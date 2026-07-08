@@ -129,6 +129,8 @@ model Firm {
   cases        Case[]
   auditLogs    AuditLog[]
   usageRecords UsageRecord[]
+  documents    Document[]
+  reports      ReportExport[]
 
   @@index([slug])
 }
@@ -214,22 +216,40 @@ model Case {
   // Human-friendly per-firm case number (e.g. "LCP-2026-0007").
   caseNumber String
 
-  // Core intake (full intake set arrives with Module 2).
+  // Intake (Module 2).
   clientName   String
   dateOfBirth  DateTime?
-  sex          Sex       @default(UNKNOWN)
-  caseType     CaseType  @default(PERSONAL_INJURY)
-  side         CaseSide  @default(PLAINTIFF)
+  sex          Sex        @default(UNKNOWN)
+  caseType     CaseType   @default(PERSONAL_INJURY)
+  side         CaseSide   @default(PLAINTIFF)
   jurisdiction String?
   dateOfInjury DateTime?
   mechanism    String?
   diagnosis    String? // primary/current diagnosis summary
-  status       CaseStatus @default(INTAKE)
 
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  // Life-expectancy & economic assumptions (editable, drive the cost engine).
+  lifeExpectancyYears Float? // remaining years used for lifetime projections
+  discountRate        Float  @default(0.03) // present-value discount rate
+  medicalInflation    Float  @default(0.032) // annual medical inflation
+  geographicFactor    Float  @default(1.0) // regional cost multiplier
 
-  auditLogs AuditLog[]
+  // Extended intake.
+  preExistingConditions String?
+  currentWorkStatus     String?
+  functionalLimitations String?
+  injurySpecialty       InjurySpecialty @default(GENERAL) // drives specialty rules
+
+  status    CaseStatus @default(INTAKE)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  auditLogs        AuditLog[]
+  documents        Document[]
+  chronologyEvents ChronologyEvent[]
+  conditions       Condition[]
+  futureCareItems  FutureCareItem[]
+  reviewFindings   ReviewFinding[]
+  reports          ReportExport[]
 
   @@unique([firmId, caseNumber])
   @@index([firmId])
@@ -274,4 +294,304 @@ model AuditLog {
 
   @@index([firmId, createdAt])
   @@index([firmId, action])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Clinical modules (2–13): records → chronology → causation → future care →
+// costs → reviews → report. All tenant-scoped through the owning Case.
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum InjurySpecialty {
+  GENERAL
+  ORTHOPEDIC_TRAUMA
+  HIP_ARTHROPLASTY
+  KNEE_ARTHROPLASTY
+  SPINE
+  AMPUTATION
+  TBI
+  SPINAL_CORD_INJURY
+  CHRONIC_PAIN
+  CRPS
+  BURNS
+  BIRTH_INJURY
+  NEUROLOGIC
+  PSYCHIATRIC
+  POLYTRAUMA
+}
+
+enum DocumentType {
+  PHYSICIAN_NOTE
+  OPERATIVE_REPORT
+  IMAGING_REPORT
+  THERAPY_NOTE
+  BILLING_RECORD
+  DEPOSITION_SUMMARY
+  PRIOR_LIFE_CARE_PLAN
+  EXPERT_REPORT
+  MEDICAL_BILL
+  SCANNED_RECORD
+  OTHER
+}
+
+enum DocumentStatus {
+  UPLOADED
+  OCR_PENDING
+  PROCESSING
+  PROCESSED
+  FAILED
+}
+
+// Causation classification per the spec.
+enum Relatedness {
+  RELATED // related to the incident
+  AGGRAVATION // aggravation of a pre-existing condition
+  PREEXISTING_UNRELATED
+  SUBSEQUENT_UNRELATED
+  UNCLEAR // requires expert review
+}
+
+enum Probability {
+  PROBABLE // more likely than not — medical probability
+  POSSIBLE
+  SPECULATIVE
+  NOT_SUPPORTED
+}
+
+enum Vulnerability {
+  LOW
+  MODERATE
+  HIGH
+}
+
+enum PhysicianStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  MODIFIED
+}
+
+enum CareCategory {
+  PHYSICIAN_VISIT
+  SPECIALIST_VISIT
+  PRIMARY_CARE
+  ORTHOPEDIC_SURGERY
+  NEUROSURGERY
+  NEUROLOGY
+  PMR
+  PAIN_MANAGEMENT
+  PSYCH
+  PHYSICAL_THERAPY
+  OCCUPATIONAL_THERAPY
+  SPEECH_THERAPY
+  COGNITIVE_THERAPY
+  MEDICATION
+  INJECTION
+  IMAGING
+  LABS
+  DME
+  ORTHOTICS_PROSTHETICS
+  MOBILITY_AID
+  HOME_MODIFICATION
+  VEHICLE_MODIFICATION
+  ATTENDANT_CARE
+  SKILLED_NURSING
+  CASE_MANAGEMENT
+  VOCATIONAL_REHAB
+  FUTURE_SURGERY
+  REVISION_SURGERY
+  COMPLICATION_MANAGEMENT
+  ASSISTIVE_TECH
+  SUPPLIES
+  TRANSPORTATION
+  MISC
+}
+
+enum ReviewKind {
+  DEFENSE // defense vulnerability critique
+  COMPLETENESS // plaintiff completeness check
+}
+
+enum ExportFormat {
+  DOCX
+  PDF
+  XLSX
+  CSV
+  MEMO
+}
+
+model Document {
+  id       String @id @default(uuid())
+  caseId   String
+  case     Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  firmId   String
+  firm     Firm   @relation(fields: [firmId], references: [id], onDelete: Cascade)
+
+  filename     String
+  type         DocumentType   @default(OTHER)
+  status       DocumentStatus @default(UPLOADED)
+  pageCount    Int            @default(0)
+  ocrConfidence Float? // 0–1; low values flag poor OCR
+  storageKey   String? // object-storage pointer (local path in dev)
+  extractedText String? // OCR/parsed text used for extraction
+  provider     String? // provider/facility identified from the doc
+  serviceDate  DateTime? // primary date extracted
+  flags        String? // e.g. "missing pages", "low OCR confidence"
+  uploadedById String?
+
+  createdAt DateTime @default(now())
+
+  @@index([caseId])
+  @@index([firmId])
+}
+
+model ChronologyEvent {
+  id     String @id @default(uuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  eventDate        DateTime
+  provider         String?
+  specialty        String?
+  recordType       String?
+  summary          String
+  objectiveFindings String?
+  diagnosis        String?
+  treatment        String?
+  imagingFindings  String?
+  medications      String?
+  restrictions     String?
+  workStatus       String?
+  functionalStatus String?
+
+  // Source citation to page (line where available).
+  sourceDocumentId String?
+  sourcePage       Int?
+
+  relevanceScore Int         @default(50) // 0–100
+  relatedness    Relatedness @default(UNCLEAR)
+
+  edited    Boolean  @default(false) // true once a human edits the AI output
+  createdAt DateTime @default(now())
+
+  @@index([caseId, eventDate])
+}
+
+// Causation / apportionment per diagnosis (Module 5).
+model Condition {
+  id     String @id @default(uuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  name        String
+  relatedness Relatedness @default(UNCLEAR)
+  confidence  Int         @default(50) // 0–100
+
+  supportingRecords String?
+  opposingRecords   String?
+  objectiveEvidence String?
+  missingInfo       String?
+  reasoning         String?
+
+  physicianConfirmed Boolean @default(false)
+
+  createdAt DateTime @default(now())
+
+  futureCareItems FutureCareItem[]
+
+  @@index([caseId])
+}
+
+// Future care recommendation + inline cost projection (Modules 6, 8) and the
+// physician + review status (Modules 10–12).
+model FutureCareItem {
+  id     String @id @default(uuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  conditionId String?
+  condition   Condition? @relation(fields: [conditionId], references: [id])
+
+  category CareCategory
+  service  String // specific service/item
+  rationale String? // medical necessity rationale
+  specialty String?
+  cptCode   String?
+
+  probability Probability @default(POSSIBLE)
+  confidence  Int         @default(50)
+
+  // Frequency / duration.
+  frequencyPerYear Float   @default(1)
+  startTrigger     String? // start date or trigger
+  durationYears    Float? // null = lifetime
+  isLifetime       Boolean @default(false)
+
+  // Cost projection (unit → lifetime → present value), low/expected/high.
+  unitCost       Float @default(0)
+  annualCost     Float @default(0)
+  lifetimeCost   Float @default(0) // undiscounted
+  presentValue   Float @default(0)
+  lowCost        Float @default(0)
+  highCost       Float @default(0)
+  pricingSource  String? // Medicare / UCR / cash-pay benchmark note
+
+  // Evidence (Module 9) — never fabricated; states when support is limited.
+  evidenceStrength String? // e.g. "Guideline-supported", "Limited — physician confirmation required"
+  literatureSupport String?
+
+  // Alternatives & adversarial framing.
+  lowerCostAlternative String?
+  plaintiffValue       String?
+  defenseVulnerability Vulnerability @default(LOW)
+  missingSupport       String?
+
+  // Physician review (Module 12).
+  physicianStatus PhysicianStatus @default(PENDING)
+  physicianNote   String?
+
+  edited    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([caseId])
+}
+
+// Findings from the defense-vulnerability and plaintiff-completeness reviews.
+model ReviewFinding {
+  id     String @id @default(uuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  kind        ReviewKind
+  category    String // e.g. "Speculative recommendation", "Omitted attendant care"
+  description String
+  vulnerability Vulnerability @default(MODERATE) // severity for DEFENSE; priority for COMPLETENESS
+  relatedItemId String? // FutureCareItem it refers to, when applicable
+
+  resolved  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([caseId, kind])
+}
+
+// Export/version history (Modules 13–14).
+model ReportExport {
+  id     String @id @default(uuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  firmId String
+  firm   Firm   @relation(fields: [firmId], references: [id], onDelete: Cascade)
+
+  format       ExportFormat
+  template     CaseSide     @default(PLAINTIFF) // plaintiff/defense/neutral template
+  version      Int          @default(1)
+  storageKey   String?
+  generatedById String?
+  totalLifetimeCost Float   @default(0)
+  totalPresentValue Float   @default(0)
+  itemCount    Int          @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@index([caseId])
+  @@index([firmId])
 }

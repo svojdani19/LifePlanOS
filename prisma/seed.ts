@@ -47,11 +47,11 @@ async function main() {
   const planner = firm.users.find((u) => u.role === "PLANNER" && u.status === "ACTIVE")!;
 
   const seedCases = [
-    { clientName: "Maria Gonzalez", caseType: "MED_MAL", side: "PLAINTIFF", status: "FUTURE_CARE", jurisdiction: "CA — Los Angeles County", mechanism: "Delayed diagnosis of compartment syndrome", diagnosis: "Left lower extremity Volkmann's contracture", createdById: planner.id },
-    { clientName: "David Chen", caseType: "PERSONAL_INJURY", side: "PLAINTIFF", status: "CHRONOLOGY", jurisdiction: "CA — Orange County", mechanism: "Motor vehicle collision", diagnosis: "L1 burst fracture with incomplete SCI", createdById: planner.id },
-    { clientName: "Patricia Ellis", caseType: "WORKERS_COMP", side: "NEUTRAL", status: "PRICING", jurisdiction: "CA — WCAB", mechanism: "Fall from height", diagnosis: "Right total knee arthroplasty, post-traumatic arthritis", createdById: admin.id },
-    { clientName: "Robert Ford", caseType: "PRODUCT_LIABILITY", side: "DEFENSE", status: "INTAKE", jurisdiction: "NV — Clark County", mechanism: "Industrial machinery", diagnosis: "Transtibial amputation", createdById: admin.id },
-    { clientName: "Angela White", caseType: "CATASTROPHIC", side: "PLAINTIFF", status: "PHYSICIAN_REVIEW", jurisdiction: "CA — San Diego County", mechanism: "Anoxic brain injury", diagnosis: "Severe TBI with spastic quadriparesis", createdById: planner.id },
+    { clientName: "Maria Gonzalez", caseType: "MED_MAL", side: "PLAINTIFF", status: "RECORDS", injurySpecialty: "ORTHOPEDIC_TRAUMA", dateOfBirth: new Date("1986-04-12"), jurisdiction: "CA — Los Angeles County", mechanism: "Delayed diagnosis of compartment syndrome", diagnosis: "Left lower extremity Volkmann's contracture", createdById: planner.id },
+    { clientName: "David Chen", caseType: "PERSONAL_INJURY", side: "PLAINTIFF", status: "RECORDS", injurySpecialty: "SPINE", dateOfBirth: new Date("1979-09-30"), jurisdiction: "CA — Orange County", mechanism: "Motor vehicle collision", diagnosis: "L1 burst fracture with incomplete SCI", createdById: planner.id },
+    { clientName: "Patricia Ellis", caseType: "WORKERS_COMP", side: "NEUTRAL", status: "RECORDS", injurySpecialty: "KNEE_ARTHROPLASTY", dateOfBirth: new Date("1972-01-18"), jurisdiction: "CA — WCAB", mechanism: "Fall from height", diagnosis: "Right total knee arthroplasty, post-traumatic arthritis", createdById: admin.id },
+    { clientName: "Robert Ford", caseType: "PRODUCT_LIABILITY", side: "DEFENSE", status: "INTAKE", injurySpecialty: "AMPUTATION", dateOfBirth: new Date("1990-11-05"), jurisdiction: "NV — Clark County", mechanism: "Industrial machinery", diagnosis: "Transtibial amputation", createdById: admin.id },
+    { clientName: "Angela White", caseType: "CATASTROPHIC", side: "PLAINTIFF", status: "RECORDS", injurySpecialty: "TBI", dateOfBirth: new Date("1995-06-22"), jurisdiction: "CA — San Diego County", mechanism: "Anoxic brain injury", diagnosis: "Severe TBI with spastic quadriparesis", createdById: planner.id },
   ] as const;
 
   let i = 0;

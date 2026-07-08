@@ -16,8 +16,9 @@ _server_ with other apps in the workspace but keeps every table in an isolated
 
 ## What's built in this milestone
 
-This milestone delivers **Module 1 — the Firm Subscription System — plus the
-multi-tenant foundation** the rest of the product hangs off of:
+LifePlanOS runs a complete **intake → final report** MVP flow.
+
+**SaaS foundation (Module 1)**
 
 | Area | Status |
 | --- | --- |
@@ -28,14 +29,29 @@ multi-tenant foundation** the rest of the product hangs off of:
 | Usage tracking + case limits by plan | ✅ append-only meter, enforced on create |
 | Stripe billing | ✅ abstraction, **mock mode** works with no keys; live seam ready |
 | Firm-branded templates | ✅ branding/letterhead in firm settings |
-| Permission controls | ✅ server-enforced + UI-aware |
-| Audit logs | ✅ append-only, every PHI/security action |
-| Case intake (core) + tenant-scoped case list | ✅ create/list scoped by firm |
-| LLM abstraction layer | ✅ provider-swappable stub (mock default) |
+| Permission controls + audit logs | ✅ server-enforced, append-only trail |
+| LLM abstraction layer | ✅ provider-swappable (deterministic mock default) |
 
-The chronology / future-care / cost / defense / report engines from the product
-spec are the next modules; the schema and the tenant guard are designed so they
-plug straight in behind `ctx.firm.id`.
+**Clinical modules (2–14) — the case workspace**
+
+| Module | Status |
+| --- | --- |
+| 2. Case intake (full field set + injury specialty) | ✅ editable intake panel |
+| 3. Record ingestion (upload, classify, mock OCR, flags) | ✅ auto-classified on ingest |
+| 4. Medical chronology (sortable, cited, editable) | ✅ with source citation + audit |
+| 5. Causation & apportionment map | ✅ relatedness + confidence per condition |
+| 6. Future-care recommendation engine | ✅ probability, frequency, evidence, alternatives |
+| 7. Specialty-specific rules | ✅ spine, knee/hip arthroplasty, amputation, TBI, +general |
+| 8. Cost projection (unit→lifetime→present value, low/exp/high) | ✅ editable assumptions, recompute |
+| 9. Evidence engine | ✅ honest — states when support is limited, never fabricates |
+| 10. Defense vulnerability review | ✅ scored LOW/MOD/HIGH |
+| 11. Plaintiff completeness review | ✅ omitted-care checklist |
+| 12. Physician review workflow | ✅ approve / reject / modify + sign-off |
+| 13. Report generator | ✅ real DOCX + CSV cost table, plaintiff/defense/neutral templates |
+| 14. Version control | ✅ export history with versions + totals |
+
+The whole pipeline runs with **no API keys** via the deterministic specialty
+library; a real LLM plugs in behind `src/lib/llm` without changing callers.
 
 ## Stack
 

@@ -76,9 +76,13 @@ export default async function CasesPage() {
               </tr>
             )}
             {cases.map((c) => (
-              <tr key={c.id} className="hover:bg-ink-50">
-                <td className="px-4 py-3 font-mono text-xs text-ink-500">{c.caseNumber}</td>
-                <td className="px-4 py-3 font-medium text-ink-900">{c.clientName}</td>
+              <tr key={c.id} className="cursor-pointer hover:bg-ink-50">
+                <td className="px-4 py-3 font-mono text-xs text-ink-500">
+                  <a href={`/cases/${c.id}`} className="hover:text-brand-700">{c.caseNumber}</a>
+                </td>
+                <td className="px-4 py-3 font-medium text-ink-900">
+                  <a href={`/cases/${c.id}`} className="hover:text-brand-700">{c.clientName}</a>
+                </td>
                 <td className="px-4 py-3 text-ink-600">{CASE_TYPE_LABELS[c.caseType]}</td>
                 <td className="px-4 py-3">
                   <Badge tone={SIDE_TONE[c.side]}>{c.side.toLowerCase()}</Badge>

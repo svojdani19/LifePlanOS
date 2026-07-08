@@ -1,9 +1,9 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { AuthShell } from "../login/page";
+import { AuthShell } from "@/components/AuthShell";
 
 const TIERS = [
   { value: "SOLO", label: "Solo — $199/mo" },
@@ -12,6 +12,14 @@ const TIERS = [
 ];
 
 export default function SignupPage() {
+  return (
+    <Suspense fallback={null}>
+      <SignupInner />
+    </Suspense>
+  );
+}
+
+function SignupInner() {
   const router = useRouter();
   const params = useSearchParams();
   const initialTier = params.get("tier") ?? "SOLO";

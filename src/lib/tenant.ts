@@ -64,6 +64,13 @@ export function requirePermission(ctx: TenantContext, permission: Permission): v
   }
 }
 
+/** Fetch a case, enforcing it belongs to the caller's firm. */
+export async function requireCase(ctx: TenantContext, caseId: string) {
+  const c = await prisma.case.findFirst({ where: { id: caseId, firmId: ctx.firm.id } });
+  if (!c) throw new TenantError("Case not found", "FORBIDDEN", 404);
+  return c;
+}
+
 // ── Plan limit enforcement ───────────────────────────────────────────────────
 
 /** Count active (not closed/archived) cases for a firm. */
@@ -118,7 +125,7 @@ function reqMeta() {
 export async function audit(
   ctx: Pick<TenantContext, "firm" | "user">,
   action: string,
-  target?: { type?: string; id?: string; caseId?: string; meta?: Record<string, unknown> },
+  target?: { type?: string; id?: string; caseId?: string; meta?: unknown },
 ): Promise<void> {
   const { ip, userAgent } = reqMeta();
   await prisma.auditLog.create({
@@ -139,7 +146,7 @@ export async function audit(
 export async function recordUsage(
   ctx: Pick<TenantContext, "firm" | "user">,
   metric: UsageMetric,
-  opts?: { quantity?: number; caseId?: string; meta?: Record<string, unknown> },
+  opts?: { quantity?: number; caseId?: string; meta?: unknown },
 ): Promise<void> {
   await prisma.usageRecord.create({
     data: {

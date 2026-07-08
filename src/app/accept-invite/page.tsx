@@ -1,10 +1,18 @@
 "use client";
 
-import { useState } from "react";
+import { Suspense, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { AuthShell } from "../login/page";
+import { AuthShell } from "@/components/AuthShell";
 
 export default function AcceptInvitePage() {
+  return (
+    <Suspense fallback={null}>
+      <AcceptInviteInner />
+    </Suspense>
+  );
+}
+
+function AcceptInviteInner() {
   const router = useRouter();
   const token = useSearchParams().get("token") ?? "";
   const [password, setPassword] = useState("");
