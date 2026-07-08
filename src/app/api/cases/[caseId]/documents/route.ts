@@ -1,7 +1,7 @@
 import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit, recordUsage } from "@/lib/tenant";
-import { processDocument } from "@/lib/engine/generate";
-import { guessDocType } from "@/lib/documents/taxonomy";
+import { ingestDocument } from "@/lib/documents/ingest";
+import { SAMPLE_DOCS } from "@/lib/documents/samples";
 import { putObject } from "@/lib/storage";
 import { ok, handleError } from "@/lib/api";
 
@@ -17,11 +17,12 @@ export async function GET(_req: Request, { params }: { params: { caseId: string 
   }
 }
 
-// Accepts multipart file uploads OR a JSON body { filenames: string[] } for
-// quickly adding sample records in the demo. Each unspecified record is
-// auto-labeled via the filename heuristic and (mock) OCR-processed on ingest.
-// The client may also send a multipart `typeMap` (JSON { [filename]: TYPE }) to
-// override the auto-detected label per file.
+// Ingest records. Three shapes:
+//   • multipart/form-data with `files` (+ optional `typeMap`) — real uploads;
+//     each file's TEXT is extracted and the type is read from its content.
+//   • JSON { sample: true } — ingests the built-in demo set (generic filenames,
+//     real body text) so the auto-classifier can be seen working on content.
+//   • JSON { documents: [{ filename, text }] } — pre-extracted text.
 export async function POST(req: Request, { params }: { params: { caseId: string } }) {
   try {
     const ctx = await requireApiContext();
@@ -37,26 +38,40 @@ export async function POST(req: Request, { params }: { params: { caseId: string 
       const typeMapRaw = form.get("typeMap");
       const typeMap: Record<string, string> = typeof typeMapRaw === "string" ? JSON.parse(typeMapRaw) : {};
       for (const file of files) {
-        const buf = Buffer.from(await file.arrayBuffer());
+        const buffer = Buffer.from(await file.arrayBuffer());
         const ext = file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")) : "";
-        const key = await putObject(buf, ext);
-        const resolvedType = (typeMap[file.name] || guessDocType(file.name)) as never;
-        const doc = await prisma.document.create({
-          data: { caseId: params.caseId, firmId: ctx.firm.id, filename: file.name, type: resolvedType, storageKey: key, uploadedById: ctx.user.id },
+        const storageKey = await putObject(buffer, ext);
+        const { document, pages } = await ingestDocument({
+          caseId: params.caseId,
+          firmId: ctx.firm.id,
+          uploadedById: ctx.user.id,
+          filename: file.name,
+          mimeType: file.type,
+          buffer,
+          storageKey,
+          forcedType: typeMap[file.name],
         });
-        await processDocument(doc);
-        await recordUsage(ctx, "RECORD_PAGE_OCR", { caseId: params.caseId, quantity: doc.pageCount || 1 });
-        created.push(doc.id);
+        await recordUsage(ctx, "RECORD_PAGE_OCR", { caseId: params.caseId, quantity: pages });
+        created.push(document.id);
       }
     } else {
       const body = await req.json().catch(() => ({}));
-      const filenames: string[] = Array.isArray(body.filenames) ? body.filenames : [];
-      for (const filename of filenames) {
-        const doc = await prisma.document.create({
-          data: { caseId: params.caseId, firmId: ctx.firm.id, filename, type: guessDocType(filename) as never, uploadedById: ctx.user.id },
+      const docs: { filename: string; text?: string }[] = body.sample
+        ? SAMPLE_DOCS
+        : Array.isArray(body.documents)
+          ? body.documents
+          : Array.isArray(body.filenames)
+            ? body.filenames.map((filename: string) => ({ filename }))
+            : [];
+      for (const d of docs) {
+        const { document } = await ingestDocument({
+          caseId: params.caseId,
+          firmId: ctx.firm.id,
+          uploadedById: ctx.user.id,
+          filename: d.filename,
+          text: d.text,
         });
-        await processDocument(doc);
-        created.push(doc.id);
+        created.push(document.id);
       }
     }
 

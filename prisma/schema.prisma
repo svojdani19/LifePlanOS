@@ -503,10 +503,15 @@ model Document {
   pageCount    Int            @default(0)
   ocrConfidence Float? // 0–1; low values flag poor OCR
   storageKey   String? // object-storage pointer (local path in dev)
-  extractedText String? // OCR/parsed text used for extraction
+  extractedText String? // OCR/parsed text used for extraction + classification
   provider     String? // provider/facility identified from the doc
   serviceDate  DateTime? // primary date extracted
   flags        String? // e.g. "missing pages", "low OCR confidence"
+  // How `type` was assigned: "content" (read from the document body),
+  // "filename" (fallback when no text could be extracted), "manual" (user
+  // reassigned), or "default". Null for legacy rows.
+  classifiedBy String?
+  classifyScore Float? // strength of the winning content signal
   uploadedById String?
 
   createdAt DateTime @default(now())

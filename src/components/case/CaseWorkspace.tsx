@@ -224,20 +224,12 @@ function Field({ label, children, wide }: { label: string; children: React.React
 }
 
 // ── Records ──────────────────────────────────────────────────────────────────
-// A varied sample set so the auto-classifier lands documents across many groups.
-const SAMPLE_RECORDS = [
-  "ED_Admission_Note.pdf",
-  "Operative_Report_ORIF.pdf",
-  "MRI_Lumbar_Spine.pdf",
-  "PT_Progress_Notes.pdf",
-  "Billing_Ledger.xlsx",
-  "Ortho_Followup_Clinic_Note.pdf",
-  "Pharmacy_Printout.pdf",
-  "Deposition_Summary_Smith.pdf",
-  "IME_Report_Defense.pdf",
-  "Neuropsych_Evaluation.pdf",
-  "Scanned_Unknown_Document.pdf",
-];
+const METHOD_BADGE: Record<string, { label: string; tone: "green" | "amber" | "neutral" | "brand" }> = {
+  content: { label: "read from content", tone: "green" },
+  filename: { label: "from filename", tone: "amber" },
+  manual: { label: "set manually", tone: "brand" },
+  default: { label: "unclassified", tone: "neutral" },
+};
 
 function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: boolean; call: any; busy: string | null }) {
   const [filter, setFilter] = useState<string>("All");
@@ -271,11 +263,11 @@ function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: bo
             <Upload className="h-4 w-4" /> Upload records
             <input type="file" multiple className="hidden" onChange={(e) => upload(e.target.files)} />
           </label>
-          <button className="btn-ghost" disabled={busy === "sample"} onClick={() => call(`/api/cases/${data.id}/documents`, "POST", { filenames: SAMPLE_RECORDS }, "sample")}>
+          <button className="btn-ghost" disabled={busy === "sample"} onClick={() => call(`/api/cases/${data.id}/documents`, "POST", { sample: true }, "sample")}>
             {busy === "sample" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />} Add sample record set
           </button>
           <span className="text-xs text-ink-500">
-            Upload unlabeled documents — each is auto-classified on ingest. Click a label to reassign it.
+            Uploads are labeled by reading each document&apos;s <span className="font-medium">content</span>, not its filename. Click a label to reassign it.
           </span>
         </div>
       )}
@@ -328,6 +320,9 @@ function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: bo
                         </button>
                       ) : (
                         <Badge tone="brand">{TYPE_LABEL[d.type] ?? d.type.replace(/_/g, " ")}</Badge>
+                      )}
+                      {d.classifiedBy && METHOD_BADGE[d.classifiedBy] && (
+                        <Badge tone={METHOD_BADGE[d.classifiedBy].tone}>{METHOD_BADGE[d.classifiedBy].label}</Badge>
                       )}
                       <span className="text-xs text-ink-400">{d.pageCount ? `${d.pageCount}p` : ""}</span>
                       {d.ocrConfidence != null && (

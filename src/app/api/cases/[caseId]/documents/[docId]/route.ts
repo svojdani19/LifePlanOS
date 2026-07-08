@@ -16,7 +16,7 @@ export async function PATCH(req: Request, { params }: { params: { caseId: string
     const { type } = patchSchema.parse(await req.json());
     const updated = await prisma.document.updateMany({
       where: { id: params.docId, caseId: params.caseId, firmId: ctx.firm.id },
-      data: { type: type as never },
+      data: { type: type as never, classifiedBy: "manual" },
     });
     if (updated.count === 0) return ok({ error: "Document not found" }, 404);
     await audit(ctx, "records.reclassify", { type: "document", id: params.docId, caseId: params.caseId, meta: { type } });
