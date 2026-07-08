@@ -1,0 +1,277 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// LifePlanOS — data model
+//
+// This schema is the foundation of the multi-tenant SaaS: the Firm Subscription
+// System (Module 1) plus a tenant-scoped Case root that the rest of the product
+// (intake → records → chronology → future care → pricing → report) hangs off of.
+//
+// Every table lives in an isolated `lifeplanos` Postgres schema (configured via
+// the `schema=lifeplanos` query param on DATABASE_URL), so LifePlanOS is a fully
+// standalone application even when it shares a Postgres server with other apps.
+//
+// PHI/HIPAA note: models holding PHI (Case, and downstream record/chronology
+// tables added in later modules) are always accessed through the tenant guard in
+// src/lib/tenant.ts, which scopes every query by firmId and writes an AuditLog.
+// ─────────────────────────────────────────────────────────────────────────────
+
+generator client {
+  provider = "prisma-client-js"
+  // Isolated output so this client never collides with any other app's client.
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ── Subscription / plan ──────────────────────────────────────────────────────
+
+enum PlanTier {
+  SOLO
+  SMALL_FIRM
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  INCOMPLETE
+}
+
+// ── Identity / roles ─────────────────────────────────────────────────────────
+
+// Roles map directly to the product spec. Permissions per role are defined in
+// code (src/lib/rbac.ts) rather than the DB so the matrix can evolve safely.
+enum UserRole {
+  ADMIN // firm owner/administrator — full control incl. billing + seats
+  PLANNER // life care planner / rehab / nurse consultant — core authoring
+  PHYSICIAN_REVIEWER // physician sign-off on medical necessity
+  ATTORNEY_REVIEWER // retaining/defense attorney read + comment
+  PARALEGAL // intake + record wrangling
+  BILLING_USER // billing/subscription only
+}
+
+enum UserStatus {
+  INVITED // seat created, invitation not yet accepted
+  ACTIVE
+  SUSPENDED // access revoked but record retained for audit
+}
+
+// ── Case ─────────────────────────────────────────────────────────────────────
+
+enum CaseType {
+  PERSONAL_INJURY
+  MED_MAL
+  WORKERS_COMP
+  PRODUCT_LIABILITY
+  CATASTROPHIC
+}
+
+enum CaseSide {
+  PLAINTIFF
+  DEFENSE
+  NEUTRAL
+}
+
+enum Sex {
+  MALE
+  FEMALE
+  OTHER
+  UNKNOWN
+}
+
+// Stages double as the case progress tracker in the UI.
+enum CaseStatus {
+  INTAKE
+  RECORDS
+  CHRONOLOGY
+  CAUSATION
+  FUTURE_CARE
+  PRICING
+  DRAFTING
+  PHYSICIAN_REVIEW
+  FINAL
+  CLOSED
+  ARCHIVED
+}
+
+// ── Usage / audit ────────────────────────────────────────────────────────────
+
+enum UsageMetric {
+  CASE_CREATED
+  RECORD_PAGE_OCR
+  AI_GENERATION
+  REPORT_EXPORT
+  SEAT_ACTIVE
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Firm {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  state     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Firm-branded templates / report letterhead.
+  logoUrl      String?
+  primaryColor String? @default("#0891b2")
+  letterhead   String? // free-text letterhead block for generated reports
+
+  subscription Subscription?
+  users        User[]
+  cases        Case[]
+  auditLogs    AuditLog[]
+  usageRecords UsageRecord[]
+
+  @@index([slug])
+}
+
+model Subscription {
+  id     String @id @default(uuid())
+  firmId String @unique
+  firm   Firm   @relation(fields: [firmId], references: [id], onDelete: Cascade)
+
+  tier   PlanTier           @default(SOLO)
+  status SubscriptionStatus @default(TRIALING)
+
+  // Purchased seats. Null = use the plan default from src/lib/subscription/plans.ts.
+  seats             Int?
+  // Enterprise overrides for negotiated limits. Null = use plan default.
+  caseLimitOverride Int?
+  seatLimitOverride Int?
+
+  // Stripe linkage (empty in mock billing mode).
+  stripeCustomerId     String?
+  stripeSubscriptionId String?
+  stripePriceId        String?
+
+  currentPeriodStart DateTime?
+  currentPeriodEnd   DateTime?
+  trialEndsAt        DateTime?
+  canceledAt         DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model User {
+  id     String @id @default(uuid())
+  firmId String
+  firm   Firm   @relation(fields: [firmId], references: [id], onDelete: Cascade)
+
+  email        String     @unique
+  name         String
+  role         UserRole   @default(PLANNER)
+  status       UserStatus @default(ACTIVE)
+  passwordHash String? // null while INVITED (set on invite acceptance)
+
+  // Invitation flow.
+  inviteToken     String?   @unique
+  inviteExpiresAt DateTime?
+  invitedById     String?
+
+  lastLoginAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  sessions     Session[]
+  casesCreated Case[]        @relation("CaseCreatedBy")
+  auditLogs    AuditLog[]
+  usageRecords UsageRecord[]
+
+  @@index([firmId])
+  @@index([inviteToken])
+}
+
+model Session {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String   @unique // sha-256 of the raw cookie token (raw token never stored)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  userAgent String?
+  ip        String?
+
+  @@index([userId])
+  @@index([tokenHash])
+}
+
+model Case {
+  id          String @id @default(uuid())
+  firmId      String
+  firm        Firm   @relation(fields: [firmId], references: [id], onDelete: Cascade)
+  createdById String
+  createdBy   User   @relation("CaseCreatedBy", fields: [createdById], references: [id])
+
+  // Human-friendly per-firm case number (e.g. "LCP-2026-0007").
+  caseNumber String
+
+  // Core intake (full intake set arrives with Module 2).
+  clientName   String
+  dateOfBirth  DateTime?
+  sex          Sex       @default(UNKNOWN)
+  caseType     CaseType  @default(PERSONAL_INJURY)
+  side         CaseSide  @default(PLAINTIFF)
+  jurisdiction String?
+  dateOfInjury DateTime?
+  mechanism    String?
+  diagnosis    String? // primary/current diagnosis summary
+  status       CaseStatus @default(INTAKE)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  auditLogs AuditLog[]
+
+  @@unique([firmId, caseNumber])
+  @@index([firmId])
+  @@index([firmId, status])
+}
+
+// Append-only usage meter. Aggregated per billing period for plan-limit checks
+// and firm dashboards. `period` is a "YYYY-MM" bucket for cheap monthly rollups.
+model UsageRecord {
+  id       String      @id @default(uuid())
+  firmId   String
+  firm     Firm        @relation(fields: [firmId], references: [id], onDelete: Cascade)
+  userId   String?
+  user     User?       @relation(fields: [userId], references: [id])
+  metric   UsageMetric
+  quantity Int         @default(1)
+  period   String // "YYYY-MM"
+  caseId   String?
+  meta     Json?
+  createdAt DateTime   @default(now())
+
+  @@index([firmId, period])
+  @@index([firmId, metric, period])
+}
+
+// Append-only audit trail — every security-relevant and PHI-touching action.
+model AuditLog {
+  id         String   @id @default(uuid())
+  firmId     String
+  firm       Firm     @relation(fields: [firmId], references: [id], onDelete: Cascade)
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id])
+  action     String // e.g. "case.create", "auth.login", "seat.invite", "export.report"
+  targetType String? // "case" | "user" | "subscription" | ...
+  targetId   String?
+  caseId     String?
+  case       Case?    @relation(fields: [caseId], references: [id])
+  ip         String?
+  userAgent  String?
+  meta       Json?
+  createdAt  DateTime @default(now())
+
+  @@index([firmId, createdAt])
+  @@index([firmId, action])
+}
