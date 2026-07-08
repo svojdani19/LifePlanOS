@@ -4,3 +4,7 @@ src/generated/
 .env
 *.tsbuildinfo
 next-env.d.ts
+
+# Runtime-uploaded record files (not source)
+uploads/
+.next*/

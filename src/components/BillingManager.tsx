@@ -24,9 +24,9 @@ interface State {
 }
 
 const CATALOG: Record<string, { price: number; caseLimit: number | null; seatLimit: number; features: string[] }> = {
-  SOLO: { price: 199, caseLimit: 10, seatLimit: 2, features: ["Chronology", "Future care", "Cost projection", "Defense flags", "DOCX/PDF export"] },
-  SMALL_FIRM: { price: 749, caseLimit: 75, seatLimit: 10, features: ["Everything in Solo", "Physician review", "Firm templates", "Version comparison", "Recommendation library"] },
-  ENTERPRISE: { price: 2499, caseLimit: null, seatLimit: 100, features: ["Everything in Small Firm", "Unlimited cases", "SSO", "Benchmarking", "API access", "BAA"] },
+  SOLO: { price: 3000, caseLimit: 10, seatLimit: 2, features: ["Chronology", "Future care", "Cost projection", "Defense flags", "DOCX/PDF export"] },
+  SMALL_FIRM: { price: 7000, caseLimit: 75, seatLimit: 10, features: ["Everything in Solo", "Physician review", "Firm templates", "Version comparison", "Recommendation library"] },
+  ENTERPRISE: { price: 10000, caseLimit: null, seatLimit: 100, features: ["Everything in Small Firm", "Unlimited cases", "SSO", "Benchmarking", "API access", "BAA"] },
 };
 const ORDER = ["SOLO", "SMALL_FIRM", "ENTERPRISE"];
 

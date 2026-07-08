@@ -5,11 +5,11 @@ import { formatMoney } from "@/lib/utils";
 import { getContext } from "@/lib/tenant";
 
 const MODULES = [
-  { icon: Activity, title: "Chronology engine", body: "Sortable, cited medical timeline built from ingested records." },
-  { icon: Stethoscope, title: "Future care engine", body: "Probable vs. possible vs. speculative — every item tied to records." },
-  { icon: Scale, title: "Cost projection", body: "Unit cost, frequency, duration, present value, low/expected/high." },
-  { icon: ShieldCheck, title: "Defense vulnerability review", body: "A defense-style critique before opposing counsel writes it." },
-  { icon: FileText, title: "Report generator", body: "Plaintiff, defense & neutral templates. DOCX, PDF, XLSX." },
+  { icon: Activity, title: "Chronology engine", body: "Sorted, cited, accessible." },
+  { icon: Stethoscope, title: "Future care engine", body: "Prognosis, probable and possible — backed by records." },
+  { icon: Scale, title: "Cost projection", body: "Every pathway, quantified." },
+  { icon: ShieldCheck, title: "Vulnerability Review", body: "Full prep and counter." },
+  { icon: FileText, title: "Report generator", body: "Complete, ready-for-review, validated." },
 ];
 
 export default async function LandingPage() {
@@ -35,7 +35,7 @@ export default async function LandingPage() {
                 Log in
               </Link>
               <Link href="/signup" className="btn-primary">
-                Start free trial
+                Get started
               </Link>
             </>
           )}
@@ -45,19 +45,17 @@ export default async function LandingPage() {
       {/* Hero */}
       <section className="mx-auto max-w-6xl px-6 pt-16 pb-20 text-center">
         <span className="inline-block rounded-full bg-brand-100 px-3 py-1 text-xs font-semibold text-brand-800">
-          The operating system for life care planning
+          Life Care Plans. Automated.
         </span>
         <h1 className="mx-auto mt-6 max-w-3xl text-5xl font-extrabold tracking-tight text-ink-900">
-          Automate 80–90% of the life care plan. Keep the expert in control.
+          Automate the work. Keep the control.
         </h1>
         <p className="mx-auto mt-6 max-w-2xl text-lg text-ink-600">
-          Intake, record ingestion, chronology, causation, future care, pricing, and report drafting —
-          engineered to maximize <span className="font-semibold text-ink-900">defensibility</span>, not damages. Every
-          recommendation is tied to medical probability, source records, and expert review.
+          Everything from Intake to Reports —<br />engineered to simplify.
         </p>
         <div className="mt-9 flex justify-center gap-3">
           <Link href="/signup" className="btn-primary px-6 py-3 text-base">
-            Start free trial
+            Get started
           </Link>
           <Link href="/login" className="btn-outline px-6 py-3 text-base">
             Log in
@@ -81,7 +79,7 @@ export default async function LandingPage() {
       {/* Pricing */}
       <section className="mx-auto max-w-6xl px-6 pb-24">
         <h2 className="text-center text-3xl font-bold tracking-tight text-ink-900">Simple firm pricing</h2>
-        <p className="mt-2 text-center text-ink-600">Every plan starts with a 14-day free trial. No card required.</p>
+        <p className="mt-2 text-center text-ink-600">One straightforward subscription per firm.</p>
         <div className="mt-10 grid gap-6 md:grid-cols-3">
           {PLAN_ORDER.map((tier) => {
             const plan = PLANS[tier];

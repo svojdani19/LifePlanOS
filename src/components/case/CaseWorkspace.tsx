@@ -362,40 +362,107 @@ function FilterChip({ label, count, active, onClick }: { label: string; count: n
   );
 }
 
-// ── Chronology ───────────────────────────────────────────────────────────────
+// ── Chronology (record-derived timeline) ─────────────────────────────────────
+const EVENT_STYLE: Record<string, { label: string; dot: string; chip: string }> = {
+  SURGERY: { label: "Surgery", dot: "#7c3aed", chip: "bg-purple-100 text-purple-800" },
+  IMAGING: { label: "Imaging", dot: "#2563eb", chip: "bg-blue-100 text-blue-800" },
+  LAB: { label: "Labs", dot: "#0891b2", chip: "bg-cyan-100 text-cyan-800" },
+  CLINIC_VISIT: { label: "Clinic visit", dot: "#64748b", chip: "bg-ink-200 text-ink-700" },
+  ER_VISIT: { label: "ER visit", dot: "#dc2626", chip: "bg-red-100 text-red-800" },
+  HOSPITALIZATION: { label: "Hospitalization", dot: "#4f46e5", chip: "bg-indigo-100 text-indigo-800" },
+  THERAPY: { label: "Therapy", dot: "#059669", chip: "bg-emerald-100 text-emerald-800" },
+  COMPLICATION: { label: "Complication", dot: "#d97706", chip: "bg-amber-100 text-amber-800" },
+  LEGAL_EVENT: { label: "Legal", dot: "#4f46e5", chip: "bg-indigo-100 text-indigo-800" },
+  BILLING: { label: "Billing", dot: "#94a3b8", chip: "bg-ink-100 text-ink-600" },
+  OTHER: { label: "Record", dot: "#94a3b8", chip: "bg-ink-100 text-ink-600" },
+};
+const styleFor = (t?: string) => EVENT_STYLE[t ?? "OTHER"] ?? EVENT_STYLE.OTHER;
+
 function ChronologyPanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; call: any }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
-  if (data.chronologyEvents.length === 0) return <Empty>Run the AI pipeline to build the medical chronology from ingested records.</Empty>;
+  const [filter, setFilter] = useState("ALL");
+
+  const events: AnyRec[] = data.chronologyEvents;
+  if (events.length === 0)
+    return <Empty>Upload records, then run the AI pipeline to build the medical chronology from every record.</Empty>;
+
+  const docName: Record<string, string> = {};
+  data.documents.forEach((d: AnyRec) => (docName[d.id] = d.filename));
+
+  const typeCounts: Record<string, number> = {};
+  events.forEach((e) => (typeCounts[e.eventType ?? "OTHER"] = (typeCounts[e.eventType ?? "OTHER"] ?? 0) + 1));
+  const presentTypes = Object.keys(typeCounts);
+  const filtered = filter === "ALL" ? events : events.filter((e) => (e.eventType ?? "OTHER") === filter);
+
+  const excluded = Math.max(0, data.documents.length - events.length);
+
   return (
-    <div className="card overflow-hidden">
-      <table className="w-full text-sm">
-        <thead className="border-b border-ink-200 bg-ink-50 text-left text-xs uppercase tracking-wide text-ink-500">
-          <tr><th className="px-4 py-2 font-medium">Date</th><th className="px-4 py-2 font-medium">Provider</th><th className="px-4 py-2 font-medium">Event</th><th className="px-4 py-2 font-medium">Rel.</th><th className="px-4 py-2 font-medium">Source</th>{canEdit && <th />}</tr>
-        </thead>
-        <tbody className="divide-y divide-ink-100">
-          {data.chronologyEvents.map((e: AnyRec) => (
-            <tr key={e.id} className="align-top">
-              <td className="px-4 py-2 whitespace-nowrap text-ink-600">{formatDate(e.eventDate)}</td>
-              <td className="px-4 py-2 text-ink-700">{e.provider}<div className="text-xs text-ink-400">{e.specialty}</div></td>
-              <td className="px-4 py-2 text-ink-800">
+    <div className="space-y-4">
+      <p className="text-sm text-ink-500">
+        {events.length} relevant {events.length === 1 ? "event" : "events"} on the timeline, screened from {data.documents.length}{" "}
+        {data.documents.length === 1 ? "record" : "records"}
+        {excluded > 0 ? ` (${excluded} not relevant to the complaint were excluded)` : ""}.
+      </p>
+
+      {/* Type filter chips */}
+      <div className="flex flex-wrap gap-2">
+        <FilterChip label="All" count={events.length} active={filter === "ALL"} onClick={() => setFilter("ALL")} />
+        {presentTypes.map((t) => (
+          <FilterChip key={t} label={styleFor(t).label} count={typeCounts[t]} active={filter === t} onClick={() => setFilter(t)} />
+        ))}
+      </div>
+
+      {/* Vertical timeline */}
+      <ol className="relative ml-2 border-l border-ink-200 pl-6">
+        {filtered.map((e) => {
+          const s = styleFor(e.eventType);
+          return (
+            <li key={e.id} className="relative mb-6">
+              <span className="absolute -left-[31px] top-1.5 h-3.5 w-3.5 rounded-full border-2 border-white" style={{ background: s.dot }} />
+              <div className="card p-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-sm font-semibold text-ink-900">
+                    {new Date(e.eventDate).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" })}
+                  </span>
+                  <span className={cn("rounded-full px-2 py-0.5 text-[11px] font-medium", s.chip)}>{s.label}</span>
+                  {e.specialty && <span className="text-xs text-ink-500">{e.specialty}</span>}
+                  {e.dateInferred && <Badge tone="amber">date inferred</Badge>}
+                  {e.edited && <Badge tone="amber">edited</Badge>}
+                  {canEdit && (
+                    <button className="ml-auto text-ink-300 hover:text-ink-700" onClick={() => { setEditing(e.id); setDraft(e.summary); }}>
+                      <Pencil className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </div>
+
                 {editing === e.id ? (
-                  <div className="flex gap-2">
+                  <div className="mt-2 flex gap-2">
                     <input className="input py-1" value={draft} onChange={(ev) => setDraft(ev.target.value)} />
                     <button className="text-emerald-600" onClick={async () => { await call(`/api/cases/${data.id}/chronology/${e.id}`, "PATCH", { summary: draft }); setEditing(null); }}><Check className="h-4 w-4" /></button>
                     <button className="text-ink-400" onClick={() => setEditing(null)}><X className="h-4 w-4" /></button>
                   </div>
                 ) : (
-                  <div>{e.summary} {e.edited && <Badge tone="amber">edited</Badge>}<div className="text-xs text-ink-400">{e.diagnosis || e.treatment || ""}</div></div>
+                  <p className="mt-1.5 text-sm text-ink-800">{e.summary}</p>
                 )}
-              </td>
-              <td className="px-4 py-2"><Badge tone="brand">{e.relevanceScore}</Badge></td>
-              <td className="px-4 py-2 text-xs text-ink-400">{e.sourcePage ? `p.${e.sourcePage}` : "—"}</td>
-              {canEdit && <td className="px-4 py-2"><button className="text-ink-400 hover:text-ink-700" onClick={() => { setEditing(e.id); setDraft(e.summary); }}><Pencil className="h-3.5 w-3.5" /></button></td>}
-            </tr>
-          ))}
-        </tbody>
-      </table>
+                {/* Link to the source document for this finding */}
+                {e.sourceDocumentId && (
+                  <a
+                    href={`/api/cases/${data.id}/documents/${e.sourceDocumentId}/view`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-brand-700 hover:underline"
+                  >
+                    <FileText className="h-3.5 w-3.5" />
+                    Source: {docName[e.sourceDocumentId] ?? "record"}
+                    {e.sourcePage ? ` · p.${e.sourcePage}` : ""}
+                  </a>
+                )}
+              </div>
+            </li>
+          );
+        })}
+      </ol>
     </div>
   );
 }

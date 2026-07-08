@@ -5,7 +5,7 @@ import type { PlanTier, UserRole } from "@/generated/prisma";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Account lifecycle: firm signup, login, teammate invitation & acceptance.
-// Every new firm starts on a 14-day TRIALING subscription of the chosen tier.
+// Every new firm starts on an ACTIVE subscription of the chosen tier.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function slugify(name: string): string {
@@ -45,7 +45,7 @@ export async function signupFirm(input: SignupInput) {
 
   const slug = await uniqueSlug(slugify(input.firmName));
   const passwordHash = await hashPassword(input.password);
-  const trialEndsAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
+  const now = new Date();
 
   const firm = await prisma.firm.create({
     data: {
@@ -55,8 +55,9 @@ export async function signupFirm(input: SignupInput) {
       subscription: {
         create: {
           tier: input.tier ?? "SOLO",
-          status: "TRIALING",
-          trialEndsAt,
+          status: "ACTIVE",
+          currentPeriodStart: now,
+          currentPeriodEnd: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000),
         },
       },
       users: {

@@ -18,7 +18,8 @@ async function main() {
   }
 
   const passwordHash = await hashPassword(DEMO_PASSWORD);
-  const trialEndsAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
+  const now = new Date();
+  const inviteExpiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
 
   const firm = await prisma.firm.create({
     data: {
@@ -28,7 +29,13 @@ async function main() {
       primaryColor: "#0891b2",
       letterhead: "Meridian Life Care Planning, LLC · Certified Life Care Planners · Los Angeles, CA",
       subscription: {
-        create: { tier: "SMALL_FIRM", status: "TRIALING", seats: 10, trialEndsAt },
+        create: {
+          tier: "SMALL_FIRM",
+          status: "ACTIVE",
+          seats: 10,
+          currentPeriodStart: now,
+          currentPeriodEnd: new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000),
+        },
       },
       users: {
         create: [
@@ -36,7 +43,7 @@ async function main() {
           { email: "planner@lifeplanos.app", name: "Jordan Blake, RN CLCP", role: "PLANNER", status: "ACTIVE", passwordHash },
           { email: "physician@lifeplanos.app", name: "Dr. Sam Okafor, MD", role: "PHYSICIAN_REVIEWER", status: "ACTIVE", passwordHash },
           { email: "para@lifeplanos.app", name: "Casey Nguyen", role: "PARALEGAL", status: "ACTIVE", passwordHash },
-          { email: "invited@lifeplanos.app", name: "Taylor Reed", role: "PLANNER", status: "INVITED", inviteToken: "demo-invite-token", inviteExpiresAt: trialEndsAt },
+          { email: "invited@lifeplanos.app", name: "Taylor Reed", role: "PLANNER", status: "INVITED", inviteToken: "demo-invite-token", inviteExpiresAt },
         ],
       },
     },

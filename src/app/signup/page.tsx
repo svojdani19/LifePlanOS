@@ -6,9 +6,9 @@ import Link from "next/link";
 import { AuthShell } from "@/components/AuthShell";
 
 const TIERS = [
-  { value: "SOLO", label: "Solo — $199/mo" },
-  { value: "SMALL_FIRM", label: "Small Firm — $749/mo" },
-  { value: "ENTERPRISE", label: "Enterprise — $2,499/mo" },
+  { value: "SOLO", label: "Solo — $3,000/mo" },
+  { value: "SMALL_FIRM", label: "Small Firm — $7,000/mo" },
+  { value: "ENTERPRISE", label: "Enterprise — $10,000/mo" },
 ];
 
 export default function SignupPage() {
@@ -59,7 +59,7 @@ function SignupInner() {
   }
 
   return (
-    <AuthShell title="Start your firm workspace" subtitle="14-day free trial. No credit card required.">
+    <AuthShell title="Start your firm workspace" subtitle="Create your firm account to get started.">
       <form onSubmit={submit} className="space-y-4">
         <div>
           <label className="label">Firm name</label>
@@ -103,7 +103,7 @@ function SignupInner() {
         </div>
         {error && <p className="text-sm text-red-600">{error}</p>}
         <button className="btn-primary w-full" disabled={loading}>
-          {loading ? "Creating workspace…" : "Create firm & start trial"}
+          {loading ? "Creating workspace…" : "Create firm workspace"}
         </button>
       </form>
       <p className="mt-6 text-center text-sm text-ink-600">

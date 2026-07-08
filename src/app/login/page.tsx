@@ -56,7 +56,7 @@ export default function LoginPage() {
       <p className="mt-6 text-center text-sm text-ink-600">
         New firm?{" "}
         <Link href="/signup" className="font-semibold text-brand-700 hover:underline">
-          Start a free trial
+          Get started
         </Link>
       </p>
     </AuthShell>

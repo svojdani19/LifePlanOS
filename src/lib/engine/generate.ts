@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { packFor } from "@/lib/engine/specialty";
 import { project, type CaseAssumptions } from "@/lib/engine/cost";
+import { buildChronologyFromRecords } from "@/lib/engine/chronology";
 import type { Case, CareCategory } from "@/generated/prisma";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -74,25 +75,33 @@ export async function generatePlan(caseId: string): Promise<PlanResult> {
   }
   const primaryConditionId = conditions[0]?.id ?? null;
 
-  // Chronology.
-  for (const e of pack.chronology) {
-    await prisma.chronologyEvent.create({
-      data: {
-        caseId,
-        eventDate: new Date(anchor.getTime() + e.dayOffset * 24 * 3600 * 1000),
-        provider: e.provider,
-        specialty: e.specialty,
-        recordType: e.recordType,
-        summary: e.summary,
-        objectiveFindings: e.objectiveFindings,
-        diagnosis: e.diagnosis,
-        treatment: e.treatment,
-        imagingFindings: e.imagingFindings,
-        relevanceScore: e.relevanceScore,
-        relatedness: "RELATED",
-        sourcePage: 1,
-      },
-    });
+  // Chronology — records are screened for relevance to the complaint; only the
+  // relevant clinical events go on the timeline, each with a one-sentence finding
+  // and a link to its source document. Falls back to the specialty template only
+  // when no relevant records exist yet.
+  const chronoResult = await buildChronologyFromRecords(caseId);
+  let chronologyCount = chronoResult.kept;
+  if (chronologyCount === 0) {
+    for (const e of pack.chronology) {
+      await prisma.chronologyEvent.create({
+        data: {
+          caseId,
+          eventDate: new Date(anchor.getTime() + e.dayOffset * 24 * 3600 * 1000),
+          provider: e.provider,
+          specialty: e.specialty,
+          recordType: e.recordType,
+          summary: e.summary,
+          objectiveFindings: e.objectiveFindings,
+          diagnosis: e.diagnosis,
+          treatment: e.treatment,
+          imagingFindings: e.imagingFindings,
+          relevanceScore: e.relevanceScore,
+          relatedness: "RELATED",
+          sourcePage: 1,
+        },
+      });
+    }
+    chronologyCount = pack.chronology.length;
   }
 
   // Future care + costs.
@@ -140,7 +149,7 @@ export async function generatePlan(caseId: string): Promise<PlanResult> {
 
   return {
     conditions: pack.conditions.length,
-    chronology: pack.chronology.length,
+    chronology: chronologyCount,
     futureCare: pack.care.length,
     totalLifetime: Math.round(totalLifetime),
     totalPresentValue: Math.round(totalPresentValue),

@@ -1,7 +1,0 @@
-Category,Service,Specialty,CPT,Probability,Freq/yr,Duration(yrs),UnitCost,AnnualCost,LifetimeCost,PresentValue,Low,High,PricingSource,PhysicianStatus
-NEUROSURGERY,Hardware removal / adjacent-segment evaluation,Neurosurgery,63030,POSSIBLE,1,1,78000,78000,78000,78000,66300,97500,UCR facility + surgeon global,PENDING
-CASE_MANAGEMENT,RN medical case management,Nurse Case Manager,T2022,POSSIBLE,1,5,4800,4800,25586,24093,20479,30117,RN case management annual,PENDING
-DME,Assistive devices and bracing,PM&R,,PROBABLE,0.2,lifetime,3200,640,40669,23311,19815,29139,DMEPOS + replacement schedule,PENDING
-PRIMARY_CARE,Primary care coordination visits,Family Medicine,99213,PROBABLE,3,lifetime,195,585,37174,21308,18112,26635,CMS RVU established patient,PENDING
-PHYSICAL_THERAPY,Ongoing physical therapy,Physical Therapy,97110,PROBABLE,20,5,145,2900,15458,14556,12373,18196,CMS PT per visit,PENDING
-PAIN_MANAGEMENT,Interventional pain management,Pain Management,99204,POSSIBLE,4,10,360,1440,16661,14526,12348,18158,UCR pain office visit,PENDING

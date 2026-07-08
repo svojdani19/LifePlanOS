@@ -526,6 +526,7 @@ model ChronologyEvent {
   case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
 
   eventDate        DateTime
+  eventType        String? // SURGERY|IMAGING|LAB|CLINIC_VISIT|ER_VISIT|HOSPITALIZATION|THERAPY|COMPLICATION|LEGAL_EVENT|BILLING|OTHER
   provider         String?
   specialty        String?
   recordType       String?
@@ -539,9 +540,11 @@ model ChronologyEvent {
   workStatus       String?
   functionalStatus String?
 
-  // Source citation to page (line where available).
+  // Source citation back to the originating record.
   sourceDocumentId String?
   sourcePage       Int?
+  sourceQuote      String? // verbatim excerpt from the record supporting the event
+  dateInferred     Boolean @default(false) // true when no date appeared in the record
 
   relevanceScore Int         @default(50) // 0–100
   relatedness    Relatedness @default(UNCLEAR)
