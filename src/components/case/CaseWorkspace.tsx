@@ -17,6 +17,7 @@ import {
   Check,
   X,
   Pencil,
+  Plus,
 } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { formatMoney, formatDate, cn } from "@/lib/utils";
@@ -199,6 +200,15 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
   const [saved, setSaved] = useState(false);
   const set = (k: string, v: string) => { setForm((f) => ({ ...f, [k]: v })); setSaved(false); };
 
+  // Additional (secondary) diagnoses — each an ICD-10 search row.
+  const [additional, setAdditional] = useState<{ diagnosis: string; icd10Code: string }[]>(
+    Array.isArray(data.additionalDiagnoses) ? data.additionalDiagnoses : [],
+  );
+  // Additional specialties for review — each a specialty autocomplete row.
+  const [addlSpecialties, setAddlSpecialties] = useState<string[]>(
+    Array.isArray(data.additionalSpecialties) ? data.additionalSpecialties : [],
+  );
+
   // Pre-existing conditions — managed via the pop-up picker with its own save.
   const [preConditions, setPreConditions] = useState<string[]>(parseConditions(data.preExistingConditions));
   const [preReviewed, setPreReviewed] = useState<boolean>(!!data.preExistingReviewed);
@@ -229,12 +239,57 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
             disabled={!canEdit}
             onChange={({ diagnosis, icd10Code }) => { setForm((f) => ({ ...f, diagnosis, icd10Code })); setSaved(false); }}
           />
+          {additional.map((d, idx) => (
+            <div key={idx} className="mt-2 flex items-start gap-2">
+              <div className="flex-1">
+                <p className="mb-1 text-xs text-ink-500">Additional diagnosis {idx + 1}</p>
+                <Icd10Search
+                  value={d.diagnosis}
+                  code={d.icd10Code}
+                  disabled={!canEdit}
+                  onChange={(v) => { setAdditional((a) => a.map((x, i) => (i === idx ? v : x))); setSaved(false); }}
+                />
+              </div>
+              {canEdit && (
+                <button type="button" title="Remove" className="mt-6 rounded-md p-1 text-ink-400 hover:bg-ink-100 hover:text-red-600" onClick={() => { setAdditional((a) => a.filter((_, i) => i !== idx)); setSaved(false); }}>
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+          ))}
+          {canEdit && (
+            <button type="button" className="btn-ghost mt-2 text-xs" onClick={() => { setAdditional((a) => [...a, { diagnosis: "", icd10Code: "" }]); setSaved(false); }}>
+              <Plus className="h-3.5 w-3.5" /> Additional diagnosis
+            </button>
+          )}
         </Field>
-        <Field label="Specialty">
+        <Field label="Specialty for Review" wide>
           <input className="input" list="specialty-list" disabled={!canEdit} value={form.specialty} placeholder="Search specialties…" onChange={(e) => set("specialty", e.target.value)} />
           <datalist id="specialty-list">
             {MEDICAL_SPECIALTIES.map((s) => <option key={s} value={s} />)}
           </datalist>
+          {addlSpecialties.map((s, idx) => (
+            <div key={idx} className="mt-2 flex items-center gap-2">
+              <input
+                className="input flex-1"
+                list="specialty-list"
+                disabled={!canEdit}
+                value={s}
+                placeholder={`Additional specialty ${idx + 1}…`}
+                onChange={(e) => { setAddlSpecialties((prev) => prev.map((x, i) => (i === idx ? e.target.value : x))); setSaved(false); }}
+              />
+              {canEdit && (
+                <button type="button" title="Remove" className="rounded-md p-1 text-ink-400 hover:bg-ink-100 hover:text-red-600" onClick={() => { setAddlSpecialties((prev) => prev.filter((_, i) => i !== idx)); setSaved(false); }}>
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+          ))}
+          {canEdit && (
+            <button type="button" className="btn-ghost mt-2 text-xs" onClick={() => { setAddlSpecialties((prev) => [...prev, ""]); setSaved(false); }}>
+              <Plus className="h-3.5 w-3.5" /> Additional specialty
+            </button>
+          )}
         </Field>
         <Field label="Mechanism of injury"><input className="input" disabled={!canEdit} value={form.mechanism} onChange={(e) => set("mechanism", e.target.value)} /></Field>
         <Field label="Jurisdiction">
@@ -286,7 +341,7 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
       </div>
       {canEdit && (
         <div className="mt-4 flex items-center gap-3">
-          <button className="btn-primary" onClick={async () => { const r = await call(`/api/cases/${data.id}`, "PATCH", form, "intake"); if (r) setSaved(true); }}>Save intake</button>
+          <button className="btn-primary" onClick={async () => { const r = await call(`/api/cases/${data.id}`, "PATCH", { ...form, additionalDiagnoses: additional.filter((d) => d.diagnosis.trim()), additionalSpecialties: addlSpecialties.map((s) => s.trim()).filter(Boolean) }, "intake"); if (r) setSaved(true); }}>Save intake</button>
           {saved && <span className="text-sm text-emerald-600">Saved.</span>}
         </div>
       )}

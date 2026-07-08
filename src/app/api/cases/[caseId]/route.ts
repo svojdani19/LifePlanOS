@@ -15,12 +15,14 @@ const patchSchema = z.object({
   mechanism: z.string().nullable().optional(),
   diagnosis: z.string().nullable().optional(),
   icd10Code: z.string().max(12).nullable().optional(),
+  additionalDiagnoses: z.array(z.object({ diagnosis: z.string(), icd10Code: z.string() })).optional(),
   injurySpecialty: z
     .enum(["GENERAL", "ORTHOPEDIC_TRAUMA", "HIP_ARTHROPLASTY", "KNEE_ARTHROPLASTY", "SPINE", "AMPUTATION", "TBI", "SPINAL_CORD_INJURY", "CHRONIC_PAIN", "CRPS", "BURNS", "BIRTH_INJURY", "NEUROLOGIC", "PSYCHIATRIC", "POLYTRAUMA"])
     .optional(),
   preExistingConditions: z.string().nullable().optional(),
   preExistingReviewed: z.boolean().optional(),
   specialty: z.string().nullable().optional(),
+  additionalSpecialties: z.array(z.string()).optional(),
   currentWorkStatus: z.string().nullable().optional(),
   disabilityReason: z.string().nullable().optional(),
   functionalLimitations: z.string().nullable().optional(),

@@ -1,6 +1,5 @@
 import Link from "next/link";
-import { ShieldCheck, Activity, FileText, Scale, Stethoscope, ArrowRight } from "lucide-react";
-import { getContext } from "@/lib/tenant";
+import { ShieldCheck, Activity, FileText, Scale, Stethoscope } from "lucide-react";
 
 const MODULES = [
   { icon: Activity, title: "Chronology engine", body: "Sorted, cited, accessible." },
@@ -10,8 +9,7 @@ const MODULES = [
   { icon: FileText, title: "Report generator", body: "Complete, ready-for-review, validated." },
 ];
 
-export default async function LandingPage() {
-  const ctx = await getContext();
+export default function LandingPage() {
   return (
     <div className="min-h-screen">
       {/* Nav */}
@@ -23,20 +21,12 @@ export default async function LandingPage() {
           <span className="text-lg font-bold tracking-tight text-ink-900">LifePlanOS</span>
         </div>
         <nav className="flex items-center gap-3 text-sm">
-          {ctx ? (
-            <Link href="/dashboard" className="btn-primary">
-              Open dashboard <ArrowRight className="h-4 w-4" />
-            </Link>
-          ) : (
-            <>
-              <Link href="/login" className="btn-ghost">
-                Log in
-              </Link>
-              <Link href="/signup" className="btn-primary">
-                Get started
-              </Link>
-            </>
-          )}
+          <Link href="/login" className="btn-ghost">
+            Log in
+          </Link>
+          <Link href="/signup" className="btn-primary">
+            Get started
+          </Link>
         </nav>
       </header>
 
@@ -51,14 +41,6 @@ export default async function LandingPage() {
         <p className="mx-auto mt-6 max-w-2xl text-lg text-ink-600">
           Everything from Intake to Reports —<br />engineered to simplify.
         </p>
-        <div className="mt-9 flex justify-center gap-3">
-          <Link href="/signup" className="btn-primary px-6 py-3 text-base">
-            Get started
-          </Link>
-          <Link href="/login" className="btn-outline px-6 py-3 text-base">
-            Log in
-          </Link>
-        </div>
       </section>
 
       {/* Modules */}
