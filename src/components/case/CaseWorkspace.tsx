@@ -21,6 +21,7 @@ import {
 import { Badge } from "@/components/ui/Badge";
 import { formatMoney, formatDate, cn } from "@/lib/utils";
 import type { Permission } from "@/lib/rbac";
+import { DOC_TYPE_GROUPS, TYPE_LABEL, TYPE_GROUP } from "@/lib/documents/taxonomy";
 
 // Loosely-typed serialized case (dates are ISO strings after JSON round-trip).
 type AnyRec = Record<string, any>;
@@ -223,9 +224,25 @@ function Field({ label, children, wide }: { label: string; children: React.React
 }
 
 // ── Records ──────────────────────────────────────────────────────────────────
-const SAMPLE_RECORDS = ["ED_Admission_Note.pdf", "Operative_Report_ORIF.pdf", "MRI_Lumbar_Spine.pdf", "PT_Progress_Notes.pdf", "Billing_Ledger.xlsx", "Ortho_Followup_Clinic_Note.pdf", "Scanned_Old_Records.pdf"];
+// A varied sample set so the auto-classifier lands documents across many groups.
+const SAMPLE_RECORDS = [
+  "ED_Admission_Note.pdf",
+  "Operative_Report_ORIF.pdf",
+  "MRI_Lumbar_Spine.pdf",
+  "PT_Progress_Notes.pdf",
+  "Billing_Ledger.xlsx",
+  "Ortho_Followup_Clinic_Note.pdf",
+  "Pharmacy_Printout.pdf",
+  "Deposition_Summary_Smith.pdf",
+  "IME_Report_Defense.pdf",
+  "Neuropsych_Evaluation.pdf",
+  "Scanned_Unknown_Document.pdf",
+];
 
 function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: boolean; call: any; busy: string | null }) {
+  const [filter, setFilter] = useState<string>("All");
+  const [editingId, setEditingId] = useState<string | null>(null);
+
   async function upload(files: FileList | null) {
     if (!files?.length) return;
     const fd = new FormData();
@@ -234,6 +251,17 @@ function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: bo
     if (res.ok) location.reload();
     else alert("Upload failed");
   }
+
+  const docs: AnyRec[] = data.documents;
+
+  // Count per group; only surface filter chips for groups that have documents.
+  const groupCounts: Record<string, number> = {};
+  docs.forEach((d) => {
+    const g = TYPE_GROUP[d.type] ?? "Other";
+    groupCounts[g] = (groupCounts[g] ?? 0) + 1;
+  });
+  const activeGroups = DOC_TYPE_GROUPS.filter((g) => groupCounts[g.label] > 0);
+  const filtered = filter === "All" ? docs : docs.filter((d) => (TYPE_GROUP[d.type] ?? "Other") === filter);
 
   return (
     <div className="space-y-4">
@@ -246,32 +274,96 @@ function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: bo
           <button className="btn-ghost" disabled={busy === "sample"} onClick={() => call(`/api/cases/${data.id}/documents`, "POST", { filenames: SAMPLE_RECORDS }, "sample")}>
             {busy === "sample" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />} Add sample record set
           </button>
-          <span className="text-xs text-ink-500">Uploads are auto-classified and OCR-processed on ingest.</span>
+          <span className="text-xs text-ink-500">
+            Upload unlabeled documents — each is auto-classified on ingest. Click a label to reassign it.
+          </span>
         </div>
       )}
-      {data.documents.length === 0 ? (
+
+      {docs.length === 0 ? (
         <Empty>No records yet. Upload files or add the sample record set to begin.</Empty>
       ) : (
-        <div className="card overflow-hidden">
-          <table className="w-full text-sm">
-            <thead className="border-b border-ink-200 bg-ink-50 text-left text-xs uppercase tracking-wide text-ink-500">
-              <tr><th className="px-4 py-2 font-medium">Document</th><th className="px-4 py-2 font-medium">Type</th><th className="px-4 py-2 font-medium">Pages</th><th className="px-4 py-2 font-medium">OCR</th><th className="px-4 py-2 font-medium">Flags</th></tr>
-            </thead>
-            <tbody className="divide-y divide-ink-100">
-              {data.documents.map((d: AnyRec) => (
-                <tr key={d.id}>
-                  <td className="px-4 py-2 font-medium text-ink-900">{d.filename}</td>
-                  <td className="px-4 py-2 text-ink-600">{d.type.replace(/_/g, " ").toLowerCase()}</td>
-                  <td className="px-4 py-2 text-ink-600">{d.pageCount}</td>
-                  <td className="px-4 py-2">{d.ocrConfidence != null ? <Badge tone={d.ocrConfidence < 0.75 ? "red" : "green"}>{Math.round(d.ocrConfidence * 100)}%</Badge> : "—"}</td>
-                  <td className="px-4 py-2 text-xs text-amber-700">{d.flags || "—"}</td>
-                </tr>
+        <>
+          {/* Filter chips — one per document group present, plus All. */}
+          <div className="flex flex-wrap gap-2">
+            <FilterChip label="All" count={docs.length} active={filter === "All"} onClick={() => setFilter("All")} />
+            {activeGroups.map((g) => (
+              <FilterChip key={g.label} label={g.label} count={groupCounts[g.label]} active={filter === g.label} onClick={() => setFilter(g.label)} />
+            ))}
+          </div>
+
+          <div className="card overflow-hidden">
+            <div className="divide-y divide-ink-100">
+              {filtered.map((d) => (
+                <div key={d.id} className="flex items-center gap-3 px-4 py-3 hover:bg-ink-50/60">
+                  <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-ink-100 text-[10px] font-bold uppercase text-ink-400">
+                    {d.filename.split(".").pop()?.slice(0, 4) ?? "?"}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium text-ink-900">{d.filename}</p>
+                    <div className="mt-0.5 flex flex-wrap items-center gap-2">
+                      {editingId === d.id ? (
+                        <select
+                          autoFocus
+                          defaultValue={d.type}
+                          className="rounded-md border border-ink-300 bg-white px-2 py-0.5 text-xs"
+                          onBlur={() => setEditingId(null)}
+                          onChange={async (e) => {
+                            setEditingId(null);
+                            await call(`/api/cases/${data.id}/documents/${d.id}`, "PATCH", { type: e.target.value });
+                          }}
+                        >
+                          {DOC_TYPE_GROUPS.map((g) => (
+                            <optgroup key={g.label} label={g.label}>
+                              {g.types.map(([v, l]) => (
+                                <option key={v} value={v}>{l}</option>
+                              ))}
+                            </optgroup>
+                          ))}
+                        </select>
+                      ) : canEdit ? (
+                        <button onClick={() => setEditingId(d.id)} title="Click to change label" className="inline-flex items-center gap-1 hover:opacity-80">
+                          <Badge tone="brand">{TYPE_LABEL[d.type] ?? d.type.replace(/_/g, " ")}</Badge>
+                          <Pencil className="h-3 w-3 text-ink-400" />
+                        </button>
+                      ) : (
+                        <Badge tone="brand">{TYPE_LABEL[d.type] ?? d.type.replace(/_/g, " ")}</Badge>
+                      )}
+                      <span className="text-xs text-ink-400">{d.pageCount ? `${d.pageCount}p` : ""}</span>
+                      {d.ocrConfidence != null && (
+                        <Badge tone={d.ocrConfidence < 0.75 ? "red" : "green"}>OCR {Math.round(d.ocrConfidence * 100)}%</Badge>
+                      )}
+                      {d.flags && <span className="text-xs text-amber-700">{d.flags}</span>}
+                    </div>
+                  </div>
+                  {canEdit && (
+                    <button className="text-ink-300 hover:text-red-600" title="Remove" onClick={async () => { if (confirm(`Remove ${d.filename}?`)) await call(`/api/cases/${data.id}/documents/${d.id}`, "DELETE"); }}>
+                      <X className="h-4 w-4" />
+                    </button>
+                  )}
+                </div>
               ))}
-            </tbody>
-          </table>
-        </div>
+              {filtered.length === 0 && <p className="px-4 py-8 text-center text-sm text-ink-400">No documents in this category.</p>}
+            </div>
+          </div>
+        </>
       )}
     </div>
+  );
+}
+
+function FilterChip({ label, count, active, onClick }: { label: string; count: number; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-colors",
+        active ? "bg-brand-600 text-white" : "bg-ink-100 text-ink-600 hover:bg-ink-200",
+      )}
+    >
+      {label}
+      <span className={cn("rounded-full px-1.5 text-[10px] font-semibold", active ? "bg-white/20" : "bg-white text-ink-500")}>{count}</span>
+    </button>
   );
 }
 

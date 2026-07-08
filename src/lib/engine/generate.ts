@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { packFor } from "@/lib/engine/specialty";
 import { project, type CaseAssumptions } from "@/lib/engine/cost";
+import { guessDocType } from "@/lib/documents/taxonomy";
 import type { Case, CareCategory, Document, DocumentType } from "@/generated/prisma";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -30,29 +31,16 @@ export function assumptionsFor(c: Case): CaseAssumptions {
 
 // ── Mock document ingestion (Module 3) ───────────────────────────────────────
 
-const TYPE_KEYWORDS: [RegExp, DocumentType][] = [
-  [/op(erative)?|surg/i, "OPERATIVE_REPORT"],
-  [/mri|ct|x-?ray|imag|radiol/i, "IMAGING_REPORT"],
-  [/pt|ot|therapy|rehab/i, "THERAPY_NOTE"],
-  [/bill|invoice|ledger|charge/i, "BILLING_RECORD"],
-  [/depo/i, "DEPOSITION_SUMMARY"],
-  [/life care|lcp/i, "PRIOR_LIFE_CARE_PLAN"],
-  [/expert|ime/i, "EXPERT_REPORT"],
-  [/scan/i, "SCANNED_RECORD"],
-  [/note|consult|clinic|visit|h&p|discharge/i, "PHYSICIAN_NOTE"],
-];
-
-export function classifyDocument(filename: string): DocumentType {
-  for (const [re, type] of TYPE_KEYWORDS) if (re.test(filename)) return type;
-  return "OTHER";
-}
-
-/** Deterministic mock OCR/extraction so uploads produce structured metadata. */
+/**
+ * Deterministic mock OCR/extraction so uploads produce structured metadata.
+ * The document type is auto-assigned by the shared filename heuristic
+ * (src/lib/documents/taxonomy.ts) unless the caller already set one.
+ */
 export async function processDocument(doc: Document): Promise<void> {
-  const type = classifyDocument(doc.filename);
+  const type = (doc.type && doc.type !== "OTHER" ? doc.type : (guessDocType(doc.filename) as DocumentType));
   const seed = [...doc.filename].reduce((a, ch) => a + ch.charCodeAt(0), 0);
   const pageCount = 3 + (seed % 40);
-  const ocrConfidence = doc.type === "SCANNED_RECORD" || /scan/i.test(doc.filename) ? 0.62 : 0.94;
+  const ocrConfidence = /scan/i.test(doc.filename) ? 0.62 : 0.94;
   const flags: string[] = [];
   if (ocrConfidence < 0.75) flags.push("Low OCR confidence — verify against source");
   if (pageCount > 35) flags.push("Large document — confirm no missing pages");
@@ -64,7 +52,7 @@ export async function processDocument(doc: Document): Promise<void> {
       status: "PROCESSED",
       pageCount,
       ocrConfidence,
-      provider: type === "OPERATIVE_REPORT" ? "Orthopedic Surgery" : "Treating Provider",
+      provider: type === "OPERATIVE_NOTE" ? "Orthopedic Surgery" : "Treating Provider",
       extractedText: `[mock-extracted text for ${doc.filename}] — classified ${type}, ${pageCount} pp.`,
       flags: flags.join("; ") || null,
     },

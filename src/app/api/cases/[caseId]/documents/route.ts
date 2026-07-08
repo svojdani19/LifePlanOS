@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit, recordUsage } from "@/lib/tenant";
-import { classifyDocument, processDocument } from "@/lib/engine/generate";
+import { processDocument } from "@/lib/engine/generate";
+import { guessDocType } from "@/lib/documents/taxonomy";
 import { putObject } from "@/lib/storage";
 import { ok, handleError } from "@/lib/api";
 
@@ -17,8 +18,10 @@ export async function GET(_req: Request, { params }: { params: { caseId: string 
 }
 
 // Accepts multipart file uploads OR a JSON body { filenames: string[] } for
-// quickly adding sample records in the demo. Either way each record is
-// classified + (mock) OCR-processed on ingest.
+// quickly adding sample records in the demo. Each unspecified record is
+// auto-labeled via the filename heuristic and (mock) OCR-processed on ingest.
+// The client may also send a multipart `typeMap` (JSON { [filename]: TYPE }) to
+// override the auto-detected label per file.
 export async function POST(req: Request, { params }: { params: { caseId: string } }) {
   try {
     const ctx = await requireApiContext();
@@ -31,12 +34,15 @@ export async function POST(req: Request, { params }: { params: { caseId: string 
     if (contentType.includes("multipart/form-data")) {
       const form = await req.formData();
       const files = form.getAll("files").filter((f): f is File => f instanceof File);
+      const typeMapRaw = form.get("typeMap");
+      const typeMap: Record<string, string> = typeof typeMapRaw === "string" ? JSON.parse(typeMapRaw) : {};
       for (const file of files) {
         const buf = Buffer.from(await file.arrayBuffer());
         const ext = file.name.includes(".") ? file.name.slice(file.name.lastIndexOf(".")) : "";
         const key = await putObject(buf, ext);
+        const resolvedType = (typeMap[file.name] || guessDocType(file.name)) as never;
         const doc = await prisma.document.create({
-          data: { caseId: params.caseId, firmId: ctx.firm.id, filename: file.name, type: classifyDocument(file.name), storageKey: key, uploadedById: ctx.user.id },
+          data: { caseId: params.caseId, firmId: ctx.firm.id, filename: file.name, type: resolvedType, storageKey: key, uploadedById: ctx.user.id },
         });
         await processDocument(doc);
         await recordUsage(ctx, "RECORD_PAGE_OCR", { caseId: params.caseId, quantity: doc.pageCount || 1 });
@@ -47,7 +53,7 @@ export async function POST(req: Request, { params }: { params: { caseId: string 
       const filenames: string[] = Array.isArray(body.filenames) ? body.filenames : [];
       for (const filename of filenames) {
         const doc = await prisma.document.create({
-          data: { caseId: params.caseId, firmId: ctx.firm.id, filename, type: classifyDocument(filename), uploadedById: ctx.user.id },
+          data: { caseId: params.caseId, firmId: ctx.firm.id, filename, type: guessDocType(filename) as never, uploadedById: ctx.user.id },
         });
         await processDocument(doc);
         created.push(doc.id);

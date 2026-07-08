@@ -13,6 +13,7 @@ import {
 } from "docx";
 import { prisma } from "@/lib/db";
 import { assumptionsFor } from "@/lib/engine/generate";
+import { typeLabel } from "@/lib/documents/taxonomy";
 import type { CaseSide } from "@/generated/prisma";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -90,7 +91,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
   // Records reviewed
   body.push(h("Records Reviewed"));
   if (c.documents.length === 0) body.push(p("No records ingested at time of report.", { italics: true }));
-  for (const d of c.documents) body.push(p(`• ${d.filename} — ${d.type.replace(/_/g, " ").toLowerCase()} (${d.pageCount} pp)`));
+  for (const d of c.documents) body.push(p(`• ${d.filename} — ${typeLabel(d.type)} (${d.pageCount} pp)`));
 
   // Methodology
   body.push(h("Methodology"));
