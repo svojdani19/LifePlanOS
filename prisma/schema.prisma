@@ -225,7 +225,8 @@ model Case {
   jurisdiction String?
   dateOfInjury DateTime?
   mechanism    String?
-  diagnosis    String? // primary/current diagnosis summary
+  diagnosis    String? // primary/current diagnosis description
+  icd10Code    String? // ICD-10-CM code linked to the primary diagnosis
 
   // Life-expectancy & economic assumptions (editable, drive the cost engine).
   lifeExpectancyYears Float? // remaining years used for lifetime projections
@@ -234,10 +235,13 @@ model Case {
   geographicFactor    Float  @default(1.0) // regional cost multiplier
 
   // Extended intake.
-  preExistingConditions String?
-  currentWorkStatus     String?
+  preExistingConditions String? // comma-separated selected conditions
+  preExistingReviewed   Boolean @default(false) // true once saved in the picker (drives Complete/Incomplete)
+  currentWorkStatus     String? // Employed | Unemployed | Disabled
+  disabilityReason      String? // shown/used only when currentWorkStatus = Disabled
   functionalLimitations String?
-  injurySpecialty       InjurySpecialty @default(GENERAL) // drives specialty rules
+  injurySpecialty       InjurySpecialty @default(GENERAL) // engine injury category (inferred from diagnosis)
+  specialty             String? // relevant medical specialty (user-selected, descriptive)
 
   status    CaseStatus @default(INTAKE)
   createdAt DateTime   @default(now())

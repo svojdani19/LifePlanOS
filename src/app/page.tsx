@@ -1,7 +1,5 @@
 import Link from "next/link";
 import { ShieldCheck, Activity, FileText, Scale, Stethoscope, ArrowRight } from "lucide-react";
-import { PLANS, PLAN_ORDER } from "@/lib/subscription/plans";
-import { formatMoney } from "@/lib/utils";
 import { getContext } from "@/lib/tenant";
 
 const MODULES = [
@@ -45,7 +43,7 @@ export default async function LandingPage() {
       {/* Hero */}
       <section className="mx-auto max-w-6xl px-6 pt-16 pb-20 text-center">
         <span className="inline-block rounded-full bg-brand-100 px-3 py-1 text-xs font-semibold text-brand-800">
-          Life Care Plans. Automated.
+          Life Care Plans. Made Easy.
         </span>
         <h1 className="mx-auto mt-6 max-w-3xl text-5xl font-extrabold tracking-tight text-ink-900">
           Automate the work. Keep the control.
@@ -76,52 +74,7 @@ export default async function LandingPage() {
         </div>
       </section>
 
-      {/* Pricing */}
-      <section className="mx-auto max-w-6xl px-6 pb-24">
-        <h2 className="text-center text-3xl font-bold tracking-tight text-ink-900">Simple firm pricing</h2>
-        <p className="mt-2 text-center text-ink-600">One straightforward subscription per firm.</p>
-        <div className="mt-10 grid gap-6 md:grid-cols-3">
-          {PLAN_ORDER.map((tier) => {
-            const plan = PLANS[tier];
-            const featured = tier === "SMALL_FIRM";
-            return (
-              <div
-                key={tier}
-                className={
-                  "card flex flex-col p-6 " + (featured ? "ring-2 ring-brand-500" : "")
-                }
-              >
-                {featured && (
-                  <span className="mb-3 self-start rounded-full bg-brand-600 px-3 py-1 text-xs font-semibold text-white">
-                    Most popular
-                  </span>
-                )}
-                <h3 className="text-lg font-bold text-ink-900">{plan.name}</h3>
-                <p className="mt-1 text-sm text-ink-600">{plan.blurb}</p>
-                <div className="mt-5 flex items-baseline gap-1">
-                  <span className="text-4xl font-extrabold text-ink-900">{formatMoney(plan.monthlyPrice)}</span>
-                  <span className="text-sm text-ink-500">/mo</span>
-                </div>
-                <ul className="mt-5 space-y-2 text-sm text-ink-700">
-                  <li>{plan.seatLimit} seats</li>
-                  <li>{plan.caseLimit === null ? "Unlimited cases" : `${plan.caseLimit} active cases`}</li>
-                  {plan.features.map((f) => (
-                    <li key={f} className="flex gap-2">
-                      <span className="text-brand-600">✓</span>
-                      {f}
-                    </li>
-                  ))}
-                </ul>
-                <Link href={`/signup?tier=${tier}`} className="btn-primary mt-6">
-                  Start with {plan.name}
-                </Link>
-              </div>
-            );
-          })}
-        </div>
-      </section>
-
-      <footer className="border-t border-ink-200 py-8 text-center text-xs text-ink-500">
+      <footer className="mt-8 border-t border-ink-200 py-8 text-center text-xs text-ink-500">
         LifePlanOS — HIPAA-ready, BAA-ready architecture. The platform maximizes defensibility, not damages.
       </footer>
     </div>

@@ -22,6 +22,11 @@ import { Badge } from "@/components/ui/Badge";
 import { formatMoney, formatDate, cn } from "@/lib/utils";
 import type { Permission } from "@/lib/rbac";
 import { DOC_TYPE_GROUPS, TYPE_LABEL, TYPE_GROUP } from "@/lib/documents/taxonomy";
+import { Icd10Search } from "@/components/Icd10Search";
+import { PreExistingConditionsModal } from "@/components/PreExistingConditionsModal";
+import { parseConditions, serializeConditions } from "@/lib/intake/preExisting";
+import { MEDICAL_SPECIALTIES } from "@/lib/intake/specialties";
+import { US_STATES } from "@/lib/intake/jurisdictions";
 
 // Loosely-typed serialized case (dates are ISO strings after JSON round-trip).
 type AnyRec = Record<string, any>;
@@ -95,7 +100,8 @@ export function CaseWorkspace({
               <Badge tone={data.side === "PLAINTIFF" ? "brand" : data.side === "DEFENSE" ? "amber" : "slate"}>{data.side.toLowerCase()}</Badge>
             </div>
             <p className="mt-1 text-sm text-ink-600">
-              {data.caseType.replace(/_/g, " ").toLowerCase()} · {data.diagnosis || "no diagnosis set"} · {data.jurisdiction || "no jurisdiction"}
+              {data.caseType.replace(/_/g, " ").toLowerCase()} · {data.diagnosis || "no diagnosis set"}
+              {data.icd10Code ? <span className="font-mono text-xs text-ink-500"> [{data.icd10Code}]</span> : null} · {data.jurisdiction || "no jurisdiction"}
             </p>
           </div>
           {can("futurecare.edit") && (
@@ -177,36 +183,105 @@ function Empty({ children }: { children: React.ReactNode }) {
 }
 
 // ── Intake ───────────────────────────────────────────────────────────────────
-const SPECIALTIES = ["GENERAL", "ORTHOPEDIC_TRAUMA", "HIP_ARTHROPLASTY", "KNEE_ARTHROPLASTY", "SPINE", "AMPUTATION", "TBI", "SPINAL_CORD_INJURY", "CHRONIC_PAIN", "CRPS", "BURNS", "BIRTH_INJURY", "NEUROLOGIC", "PSYCHIATRIC", "POLYTRAUMA"];
+const WORK_STATUSES = ["Employed", "Unemployed", "Disabled"];
 
 function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; call: any }) {
   const [form, setForm] = useState({
     diagnosis: data.diagnosis ?? "",
+    icd10Code: data.icd10Code ?? "",
     mechanism: data.mechanism ?? "",
     jurisdiction: data.jurisdiction ?? "",
-    injurySpecialty: data.injurySpecialty ?? "GENERAL",
-    preExistingConditions: data.preExistingConditions ?? "",
+    specialty: data.specialty ?? "",
     currentWorkStatus: data.currentWorkStatus ?? "",
+    disabilityReason: data.disabilityReason ?? "",
     functionalLimitations: data.functionalLimitations ?? "",
   });
   const [saved, setSaved] = useState(false);
   const set = (k: string, v: string) => { setForm((f) => ({ ...f, [k]: v })); setSaved(false); };
 
+  // Pre-existing conditions — managed via the pop-up picker with its own save.
+  const [preConditions, setPreConditions] = useState<string[]>(parseConditions(data.preExistingConditions));
+  const [preReviewed, setPreReviewed] = useState<boolean>(!!data.preExistingReviewed);
+  const [preOpen, setPreOpen] = useState(false);
+  const [preSaving, setPreSaving] = useState(false);
+
+  async function savePreExisting(selected: string[], none: boolean) {
+    setPreSaving(true);
+    const list = none ? [] : selected;
+    const r = await call(`/api/cases/${data.id}`, "PATCH", { preExistingConditions: serializeConditions(list), preExistingReviewed: true }, "pre");
+    setPreSaving(false);
+    if (r) {
+      setPreConditions(list);
+      setPreReviewed(true);
+      setPreOpen(false);
+    }
+  }
+
   return (
     <div className="card max-w-3xl p-6">
       <h3 className="text-sm font-semibold text-ink-900">Case intake</h3>
-      <p className="mt-1 text-xs text-ink-500">The injury specialty drives the specialty-specific recommendation rules used by the AI pipeline.</p>
+      <p className="mt-1 text-xs text-ink-500">Structured intake. The future-care engine infers specialty-specific rules from the diagnosis.</p>
       <div className="mt-4 grid gap-4 sm:grid-cols-2">
-        <Field label="Primary diagnosis"><input className="input" disabled={!canEdit} value={form.diagnosis} onChange={(e) => set("diagnosis", e.target.value)} /></Field>
-        <Field label="Injury specialty">
-          <select className="input" disabled={!canEdit} value={form.injurySpecialty} onChange={(e) => set("injurySpecialty", e.target.value)}>
-            {SPECIALTIES.map((s) => <option key={s} value={s}>{s.replace(/_/g, " ").toLowerCase()}</option>)}
-          </select>
+        <Field label="Primary diagnosis (ICD-10)" wide>
+          <Icd10Search
+            value={form.diagnosis}
+            code={form.icd10Code}
+            disabled={!canEdit}
+            onChange={({ diagnosis, icd10Code }) => { setForm((f) => ({ ...f, diagnosis, icd10Code })); setSaved(false); }}
+          />
+        </Field>
+        <Field label="Specialty">
+          <input className="input" list="specialty-list" disabled={!canEdit} value={form.specialty} placeholder="Search specialties…" onChange={(e) => set("specialty", e.target.value)} />
+          <datalist id="specialty-list">
+            {MEDICAL_SPECIALTIES.map((s) => <option key={s} value={s} />)}
+          </datalist>
         </Field>
         <Field label="Mechanism of injury"><input className="input" disabled={!canEdit} value={form.mechanism} onChange={(e) => set("mechanism", e.target.value)} /></Field>
-        <Field label="Jurisdiction"><input className="input" disabled={!canEdit} value={form.jurisdiction} onChange={(e) => set("jurisdiction", e.target.value)} /></Field>
-        <Field label="Pre-existing conditions"><input className="input" disabled={!canEdit} value={form.preExistingConditions} onChange={(e) => set("preExistingConditions", e.target.value)} /></Field>
-        <Field label="Current work status"><input className="input" disabled={!canEdit} value={form.currentWorkStatus} onChange={(e) => set("currentWorkStatus", e.target.value)} /></Field>
+        <Field label="Jurisdiction">
+          <input className="input" list="state-list" disabled={!canEdit} value={form.jurisdiction} placeholder="Search states…" onChange={(e) => set("jurisdiction", e.target.value)} />
+          <datalist id="state-list">
+            {US_STATES.map((s) => <option key={s} value={s} />)}
+          </datalist>
+        </Field>
+
+        {/* Pre-existing conditions — pop-up multi-select with Complete/Incomplete status */}
+        <Field label="Pre-existing conditions" wide>
+          <div className="flex flex-wrap items-center gap-2">
+            <button type="button" className="btn-outline" disabled={!canEdit} onClick={() => setPreOpen(true)}>
+              {preReviewed ? "Edit conditions" : "Select conditions"}
+            </button>
+            <Badge tone={preReviewed ? "green" : "amber"}>{preReviewed ? "Complete" : "Incomplete"}</Badge>
+            <span className="text-xs text-ink-500">
+              {preReviewed ? (preConditions.length ? `${preConditions.length} condition${preConditions.length === 1 ? "" : "s"} recorded` : "No known pre-existing conditions") : "Not yet reviewed"}
+            </span>
+          </div>
+          {preConditions.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {preConditions.map((c) => (
+                <span key={c} className="rounded-full bg-ink-100 px-2.5 py-0.5 text-xs text-ink-700">{c}</span>
+              ))}
+            </div>
+          )}
+        </Field>
+
+        <Field label="Current work status">
+          <select
+            className="input"
+            disabled={!canEdit}
+            value={form.currentWorkStatus}
+            onChange={(e) => setForm((f) => ({ ...f, currentWorkStatus: e.target.value, disabilityReason: e.target.value === "Disabled" ? f.disabilityReason : "" }))}
+          >
+            <option value="">Select…</option>
+            {WORK_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
+        </Field>
+        {form.currentWorkStatus === "Disabled" ? (
+          <Field label="Reason for disability">
+            <input className="input" disabled={!canEdit} value={form.disabilityReason} placeholder="e.g. lumbar radiculopathy, unable to sit/stand" onChange={(e) => set("disabilityReason", e.target.value)} />
+          </Field>
+        ) : (
+          <div className="hidden sm:block" />
+        )}
         <Field label="Functional limitations" wide><textarea className="input min-h-[70px]" disabled={!canEdit} value={form.functionalLimitations} onChange={(e) => set("functionalLimitations", e.target.value)} /></Field>
       </div>
       {canEdit && (
@@ -214,6 +289,15 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
           <button className="btn-primary" onClick={async () => { const r = await call(`/api/cases/${data.id}`, "PATCH", form, "intake"); if (r) setSaved(true); }}>Save intake</button>
           {saved && <span className="text-sm text-emerald-600">Saved.</span>}
         </div>
+      )}
+
+      {preOpen && (
+        <PreExistingConditionsModal
+          initial={preConditions}
+          saving={preSaving}
+          onClose={() => setPreOpen(false)}
+          onSave={savePreExisting}
+        />
       )}
     </div>
   );
