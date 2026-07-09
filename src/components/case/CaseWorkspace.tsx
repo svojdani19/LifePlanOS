@@ -241,6 +241,12 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
     }
   }
 
+  // Every diagnosis must link to an ICD-10 code. Flag any with text but no code.
+  const unlinkedDx = [
+    ...(form.diagnosis.trim() && !form.icd10Code.trim() ? ["Primary Diagnosis"] : []),
+    ...additional.map((d, i) => (d.diagnosis.trim() && !d.icd10Code.trim() ? `Additional Diagnosis ${i + 1}` : "")).filter(Boolean),
+  ];
+
   return (
     <div className="card max-w-3xl p-6">
       <h3 className="text-sm font-semibold text-ink-900">Case Intake</h3>
@@ -356,8 +362,12 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
       </div>
       {canEdit && (
         <div className="mt-4 flex items-center gap-3">
-          <button className="btn-primary" onClick={async () => { const r = await call(`/api/cases/${data.id}`, "PATCH", { ...form, additionalDiagnoses: additional.filter((d) => d.diagnosis.trim()), additionalSpecialties: addlSpecialties.map((s) => s.trim()).filter(Boolean) }, "intake"); if (r) setSaved(true); }}>Save Intake</button>
-          {saved && <span className="text-sm text-emerald-600">Saved.</span>}
+          <button className="btn-primary" onClick={async () => {
+            if (unlinkedDx.length) { alert(`Link an ICD-10 code to each diagnosis before saving. Missing: ${unlinkedDx.join(", ")}. Pick a code from the search results.`); return; }
+            const r = await call(`/api/cases/${data.id}`, "PATCH", { ...form, additionalDiagnoses: additional.filter((d) => d.diagnosis.trim()), additionalSpecialties: addlSpecialties.map((s) => s.trim()).filter(Boolean) }, "intake"); if (r) setSaved(true);
+          }}>Save Intake</button>
+          {unlinkedDx.length > 0 && <span className="text-sm text-amber-600">Link an ICD-10 code to {unlinkedDx.length === 1 ? "the flagged diagnosis" : `${unlinkedDx.length} diagnoses`} before saving.</span>}
+          {saved && unlinkedDx.length === 0 && <span className="text-sm text-emerald-600">Saved.</span>}
         </div>
       )}
 

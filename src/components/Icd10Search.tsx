@@ -95,7 +95,7 @@ export function Icd10Search({
         />
         <div className="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
           {loading && <Loader2 className="h-4 w-4 animate-spin text-ink-400" />}
-          {code && <Badge tone="brand">{code}</Badge>}
+          {code ? <Badge tone="brand">{code}</Badge> : query.trim().length > 0 ? <Badge tone="amber">no code</Badge> : null}
           {(query || code) && !disabled && (
             <button
               type="button"
