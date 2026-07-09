@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, Fragment } from "react";
 import { useRouter } from "next/navigation";
 import {
   Sparkles,
@@ -25,7 +25,7 @@ import type { Permission } from "@/lib/rbac";
 import { DOC_TYPE_GROUPS, TYPE_LABEL, TYPE_GROUP } from "@/lib/documents/taxonomy";
 import { Icd10Search } from "@/components/Icd10Search";
 import { PreExistingConditionsModal } from "@/components/PreExistingConditionsModal";
-import { parseConditions, serializeConditions } from "@/lib/intake/preExisting";
+import { parseConditions, serializeConditions, findConditionsInRecords } from "@/lib/intake/preExisting";
 import { MEDICAL_SPECIALTIES } from "@/lib/intake/specialties";
 import { US_STATES } from "@/lib/intake/jurisdictions";
 
@@ -74,8 +74,6 @@ export function CaseWorkspace({
 
   const hasPlan = data.futureCareItems.length > 0;
   const pendingPhysician = data.futureCareItems.filter((i: AnyRec) => i.physicianStatus === "PENDING").length;
-  const defense = data.reviewFindings.filter((f: AnyRec) => f.kind === "DEFENSE");
-  const completeness = data.reviewFindings.filter((f: AnyRec) => f.kind === "COMPLETENESS");
 
   const TABS = [
     { id: "overview", label: "Intake", icon: FileText },
@@ -139,20 +137,33 @@ export function CaseWorkspace({
         )}
       </div>
 
-      {/* Tabs */}
-      <div className="mt-5 flex flex-wrap gap-1 border-b border-ink-200">
-        {TABS.map((t) => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            className={cn(
-              "flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm font-medium transition-colors",
-              tab === t.id ? "border-brand-600 text-brand-700" : "border-transparent text-ink-500 hover:text-ink-800",
-            )}
-          >
-            <t.icon className="h-4 w-4" /> {t.label}
-          </button>
-        ))}
+      {/* Tabs — single non-wrapping row (scrolls horizontally if too narrow) */}
+      <div className="mt-5 flex items-center gap-1 overflow-x-auto border-b border-ink-200">
+        {TABS.map((t) =>
+          t.id === "report" ? (
+            // The Report tab is presented as a primary call-to-action button,
+            // matching the "Re-run AI Pipeline" button format, kept compact so it
+            // fits inline with the other tabs.
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={cn("btn-primary ml-auto shrink-0 whitespace-nowrap self-center px-3 py-1.5 text-sm", tab === t.id && "ring-2 ring-brand-300 ring-offset-1")}
+            >
+              <t.icon className="h-4 w-4" /> {t.label}
+            </button>
+          ) : (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={cn(
+                "flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-2.5 py-2 text-sm font-medium transition-colors",
+                tab === t.id ? "border-brand-600 text-brand-700" : "border-transparent text-ink-500 hover:text-ink-800",
+              )}
+            >
+              <t.icon className="h-4 w-4" /> {t.label}
+            </button>
+          ),
+        )}
       </div>
 
       <div className="mt-5">
@@ -162,7 +173,7 @@ export function CaseWorkspace({
         {tab === "causation" && <CausationPanel data={data} />}
         {tab === "futurecare" && <FutureCarePanel data={data} canEdit={can("futurecare.edit")} call={call} />}
         {tab === "costs" && <CostsPanel data={data} assumptions={assumptions} totals={totals} canEdit={can("case.edit")} call={call} />}
-        {tab === "reviews" && <ReviewsPanel defense={defense} completeness={completeness} hasPlan={hasPlan} />}
+        {tab === "reviews" && <ReviewsPanel points={data.reviewFindings} hasPlan={hasPlan} />}
         {tab === "physician" && <PhysicianPanel data={data} canReview={can("physician.review")} call={call} />}
         {tab === "report" && <ReportPanel data={data} canExport={can("report.export")} call={call} busy={busy} totals={totals} />}
       </div>
@@ -264,20 +275,21 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
           )}
         </Field>
         <Field label="Specialty for Review" wide>
-          <input className="input" list="specialty-list" disabled={!canEdit} value={form.specialty} placeholder="Search specialties…" onChange={(e) => set("specialty", e.target.value)} />
-          <datalist id="specialty-list">
-            {MEDICAL_SPECIALTIES.map((s) => <option key={s} value={s} />)}
-          </datalist>
+          <select className="input" disabled={!canEdit} value={form.specialty} onChange={(e) => set("specialty", e.target.value)}>
+            <option value="">Select a specialty…</option>
+            {MEDICAL_SPECIALTIES.map((s) => <option key={s} value={s}>{s}</option>)}
+          </select>
           {addlSpecialties.map((s, idx) => (
             <div key={idx} className="mt-2 flex items-center gap-2">
-              <input
+              <select
                 className="input flex-1"
-                list="specialty-list"
                 disabled={!canEdit}
                 value={s}
-                placeholder={`Additional specialty ${idx + 1}…`}
                 onChange={(e) => { setAddlSpecialties((prev) => prev.map((x, i) => (i === idx ? e.target.value : x))); setSaved(false); }}
-              />
+              >
+                <option value="">Additional specialty {idx + 1}…</option>
+                {MEDICAL_SPECIALTIES.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
               {canEdit && (
                 <button type="button" title="Remove" className="rounded-md p-1 text-ink-400 hover:bg-ink-100 hover:text-red-600" onClick={() => { setAddlSpecialties((prev) => prev.filter((_, i) => i !== idx)); setSaved(false); }}>
                   <X className="h-4 w-4" />
@@ -349,6 +361,7 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
       {preOpen && (
         <PreExistingConditionsModal
           initial={preConditions}
+          detectedInRecords={findConditionsInRecords(data.documents.map((d: AnyRec) => d.extractedText || "").join(" \n "))}
           saving={preSaving}
           onClose={() => setPreOpen(false)}
           onSave={savePreExisting}
@@ -700,6 +713,7 @@ function CostsPanel({ data, assumptions, totals, canEdit, call }: { data: AnyRec
     medicalInflation: assumptions.medicalInflation,
     geographicFactor: assumptions.geographicFactor,
   });
+  const [open, setOpen] = useState<string | null>(null);
   if (data.futureCareItems.length === 0) return <Empty>Run the AI pipeline to project costs.</Empty>;
   return (
     <div className="space-y-4">
@@ -716,13 +730,36 @@ function CostsPanel({ data, assumptions, totals, canEdit, call }: { data: AnyRec
       <div className="card overflow-hidden">
         <table className="w-full text-sm">
           <thead className="border-b border-ink-200 bg-ink-50 text-left text-xs uppercase tracking-wide text-ink-500">
-            <tr><th className="px-4 py-2 font-medium">Service</th><th className="px-4 py-2 font-medium">Annual</th><th className="px-4 py-2 font-medium">Low</th><th className="px-4 py-2 font-medium">Lifetime</th><th className="px-4 py-2 font-medium">Present Value</th></tr>
+            <tr><th className="px-4 py-2 font-medium">Service</th><th className="px-4 py-2 font-medium">Annual</th><th className="px-4 py-2 font-medium">Low</th><th className="px-4 py-2 font-medium">Lifetime</th><th className="px-4 py-2 font-medium">Present Value</th><th /></tr>
           </thead>
           <tbody className="divide-y divide-ink-100">
             {data.futureCareItems.map((it: AnyRec) => (
-              <tr key={it.id}><td className="px-4 py-2 text-ink-800">{it.service}</td><td className="px-4 py-2 text-ink-600">{formatMoney(it.annualCost)}</td><td className="px-4 py-2 text-ink-500">{formatMoney(it.lowCost)}</td><td className="px-4 py-2 text-ink-600">{formatMoney(it.lifetimeCost)}</td><td className="px-4 py-2 font-medium text-brand-800">{formatMoney(it.presentValue)}</td></tr>
+              <Fragment key={it.id}>
+                <tr>
+                  <td className="px-4 py-2 text-ink-800">{it.service}</td>
+                  <td className="px-4 py-2 text-ink-600">{formatMoney(it.annualCost)}</td>
+                  <td className="px-4 py-2 text-ink-500">{formatMoney(it.lowCost)}</td>
+                  <td className="px-4 py-2 text-ink-600">{formatMoney(it.lifetimeCost)}</td>
+                  <td className="px-4 py-2 font-medium text-brand-800">{formatMoney(it.presentValue)}</td>
+                  <td className="px-4 py-2 text-right"><button className="text-xs font-medium text-brand-700 hover:underline" onClick={() => setOpen(open === it.id ? null : it.id)}>{open === it.id ? "Hide" : "Details"}</button></td>
+                </tr>
+                {open === it.id && (
+                  <tr className="bg-ink-50/60">
+                    <td colSpan={6} className="px-4 py-3">
+                      <div className="grid gap-x-6 gap-y-1.5 text-xs sm:grid-cols-2">
+                        <p><span className="font-medium text-ink-500">Unit cost:</span> {formatMoney(it.unitCost)} {it.cptCode ? `· CPT ${it.cptCode}` : ""}</p>
+                        <p><span className="font-medium text-ink-500">Frequency & duration:</span> {it.frequencyPerYear}/yr {it.isLifetime ? `× ${a.lifeExpectancyYears.toFixed(1)} yrs (life)` : it.durationYears ? `× ${it.durationYears} yrs` : "one-time"}</p>
+                        <p><span className="font-medium text-ink-500">Pricing basis / source:</span> {it.pricingSource || "UCR benchmark"}</p>
+                        <p><span className="font-medium text-ink-500">Cost range (low–high):</span> {formatMoney(it.lowCost)} – {formatMoney(it.highCost)}</p>
+                        <p className="sm:col-span-2"><span className="font-medium text-ink-500">Evidence basis:</span> {it.evidenceStrength || "—"}{it.literatureSupport ? ` — ${it.literatureSupport}` : ""}</p>
+                        <p className="sm:col-span-2"><span className="font-medium text-ink-500">Economic assumptions:</span> discount {(a.discountRate * 100).toFixed(1)}%, medical inflation {(a.medicalInflation * 100).toFixed(1)}%, geographic factor {a.geographicFactor.toFixed(2)} → present value {formatMoney(it.presentValue)}.</p>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+              </Fragment>
             ))}
-            <tr className="bg-ink-50 font-bold"><td className="px-4 py-2">Total</td><td /><td /><td className="px-4 py-2">{formatMoney(totals.totalLifetime)}</td><td className="px-4 py-2 text-brand-800">{formatMoney(totals.totalPresentValue)}</td></tr>
+            <tr className="bg-ink-50 font-bold"><td className="px-4 py-2">Total</td><td /><td /><td className="px-4 py-2">{formatMoney(totals.totalLifetime)}</td><td className="px-4 py-2 text-brand-800">{formatMoney(totals.totalPresentValue)}</td><td /></tr>
           </tbody>
         </table>
       </div>
@@ -740,28 +777,56 @@ function NumField({ label, value, onChange, step, disabled, pct }: { label: stri
 }
 
 // ── Reviews ──────────────────────────────────────────────────────────────────
-function ReviewsPanel({ defense, completeness, hasPlan }: { defense: AnyRec[]; completeness: AnyRec[]; hasPlan: boolean }) {
-  if (!hasPlan) return <Empty>Run the AI pipeline to generate the defense vulnerability and completeness reviews.</Empty>;
+// Contested-points review: each point states the argument one side will make,
+// cites its source, and provides the opposing side's counter-argument with its
+// own supporting source.
+function ReviewsPanel({ points, hasPlan }: { points: AnyRec[]; hasPlan: boolean }) {
+  const [filter, setFilter] = useState<"ALL" | "DEFENSE" | "PLAINTIFF">("ALL");
+  if (!hasPlan) return <Empty>Run the AI pipeline to generate the contested-points review.</Empty>;
+  if (!points.length) return <Empty>No contested points identified — the plan is cleanly supported.</Empty>;
+
+  const defenseN = points.filter((p) => p.side === "DEFENSE").length;
+  const plaintiffN = points.filter((p) => p.side === "PLAINTIFF").length;
+  const shown = filter === "ALL" ? points : points.filter((p) => p.side === filter);
+
   return (
-    <div className="grid gap-4 md:grid-cols-2">
-      <ReviewColumn title="Defense Vulnerability Review" subtitle="A defense-style critique — before opposing counsel writes it." findings={defense} />
-      <ReviewColumn title="Plaintiff Completeness Review" subtitle="Commonly-expected care that may be missing." findings={completeness} />
-    </div>
-  );
-}
-function ReviewColumn({ title, subtitle, findings }: { title: string; subtitle: string; findings: AnyRec[] }) {
-  return (
-    <div className="card p-5">
-      <h3 className="text-sm font-semibold text-ink-900">{title}</h3>
-      <p className="text-xs text-ink-500">{subtitle}</p>
-      <div className="mt-3 space-y-2">
-        {findings.length === 0 && <p className="text-sm text-emerald-600">No findings — clean.</p>}
-        {findings.map((f) => (
-          <div key={f.id} className="rounded-lg border border-ink-200 p-3">
-            <div className="flex items-center justify-between gap-2"><span className="text-sm font-medium text-ink-900">{f.category}</span><Badge tone={VULN_TONE[f.vulnerability]}>{f.vulnerability.toLowerCase()}</Badge></div>
-            <p className="mt-1 text-xs text-ink-600">{f.description}</p>
-          </div>
-        ))}
+    <div className="space-y-4">
+      <p className="text-sm text-ink-500">Each contested point states the argument one side will make with its source, and the opposing side&apos;s counter backed by source and/or literature.</p>
+      <div className="flex flex-wrap gap-2">
+        <FilterChip label="All points" count={points.length} active={filter === "ALL"} onClick={() => setFilter("ALL")} />
+        <FilterChip label="Defense raises" count={defenseN} active={filter === "DEFENSE"} onClick={() => setFilter("DEFENSE")} />
+        <FilterChip label="Plaintiff raises" count={plaintiffN} active={filter === "PLAINTIFF"} onClick={() => setFilter("PLAINTIFF")} />
+      </div>
+
+      <div className="space-y-3">
+        {shown.map((p) => {
+          const raiser = p.side === "PLAINTIFF" ? "Plaintiff" : "Defense";
+          const counter = p.side === "PLAINTIFF" ? "Defense" : "Plaintiff";
+          return (
+            <div key={p.id} className="card p-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-sm font-semibold text-ink-900">{p.category}</span>
+                <Badge tone={VULN_TONE[p.vulnerability]}>{p.vulnerability.toLowerCase()}</Badge>
+              </div>
+
+              {/* Argument */}
+              <div className="mt-2 rounded-lg border-l-4 border-amber-300 bg-amber-50/60 p-3">
+                <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-800">{raiser} argues</p>
+                <p className="mt-0.5 text-sm text-ink-800">{p.description}</p>
+                {p.sourceRef && <p className="mt-1 text-xs text-ink-500"><span className="font-medium">Source:</span> {p.sourceRef}</p>}
+              </div>
+
+              {/* Counter */}
+              {p.counterArgument && (
+                <div className="mt-2 rounded-lg border-l-4 border-emerald-300 bg-emerald-50/60 p-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-800">{counter} counter</p>
+                  <p className="mt-0.5 text-sm text-ink-800">{p.counterArgument}</p>
+                  {p.counterSource && <p className="mt-1 text-xs text-ink-500"><span className="font-medium">Support:</span> {p.counterSource}</p>}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </div>
   );
@@ -769,28 +834,51 @@ function ReviewColumn({ title, subtitle, findings }: { title: string; subtitle: 
 
 // ── Physician ────────────────────────────────────────────────────────────────
 function PhysicianPanel({ data, canReview, call }: { data: AnyRec; canReview: boolean; call: any }) {
+  const [open, setOpen] = useState<string | null>(null);
   if (data.futureCareItems.length === 0) return <Empty>Run the AI pipeline first to build the physician review packet.</Empty>;
+
+  function modify(it: AnyRec) {
+    const info = prompt(`Add information for "${it.service}". The paraphrased summary will be updated to include it.`);
+    if (info == null) return;
+    call(`/api/cases/${data.id}/future-care/${it.id}/physician`, "POST", { status: "MODIFIED", note: info });
+  }
+
   return (
     <div className="space-y-3">
       <div className="card p-4 text-sm text-ink-600">
-        Physician review packet — {canReview ? "approve, reject, or modify each item and attach a medical-necessity statement." : "read-only: your role cannot sign off on medical necessity."}
+        Physician review packet — {canReview ? "review the paraphrased summary of each point, then accept, reject, or modify by adding information (the summary updates automatically)." : "read-only: your role cannot sign off on medical necessity."}
       </div>
       {data.futureCareItems.map((it: AnyRec) => (
         <div key={it.id} className="card p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <div>
+            <div className="min-w-0">
               <span className="font-medium text-ink-900">{it.service}</span>
               <Badge tone={PHYS_TONE[it.physicianStatus]} className="ml-2">{it.physicianStatus.toLowerCase()}</Badge>
-              <p className="mt-0.5 text-xs text-ink-500">{it.rationale}</p>
             </div>
-            {canReview && (
-              <div className="flex gap-2">
-                <button className="btn-outline py-1 text-xs" onClick={() => call(`/api/cases/${data.id}/future-care/${it.id}/physician`, "POST", { status: "APPROVED", note: "Medical necessity confirmed." })}>Approve</button>
-                <button className="btn-outline py-1 text-xs" onClick={() => { const n = prompt("Modification / note"); call(`/api/cases/${data.id}/future-care/${it.id}/physician`, "POST", { status: "MODIFIED", note: n || "Modified" }); }}>Modify</button>
-                <button className="py-1 text-xs font-medium text-red-600 hover:underline" onClick={() => { const n = prompt("Reason for rejection"); call(`/api/cases/${data.id}/future-care/${it.id}/physician`, "POST", { status: "REJECTED", note: n || "Not supported" }); }}>Reject</button>
-              </div>
-            )}
+            <div className="flex items-center gap-2">
+              <button className="text-xs font-medium text-brand-700 hover:underline" onClick={() => setOpen(open === it.id ? null : it.id)}>
+                {open === it.id ? "Hide summary" : "Summary"}
+              </button>
+              {canReview && (
+                <>
+                  <button className="btn-outline py-1 text-xs" onClick={() => call(`/api/cases/${data.id}/future-care/${it.id}/physician`, "POST", { status: "APPROVED", note: it.physicianNote || undefined })}>Accept</button>
+                  <button className="btn-outline py-1 text-xs" onClick={() => modify(it)}>Modify</button>
+                  <button className="py-1 text-xs font-medium text-red-600 hover:underline" onClick={() => { const n = prompt("Reason for rejection"); if (n != null) call(`/api/cases/${data.id}/future-care/${it.id}/physician`, "POST", { status: "REJECTED", note: n }); }}>Reject</button>
+                </>
+              )}
+            </div>
           </div>
+
+          {/* Expandable paraphrased summary of the point being made */}
+          {open === it.id && (
+            <div className="mt-3 rounded-lg bg-ink-50 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">Paraphrased summary</p>
+              <p className="mt-1 text-sm text-ink-800">{it.physicianSummary || it.rationale || "No summary available."}</p>
+              {it.physicianNote && (
+                <p className="mt-2 text-xs text-ink-500"><span className="font-medium">Physician note on file:</span> {it.physicianNote}</p>
+              )}
+            </div>
+          )}
         </div>
       ))}
     </div>

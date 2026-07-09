@@ -631,8 +631,9 @@ model FutureCareItem {
   missingSupport       String?
 
   // Physician review (Module 12).
-  physicianStatus PhysicianStatus @default(PENDING)
-  physicianNote   String?
+  physicianStatus  PhysicianStatus @default(PENDING)
+  physicianNote    String?
+  physicianSummary String? // paraphrased summary of the medical-necessity point (auto-updated on modify)
 
   edited    Boolean  @default(false)
   createdAt DateTime @default(now())
@@ -647,10 +648,17 @@ model ReviewFinding {
   case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
 
   kind        ReviewKind
-  category    String // e.g. "Speculative recommendation", "Omitted attendant care"
-  description String
+  category    String // topic of the contested point
+  description String // the argument being made
   vulnerability Vulnerability @default(MODERATE) // severity for DEFENSE; priority for COMPLETENESS
   relatedItemId String? // FutureCareItem it refers to, when applicable
+
+  // Contested-point structure: which side raises the argument, its source, and
+  // the opposing side's counter-argument with its own supporting source.
+  side           String? // "DEFENSE" | "PLAINTIFF" — who raises the primary argument
+  sourceRef      String? // source backing the argument (record / plan basis)
+  counterArgument String?
+  counterSource   String? // source / literature backing the counter-argument
 
   resolved  Boolean  @default(false)
   createdAt DateTime @default(now())

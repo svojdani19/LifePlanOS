@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit } from "@/lib/tenant";
-import { generateReviews } from "@/lib/engine/generate";
+import { generateReviews, paraphraseSummary } from "@/lib/engine/generate";
 import { ok, handleError } from "@/lib/api";
 
 const schema = z.object({
@@ -24,14 +24,28 @@ export async function POST(req: Request, { params }: { params: { caseId: string;
     if (!item) return ok({ error: "Item not found" }, 404);
 
     const input = schema.parse(await req.json());
+    const note = input.note ?? item.physicianNote;
+    const merged = {
+      service: item.service,
+      rationale: item.rationale,
+      probability: input.probability ?? item.probability,
+      frequencyPerYear: input.frequencyPerYear ?? item.frequencyPerYear,
+      isLifetime: item.isLifetime,
+      durationYears: input.durationYears !== undefined ? input.durationYears : item.durationYears,
+      evidenceStrength: item.evidenceStrength,
+    };
+    // Auto-regenerate the paraphrased summary, folding in the physician's note
+    // when the item is modified (or when a note is provided on approve/reject).
+    const summary = paraphraseSummary(merged, input.status === "MODIFIED" || input.note ? note : null);
     const updated = await prisma.futureCareItem.update({
       where: { id: item.id },
       data: {
         physicianStatus: input.status,
-        physicianNote: input.note ?? item.physicianNote,
-        probability: input.probability ?? item.probability,
-        frequencyPerYear: input.frequencyPerYear ?? item.frequencyPerYear,
-        durationYears: input.durationYears !== undefined ? input.durationYears : item.durationYears,
+        physicianNote: note,
+        probability: merged.probability,
+        frequencyPerYear: merged.frequencyPerYear,
+        durationYears: merged.durationYears,
+        physicianSummary: summary,
       },
     });
 

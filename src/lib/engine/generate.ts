@@ -1,8 +1,28 @@
 import { prisma } from "@/lib/db";
-import { packFor } from "@/lib/engine/specialty";
+import { packFor, type CareTemplate } from "@/lib/engine/specialty";
+import { CONDITION_CARE, BASELINE_CARE, resolveConditionKeys } from "@/lib/engine/careLibrary";
 import { project, type CaseAssumptions } from "@/lib/engine/cost";
 import { buildChronologyFromRecords } from "@/lib/engine/chronology";
 import type { Case, CareCategory } from "@/generated/prisma";
+
+const money = (n: number) => "$" + Math.round(n).toLocaleString("en-US");
+
+/**
+ * Paraphrased summary of the medical-necessity point for a care item. When a
+ * physician modifies the item and adds information, the same helper is re-run
+ * with `extra` so the summary automatically folds in an appropriate version of
+ * the newly added information.
+ */
+export function paraphraseSummary(
+  o: { service: string; rationale?: string | null; probability: string; frequencyPerYear: number; isLifetime?: boolean | null; durationYears?: number | null; evidenceStrength?: string | null },
+  extra?: string | null,
+): string {
+  const freq = o.isLifetime ? `${o.frequencyPerYear}×/yr across the life expectancy` : o.durationYears ? `${o.frequencyPerYear}×/yr for ${o.durationYears} year${o.durationYears === 1 ? "" : "s"}` : "on a one-time basis";
+  let s = `${o.service} is recommended${o.rationale ? ` because ${o.rationale.replace(/\.$/, "").toLowerCase()}` : ""}. It is offered as ${o.probability.toLowerCase()} within a reasonable degree of medical probability, ${freq}${o.evidenceStrength ? `, and is ${o.evidenceStrength.toLowerCase()}` : ""}.`;
+  const info = (extra ?? "").trim();
+  if (info) s += ` Incorporating the physician's input: ${info}${/[.!?]$/.test(info) ? "" : "."}`;
+  return s;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The generation pipeline. Turns a case (+ its records) into a chronology,
@@ -56,23 +76,21 @@ export async function generatePlan(caseId: string): Promise<PlanResult> {
     prisma.chronologyEvent.deleteMany({ where: { caseId } }),
   ]);
 
-  // Conditions (causation map).
-  const conditions = [];
-  for (const t of pack.conditions) {
-    const cond = await prisma.condition.create({
-      data: {
-        caseId,
-        name: t.name,
-        relatedness: t.relatedness,
-        confidence: t.confidence,
-        reasoning: t.reasoning,
-        objectiveEvidence: t.objectiveEvidence,
-        supportingRecords: "Derived from ingested records (see chronology).",
-        missingInfo: t.confidence < 65 ? "Additional records / specialist opinion needed." : null,
-      },
-    });
+  // Every injury-related diagnosis: the intake primary + additional diagnoses
+  // and the specialty-pack conditions, so the causation map is comprehensive.
+  const additionalDx = (Array.isArray(c.additionalDiagnoses) ? c.additionalDiagnoses : []) as { diagnosis?: string; icd10Code?: string }[];
+  const conditions: { id: string }[] = [];
+  const seenNames = new Set<string>();
+  async function addCondition(data: { name: string; relatedness: "RELATED" | "AGGRAVATION" | "PREEXISTING_UNRELATED" | "SUBSEQUENT_UNRELATED" | "UNCLEAR"; confidence: number; reasoning: string; objectiveEvidence: string; missingInfo: string | null }) {
+    const key = data.name.trim().toLowerCase();
+    if (!key || seenNames.has(key)) return;
+    seenNames.add(key);
+    const cond = await prisma.condition.create({ data: { caseId, supportingRecords: "Derived from ingested records (see chronology).", ...data } });
     conditions.push(cond);
   }
+  if (c.diagnosis) await addCondition({ name: c.diagnosis, relatedness: "RELATED", confidence: 78, reasoning: "Primary diagnosis of record, attributed to the reported injury mechanism.", objectiveEvidence: "See medical records and imaging.", missingInfo: null });
+  for (const d of additionalDx) if (d?.diagnosis) await addCondition({ name: d.diagnosis, relatedness: "RELATED", confidence: 70, reasoning: "Injury-related secondary diagnosis pending physician confirmation.", objectiveEvidence: "See medical records.", missingInfo: "Physician confirmation recommended." });
+  for (const t of pack.conditions) await addCondition({ name: t.name, relatedness: t.relatedness, confidence: t.confidence, reasoning: t.reasoning, objectiveEvidence: t.objectiveEvidence, missingInfo: t.confidence < 65 ? "Additional records / specialist opinion needed." : null });
   const primaryConditionId = conditions[0]?.id ?? null;
 
   // Chronology — records are screened for relevance to the complaint; only the
@@ -104,10 +122,34 @@ export async function generatePlan(caseId: string): Promise<PlanResult> {
     chronologyCount = pack.chronology.length;
   }
 
-  // Future care + costs.
+  // Future care — comprehensive, DIAGNOSIS-DRIVEN, but restricted to
+  // INJURY-RELATED diagnoses only. The corpus is the primary diagnosis, the
+  // additional diagnoses (both entered as diagnoses of the injury), and the
+  // specialty-pack conditions whose relatedness is RELATED or AGGRAVATION.
+  // Pre-existing / unrelated / subsequent-unrelated conditions and the raw
+  // mechanism are deliberately excluded so future care is not driven by
+  // non-injury diagnoses (apportionment principle).
+  const injuryRelated = pack.conditions.filter((pc) => pc.relatedness === "RELATED" || pc.relatedness === "AGGRAVATION");
+  const corpus = [c.diagnosis, ...additionalDx.map((d) => d?.diagnosis), ...injuryRelated.map((pc) => pc.name)].filter(Boolean).join(" ; ");
+  const matchedKeys = resolveConditionKeys(corpus);
+  let care: CareTemplate[] = [];
+  if (matchedKeys.length > 0) {
+    for (const k of matchedKeys) care.push(...CONDITION_CARE[k]);
+    care.push(...BASELINE_CARE);
+  } else {
+    care = pack.care;
+  }
+  const seenService = new Set<string>();
+  const careItems = care.filter((t) => {
+    const k = t.service.trim().toLowerCase();
+    if (seenService.has(k)) return false;
+    seenService.add(k);
+    return true;
+  });
+
   let totalLifetime = 0;
   let totalPresentValue = 0;
-  for (const t of pack.care) {
+  for (const t of careItems) {
     const p = project(
       { category: t.category, unitCost: t.unitCost, frequencyPerYear: t.frequencyPerYear, durationYears: t.durationYears, isLifetime: !!t.isLifetime },
       a,
@@ -122,7 +164,7 @@ export async function generatePlan(caseId: string): Promise<PlanResult> {
         service: t.service,
         specialty: t.specialty,
         rationale: t.rationale,
-        cptCode: p.cptCode,
+        cptCode: t.cptCode ?? p.cptCode,
         probability: t.probability,
         confidence: t.confidence,
         frequencyPerYear: t.frequencyPerYear,
@@ -141,6 +183,7 @@ export async function generatePlan(caseId: string): Promise<PlanResult> {
         defenseVulnerability: t.defenseVulnerability,
         missingSupport: t.probability === "SPECULATIVE" || t.confidence < 60 ? "Physician confirmation of medical necessity required." : null,
         plaintiffValue: t.probability === "PROBABLE" ? "Well-supported; core plan item." : "Supports comprehensive future care.",
+        physicianSummary: paraphraseSummary(t),
       },
     });
   }
@@ -148,9 +191,9 @@ export async function generatePlan(caseId: string): Promise<PlanResult> {
   await generateReviews(caseId);
 
   return {
-    conditions: pack.conditions.length,
+    conditions: conditions.length,
     chronology: chronologyCount,
-    futureCare: pack.care.length,
+    futureCare: careItems.length,
     totalLifetime: Math.round(totalLifetime),
     totalPresentValue: Math.round(totalPresentValue),
   };
@@ -161,58 +204,96 @@ export async function generatePlan(caseId: string): Promise<PlanResult> {
 export async function generateReviews(caseId: string): Promise<void> {
   await prisma.reviewFinding.deleteMany({ where: { caseId } });
   const items = await prisma.futureCareItem.findMany({ where: { caseId } });
+  const conditions = await prisma.condition.findMany({ where: { caseId } });
   const docCount = await prisma.document.count({ where: { caseId } });
+  const objEvidence = conditions.map((x) => x.objectiveEvidence).filter(Boolean)[0] ?? "the ingested medical records and imaging";
 
-  const findings: {
+  type Point = {
     kind: "DEFENSE" | "COMPLETENESS";
+    side: "DEFENSE" | "PLAINTIFF";
     category: string;
     description: string;
+    sourceRef: string;
+    counterArgument: string;
+    counterSource: string;
     vulnerability: "LOW" | "MODERATE" | "HIGH";
     relatedItemId?: string;
-  }[] = [];
+  };
+  const points: Point[] = [];
 
-  // Defense vulnerability critique.
-  const seenCategory = new Map<CareCategory, string>();
-  for (const it of items) {
-    if (it.probability === "SPECULATIVE" || it.probability === "NOT_SUPPORTED") {
-      findings.push({ kind: "DEFENSE", category: "Speculative recommendation", description: `"${it.service}" is labeled ${it.probability.toLowerCase()} — vulnerable absent stronger support.`, vulnerability: "HIGH", relatedItemId: it.id });
-    }
-    if (it.physicianStatus === "PENDING" && it.defenseVulnerability === "HIGH") {
-      findings.push({ kind: "DEFENSE", category: "Missing physician support", description: `"${it.service}" carries high exposure and lacks physician sign-off.`, vulnerability: "HIGH", relatedItemId: it.id });
-    }
-    if (it.isLifetime && it.probability === "POSSIBLE") {
-      findings.push({ kind: "DEFENSE", category: "Overbroad lifetime recommendation", description: `"${it.service}" is projected for the full life expectancy on a "possible" basis.`, vulnerability: "MODERATE", relatedItemId: it.id });
-    }
-    if (seenCategory.has(it.category)) {
-      findings.push({ kind: "DEFENSE", category: "Duplicative services", description: `"${it.service}" overlaps with "${seenCategory.get(it.category)}" in the same category.`, vulnerability: "MODERATE", relatedItemId: it.id });
-    } else {
-      seenCategory.set(it.category, it.service);
-    }
+  // Defense-raised challenges to INCLUDED items, each with a plaintiff counter.
+  const speculative = items.filter((i) => i.probability === "SPECULATIVE" || i.probability === "NOT_SUPPORTED");
+  for (const it of speculative) {
+    points.push({
+      kind: "DEFENSE", side: "DEFENSE", vulnerability: "HIGH", relatedItemId: it.id,
+      category: `Speculative — ${it.service}`,
+      description: `The defense will argue that "${it.service}" is ${it.probability.toLowerCase()} and is not established to a reasonable degree of medical probability.`,
+      sourceRef: `Plan basis: evidence "${it.evidenceStrength ?? "case-specific"}"; ${it.missingSupport ?? "supporting documentation is limited."}`,
+      counterArgument: `The item is reserved for treating-physician confirmation and priced conservatively (${money(it.lifetimeCost)} lifetime). Such care is a foreseeable, recognized sequela of the injury.`,
+      counterSource: it.literatureSupport ?? "Injury-specific registry and complication-rate literature; " + objEvidence,
+    });
   }
+
+  const lifetimePossible = items.filter((i) => i.isLifetime && i.probability === "POSSIBLE").sort((a, b) => b.lifetimeCost - a.lifetimeCost).slice(0, 4);
+  for (const it of lifetimePossible) {
+    points.push({
+      kind: "DEFENSE", side: "DEFENSE", vulnerability: "MODERATE", relatedItemId: it.id,
+      category: `Lifetime duration — ${it.service}`,
+      description: `The defense will argue that "${it.service}" is projected across the full life expectancy on a "possible" basis, overstating duration and cost.`,
+      sourceRef: `Plan basis: ${it.frequencyPerYear}/yr over the lifetime horizon; unit cost ${money(it.unitCost)} (${it.pricingSource ?? "UCR"}).`,
+      counterArgument: `The underlying condition is chronic and progressive; the projected frequency reflects averaged utilization with periodic flare-ups, and lifetime need is supported by the natural history of the diagnosis.`,
+      counterSource: it.literatureSupport ?? "Natural-history / chronic-progression literature; " + objEvidence,
+    });
+  }
+
+  const withAlt = items.filter((i) => i.lowerCostAlternative).slice(0, 4);
+  for (const it of withAlt) {
+    points.push({
+      kind: "DEFENSE", side: "DEFENSE", vulnerability: "MODERATE", relatedItemId: it.id,
+      category: `Cost / alternative — ${it.service}`,
+      description: `The defense will argue a lower-cost alternative exists: ${it.lowerCostAlternative}`,
+      sourceRef: `Plan basis: unit cost ${money(it.unitCost)} (${it.pricingSource ?? "UCR"}).`,
+      counterArgument: `The recommended item reflects the accepted standard of care for the diagnosis; the proposed alternative is not clinically equivalent and does not meet the same medical need.`,
+      counterSource: it.literatureSupport ?? (it.pricingSource ? `Benchmark pricing (${it.pricingSource}).` : "Benchmark pricing (FAIR Health / CMS)."),
+    });
+  }
+
   if (docCount < 3) {
-    findings.push({ kind: "DEFENSE", category: "Missing records", description: `Only ${docCount} record(s) ingested — plan may rest on an incomplete record set.`, vulnerability: "HIGH" });
+    points.push({
+      kind: "DEFENSE", side: "DEFENSE", vulnerability: "HIGH",
+      category: "Incomplete record set",
+      description: `The defense will argue the plan rests on an incomplete record set (${docCount} record${docCount === 1 ? "" : "s"} reviewed).`,
+      sourceRef: `Records reviewed: ${docCount}.`,
+      counterArgument: `Outstanding records can be requested and incorporated; the current projections are grounded in the available documentation and the recognized natural history of the injuries.`,
+      counterSource: "Records-reviewed list; treating-provider documentation.",
+    });
   }
 
-  // Plaintiff completeness check — flag commonly-expected categories that are absent.
+  // Plaintiff-raised challenges to OMISSIONS, each with a defense counter.
   const present = new Set(items.map((i) => i.category));
   const expected: [CareCategory, string, "LOW" | "MODERATE" | "HIGH"][] = [
-    ["MEDICATION", "Omitted medication costs", "MODERATE"],
-    ["PSYCH", "Omitted psychological care", "MODERATE"],
-    ["PAIN_MANAGEMENT", "Omitted pain management", "MODERATE"],
-    ["IMAGING", "Omitted imaging surveillance", "LOW"],
-    ["HOME_MODIFICATION", "Omitted home modifications", "MODERATE"],
-    ["TRANSPORTATION", "Omitted transportation", "LOW"],
-    ["CASE_MANAGEMENT", "Omitted case management", "LOW"],
+    ["MEDICATION", "medication costs", "MODERATE"],
+    ["PSYCH", "psychological care", "MODERATE"],
+    ["PAIN_MANAGEMENT", "pain management", "MODERATE"],
+    ["IMAGING", "imaging surveillance", "LOW"],
+    ["HOME_MODIFICATION", "home modifications", "MODERATE"],
+    ["TRANSPORTATION", "transportation", "LOW"],
+    ["CASE_MANAGEMENT", "case management", "LOW"],
+    ["ATTENDANT_CARE", "attendant care", "HIGH"],
   ];
   for (const [cat, label, sev] of expected) {
-    if (!present.has(cat)) {
-      findings.push({ kind: "COMPLETENESS", category: label, description: `No ${label.replace("Omitted ", "")} item is present — confirm whether the injury warrants it.`, vulnerability: sev });
-    }
+    if (present.has(cat)) continue;
+    points.push({
+      kind: "COMPLETENESS", side: "PLAINTIFF", vulnerability: sev,
+      category: `Omitted — ${label}`,
+      description: `The plaintiff will argue the plan should include ${label}, which is commonly required for injuries of this nature.`,
+      sourceRef: `Standard life-care-planning practice and treatment guidelines for the diagnosis.`,
+      counterArgument: `The defense will respond that, absent supporting documentation in the reviewed records, inclusion of ${label} would be speculative.`,
+      counterSource: "Records-reviewed list; ODG guidance on medical necessity.",
+    });
   }
 
-  if (findings.length) {
-    await prisma.reviewFinding.createMany({ data: findings.map((f) => ({ caseId, ...f })) });
-  }
+  if (points.length) await prisma.reviewFinding.createMany({ data: points.map((p) => ({ caseId, ...p })) });
 }
 
 /** Recompute all cost projections after assumption edits (Module 8 editable). */

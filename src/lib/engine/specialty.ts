@@ -13,6 +13,7 @@ export interface CareTemplate {
   service: string;
   specialty: string;
   rationale: string;
+  cptCode?: string; // specific CPT/HCPCS when the item warrants it
   probability: Probability;
   frequencyPerYear: number;
   durationYears?: number | null;

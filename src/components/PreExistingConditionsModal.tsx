@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { X, Search, Plus, Check } from "lucide-react";
+import { X, Search, Plus, Check, FileText } from "lucide-react";
 import { PRE_EXISTING_GROUPS } from "@/lib/intake/preExisting";
 
 /**
@@ -12,16 +12,19 @@ import { PRE_EXISTING_GROUPS } from "@/lib/intake/preExisting";
  */
 export function PreExistingConditionsModal({
   initial,
+  detectedInRecords = [],
   onClose,
   onSave,
   saving,
 }: {
   initial: string[];
+  detectedInRecords?: string[];
   onClose: () => void;
   onSave: (selected: string[], none: boolean) => void;
   saving?: boolean;
 }) {
   const NONE = "No known pre-existing conditions";
+  const detected = new Set(detectedInRecords);
   const [selected, setSelected] = useState<Set<string>>(new Set(initial));
   const [none, setNone] = useState<boolean>(false);
   const [query, setQuery] = useState("");
@@ -88,6 +91,16 @@ export function PreExistingConditionsModal({
           </label>
         </div>
 
+        {/* Records-detection legend */}
+        {detected.size > 0 && !none && (
+          <div className="mx-6 mt-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+            <FileText className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span>
+              <span className="font-semibold">Highlighted</span> conditions ({detected.size}) were noted in the ingested medical records. Review and select those that apply.
+            </span>
+          </div>
+        )}
+
         {/* Groups */}
         <div className="min-h-0 flex-1 overflow-auto px-6 py-4">
           {none ? (
@@ -100,6 +113,7 @@ export function PreExistingConditionsModal({
                   <div className="grid gap-1.5 sm:grid-cols-2">
                     {g.conditions.map((c) => {
                       const on = selected.has(c);
+                      const inRecords = detected.has(c);
                       return (
                         <button
                           key={c}
@@ -107,13 +121,18 @@ export function PreExistingConditionsModal({
                           onClick={() => toggle(c)}
                           className={
                             "flex items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm transition-colors " +
-                            (on ? "border-brand-400 bg-brand-50 text-brand-900" : "border-ink-200 text-ink-700 hover:bg-ink-50")
+                            (on
+                              ? "border-brand-400 bg-brand-50 text-brand-900"
+                              : inRecords
+                                ? "border-amber-300 bg-amber-50 text-amber-900 hover:bg-amber-100"
+                                : "border-ink-200 text-ink-700 hover:bg-ink-50")
                           }
                         >
-                          <span className={"grid h-4 w-4 shrink-0 place-items-center rounded border " + (on ? "border-brand-500 bg-brand-500 text-white" : "border-ink-300")}>
+                          <span className={"grid h-4 w-4 shrink-0 place-items-center rounded border " + (on ? "border-brand-500 bg-brand-500 text-white" : inRecords ? "border-amber-400" : "border-ink-300")}>
                             {on && <Check className="h-3 w-3" />}
                           </span>
-                          {c}
+                          <span className="flex-1">{c}</span>
+                          {inRecords && <span className="shrink-0 rounded-full bg-amber-200 px-1.5 py-0.5 text-[10px] font-semibold text-amber-800">in records</span>}
                         </button>
                       );
                     })}

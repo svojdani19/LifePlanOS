@@ -75,6 +75,7 @@ Cognitive functioning and memory index scores are reported. Validity indicators 
     text: `EMERGENCY DEPARTMENT RECORD
 DATE OF SERVICE: 06/08/2024
 CHIEF COMPLAINT: Back pain after motor vehicle collision. TRIAGE level 2. Mode of arrival: ambulance.
+PAST MEDICAL HISTORY: Hypertension, type 2 diabetes mellitus, degenerative disc disease, and chronic low back pain. Former tobacco use.
 DISPOSITION: Admitted to trauma service. Time of arrival documented.`,
   },
   {
