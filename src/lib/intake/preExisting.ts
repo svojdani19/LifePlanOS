@@ -92,8 +92,10 @@ export function serializeConditions(list: string[]): string {
 }
 
 // ── Record detection ─────────────────────────────────────────────────────────
-// Keyword patterns used to flag which pre-existing conditions appear in the
-// ingested medical records, keyed by the exact catalog label.
+// Keyword patterns for each catalog condition, keyed by the exact label. These
+// only identify the *term*; whether an occurrence counts as PRE-EXISTING is
+// decided by context (see findConditionsInRecords) so that post-injury
+// diagnoses are not misread as prior history.
 const CONDITION_KEYWORDS: Record<string, RegExp> = {
   "Prior low back injury / lumbar strain": /low back|lumbar strain|lumbago/i,
   "Degenerative disc disease": /degenerative disc|\bddd\b/i,
@@ -145,10 +147,58 @@ const CONDITION_KEYWORDS: Record<string, RegExp> = {
   "Prior motor vehicle collision injury": /(prior|previous).{0,30}(motor vehicle|mvc|mva|car accident)/i,
 };
 
-/** Return the catalog conditions whose keywords appear in the record text. */
+// Headers that open a PRIOR / past-history section. "History of present illness"
+// (HPI) is deliberately excluded — it narrates the current injury, not history.
+const PMH_HEADER = /(past\s+medical(?:\s*\/?\s*surgical)?\s+history|past\s+surgical\s+history|prior\s+medical\s+history|previous\s+medical\s+history|significant\s+past\s+history|past\s+history|\bpmhx?\b|\bpshx?\b)\s*[:\-]?/gi;
+
+// Keywords/headers that close a history section (i.e. begin a different section).
+const SECTION_END = /(history of present illness|chief complaint|\bhpi\b|medications?\b|allerg|social history|family history|review of systems|\bros\b|physical exam|vital signs|assessment|impression|findings|diagnosis\b|disposition|\bplan\b|procedure|technique)/i;
+
+// A qualifier that, appearing just before a condition term, marks it as prior.
+const PRIOR_QUALIFIER = /(pre-?existing|prior|previous|history of|h\/o|hx of|long-?standing|remote|known|underlying|baseline|status[- ]post)\b[\w,\-\/ ]{0,25}$/i;
+// A qualifier embedded within the matched term itself (e.g. "old fracture").
+const SELF_PRIOR = /pre-?existing|prior|previous|history of|\bh\/o\b|\bold\b|healed|remote/i;
+
+// Concatenate the text falling under past-history headers only.
+function pmhScope(text: string): string {
+  const out: string[] = [];
+  PMH_HEADER.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = PMH_HEADER.exec(text))) {
+    const rest = text.slice(m.index + m[0].length, m.index + m[0].length + 500);
+    const blank = rest.search(/\n\s*\n/);
+    const sec = rest.search(SECTION_END);
+    const ends = [blank, sec].filter((i) => i >= 0);
+    out.push(rest.slice(0, ends.length ? Math.min(...ends) : rest.length));
+  }
+  return out.join("\n");
+}
+
+// True if the term appears anywhere in the text explicitly framed as prior.
+function contextuallyPrior(text: string, re: RegExp): boolean {
+  const g = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
+  let m: RegExpExecArray | null;
+  while ((m = g.exec(text))) {
+    const before = text.slice(Math.max(0, m.index - 45), m.index);
+    if (SELF_PRIOR.test(m[0]) || PRIOR_QUALIFIER.test(before)) return true;
+    if (m.index === g.lastIndex) g.lastIndex++;
+  }
+  return false;
+}
+
+/**
+ * Return the catalog conditions documented as PRE-EXISTING in the records. A
+ * term only qualifies when it appears inside a past-medical-history section or
+ * is explicitly qualified as prior ("history of …", "prior …", etc.). This keeps
+ * post-injury diagnoses — sequelae that naturally recur throughout the chart —
+ * from being misconstrued as pre-existing simply because the term is present.
+ */
 export function findConditionsInRecords(text: string | null | undefined): string[] {
   if (!text) return [];
+  const scoped = pmhScope(text);
   const found: string[] = [];
-  for (const [label, re] of Object.entries(CONDITION_KEYWORDS)) if (re.test(text)) found.push(label);
+  for (const [label, re] of Object.entries(CONDITION_KEYWORDS)) {
+    if (re.test(scoped) || contextuallyPrior(text, re)) found.push(label);
+  }
   return found;
 }
