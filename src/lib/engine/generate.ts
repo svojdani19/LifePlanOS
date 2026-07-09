@@ -216,10 +216,21 @@ export async function generateReviews(caseId: string): Promise<void> {
     sourceRef: string;
     counterArgument: string;
     counterSource: string;
+    counterCitation: string;
     vulnerability: "LOW" | "MODERATE" | "HIGH";
     relatedItemId?: string;
   };
   const points: Point[] = [];
+
+  // Honest, citable authorities for the counter's support (no fabricated
+  // article-level cites). These mirror the report's References section.
+  const CITE = {
+    NATURAL_HISTORY: "StatPearls / NCBI Bookshelf and peer-reviewed natural-history and complication-rate literature for the diagnosis.",
+    ODG: "Official Disability Guidelines (ODG), Work Loss Data Institute — evidence-based treatment guidelines.",
+    PRICING: "FAIR Health (fairhealth.org) billed-charge benchmarks by CPT/geography; CMS RVU/DMEPOS fee schedules.",
+    LCP_STANDARDS: "Life Care Planning and Case Management Across the Lifespan, 5th ed. (ICHCC, 2024); A Physician's Guide to Life Care Planning, AAPLCP (2017).",
+    RECORDS: "Medical records reviewed (see Records-Reviewed index) and treating-provider documentation.",
+  };
 
   // Defense-raised challenges to INCLUDED items, each with a plaintiff counter.
   const speculative = items.filter((i) => i.probability === "SPECULATIVE" || i.probability === "NOT_SUPPORTED");
@@ -231,6 +242,7 @@ export async function generateReviews(caseId: string): Promise<void> {
       sourceRef: `Plan basis: evidence "${it.evidenceStrength ?? "case-specific"}"; ${it.missingSupport ?? "supporting documentation is limited."}`,
       counterArgument: `The item is reserved for treating-physician confirmation and priced conservatively (${money(it.lifetimeCost)} lifetime). Such care is a foreseeable, recognized sequela of the injury.`,
       counterSource: it.literatureSupport ?? "Injury-specific registry and complication-rate literature; " + objEvidence,
+      counterCitation: CITE.NATURAL_HISTORY,
     });
   }
 
@@ -243,6 +255,7 @@ export async function generateReviews(caseId: string): Promise<void> {
       sourceRef: `Plan basis: ${it.frequencyPerYear}/yr over the lifetime horizon; unit cost ${money(it.unitCost)} (${it.pricingSource ?? "UCR"}).`,
       counterArgument: `The underlying condition is chronic and progressive; the projected frequency reflects averaged utilization with periodic flare-ups, and lifetime need is supported by the natural history of the diagnosis.`,
       counterSource: it.literatureSupport ?? "Natural-history / chronic-progression literature; " + objEvidence,
+      counterCitation: CITE.NATURAL_HISTORY,
     });
   }
 
@@ -255,6 +268,7 @@ export async function generateReviews(caseId: string): Promise<void> {
       sourceRef: `Plan basis: unit cost ${money(it.unitCost)} (${it.pricingSource ?? "UCR"}).`,
       counterArgument: `The recommended item reflects the accepted standard of care for the diagnosis; the proposed alternative is not clinically equivalent and does not meet the same medical need.`,
       counterSource: it.literatureSupport ?? (it.pricingSource ? `Benchmark pricing (${it.pricingSource}).` : "Benchmark pricing (FAIR Health / CMS)."),
+      counterCitation: `${CITE.ODG} ${CITE.PRICING}`,
     });
   }
 
@@ -266,6 +280,7 @@ export async function generateReviews(caseId: string): Promise<void> {
       sourceRef: `Records reviewed: ${docCount}.`,
       counterArgument: `Outstanding records can be requested and incorporated; the current projections are grounded in the available documentation and the recognized natural history of the injuries.`,
       counterSource: "Records-reviewed list; treating-provider documentation.",
+      counterCitation: CITE.RECORDS,
     });
   }
 
@@ -290,6 +305,7 @@ export async function generateReviews(caseId: string): Promise<void> {
       sourceRef: `Standard life-care-planning practice and treatment guidelines for the diagnosis.`,
       counterArgument: `The defense will respond that, absent supporting documentation in the reviewed records, inclusion of ${label} would be speculative.`,
       counterSource: "Records-reviewed list; ODG guidance on medical necessity.",
+      counterCitation: `${CITE.ODG} ${CITE.LCP_STANDARDS}`,
     });
   }
 

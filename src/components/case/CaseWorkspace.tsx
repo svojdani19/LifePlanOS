@@ -875,6 +875,7 @@ function ReviewsPanel({ points, hasPlan }: { points: AnyRec[]; hasPlan: boolean 
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-800">{counter} counter</p>
                   <p className="mt-0.5 text-sm text-ink-800">{p.counterArgument}</p>
                   {p.counterSource && <p className="mt-1 text-xs text-ink-500"><span className="font-medium">Support:</span> {p.counterSource}</p>}
+                  {p.counterCitation && <p className="mt-1 text-xs text-emerald-800"><span className="font-medium">Citation:</span> {p.counterCitation}</p>}
                 </div>
               )}
             </div>

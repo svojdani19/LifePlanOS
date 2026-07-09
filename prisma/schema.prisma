@@ -658,7 +658,8 @@ model ReviewFinding {
   side           String? // "DEFENSE" | "PLAINTIFF" — who raises the primary argument
   sourceRef      String? // source backing the argument (record / plan basis)
   counterArgument String?
-  counterSource   String? // source / literature backing the counter-argument
+  counterSource   String? // narrative source / literature backing the counter-argument
+  counterCitation String? // formal citation (authority/guideline/text) for the support
 
   resolved  Boolean  @default(false)
   createdAt DateTime @default(now())
