@@ -24,9 +24,9 @@ interface NavItem {
 const NAV: NavItem[] = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/cases", label: "Cases", icon: FolderKanban, perm: "case.view" },
-  { href: "/team", label: "Team & seats", icon: Users, perm: "team.manage" },
+  { href: "/team", label: "Team & Seats", icon: Users, perm: "team.manage" },
   { href: "/billing", label: "Billing", icon: CreditCard, perm: "billing.manage" },
-  { href: "/settings", label: "Firm settings", icon: Settings, perm: "firm.settings" },
+  { href: "/settings", label: "Firm Settings", icon: Settings, perm: "firm.settings" },
 ];
 
 export function Sidebar({

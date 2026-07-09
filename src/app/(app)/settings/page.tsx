@@ -11,7 +11,7 @@ export default async function SettingsPage() {
   return (
     <div>
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-ink-900">Firm settings</h1>
+        <h1 className="text-2xl font-bold text-ink-900">Firm Settings</h1>
         <p className="mt-1 text-sm text-ink-600">Branding and report identity for {ctx.firm.name}.</p>
       </div>
       <FirmSettingsForm
@@ -25,7 +25,7 @@ export default async function SettingsPage() {
       />
 
       <div className="mt-8">
-        <h2 className="text-sm font-semibold text-ink-900">Compliance & data handling</h2>
+        <h2 className="text-sm font-semibold text-ink-900">Compliance & Data Handling</h2>
         <div className="mt-3 flex flex-wrap gap-2">
           <Badge tone="green">Encryption in transit</Badge>
           <Badge tone="green">Encryption at rest</Badge>

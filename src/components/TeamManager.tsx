@@ -84,12 +84,12 @@ export function TeamManager({ currentUserId }: { currentUserId: string }) {
       {/* Invite */}
       <div className="card h-fit p-6">
         <h2 className="flex items-center gap-2 text-sm font-semibold text-ink-900">
-          <UserPlus className="h-4 w-4 text-brand-600" /> Invite a teammate
+          <UserPlus className="h-4 w-4 text-brand-600" /> Invite a Teammate
         </h2>
         <form onSubmit={sendInvite} className="mt-4 space-y-3">
           <input
             className="input"
-            placeholder="Full name"
+            placeholder="Full Name"
             required
             value={invite.name}
             onChange={(e) => setInvite({ ...invite, name: e.target.value })}
@@ -97,7 +97,7 @@ export function TeamManager({ currentUserId }: { currentUserId: string }) {
           <input
             className="input"
             type="email"
-            placeholder="Work email"
+            placeholder="Work Email"
             required
             value={invite.email}
             onChange={(e) => setInvite({ ...invite, email: e.target.value })}
@@ -110,7 +110,7 @@ export function TeamManager({ currentUserId }: { currentUserId: string }) {
             ))}
           </select>
           {error && <p className="text-sm text-red-600">{error}</p>}
-          <button className="btn-primary w-full">Send invitation</button>
+          <button className="btn-primary w-full">Send Invitation</button>
         </form>
         {lastInviteLink && (
           <div className="mt-4 rounded-lg bg-brand-50 p-3 text-xs">

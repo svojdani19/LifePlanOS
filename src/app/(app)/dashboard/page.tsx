@@ -11,10 +11,10 @@ const STAGE_LABELS: Record<string, string> = {
   RECORDS: "Records",
   CHRONOLOGY: "Chronology",
   CAUSATION: "Causation",
-  FUTURE_CARE: "Future care",
+  FUTURE_CARE: "Future Care",
   PRICING: "Pricing",
   DRAFTING: "Drafting",
-  PHYSICIAN_REVIEW: "Physician review",
+  PHYSICIAN_REVIEW: "Physician Review",
   FINAL: "Final",
   CLOSED: "Closed",
   ARCHIVED: "Archived",
@@ -42,23 +42,23 @@ export default async function DashboardPage() {
   const aiUsed = aiThisPeriod._sum.quantity ?? 0;
 
   const kpis = [
-    { label: "Active cases", value: active, sub: limits.caseLimit === null ? "unlimited" : `of ${limits.caseLimit}`, icon: FolderKanban },
-    { label: "Awaiting physician sign-off", value: physicianReview, sub: "cases", icon: Sparkles },
-    { label: "Seats in use", value: seats, sub: `of ${limits.seatLimit}`, icon: Users },
-    { label: "AI generations", value: aiUsed, sub: limits.aiGenerationLimit === null ? "this month" : `of ${limits.aiGenerationLimit} this month`, icon: Layers },
+    { label: "Active Cases", value: active, sub: limits.caseLimit === null ? "unlimited" : `of ${limits.caseLimit}`, icon: FolderKanban },
+    { label: "Awaiting Physician Sign-off", value: physicianReview, sub: "cases", icon: Sparkles },
+    { label: "Seats in Use", value: seats, sub: `of ${limits.seatLimit}`, icon: Users },
+    { label: "AI Generations", value: aiUsed, sub: limits.aiGenerationLimit === null ? "this month" : `of ${limits.aiGenerationLimit} this month`, icon: Layers },
   ];
 
   return (
     <div>
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-ink-900">Firm dashboard</h1>
+          <h1 className="text-2xl font-bold text-ink-900">Firm Dashboard</h1>
           <p className="mt-1 text-sm text-ink-600">
             {ctx.firm.name} · {PLANS[tier].name} plan
           </p>
         </div>
         <Link href="/cases" className="btn-primary">
-          <FolderKanban className="h-4 w-4" /> Go to cases
+          <FolderKanban className="h-4 w-4" /> Go to Cases
         </Link>
       </div>
 
@@ -81,7 +81,7 @@ export default async function DashboardPage() {
       <div className="mt-6 grid gap-6 lg:grid-cols-2">
         {/* Cases by stage */}
         <div className="card p-6">
-          <h2 className="text-sm font-semibold text-ink-900">Cases by stage</h2>
+          <h2 className="text-sm font-semibold text-ink-900">Cases by Stage</h2>
           <div className="mt-4 space-y-2">
             {Object.entries(STAGE_LABELS)
               .filter(([k]) => k !== "ARCHIVED")
@@ -105,7 +105,7 @@ export default async function DashboardPage() {
 
         {/* Recent activity (audit trail) */}
         <div className="card p-6">
-          <h2 className="text-sm font-semibold text-ink-900">Recent activity</h2>
+          <h2 className="text-sm font-semibold text-ink-900">Recent Activity</h2>
           <ul className="mt-4 space-y-3">
             {recent.length === 0 && <li className="text-sm text-ink-500">No activity yet.</li>}
             {recent.map((log) => (

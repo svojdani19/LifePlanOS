@@ -108,7 +108,7 @@ export function CaseWorkspace({
           {can("futurecare.edit") && (
             <button className="btn-primary" disabled={busy === "gen"} onClick={() => call(`/api/cases/${data.id}/generate`, "POST", undefined, "gen")}>
               {busy === "gen" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-              {hasPlan ? "Re-run AI pipeline" : "Run AI pipeline"}
+              {hasPlan ? "Re-run AI Pipeline" : "Run AI Pipeline"}
             </button>
           )}
         </div>
@@ -131,10 +131,10 @@ export function CaseWorkspace({
         {/* Quick totals */}
         {hasPlan && (
           <div className="mt-5 grid gap-3 sm:grid-cols-4">
-            <Stat label="Future care items" value={String(data.futureCareItems.length)} />
-            <Stat label="Lifetime (undiscounted)" value={formatMoney(totals.totalLifetime)} />
-            <Stat label="Present value" value={formatMoney(totals.totalPresentValue)} highlight />
-            <Stat label="Physician pending" value={String(pendingPhysician)} />
+            <Stat label="Future Care Items" value={String(data.futureCareItems.length)} />
+            <Stat label="Lifetime (Undiscounted)" value={formatMoney(totals.totalLifetime)} />
+            <Stat label="Present Value" value={formatMoney(totals.totalPresentValue)} highlight />
+            <Stat label="Physician Pending" value={String(pendingPhysician)} />
           </div>
         )}
       </div>
@@ -229,10 +229,10 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
 
   return (
     <div className="card max-w-3xl p-6">
-      <h3 className="text-sm font-semibold text-ink-900">Case intake</h3>
+      <h3 className="text-sm font-semibold text-ink-900">Case Intake</h3>
       <p className="mt-1 text-xs text-ink-500">Structured intake. The future-care engine infers specialty-specific rules from the diagnosis.</p>
       <div className="mt-4 grid gap-4 sm:grid-cols-2">
-        <Field label="Primary diagnosis (ICD-10)" wide>
+        <Field label="Primary Diagnosis (ICD-10)" wide>
           <Icd10Search
             value={form.diagnosis}
             code={form.icd10Code}
@@ -242,7 +242,7 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
           {additional.map((d, idx) => (
             <div key={idx} className="mt-2 flex items-start gap-2">
               <div className="flex-1">
-                <p className="mb-1 text-xs text-ink-500">Additional diagnosis {idx + 1}</p>
+                <p className="mb-1 text-xs text-ink-500">Additional Diagnosis {idx + 1}</p>
                 <Icd10Search
                   value={d.diagnosis}
                   code={d.icd10Code}
@@ -259,7 +259,7 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
           ))}
           {canEdit && (
             <button type="button" className="btn-ghost mt-2 text-xs" onClick={() => { setAdditional((a) => [...a, { diagnosis: "", icd10Code: "" }]); setSaved(false); }}>
-              <Plus className="h-3.5 w-3.5" /> Additional diagnosis
+              <Plus className="h-3.5 w-3.5" /> Additional Diagnosis
             </button>
           )}
         </Field>
@@ -287,11 +287,11 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
           ))}
           {canEdit && (
             <button type="button" className="btn-ghost mt-2 text-xs" onClick={() => { setAddlSpecialties((prev) => [...prev, ""]); setSaved(false); }}>
-              <Plus className="h-3.5 w-3.5" /> Additional specialty
+              <Plus className="h-3.5 w-3.5" /> Additional Specialty
             </button>
           )}
         </Field>
-        <Field label="Mechanism of injury"><input className="input" disabled={!canEdit} value={form.mechanism} onChange={(e) => set("mechanism", e.target.value)} /></Field>
+        <Field label="Mechanism of Injury"><input className="input" disabled={!canEdit} value={form.mechanism} onChange={(e) => set("mechanism", e.target.value)} /></Field>
         <Field label="Jurisdiction">
           <input className="input" list="state-list" disabled={!canEdit} value={form.jurisdiction} placeholder="Search states…" onChange={(e) => set("jurisdiction", e.target.value)} />
           <datalist id="state-list">
@@ -300,10 +300,10 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
         </Field>
 
         {/* Pre-existing conditions — pop-up multi-select with Complete/Incomplete status */}
-        <Field label="Pre-existing conditions" wide>
+        <Field label="Pre-Existing Conditions" wide>
           <div className="flex flex-wrap items-center gap-2">
             <button type="button" className="btn-outline" disabled={!canEdit} onClick={() => setPreOpen(true)}>
-              {preReviewed ? "Edit conditions" : "Select conditions"}
+              {preReviewed ? "Edit Conditions" : "Select Conditions"}
             </button>
             <Badge tone={preReviewed ? "green" : "amber"}>{preReviewed ? "Complete" : "Incomplete"}</Badge>
             <span className="text-xs text-ink-500">
@@ -319,7 +319,7 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
           )}
         </Field>
 
-        <Field label="Current work status">
+        <Field label="Current Work Status">
           <select
             className="input"
             disabled={!canEdit}
@@ -331,17 +331,17 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
           </select>
         </Field>
         {form.currentWorkStatus === "Disabled" ? (
-          <Field label="Reason for disability">
+          <Field label="Reason for Disability">
             <input className="input" disabled={!canEdit} value={form.disabilityReason} placeholder="e.g. lumbar radiculopathy, unable to sit/stand" onChange={(e) => set("disabilityReason", e.target.value)} />
           </Field>
         ) : (
           <div className="hidden sm:block" />
         )}
-        <Field label="Functional limitations" wide><textarea className="input min-h-[70px]" disabled={!canEdit} value={form.functionalLimitations} onChange={(e) => set("functionalLimitations", e.target.value)} /></Field>
+        <Field label="Functional Limitations" wide><textarea className="input min-h-[70px]" disabled={!canEdit} value={form.functionalLimitations} onChange={(e) => set("functionalLimitations", e.target.value)} /></Field>
       </div>
       {canEdit && (
         <div className="mt-4 flex items-center gap-3">
-          <button className="btn-primary" onClick={async () => { const r = await call(`/api/cases/${data.id}`, "PATCH", { ...form, additionalDiagnoses: additional.filter((d) => d.diagnosis.trim()), additionalSpecialties: addlSpecialties.map((s) => s.trim()).filter(Boolean) }, "intake"); if (r) setSaved(true); }}>Save intake</button>
+          <button className="btn-primary" onClick={async () => { const r = await call(`/api/cases/${data.id}`, "PATCH", { ...form, additionalDiagnoses: additional.filter((d) => d.diagnosis.trim()), additionalSpecialties: addlSpecialties.map((s) => s.trim()).filter(Boolean) }, "intake"); if (r) setSaved(true); }}>Save Intake</button>
           {saved && <span className="text-sm text-emerald-600">Saved.</span>}
         </div>
       )}
@@ -399,11 +399,11 @@ function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: bo
       {canEdit && (
         <div className="card flex flex-wrap items-center gap-3 p-4">
           <label className="btn-outline cursor-pointer">
-            <Upload className="h-4 w-4" /> Upload records
+            <Upload className="h-4 w-4" /> Upload Records
             <input type="file" multiple className="hidden" onChange={(e) => upload(e.target.files)} />
           </label>
           <button className="btn-ghost" disabled={busy === "sample"} onClick={() => call(`/api/cases/${data.id}/documents`, "POST", { sample: true }, "sample")}>
-            {busy === "sample" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />} Add sample record set
+            {busy === "sample" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />} Add Sample Record Set
           </button>
           <span className="text-xs text-ink-500">
             Uploads are labeled by reading each document&apos;s <span className="font-medium">content</span>, not its filename. Click a label to reassign it.
@@ -506,8 +506,8 @@ const EVENT_STYLE: Record<string, { label: string; dot: string; chip: string }> 
   SURGERY: { label: "Surgery", dot: "#7c3aed", chip: "bg-purple-100 text-purple-800" },
   IMAGING: { label: "Imaging", dot: "#2563eb", chip: "bg-blue-100 text-blue-800" },
   LAB: { label: "Labs", dot: "#0891b2", chip: "bg-cyan-100 text-cyan-800" },
-  CLINIC_VISIT: { label: "Clinic visit", dot: "#64748b", chip: "bg-ink-200 text-ink-700" },
-  ER_VISIT: { label: "ER visit", dot: "#dc2626", chip: "bg-red-100 text-red-800" },
+  CLINIC_VISIT: { label: "Clinic Visit", dot: "#64748b", chip: "bg-ink-200 text-ink-700" },
+  ER_VISIT: { label: "ER Visit", dot: "#dc2626", chip: "bg-red-100 text-red-800" },
   HOSPITALIZATION: { label: "Hospitalization", dot: "#4f46e5", chip: "bg-indigo-100 text-indigo-800" },
   THERAPY: { label: "Therapy", dot: "#059669", chip: "bg-emerald-100 text-emerald-800" },
   COMPLICATION: { label: "Complication", dot: "#d97706", chip: "bg-amber-100 text-amber-800" },
@@ -671,8 +671,8 @@ function FutureCarePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
               {canEdit && (
                 <div className="md:col-span-2 flex flex-wrap gap-2 pt-1">
                   <InlineProbability item={it} caseId={data.id} call={call} />
-                  <button className="btn-outline py-1 text-xs" onClick={async () => { const v = prompt("Frequency per year", String(it.frequencyPerYear)); if (v != null) await call(`/api/cases/${data.id}/future-care/${it.id}`, "PATCH", { frequencyPerYear: Number(v) }); }}>Edit frequency</button>
-                  <button className="btn-outline py-1 text-xs" onClick={async () => { const v = prompt("Unit cost (USD)", String(it.unitCost)); if (v != null) await call(`/api/cases/${data.id}/future-care/${it.id}`, "PATCH", { unitCost: Number(v) }); }}>Edit unit cost</button>
+                  <button className="btn-outline py-1 text-xs" onClick={async () => { const v = prompt("Frequency per year", String(it.frequencyPerYear)); if (v != null) await call(`/api/cases/${data.id}/future-care/${it.id}`, "PATCH", { frequencyPerYear: Number(v) }); }}>Edit Frequency</button>
+                  <button className="btn-outline py-1 text-xs" onClick={async () => { const v = prompt("Unit cost (USD)", String(it.unitCost)); if (v != null) await call(`/api/cases/${data.id}/future-care/${it.id}`, "PATCH", { unitCost: Number(v) }); }}>Edit Unit Cost</button>
                   <button className="py-1 text-xs font-medium text-red-600 hover:underline" onClick={async () => { if (confirm("Remove this item?")) await call(`/api/cases/${data.id}/future-care/${it.id}`, "DELETE"); }}>Remove</button>
                 </div>
               )}
@@ -704,19 +704,19 @@ function CostsPanel({ data, assumptions, totals, canEdit, call }: { data: AnyRec
   return (
     <div className="space-y-4">
       <div className="card p-5">
-        <h3 className="text-sm font-semibold text-ink-900">Editable assumptions</h3>
+        <h3 className="text-sm font-semibold text-ink-900">Editable Assumptions</h3>
         <div className="mt-3 grid gap-3 sm:grid-cols-4">
-          <NumField label="Life expectancy (yrs)" value={a.lifeExpectancyYears} step={0.5} disabled={!canEdit} onChange={(v) => setA({ ...a, lifeExpectancyYears: v })} />
-          <NumField label="Discount rate" value={a.discountRate} step={0.005} disabled={!canEdit} onChange={(v) => setA({ ...a, discountRate: v })} pct />
-          <NumField label="Medical inflation" value={a.medicalInflation} step={0.005} disabled={!canEdit} onChange={(v) => setA({ ...a, medicalInflation: v })} pct />
-          <NumField label="Geographic factor" value={a.geographicFactor} step={0.05} disabled={!canEdit} onChange={(v) => setA({ ...a, geographicFactor: v })} />
+          <NumField label="Life Expectancy (Yrs)" value={a.lifeExpectancyYears} step={0.5} disabled={!canEdit} onChange={(v) => setA({ ...a, lifeExpectancyYears: v })} />
+          <NumField label="Discount Rate" value={a.discountRate} step={0.005} disabled={!canEdit} onChange={(v) => setA({ ...a, discountRate: v })} pct />
+          <NumField label="Medical Inflation" value={a.medicalInflation} step={0.005} disabled={!canEdit} onChange={(v) => setA({ ...a, medicalInflation: v })} pct />
+          <NumField label="Geographic Factor" value={a.geographicFactor} step={0.05} disabled={!canEdit} onChange={(v) => setA({ ...a, geographicFactor: v })} />
         </div>
-        {canEdit && <button className="btn-primary mt-4" onClick={() => call(`/api/cases/${data.id}`, "PATCH", a, "recompute")}>Recompute costs</button>}
+        {canEdit && <button className="btn-primary mt-4" onClick={() => call(`/api/cases/${data.id}`, "PATCH", a, "recompute")}>Recompute Costs</button>}
       </div>
       <div className="card overflow-hidden">
         <table className="w-full text-sm">
           <thead className="border-b border-ink-200 bg-ink-50 text-left text-xs uppercase tracking-wide text-ink-500">
-            <tr><th className="px-4 py-2 font-medium">Service</th><th className="px-4 py-2 font-medium">Annual</th><th className="px-4 py-2 font-medium">Low</th><th className="px-4 py-2 font-medium">Lifetime</th><th className="px-4 py-2 font-medium">Present value</th></tr>
+            <tr><th className="px-4 py-2 font-medium">Service</th><th className="px-4 py-2 font-medium">Annual</th><th className="px-4 py-2 font-medium">Low</th><th className="px-4 py-2 font-medium">Lifetime</th><th className="px-4 py-2 font-medium">Present Value</th></tr>
           </thead>
           <tbody className="divide-y divide-ink-100">
             {data.futureCareItems.map((it: AnyRec) => (
@@ -744,8 +744,8 @@ function ReviewsPanel({ defense, completeness, hasPlan }: { defense: AnyRec[]; c
   if (!hasPlan) return <Empty>Run the AI pipeline to generate the defense vulnerability and completeness reviews.</Empty>;
   return (
     <div className="grid gap-4 md:grid-cols-2">
-      <ReviewColumn title="Defense vulnerability review" subtitle="A defense-style critique — before opposing counsel writes it." findings={defense} />
-      <ReviewColumn title="Plaintiff completeness review" subtitle="Commonly-expected care that may be missing." findings={completeness} />
+      <ReviewColumn title="Defense Vulnerability Review" subtitle="A defense-style critique — before opposing counsel writes it." findings={defense} />
+      <ReviewColumn title="Plaintiff Completeness Review" subtitle="Commonly-expected care that may be missing." findings={completeness} />
     </div>
   );
 }
@@ -807,7 +807,7 @@ function ReportPanel({ data, canExport, call, busy, totals }: { data: AnyRec; ca
   return (
     <div className="space-y-4">
       <div className="card p-5">
-        <h3 className="text-sm font-semibold text-ink-900">Generate report</h3>
+        <h3 className="text-sm font-semibold text-ink-900">Generate Report</h3>
         <p className="text-xs text-ink-500">Present value {formatMoney(totals.totalPresentValue)} across {data.futureCareItems.length} items.</p>
         <div className="mt-3 flex flex-wrap items-center gap-3">
           <select className="input w-48" value={template} onChange={(e) => setTemplate(e.target.value)}>
@@ -820,14 +820,14 @@ function ReportPanel({ data, canExport, call, busy, totals }: { data: AnyRec; ca
               <button className="btn-primary" disabled={busy === "export" || data.futureCareItems.length === 0} onClick={() => exportReport("DOCX")}>
                 {busy === "export" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileOutput className="h-4 w-4" />} Export DOCX
               </button>
-              <button className="btn-outline" disabled={data.futureCareItems.length === 0} onClick={() => exportReport("CSV")}>Export cost CSV</button>
+              <button className="btn-outline" disabled={data.futureCareItems.length === 0} onClick={() => exportReport("CSV")}>Export Cost CSV</button>
             </>
           ) : <span className="text-sm text-ink-500">Your role cannot export reports.</span>}
         </div>
       </div>
 
       <div className="card p-5">
-        <h3 className="text-sm font-semibold text-ink-900">Export history (version control)</h3>
+        <h3 className="text-sm font-semibold text-ink-900">Export History (Version Control)</h3>
         {data.reports.length === 0 ? (
           <p className="mt-2 text-sm text-ink-500">No exports yet.</p>
         ) : (

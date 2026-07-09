@@ -60,7 +60,7 @@ export function PreExistingConditionsModal({
         {/* Header */}
         <div className="flex items-center justify-between border-b border-ink-200 px-6 py-4">
           <div>
-            <h2 className="text-lg font-bold text-ink-900">Pre-existing conditions</h2>
+            <h2 className="text-lg font-bold text-ink-900">Pre-Existing Conditions</h2>
             <p className="text-xs text-ink-500">Select all that apply, add any not listed, then save.</p>
           </div>
           <button onClick={onClose} className="rounded-md p-1 text-ink-400 hover:bg-ink-100">
@@ -157,7 +157,7 @@ export function PreExistingConditionsModal({
           <div className="flex gap-2">
             <button className="btn-outline" onClick={onClose}>Cancel</button>
             <button className="btn-primary" disabled={saving} onClick={() => onSave([...selected], none)}>
-              {saving ? "Saving…" : "Save conditions"}
+              {saving ? "Saving…" : "Save Conditions"}
             </button>
           </div>
         </div>

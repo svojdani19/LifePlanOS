@@ -62,12 +62,12 @@ function SignupInner() {
     <AuthShell title="Start your firm workspace" subtitle="Create your firm account to get started.">
       <form onSubmit={submit} className="space-y-4">
         <div>
-          <label className="label">Firm name</label>
+          <label className="label">Firm Name</label>
           <input className="input" required value={form.firmName} onChange={(e) => set("firmName", e.target.value)} />
         </div>
         <div className="grid grid-cols-2 gap-3">
           <div>
-            <label className="label">Your name</label>
+            <label className="label">Your Name</label>
             <input className="input" required value={form.adminName} onChange={(e) => set("adminName", e.target.value)} />
           </div>
           <div>
@@ -76,7 +76,7 @@ function SignupInner() {
           </div>
         </div>
         <div>
-          <label className="label">Work email</label>
+          <label className="label">Work Email</label>
           <input className="input" type="email" required value={form.email} onChange={(e) => set("email", e.target.value)} />
         </div>
         <div>
@@ -103,13 +103,13 @@ function SignupInner() {
         </div>
         {error && <p className="text-sm text-red-600">{error}</p>}
         <button className="btn-primary w-full" disabled={loading}>
-          {loading ? "Creating workspace…" : "Create firm workspace"}
+          {loading ? "Creating workspace…" : "Create Firm Workspace"}
         </button>
       </form>
       <p className="mt-6 text-center text-sm text-ink-600">
         Already have an account?{" "}
         <Link href="/login" className="font-semibold text-brand-700 hover:underline">
-          Log in
+          Log In
         </Link>
       </p>
     </AuthShell>

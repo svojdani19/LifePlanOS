@@ -45,7 +45,7 @@ function AcceptInviteInner() {
       ) : (
         <form onSubmit={submit} className="space-y-4">
           <div>
-            <label className="label">Create a password</label>
+            <label className="label">Create a Password</label>
             <input
               className="input"
               type="password"
@@ -58,7 +58,7 @@ function AcceptInviteInner() {
           </div>
           {error && <p className="text-sm text-red-600">{error}</p>}
           <button className="btn-primary w-full" disabled={busy}>
-            {busy ? "Joining…" : "Join workspace"}
+            {busy ? "Joining…" : "Join Workspace"}
           </button>
         </form>
       )}

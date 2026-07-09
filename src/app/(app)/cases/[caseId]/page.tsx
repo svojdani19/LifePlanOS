@@ -30,7 +30,7 @@ export default async function CaseDetailPage({ params }: { params: { caseId: str
   return (
     <div>
       <Link href="/cases" className="mb-4 inline-flex items-center gap-1.5 text-sm text-ink-500 hover:text-ink-800">
-        <ArrowLeft className="h-4 w-4" /> All cases
+        <ArrowLeft className="h-4 w-4" /> All Cases
       </Link>
       <CaseWorkspace
         data={JSON.parse(JSON.stringify(c))}

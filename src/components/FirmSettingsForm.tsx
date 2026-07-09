@@ -41,7 +41,7 @@ export function FirmSettingsForm({
   return (
     <form onSubmit={save} className="card max-w-2xl space-y-5 p-6">
       <div>
-        <label className="label">Firm name</label>
+        <label className="label">Firm Name</label>
         <input className="input" value={form.name} onChange={(e) => set("name", e.target.value)} />
       </div>
       <div className="grid grid-cols-2 gap-4">
@@ -50,7 +50,7 @@ export function FirmSettingsForm({
           <input className="input" value={form.state} onChange={(e) => set("state", e.target.value)} />
         </div>
         <div>
-          <label className="label">Brand color</label>
+          <label className="label">Brand Color</label>
           <div className="flex items-center gap-2">
             <input
               type="color"
@@ -67,7 +67,7 @@ export function FirmSettingsForm({
         <input className="input" value={form.logoUrl} onChange={(e) => set("logoUrl", e.target.value)} placeholder="https://…" />
       </div>
       <div>
-        <label className="label">Report letterhead</label>
+        <label className="label">Report Letterhead</label>
         <textarea
           className="input min-h-[90px]"
           value={form.letterhead}
@@ -78,7 +78,7 @@ export function FirmSettingsForm({
       {error && <p className="text-sm text-red-600">{error}</p>}
       <div className="flex items-center gap-3">
         <button className="btn-primary" disabled={busy}>
-          {busy ? "Saving…" : "Save changes"}
+          {busy ? "Saving…" : "Save Changes"}
         </button>
         {saved && <span className="text-sm text-emerald-600">Saved.</span>}
       </div>

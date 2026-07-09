@@ -78,7 +78,7 @@ export function BillingManager() {
 
       {/* Usage vs. limits */}
       <div className="mt-5 grid gap-4 sm:grid-cols-2">
-        <UsageBar label="Active cases" used={state.usage.activeCases} limit={state.limits.caseLimit} />
+        <UsageBar label="Active Cases" used={state.usage.activeCases} limit={state.limits.caseLimit} />
         <UsageBar label="Seats" used={state.usage.seats} limit={state.limits.seatLimit} />
       </div>
 
@@ -110,7 +110,7 @@ export function BillingManager() {
                 onClick={() => change(tier)}
                 className={"mt-6 " + (isCurrent ? "btn-outline cursor-default" : "btn-primary")}
               >
-                {isCurrent ? "Current plan" : busy === tier ? "Updating…" : "Switch to this plan"}
+                {isCurrent ? "Current Plan" : busy === tier ? "Updating…" : "Switch to This Plan"}
               </button>
             </div>
           );

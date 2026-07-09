@@ -35,7 +35,7 @@ export default function LoginPage() {
     <AuthShell title="Welcome back" subtitle="Log in to your firm workspace.">
       <form onSubmit={submit} className="space-y-4">
         <div>
-          <label className="label">Work email</label>
+          <label className="label">Work Email</label>
           <input className="input" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} />
         </div>
         <div>
@@ -50,13 +50,13 @@ export default function LoginPage() {
         </div>
         {error && <p className="text-sm text-red-600">{error}</p>}
         <button className="btn-primary w-full" disabled={loading}>
-          {loading ? "Signing in…" : "Log in"}
+          {loading ? "Signing in…" : "Log In"}
         </button>
       </form>
       <p className="mt-6 text-center text-sm text-ink-600">
         New firm?{" "}
         <Link href="/signup" className="font-semibold text-brand-700 hover:underline">
-          Get started
+          Get Started
         </Link>
       </p>
     </AuthShell>

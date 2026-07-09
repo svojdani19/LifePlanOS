@@ -2,11 +2,11 @@ import Link from "next/link";
 import { ShieldCheck, Activity, FileText, Scale, Stethoscope } from "lucide-react";
 
 const MODULES = [
-  { icon: Activity, title: "Chronology engine", body: "Sorted, cited, accessible." },
-  { icon: Stethoscope, title: "Future care engine", body: "Prognosis, probable and possible — backed by records." },
-  { icon: Scale, title: "Cost projection", body: "Every pathway, quantified." },
+  { icon: Activity, title: "Chronology Engine", body: "Sorted, cited, accessible." },
+  { icon: Stethoscope, title: "Future Care Engine", body: "Prognosis, probable and possible — backed by records." },
+  { icon: Scale, title: "Cost Projection", body: "Every pathway, quantified." },
   { icon: ShieldCheck, title: "Vulnerability Review", body: "Full prep and counter." },
-  { icon: FileText, title: "Report generator", body: "Complete, ready-for-review, validated." },
+  { icon: FileText, title: "Report Generator", body: "Complete, ready-for-review, validated." },
 ];
 
 export default function LandingPage() {
@@ -22,10 +22,10 @@ export default function LandingPage() {
         </div>
         <nav className="flex items-center gap-3 text-sm">
           <Link href="/login" className="btn-ghost">
-            Log in
+            Log In
           </Link>
           <Link href="/signup" className="btn-primary">
-            Get started
+            Get Started
           </Link>
         </nav>
       </header>

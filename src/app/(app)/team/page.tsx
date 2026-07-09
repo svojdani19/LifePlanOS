@@ -14,7 +14,7 @@ export default async function TeamPage() {
   return (
     <div>
       <div className="mb-6">
-        <h1 className="text-2xl font-bold text-ink-900">Team & seats</h1>
+        <h1 className="text-2xl font-bold text-ink-900">Team & Seats</h1>
         <p className="mt-1 text-sm text-ink-600">
           {seats} of {limits.seatLimit} seats used · roles govern what each teammate can do.
         </p>

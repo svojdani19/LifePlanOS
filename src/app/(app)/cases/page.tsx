@@ -7,10 +7,10 @@ import { NewCaseForm } from "@/components/NewCaseForm";
 import { can } from "@/lib/rbac";
 
 const CASE_TYPE_LABELS: Record<string, string> = {
-  PERSONAL_INJURY: "Personal injury",
-  MED_MAL: "Med mal",
-  WORKERS_COMP: "Workers' comp",
-  PRODUCT_LIABILITY: "Product liability",
+  PERSONAL_INJURY: "Personal Injury",
+  MED_MAL: "Med Mal",
+  WORKERS_COMP: "Workers' Comp",
+  PRODUCT_LIABILITY: "Product Liability",
   CATASTROPHIC: "Catastrophic",
 };
 

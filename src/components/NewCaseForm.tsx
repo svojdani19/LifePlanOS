@@ -5,11 +5,11 @@ import { useRouter } from "next/navigation";
 import { Plus, X } from "lucide-react";
 
 const CASE_TYPES = [
-  ["PERSONAL_INJURY", "Personal injury"],
-  ["MED_MAL", "Medical malpractice"],
-  ["WORKERS_COMP", "Workers' comp"],
-  ["PRODUCT_LIABILITY", "Product liability"],
-  ["CATASTROPHIC", "Catastrophic injury"],
+  ["PERSONAL_INJURY", "Personal Injury"],
+  ["MED_MAL", "Medical Malpractice"],
+  ["WORKERS_COMP", "Workers' Comp"],
+  ["PRODUCT_LIABILITY", "Product Liability"],
+  ["CATASTROPHIC", "Catastrophic Injury"],
 ] as const;
 
 const SIDES = [
@@ -59,7 +59,7 @@ export function NewCaseForm() {
   if (!open) {
     return (
       <button className="btn-primary" onClick={() => setOpen(true)}>
-        <Plus className="h-4 w-4" /> New case
+        <Plus className="h-4 w-4" /> New Case
       </button>
     );
   }
@@ -68,19 +68,19 @@ export function NewCaseForm() {
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-900/40 p-4" onClick={() => setOpen(false)}>
       <div className="card w-full max-w-lg p-6" onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-bold text-ink-900">New case intake</h2>
+          <h2 className="text-lg font-bold text-ink-900">New Case Intake</h2>
           <button onClick={() => setOpen(false)} className="rounded-md p-1 text-ink-400 hover:bg-ink-100">
             <X className="h-4 w-4" />
           </button>
         </div>
         <form onSubmit={submit} className="mt-4 space-y-4">
           <div>
-            <label className="label">Plaintiff / patient name</label>
+            <label className="label">Plaintiff / Patient Name</label>
             <input className="input" required value={form.clientName} onChange={(e) => set("clientName", e.target.value)} />
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="label">Case type</label>
+              <label className="label">Case Type</label>
               <select className="input" value={form.caseType} onChange={(e) => set("caseType", e.target.value)}>
                 {CASE_TYPES.map(([v, l]) => (
                   <option key={v} value={v}>
@@ -90,7 +90,7 @@ export function NewCaseForm() {
               </select>
             </div>
             <div>
-              <label className="label">Retained by</label>
+              <label className="label">Retained By</label>
               <select className="input" value={form.side} onChange={(e) => set("side", e.target.value)}>
                 {SIDES.map(([v, l]) => (
                   <option key={v} value={v}>
@@ -105,11 +105,11 @@ export function NewCaseForm() {
             <input className="input" value={form.jurisdiction} onChange={(e) => set("jurisdiction", e.target.value)} placeholder="e.g. CA — Los Angeles County" />
           </div>
           <div>
-            <label className="label">Mechanism of injury</label>
+            <label className="label">Mechanism of Injury</label>
             <input className="input" value={form.mechanism} onChange={(e) => set("mechanism", e.target.value)} placeholder="e.g. MVC, fall, surgical complication" />
           </div>
           <div>
-            <label className="label">Primary diagnosis</label>
+            <label className="label">Primary Diagnosis</label>
             <input className="input" value={form.diagnosis} onChange={(e) => set("diagnosis", e.target.value)} />
           </div>
           {error && <p className="text-sm text-red-600">{error}</p>}
@@ -118,7 +118,7 @@ export function NewCaseForm() {
               Cancel
             </button>
             <button className="btn-primary" disabled={loading}>
-              {loading ? "Creating…" : "Create case"}
+              {loading ? "Creating…" : "Create Case"}
             </button>
           </div>
         </form>
