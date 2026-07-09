@@ -5,6 +5,7 @@
   "description": "LifePlanOS — the operating system for life care planning. Standalone multi-tenant SaaS.",
   "scripts": {
     "dev": "next dev -p 3100",
+    "dev:auto": "next dev",
     "build": "next build",
     "start": "next start -p 3100",
     "lint": "next lint",
