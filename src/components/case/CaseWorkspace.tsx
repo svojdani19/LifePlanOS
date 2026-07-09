@@ -899,8 +899,8 @@ function PhysicianPanel({ data, canReview, call }: { data: AnyRec; canReview: bo
     call(`/api/cases/${data.id}/future-care/${it.id}/physician`, "POST", { status: "MODIFIED", note: info });
   }
 
-  function acceptAll() {
-    if (!confirm(`Accept all ${pending} pending item${pending === 1 ? "" : "s"}? Each will carry physician sign-off and be included in the report.`)) return;
+  function approveAll() {
+    if (!confirm(`Approve all ${pending} pending item${pending === 1 ? "" : "s"}? Each will carry physician sign-off and be included in the report.`)) return;
     call(`/api/cases/${data.id}/future-care/accept-all`, "POST", undefined, "op");
   }
 
@@ -908,10 +908,10 @@ function PhysicianPanel({ data, canReview, call }: { data: AnyRec; canReview: bo
     <div className="space-y-3">
       <div className="card flex flex-wrap items-center justify-between gap-3 p-4 text-sm text-ink-600">
         <span className="min-w-0 flex-1">
-          Physician review packet — {canReview ? "review the paraphrased summary of each point, then accept, reject, or modify by adding information (the summary updates automatically)." : "read-only: your role cannot sign off on medical necessity."}
+          Physician review packet — {canReview ? "every item stays Pending until you designate it. Review the paraphrased summary, then approve, reject, or modify by adding information (the summary updates automatically). Use Approve All only when you intend to sign off on the whole packet." : "read-only: your role cannot sign off on medical necessity."}
         </span>
         {canReview && pending > 0 && (
-          <button className="btn-primary shrink-0 py-1.5 text-xs" onClick={acceptAll}>Accept All ({pending})</button>
+          <button className="btn-primary shrink-0 py-1.5 text-xs" onClick={approveAll}>Approve All ({pending})</button>
         )}
       </div>
       {data.futureCareItems.map((it: AnyRec) => (
@@ -927,7 +927,7 @@ function PhysicianPanel({ data, canReview, call }: { data: AnyRec; canReview: bo
               </button>
               {canReview && (
                 <>
-                  <button className="btn-outline py-1 text-xs" onClick={() => call(`/api/cases/${data.id}/future-care/${it.id}/physician`, "POST", { status: "APPROVED", note: it.physicianNote || undefined })}>Accept</button>
+                  <button className="btn-outline py-1 text-xs" onClick={() => call(`/api/cases/${data.id}/future-care/${it.id}/physician`, "POST", { status: "APPROVED", note: it.physicianNote || undefined })}>Approve</button>
                   <button className="btn-outline py-1 text-xs" onClick={() => modify(it)}>Modify</button>
                   <button className="py-1 text-xs font-medium text-red-600 hover:underline" onClick={() => { const n = prompt("Reason for rejection"); if (n != null) call(`/api/cases/${data.id}/future-care/${it.id}/physician`, "POST", { status: "REJECTED", note: n }); }}>Reject</button>
                 </>
