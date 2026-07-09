@@ -21,7 +21,20 @@ import {
   Calendar,
   UserRound,
   MapPin,
+  Siren,
+  Syringe,
+  Dumbbell,
+  Microscope,
+  ClipboardList,
+  Receipt,
+  Scale,
+  Gavel,
+  Camera,
+  ChevronDown,
+  ExternalLink,
+  File as FileIcon,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { formatMoney, formatDate, cn } from "@/lib/utils";
 import type { Permission } from "@/lib/rbac";
@@ -389,12 +402,62 @@ function Field({ label, children, wide }: { label: string; children: React.React
 }
 
 // ── Records ──────────────────────────────────────────────────────────────────
-const METHOD_BADGE: Record<string, { label: string; tone: "green" | "amber" | "neutral" | "brand" }> = {
-  content: { label: "read from content", tone: "green" },
-  filename: { label: "from filename", tone: "amber" },
-  manual: { label: "set manually", tone: "brand" },
-  default: { label: "unclassified", tone: "neutral" },
+// One icon per document group, used both on the group filter chips and as the
+// left-hand type label on each record.
+const GROUP_ICON: Record<string, LucideIcon> = {
+  "Emergency & Acute Care": Siren,
+  "Surgical & Procedural": Syringe,
+  "Outpatient / Clinic": Stethoscope,
+  "Rehabilitation & Therapy": Dumbbell,
+  Diagnostics: Microscope,
+  "Life Care Plan & Vocational": ClipboardList,
+  "Financial & Economic": Receipt,
+  "Medicolegal / Expert": Scale,
+  "Legal & Liability": Gavel,
+  "Scene & Evidence": Camera,
+  Other: FileIcon,
 };
+const iconForType = (type: string): LucideIcon => GROUP_ICON[TYPE_GROUP[type] ?? "Other"] ?? FileIcon;
+
+// A 2–3 sentence, deterministic summary of a record: what it is, then the most
+// relevant documented findings pulled from the record's own labeled sections.
+const FINDING_SECTIONS: [RegExp, string][] = [
+  [/impression:?\s*(.+?)(?=\b[A-Z]{2,}[A-Z /]*:|$)/i, "Impression"],
+  [/procedure performed:?\s*(.+?)(?=\b[A-Z]{2,}[A-Z /]*:|$)/i, "Procedure"],
+  [/findings:?\s*(.+?)(?=\b[A-Z]{2,}[A-Z /]*:|$)/i, "Findings"],
+  [/assessment:?\s*(.+?)(?=\b[A-Z]{2,}[A-Z /]*:|$)/i, "Assessment"],
+  [/chief complaint:?\s*(.+?)(?=\b[A-Z]{2,}[A-Z /]*:|$)/i, "Presenting complaint"],
+  [/disposition:?\s*(.+?)(?=\b[A-Z]{2,}[A-Z /]*:|$)/i, "Disposition"],
+  [/plan of care:?\s*(.+?)(?=\b[A-Z]{2,}[A-Z /]*:|$)/i, "Plan of care"],
+  [/(?:preoperative )?diagnosis:?\s*(.+?)(?=\b[A-Z]{2,}[A-Z /]*:|$)/i, "Diagnosis"],
+  [/prescription:?\s*(.+?)(?=\b[A-Z]{2,}[A-Z /]*:|$)/i, "Prescription"],
+];
+function summarizeDocument(d: AnyRec): string {
+  const label = TYPE_LABEL[d.type] ?? "medical record";
+  const article = /^[aeiou]/i.test(label) ? "an" : "a";
+  const when = d.serviceDate ? ` dated ${new Date(d.serviceDate).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" })}` : "";
+  const who = d.authorName ? ` documented by ${d.authorName}${d.authorRole ? ` (${d.authorRole})` : ""}` : "";
+  const where = d.facility ? ` at ${d.facility}` : "";
+  const first = `This is ${article} ${label}${when}${who}${where}.`;
+
+  const text = String(d.extractedText || "").replace(/\s+/g, " ").trim();
+  const findings: string[] = [];
+  const seen = new Set<string>();
+  for (const [re, name] of FINDING_SECTIONS) {
+    if (findings.length >= 2) break;
+    const m = text.match(re);
+    const val = m?.[1]?.trim().replace(/[.;]+$/, "");
+    if (val && val.length > 3 && val.length < 220 && !seen.has(val.toLowerCase())) {
+      seen.add(val.toLowerCase());
+      findings.push(`${name}: ${val}`);
+    }
+  }
+  if (!findings.length) {
+    const lead = text.split(/(?<=[.!?])\s+/).find((s) => s.length > 25 && !/^[A-Z ]+$/.test(s.trim()));
+    return lead ? `${first} Relevant content — ${lead.trim()}` : `${first} No structured findings were extracted from this record.`;
+  }
+  return `${first} Relevant findings — ${findings.join("; ")}.`;
+}
 
 // Documented date · documenting individual (name, credentials, role) · location.
 function RecordMeta({ d }: { d: AnyRec }) {
@@ -417,6 +480,7 @@ function RecordMeta({ d }: { d: AnyRec }) {
 function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: boolean; call: any; busy: string | null }) {
   const [filter, setFilter] = useState<string>("All");
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
 
   async function upload(files: FileList | null) {
     if (!files?.length) return;
@@ -450,7 +514,7 @@ function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: bo
             {busy === "sample" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />} Add Sample Record Set
           </button>
           <span className="text-xs text-ink-500">
-            Uploads are labeled by reading each document&apos;s <span className="font-medium">content</span>, not its filename. Click a label to reassign it.
+            Each record is auto-labeled by type. Click a record&apos;s type icon to reassign it.
           </span>
         </div>
       )}
@@ -463,25 +527,24 @@ function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: bo
           <div className="flex flex-wrap gap-2">
             <FilterChip label="All" count={docs.length} active={filter === "All"} onClick={() => setFilter("All")} />
             {activeGroups.map((g) => (
-              <FilterChip key={g.label} label={g.label} count={groupCounts[g.label]} active={filter === g.label} onClick={() => setFilter(g.label)} />
+              <FilterChip key={g.label} label={g.label} count={groupCounts[g.label]} icon={GROUP_ICON[g.label]} active={filter === g.label} onClick={() => setFilter(g.label)} />
             ))}
           </div>
 
           <div className="card overflow-hidden">
             <div className="divide-y divide-ink-100">
-              {filtered.map((d) => (
-                <div key={d.id} className="flex items-center gap-3 px-4 py-3 hover:bg-ink-50/60">
-                  <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-ink-100 text-[10px] font-bold uppercase text-ink-400">
-                    {d.filename.split(".").pop()?.slice(0, 4) ?? "?"}
-                  </div>
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm font-medium text-ink-900">{d.filename}</p>
-                    <div className="mt-0.5 flex flex-wrap items-center gap-2">
+              {filtered.map((d) => {
+                const TypeIcon = iconForType(d.type);
+                const open = expandedId === d.id;
+                return (
+                  <div key={d.id} className="px-4 py-3 hover:bg-ink-50/60">
+                    <div className="flex items-start gap-3">
+                      {/* Left: the type icon is the (editable) type label. */}
                       {editingId === d.id ? (
                         <select
                           autoFocus
                           defaultValue={d.type}
-                          className="rounded-md border border-ink-300 bg-white px-2 py-0.5 text-xs"
+                          className="mt-0.5 rounded-md border border-ink-300 bg-white px-2 py-1 text-xs"
                           onBlur={() => setEditingId(null)}
                           onChange={async (e) => {
                             setEditingId(null);
@@ -496,32 +559,65 @@ function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: bo
                             </optgroup>
                           ))}
                         </select>
-                      ) : canEdit ? (
-                        <button onClick={() => setEditingId(d.id)} title="Click to change label" className="inline-flex items-center gap-1 hover:opacity-80">
-                          <Badge tone="brand">{TYPE_LABEL[d.type] ?? d.type.replace(/_/g, " ")}</Badge>
-                          <Pencil className="h-3 w-3 text-ink-400" />
-                        </button>
                       ) : (
-                        <Badge tone="brand">{TYPE_LABEL[d.type] ?? d.type.replace(/_/g, " ")}</Badge>
+                        <button
+                          type="button"
+                          title={`${TYPE_LABEL[d.type] ?? d.type.replace(/_/g, " ")}${canEdit ? " — click to reassign" : ""}`}
+                          onClick={() => canEdit && setEditingId(d.id)}
+                          className={cn("group relative mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-brand-50 text-brand-700", canEdit && "cursor-pointer hover:bg-brand-100")}
+                        >
+                          <TypeIcon className="h-5 w-5" />
+                          {canEdit && <Pencil className="absolute -bottom-1 -right-1 h-3.5 w-3.5 rounded-full bg-white p-0.5 text-ink-400 opacity-0 shadow-sm transition-opacity group-hover:opacity-100" />}
+                        </button>
                       )}
-                      {d.classifiedBy && METHOD_BADGE[d.classifiedBy] && (
-                        <Badge tone={METHOD_BADGE[d.classifiedBy].tone}>{METHOD_BADGE[d.classifiedBy].label}</Badge>
-                      )}
-                      <span className="text-xs text-ink-400">{d.pageCount ? `${d.pageCount}p` : ""}</span>
-                      {d.ocrConfidence != null && (
-                        <Badge tone={d.ocrConfidence < 0.75 ? "red" : "green"}>OCR {Math.round(d.ocrConfidence * 100)}%</Badge>
-                      )}
-                      {d.flags && <span className="text-xs text-amber-700">{d.flags}</span>}
+
+                      {/* Middle: filename toggles the expandable detail + summary. */}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <button type="button" onClick={() => setExpandedId(open ? null : d.id)} className="flex min-w-0 items-center gap-1.5 text-left" aria-expanded={open}>
+                            <ChevronDown className={cn("h-4 w-4 shrink-0 text-ink-400 transition-transform", open && "rotate-180")} />
+                            <span className="truncate text-sm font-medium text-ink-900">{d.filename}</span>
+                          </button>
+                          {d.flags && <span title={d.flags} className="shrink-0 text-sm text-amber-500">⚠</span>}
+                        </div>
+
+                        {open && (
+                          <div className="mt-2 space-y-2 rounded-lg bg-ink-50/70 p-3">
+                            <RecordMeta d={d} />
+                            {(d.pageCount || d.ocrConfidence != null) && (
+                              <p className="text-[11px] text-ink-400">
+                                {d.pageCount ? `${d.pageCount} page${d.pageCount === 1 ? "" : "s"}` : ""}
+                                {d.pageCount && d.ocrConfidence != null ? " · " : ""}
+                                {d.ocrConfidence != null ? `OCR ${Math.round(d.ocrConfidence * 100)}%` : ""}
+                                {d.flags ? ` · ${d.flags}` : ""}
+                              </p>
+                            )}
+                            <p className="text-xs leading-relaxed text-ink-600">{summarizeDocument(d)}</p>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Right: open the document, and remove. */}
+                      <div className="flex shrink-0 items-center gap-1">
+                        <a
+                          href={`/api/cases/${data.id}/documents/${d.id}/view`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          title="Open document"
+                          className="rounded-md p-1.5 text-ink-400 hover:bg-ink-100 hover:text-brand-700"
+                        >
+                          <ExternalLink className="h-4 w-4" />
+                        </a>
+                        {canEdit && (
+                          <button className="rounded-md p-1.5 text-ink-300 hover:bg-ink-100 hover:text-red-600" title="Remove" onClick={async () => { if (confirm(`Remove ${d.filename}?`)) await call(`/api/cases/${data.id}/documents/${d.id}`, "DELETE"); }}>
+                            <X className="h-4 w-4" />
+                          </button>
+                        )}
+                      </div>
                     </div>
-                    <RecordMeta d={d} />
                   </div>
-                  {canEdit && (
-                    <button className="text-ink-300 hover:text-red-600" title="Remove" onClick={async () => { if (confirm(`Remove ${d.filename}?`)) await call(`/api/cases/${data.id}/documents/${d.id}`, "DELETE"); }}>
-                      <X className="h-4 w-4" />
-                    </button>
-                  )}
-                </div>
-              ))}
+                );
+              })}
               {filtered.length === 0 && <p className="px-4 py-8 text-center text-sm text-ink-400">No documents in this category.</p>}
             </div>
           </div>
@@ -531,7 +627,7 @@ function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: bo
   );
 }
 
-function FilterChip({ label, count, active, onClick }: { label: string; count: number; active: boolean; onClick: () => void }) {
+function FilterChip({ label, count, active, onClick, icon: Icon }: { label: string; count: number; active: boolean; onClick: () => void; icon?: LucideIcon }) {
   return (
     <button
       onClick={onClick}
@@ -540,6 +636,7 @@ function FilterChip({ label, count, active, onClick }: { label: string; count: n
         active ? "bg-brand-600 text-white" : "bg-ink-100 text-ink-600 hover:bg-ink-200",
       )}
     >
+      {Icon && <Icon className="h-3.5 w-3.5" />}
       {label}
       <span className={cn("rounded-full px-1.5 text-[10px] font-semibold", active ? "bg-white/20" : "bg-white text-ink-500")}>{count}</span>
     </button>
