@@ -15,6 +15,7 @@ import { prisma } from "@/lib/db";
 import { assumptionsFor } from "@/lib/engine/generate";
 import { project } from "@/lib/engine/cost";
 import { typeLabel } from "@/lib/documents/taxonomy";
+import { pageRange } from "@/lib/documents/meta";
 import { parseConditions } from "@/lib/intake/preExisting";
 import type { CaseSide, CareCategory, FutureCareItem } from "@/generated/prisma";
 
@@ -447,10 +448,15 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
       const fill = i % 2 ? "F8FAFC" : "FFFFFF";
       const imp = importanceOf(d.type);
       const conf = Math.round((d.ocrConfidence ?? 0.9) * 100);
+      const pp = (pages: number[]) => { const r = pageRange(pages || []); return r ? (/[–,]/.test(r) ? ` (pp. ${r})` : ` (p. ${r})`) : ""; };
+      const provs = (Array.isArray(d.providers) ? d.providers : []) as { name: string; credentials?: string | null; role?: string | null; pages?: number[] }[];
+      const dateCell = d.serviceDate ? (d.serviceDateEnd ? `${fmtDate(d.serviceDate)} – ${fmtDate(d.serviceDateEnd)}` : fmtDate(d.serviceDate)) : "—";
+      const provCell = provs.length > 1 ? provs.map((p) => `${p.name}${p.credentials ? `, ${p.credentials}` : ""}${pp(p.pages ?? [])}`).join("; ") : d.authorName || "—";
+      const roleCell = provs.length > 1 ? [...new Set(provs.map((p) => p.role).filter(Boolean))].join("; ") || "Multiple" : d.authorRole || "—";
       rr.push(row([
-        cell(d.serviceDate ? fmtDate(d.serviceDate) : "—", { size: 15, fill }),
-        cell(d.authorName || "—", { size: 15, fill }),
-        cell(d.authorRole || "—", { size: 15, fill }),
+        cell(dateCell, { size: 15, fill }),
+        cell(provCell, { size: 15, fill }),
+        cell(roleCell, { size: 15, fill }),
         cell(typeLabel(d.type), { size: 15, fill }),
         cell(String(d.pageCount || "—"), { align: AlignmentType.RIGHT, size: 15, fill }),
         cell(imp, { size: 15, fill }),

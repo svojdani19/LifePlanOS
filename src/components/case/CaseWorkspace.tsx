@@ -39,6 +39,7 @@ import { Badge } from "@/components/ui/Badge";
 import { formatMoney, formatDate, cn } from "@/lib/utils";
 import type { Permission } from "@/lib/rbac";
 import { DOC_TYPE_GROUPS, TYPE_LABEL, TYPE_GROUP } from "@/lib/documents/taxonomy";
+import { pageRange } from "@/lib/documents/meta";
 import { Icd10Search } from "@/components/Icd10Search";
 import { PreExistingConditionsModal } from "@/components/PreExistingConditionsModal";
 import { parseConditions, serializeConditions, findConditionsInRecords } from "@/lib/intake/preExisting";
@@ -441,6 +442,7 @@ function section(text: string, ...res: RegExp[]): string | null {
 // narrative reflects findings, not header boilerplate.
 function clinicalText(raw: string): string {
   return raw
+    .replace(/\bpage\s+\d+(?:\s+of\s+\d+)?\b/gi, " ")
     .replace(/\b(?:FACILITY|LOCATION|TECHNIQUE|COMPARISON)\s*:\s*[^.]*\.?/gi, "")
     .replace(/\bDATE OF [A-Z ]+?\s*:\s*[\d/]+/gi, "")
     .replace(/\b(?:COLLECTED|FILL DATE|DATE)\s*:\s*[\d/]+/gi, "")
@@ -460,6 +462,23 @@ function clinicalSentences(text: string, n = 2): string {
 function narrativeFor(d: AnyRec): string {
   const text = String(d.extractedText || "").replace(/\s+/g, " ").trim();
   if (text.length < 30 || /\billegible\b|no extractable text/i.test(text)) return "Illegible or near-empty page; no findings could be extracted.";
+
+  // A consolidated multi-encounter record (spans dates / has several providers):
+  // narrate the arc across encounters rather than a single section.
+  const provs = Array.isArray(d.providers) ? d.providers : [];
+  if (d.serviceDateEnd || provs.length > 1) {
+    const cc = section(text, S("chief complaint"));
+    const proc = section(text, S("procedure performed"), S("procedure"));
+    const imp = section(text, S("impression"), S("assessment"));
+    const parts = [
+      cc ? `presenting with ${lcFirst(oneSentence(cc))}` : null,
+      proc ? lcFirst(proc) : null,
+      imp ? `impression: ${lcFirst(imp)}` : null,
+    ].filter(Boolean);
+    return parts.length
+      ? `Consolidated multi-encounter record — ${parts.join("; ")}.`
+      : `Consolidated record spanning ${provs.length || "multiple"} providers and encounters.`;
+  }
 
   switch (d.type) {
     case "IMAGING_REPORT": {
@@ -523,18 +542,54 @@ function narrativeFor(d: AnyRec): string {
 
 // Documented date · documenting individual (name, credentials, role) · location.
 function RecordMeta({ d }: { d: AnyRec }) {
-  const date = d.serviceDate ? new Date(d.serviceDate).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" }) : null;
-  const who = d.authorName
+  const fmt = (v: string) => new Date(v).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" });
+  const pp = (pages: number[]) => { const r = pageRange(pages || []); return r ? (/[–,]/.test(r) ? `pp. ${r}` : `p. ${r}`) : ""; };
+  const providers: AnyRec[] = Array.isArray(d.providers) ? d.providers : [];
+  const locations: AnyRec[] = Array.isArray(d.locations) ? d.locations : [];
+  const datePages: number[] = Array.isArray(d.datePages) ? d.datePages : [];
+
+  const start = d.serviceDate ? fmt(d.serviceDate) : null;
+  const end = d.serviceDateEnd ? fmt(d.serviceDateEnd) : null;
+  const dateStr = start && end ? `${start} – ${end}` : start;
+  const singleWho = d.authorName
     ? `${d.authorName}${d.authorCredentials ? `, ${d.authorCredentials}` : ""}${d.authorRole ? ` — ${d.authorRole}` : ""}`
     : d.authorRole || null;
-  if (!date && !who && !d.facility) {
+
+  if (!dateStr && !singleWho && !d.facility && providers.length === 0 && locations.length === 0) {
     return <p className="mt-1 text-xs italic text-ink-300">No date, author, or location documented in this record.</p>;
   }
   return (
-    <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-ink-500">
-      {date && <span className="inline-flex items-center gap-1"><Calendar className="h-3 w-3 text-ink-400" />{date}</span>}
-      {who && <span className="inline-flex items-center gap-1 before:text-ink-300 before:content-['·']"><UserRound className="h-3 w-3 text-ink-400" />{who}</span>}
-      {d.facility && <span className="inline-flex items-center gap-1 before:text-ink-300 before:content-['·']"><MapPin className="h-3 w-3 text-ink-400" />{d.facility}</span>}
+    <div className="mt-1 space-y-1 text-xs text-ink-500">
+      {dateStr && (
+        <div className="flex items-center gap-1">
+          <Calendar className="h-3 w-3 shrink-0 text-ink-400" />
+          <span>{dateStr}{end && datePages.length > 1 && <span className="text-ink-400"> · {pp(datePages)}</span>}</span>
+        </div>
+      )}
+      {providers.length > 1 ? (
+        <div className="flex items-start gap-1">
+          <UserRound className="mt-0.5 h-3 w-3 shrink-0 text-ink-400" />
+          <ul className="space-y-0.5">
+            {providers.map((p, i) => (
+              <li key={i}>{p.name}{p.credentials ? `, ${p.credentials}` : ""}{p.role ? ` — ${p.role}` : ""}{p.pages?.length ? <span className="text-ink-400"> ({pp(p.pages)})</span> : null}</li>
+            ))}
+          </ul>
+        </div>
+      ) : singleWho ? (
+        <div className="flex items-center gap-1"><UserRound className="h-3 w-3 shrink-0 text-ink-400" />{singleWho}</div>
+      ) : null}
+      {locations.length > 1 ? (
+        <div className="flex items-start gap-1">
+          <MapPin className="mt-0.5 h-3 w-3 shrink-0 text-ink-400" />
+          <ul className="space-y-0.5">
+            {locations.map((l, i) => (
+              <li key={i}>{l.name}{l.pages?.length ? <span className="text-ink-400"> ({pp(l.pages)})</span> : null}</li>
+            ))}
+          </ul>
+        </div>
+      ) : d.facility ? (
+        <div className="flex items-center gap-1"><MapPin className="h-3 w-3 shrink-0 text-ink-400" />{d.facility}</div>
+      ) : null}
     </div>
   );
 }

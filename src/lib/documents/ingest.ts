@@ -2,6 +2,7 @@ import { prisma } from "@/lib/db";
 import { extractText } from "@/lib/documents/extract";
 import { classifyDocument } from "@/lib/documents/classify";
 import { parseRecordMeta } from "@/lib/documents/meta";
+import { Prisma } from "@/generated/prisma";
 import type { Document, DocumentType } from "@/generated/prisma";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -62,8 +63,12 @@ export async function ingestDocument(input: IngestInput): Promise<IngestResult> 
   else if (c.method !== "content") flags.push(c.note);
   if (pageCount > 35) flags.push("Large document — confirm no missing pages");
 
-  // 4. Read the record descriptors from the content: documented date, the
-  //    documenting individual (name/credentials/role), and the facility.
+  // A multi-page consolidated record stamps "Page N of M" — trust it for the count.
+  const pm = text.match(/page\s+\d+\s+of\s+(\d+)/i);
+  if (pm) pageCount = Math.max(pageCount, parseInt(pm[1], 10));
+
+  // 4. Read the record descriptors from the content: documented date(s), the
+  //    documenting individual(s), and the location(s), each with page refs.
   const meta = parseRecordMeta(text, c.type);
 
   const document = await prisma.document.create({
@@ -80,10 +85,14 @@ export async function ingestDocument(input: IngestInput): Promise<IngestResult> 
       classifiedBy: c.method,
       classifyScore: c.score,
       serviceDate: meta.serviceDate,
+      serviceDateEnd: meta.serviceDateEnd,
+      datePages: meta.serviceDateEnd ? meta.datePages : undefined,
       authorName: meta.authorName,
       authorCredentials: meta.authorCredentials,
       authorRole: meta.authorRole,
       facility: meta.facility,
+      providers: meta.providers.length > 1 ? (meta.providers as unknown as Prisma.InputJsonValue) : undefined,
+      locations: meta.locations.length > 1 ? (meta.locations as unknown as Prisma.InputJsonValue) : undefined,
       provider: meta.facility ?? meta.authorName ?? (c.type === "OPERATIVE_NOTE" ? "Surgical Facility" : "Treating Provider"),
       extractedText: text.slice(0, 4000),
       flags: flags.join("; ") || null,

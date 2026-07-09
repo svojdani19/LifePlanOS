@@ -112,4 +112,29 @@ Reviewed by: Susan Pyle, MD — Clinical Pathology.`,
     // Sparse/uninformative — mimics a scanned page with almost no text layer.
     text: `Page 1 of 1. [illegible handwriting]`,
   },
+  {
+    filename: "Uploaded_Document_12.pdf",
+    // A consolidated multi-page chart — spans several dates, providers, and
+    // facilities, each stamped with its page, to exercise range/list handling.
+    text: `CONSOLIDATED HOSPITAL RECORDS
+Page 1 of 4
+DATE OF SERVICE: 06/08/2024
+FACILITY: Fountain Valley Regional Hospital, Fountain Valley, CA.
+CHIEF COMPLAINT: Back pain after motor vehicle collision. Admitted to trauma service.
+Attending Physician: Omar Haddad, MD — Emergency Medicine.
+Page 2 of 4
+DATE OF SERVICE: 06/12/2024
+FACILITY: St. Jude Medical Center, Fullerton, CA.
+PROCEDURE PERFORMED: Open reduction internal fixation of the lumbar spine.
+Surgeon: Nadia Brandt, MD — Orthopedic Spine Surgery.
+Page 3 of 4
+DATE OF SERVICE: 07/15/2024
+FACILITY: Meridian Rehabilitation Services, Irvine, CA.
+Progress note: patient advancing with therapeutic exercise and gait training.
+Therapist: Priya Nair, PT, DPT — Physical Therapy.
+Page 4 of 4
+DATE OF SERVICE: 08/20/2024
+Impression: post-surgical recovery progressing; continued rehabilitation advised.
+Reviewed by: Sam Okafor, MD — Physical Medicine & Rehabilitation.`,
+  },
 ];
