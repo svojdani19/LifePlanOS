@@ -36,7 +36,7 @@ export default function LandingPage() {
           Life Care Plans. Made Easy.
         </span>
         <h1 className="mx-auto mt-6 max-w-3xl text-5xl font-extrabold tracking-tight text-ink-900">
-          Automate the work. Keep the control.
+          Automate the work.<br />Keep the control.
         </h1>
         <p className="mx-auto mt-6 max-w-2xl text-lg text-ink-600">
           Everything from Intake to Reports —<br />engineered to simplify.
