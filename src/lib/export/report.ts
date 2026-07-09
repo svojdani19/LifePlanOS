@@ -60,6 +60,27 @@ function labeled(label: string, bodyText: string) {
 function bullet(text: string) {
   return new Paragraph({ bullet: { level: 0 }, spacing: { after: 40 }, children: [new TextRun({ text, size: 20 })] });
 }
+// Full contested-point rendering: the argument with its source, and the
+// opposing side's counter with its supporting authority carried as a citation.
+function reviewParagraphs(f: {
+  vulnerability: string;
+  category: string;
+  description: string;
+  sourceRef: string | null;
+  counterArgument: string | null;
+  counterSource: string | null;
+  counterCitation: string | null;
+}): Paragraph[] {
+  const out: Paragraph[] = [
+    new Paragraph({ spacing: { before: 140, after: 30 }, children: [new TextRun({ text: `[${f.vulnerability}] `, bold: true, size: 18, color: BRAND }), new TextRun({ text: f.category, bold: true, size: 20 })] }),
+    labeled("Argument", f.description),
+  ];
+  if (f.sourceRef) out.push(labeled("Source", f.sourceRef));
+  if (f.counterArgument) out.push(labeled("Counter", f.counterArgument));
+  if (f.counterSource) out.push(labeled("Support", f.counterSource));
+  if (f.counterCitation) out.push(labeled("Citation", f.counterCitation));
+  return out;
+}
 function cell(text: string, o: { bold?: boolean; width?: number; align?: (typeof AlignmentType)[keyof typeof AlignmentType]; fill?: string; color?: string; size?: number } = {}) {
   return new TableCell({
     width: o.width ? { size: o.width, type: WidthType.PERCENTAGE } : undefined,
@@ -364,11 +385,13 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
   const pendingMd = items.filter((i) => i.physicianStatus === "PENDING").length;
   if (template !== "PLAINTIFF" && defenseFindings.length) {
     body.push(h1("Appendix A — Defense Vulnerability Review", { pageBreak: true }));
-    for (const f of defenseFindings) body.push(bullet(`[${f.vulnerability}] ${f.category}: ${f.description}`));
+    body.push(p("Each contested point states the argument the defense is expected to raise with its source, and the plaintiff's counter backed by its supporting authority.", { italics: true, size: 18 }));
+    for (const f of defenseFindings) body.push(...reviewParagraphs(f));
   }
   if (template === "PLAINTIFF" && completeness.length) {
     body.push(h1("Appendix A — Completeness Review", { pageBreak: true }));
-    for (const f of completeness) body.push(bullet(`[${f.vulnerability}] ${f.category}: ${f.description}`));
+    body.push(p("Each point states an argument the plaintiff is expected to raise with its source, and the defense's counter backed by its supporting authority.", { italics: true, size: 18 }));
+    for (const f of completeness) body.push(...reviewParagraphs(f));
   }
   body.push(h1("Appendix B — Physician Review"));
   body.push(p(`${accepted.length} of ${items.length} projected care items carry treating-physician sign-off and are included in the Medical Cost Table.${rejected.length ? ` ${rejected.length} item${rejected.length === 1 ? " was" : "s were"} declined on physician review and excluded from the totals.` : ""}${pendingMd ? ` ${pendingMd} item${pendingMd === 1 ? " remains" : "s remain"} pending confirmation of medical necessity and ${pendingMd === 1 ? "is" : "are"} reserved for physician review prior to testimony.` : ""}`));
