@@ -419,44 +419,106 @@ const GROUP_ICON: Record<string, LucideIcon> = {
 };
 const iconForType = (type: string): LucideIcon => GROUP_ICON[TYPE_GROUP[type] ?? "Other"] ?? FileIcon;
 
-// A 2–3 sentence, deterministic summary of a record: what it is, then the most
-// relevant documented findings pulled from the record's own labeled sections.
-const FINDING_SECTIONS: [RegExp, string][] = [
-  [/impression:?\s*(.+?)(?=\b[A-Z]{2,}[A-Z /]*:|$)/i, "Impression"],
-  [/procedure performed:?\s*(.+?)(?=\b[A-Z]{2,}[A-Z /]*:|$)/i, "Procedure"],
-  [/findings:?\s*(.+?)(?=\b[A-Z]{2,}[A-Z /]*:|$)/i, "Findings"],
-  [/assessment:?\s*(.+?)(?=\b[A-Z]{2,}[A-Z /]*:|$)/i, "Assessment"],
-  [/chief complaint:?\s*(.+?)(?=\b[A-Z]{2,}[A-Z /]*:|$)/i, "Presenting complaint"],
-  [/disposition:?\s*(.+?)(?=\b[A-Z]{2,}[A-Z /]*:|$)/i, "Disposition"],
-  [/plan of care:?\s*(.+?)(?=\b[A-Z]{2,}[A-Z /]*:|$)/i, "Plan of care"],
-  [/(?:preoperative )?diagnosis:?\s*(.+?)(?=\b[A-Z]{2,}[A-Z /]*:|$)/i, "Diagnosis"],
-  [/prescription:?\s*(.+?)(?=\b[A-Z]{2,}[A-Z /]*:|$)/i, "Prescription"],
-];
-function summarizeDocument(d: AnyRec): string {
-  const label = TYPE_LABEL[d.type] ?? "medical record";
-  const article = /^[aeiou]/i.test(label) ? "an" : "a";
-  const when = d.serviceDate ? ` dated ${new Date(d.serviceDate).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" })}` : "";
-  const who = d.authorName ? ` documented by ${d.authorName}${d.authorRole ? ` (${d.authorRole})` : ""}` : "";
-  const where = d.facility ? ` at ${d.facility}` : "";
-  const first = `This is ${article} ${label}${when}${who}${where}.`;
-
-  const text = String(d.extractedText || "").replace(/\s+/g, " ").trim();
-  const findings: string[] = [];
-  const seen = new Set<string>();
-  for (const [re, name] of FINDING_SECTIONS) {
-    if (findings.length >= 2) break;
+// A brief, plain-language narrative of the FINDINGS in a record (the metadata —
+// date, author, location — is shown separately above it). Type-aware so it pulls
+// the clinically relevant content and phrases it naturally, rather than dumping
+// every labeled section. Deterministic; falls back to the first clinical
+// sentence when a record has no recognizable structure.
+const lcFirst = (s: string) => (/^[A-Z][a-z]/.test(s) ? s[0].toLowerCase() + s.slice(1) : s);
+const capFirst = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+const cleanVal = (s: string) => s.replace(/\s+/g, " ").replace(/\s+as above\b/i, "").trim().replace(/[.;,]+$/, "").trim();
+const oneSentence = (s: string) => s.split(/(?<=[.!?])\s+/)[0].replace(/[.;,]+$/, "").trim();
+const S = (label: string) => new RegExp(label + ":?\\s*(.+?)(?=\\b[A-Z]{2,}[A-Z /]*:|$)", "i");
+function section(text: string, ...res: RegExp[]): string | null {
+  for (const re of res) {
     const m = text.match(re);
-    const val = m?.[1]?.trim().replace(/[.;]+$/, "");
-    if (val && val.length > 3 && val.length < 220 && !seen.has(val.toLowerCase())) {
-      seen.add(val.toLowerCase());
-      findings.push(`${name}: ${val}`);
+    const v = m?.[1] ? cleanVal(m[1]) : "";
+    if (v && v.length > 2 && v.length < 240) return v;
+  }
+  return null;
+}
+// Strip non-clinical metadata (facility/date/author-signature lines) so the
+// narrative reflects findings, not header boilerplate.
+function clinicalText(raw: string): string {
+  return raw
+    .replace(/\b(?:FACILITY|LOCATION|TECHNIQUE|COMPARISON)\s*:\s*[^.]*\.?/gi, "")
+    .replace(/\bDATE OF [A-Z ]+?\s*:\s*[\d/]+/gi, "")
+    .replace(/\b(?:COLLECTED|FILL DATE|DATE)\s*:\s*[\d/]+/gi, "")
+    .replace(/\b(?:Dictated by|Reviewed by|Ordered by|Prepared by|Reported by|Electronically signed by|Signed by|Therapist|Attending Physician|Treating Physician|Examining Physician|Physician|Examiner|Surgeon|Assistant Surgeon|Radiologist|Anesthesiologist|Pharmacist|Evaluated by|Provider)\s*:\s*[^.]*\.?/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+const METADATA_SENT = /\b(facility|location|date of|collected|fill date|\bndc\b|appearances|dictated by|reviewed by|therapist|surgeon|radiologist|attending physician|examiner|pharmacist|evaluated by|reported by|prepared by)\b/i;
+// The first `n` genuine clinical sentences (skipping headers and metadata).
+function clinicalSentences(text: string, n = 2): string {
+  const sents = text
+    .split(/(?<=[.!?])\s+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length > 12 && s.length < 240 && !/^[A-Z0-9 /()\-]+$/.test(s) && !METADATA_SENT.test(s));
+  return cleanVal(sents.slice(0, n).join(" "));
+}
+function narrativeFor(d: AnyRec): string {
+  const text = String(d.extractedText || "").replace(/\s+/g, " ").trim();
+  if (text.length < 30 || /\billegible\b|no extractable text/i.test(text)) return "Illegible or near-empty page; no findings could be extracted.";
+
+  switch (d.type) {
+    case "IMAGING_REPORT": {
+      const modM = text.match(/\b(MRI|CT|X-?ray|ultrasound|radiograph)\b/i);
+      const mod = modM ? modM[1].toUpperCase().replace("X-RAY", "X-ray") : "Imaging";
+      const regM = text.match(/of the\s+([a-z][a-z ]{2,30}?)(?:\s+(?:with|without)\b|,|\.)/i);
+      const reg = regM ? regM[1].trim().toLowerCase() : null;
+      const body = section(text, S("impression"), S("findings"));
+      const lead = `${mod} of the ${reg || "affected region"}`;
+      return body ? `${lead} demonstrating ${lcFirst(body)}.` : `${lead}; see report for detailed findings.`;
+    }
+    case "OPERATIVE_NOTE": {
+      const proc = section(text, S("procedure performed"), S("procedure"));
+      const detail = section(text, /(the fracture[^.]+)\./i, /(closure[^.]*)\./i);
+      return proc ? `Documents ${lcFirst(proc)}${detail ? `; ${lcFirst(detail)}` : ""}.` : "Operative report; see body for the procedure performed.";
+    }
+    case "ER_RECORD": {
+      const cc = section(text, S("chief complaint"));
+      const disp = section(text, S("disposition"));
+      if (!cc) return "Emergency department encounter.";
+      return `Emergency presentation for ${lcFirst(oneSentence(cc))}${disp ? `; ${lcFirst(oneSentence(disp))}` : ""}.`;
+    }
+    case "PT_OT_RECORD": {
+      const s = clinicalSentences(clinicalText(text).replace(/^[^.]*\bnote\b\s*/i, ""), 2);
+      return s ? `Therapy progress note — ${lcFirst(s)}.` : "Rehabilitation therapy progress note documenting the patient's tolerance and functional progress.";
+    }
+    case "LAB_REPORT": {
+      const m = text.match(/([A-Za-z][A-Za-z ]{2,24}?)\s+([\d.]+).{0,60}?flag\s+(low|high)/i);
+      const wbcNormal = /white blood cell[^.]*?(?:within|normal|reference interval)/i.test(text);
+      if (m) return `Laboratory report; ${m[1].trim().toLowerCase()} was flagged ${m[3].toLowerCase()} at ${m[2]}${wbcNormal ? ", with the white blood cell count within normal limits" : ""}.`;
+      return "Laboratory report; values reported against their reference ranges.";
+    }
+    case "NEUROPSYCHOLOGICAL_EVALUATION":
+      return "Neuropsychological evaluation using a standardized test battery; cognitive and memory indices are reported with documented test validity.";
+    case "IME_REPORT": {
+      const mmi = /maximum medical improvement/i.test(text);
+      const rating = /impairment rating/i.test(text);
+      return `Independent medical examination following record review${mmi ? ", opining the claimant has reached maximum medical improvement" : ""}${rating ? " and providing an impairment rating" : ""}.`;
+    }
+    case "PHARMACY_RECORD": {
+      const rx = section(text, S("prescription"));
+      const sig = section(text, S("sig"));
+      return rx ? `Pharmacy record for ${lcFirst(rx)}${sig ? ` — ${lcFirst(sig)}` : ""}.` : "Pharmacy dispensing record.";
+    }
+    case "BILLING_RECORD": {
+      const cpt = text.match(/cpt\s*(\d{5})/i)?.[1];
+      const tot = text.match(/total charges:?\s*(\$[\d,]+(?:\.\d{2})?)/i)?.[1];
+      const bal = /balance due/i.test(text);
+      return `Billing statement${cpt ? ` for CPT ${cpt}` : ""}${tot ? `, total charges ${tot}` : ""}${bal ? ", with a patient balance due" : ""}.`;
+    }
+    case "DEPOSITION":
+      return "Sworn deposition transcript of the witness's testimony.";
+    default: {
+      const body = section(text, S("impression"), S("assessment"), S("diagnosis"), S("findings"));
+      if (body) return `${capFirst(body)}.`;
+      const sent = clinicalSentences(clinicalText(text), 2);
+      return sent ? `${capFirst(sent)}.` : "Record on file; no structured clinical findings were extracted.";
     }
   }
-  if (!findings.length) {
-    const lead = text.split(/(?<=[.!?])\s+/).find((s) => s.length > 25 && !/^[A-Z ]+$/.test(s.trim()));
-    return lead ? `${first} Relevant content — ${lead.trim()}` : `${first} No structured findings were extracted from this record.`;
-  }
-  return `${first} Relevant findings — ${findings.join("; ")}.`;
 }
 
 // Documented date · documenting individual (name, credentials, role) · location.
@@ -575,8 +637,8 @@ function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: bo
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
                           <button type="button" onClick={() => setExpandedId(open ? null : d.id)} className="flex min-w-0 items-center gap-1.5 text-left" aria-expanded={open}>
-                            <ChevronDown className={cn("h-4 w-4 shrink-0 text-ink-400 transition-transform", open && "rotate-180")} />
                             <span className="truncate text-sm font-medium text-ink-900">{d.filename}</span>
+                            <ChevronDown className={cn("h-4 w-4 shrink-0 text-ink-400 transition-transform", open && "rotate-180")} />
                           </button>
                           {d.flags && <span title={d.flags} className="shrink-0 text-sm text-amber-500">⚠</span>}
                         </div>
@@ -592,7 +654,7 @@ function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: bo
                                 {d.flags ? ` · ${d.flags}` : ""}
                               </p>
                             )}
-                            <p className="text-xs leading-relaxed text-ink-600">{summarizeDocument(d)}</p>
+                            <p className="text-xs leading-relaxed text-ink-600">{narrativeFor(d)}</p>
                           </div>
                         )}
                       </div>
