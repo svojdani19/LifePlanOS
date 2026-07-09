@@ -511,7 +511,11 @@ model Document {
   storageKey   String? // object-storage pointer (local path in dev)
   extractedText String? // OCR/parsed text used for extraction + classification
   provider     String? // provider/facility identified from the doc
-  serviceDate  DateTime? // primary date extracted
+  serviceDate  DateTime? // documented date of the record (primary date extracted)
+  authorName        String? // documenting individual's name
+  authorCredentials String? // e.g. "MD", "PT, DPT", "PharmD"
+  authorRole        String? // role designation, e.g. "Orthopedic Surgeon"
+  facility          String? // location/facility where the episode took place
   flags        String? // e.g. "missing pages", "low OCR confidence"
   // How `type` was assigned: "content" (read from the document body),
   // "filename" (fallback when no text could be extracted), "manual" (user

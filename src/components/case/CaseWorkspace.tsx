@@ -18,6 +18,9 @@ import {
   X,
   Pencil,
   Plus,
+  Calendar,
+  UserRound,
+  MapPin,
 } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { formatMoney, formatDate, cn } from "@/lib/utils";
@@ -383,6 +386,24 @@ const METHOD_BADGE: Record<string, { label: string; tone: "green" | "amber" | "n
   default: { label: "unclassified", tone: "neutral" },
 };
 
+// Documented date · documenting individual (name, credentials, role) · location.
+function RecordMeta({ d }: { d: AnyRec }) {
+  const date = d.serviceDate ? new Date(d.serviceDate).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" }) : null;
+  const who = d.authorName
+    ? `${d.authorName}${d.authorCredentials ? `, ${d.authorCredentials}` : ""}${d.authorRole ? ` — ${d.authorRole}` : ""}`
+    : d.authorRole || null;
+  if (!date && !who && !d.facility) {
+    return <p className="mt-1 text-xs italic text-ink-300">No date, author, or location documented in this record.</p>;
+  }
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-xs text-ink-500">
+      {date && <span className="inline-flex items-center gap-1"><Calendar className="h-3 w-3 text-ink-400" />{date}</span>}
+      {who && <span className="inline-flex items-center gap-1 before:text-ink-300 before:content-['·']"><UserRound className="h-3 w-3 text-ink-400" />{who}</span>}
+      {d.facility && <span className="inline-flex items-center gap-1 before:text-ink-300 before:content-['·']"><MapPin className="h-3 w-3 text-ink-400" />{d.facility}</span>}
+    </div>
+  );
+}
+
 function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: boolean; call: any; busy: string | null }) {
   const [filter, setFilter] = useState<string>("All");
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -482,6 +503,7 @@ function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: bo
                       )}
                       {d.flags && <span className="text-xs text-amber-700">{d.flags}</span>}
                     </div>
+                    <RecordMeta d={d} />
                   </div>
                   {canEdit && (
                     <button className="text-ink-300 hover:text-red-600" title="Remove" onClick={async () => { if (confirm(`Remove ${d.filename}?`)) await call(`/api/cases/${data.id}/documents/${d.id}`, "DELETE"); }}>

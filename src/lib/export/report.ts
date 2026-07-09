@@ -254,8 +254,26 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
         width: { size: 100, type: WidthType.PERCENTAGE },
         borders: allBorders("E2E8F0"),
         rows: [
-          row([cell("Document", { bold: true, width: 46, fill: BRAND, color: "FFFFFF" }), cell("Record Type", { bold: true, width: 34, fill: BRAND, color: "FFFFFF" }), cell("Pages", { bold: true, width: 10, fill: BRAND, color: "FFFFFF", align: AlignmentType.RIGHT }), cell("Read", { bold: true, width: 10, fill: BRAND, color: "FFFFFF" })]),
-          ...c.documents.map((d, i) => row([cell(d.filename, { fill: i % 2 ? "F8FAFC" : "FFFFFF" }), cell(typeLabel(d.type), { fill: i % 2 ? "F8FAFC" : "FFFFFF" }), cell(String(d.pageCount || "—"), { align: AlignmentType.RIGHT, fill: i % 2 ? "F8FAFC" : "FFFFFF" }), cell(d.classifiedBy === "content" ? "content" : "filename", { size: 15, fill: i % 2 ? "F8FAFC" : "FFFFFF" })])),
+          row([
+            cell("Date", { bold: true, width: 11, fill: BRAND, color: "FFFFFF" }),
+            cell("Record Type", { bold: true, width: 21, fill: BRAND, color: "FFFFFF" }),
+            cell("Documenting Individual", { bold: true, width: 30, fill: BRAND, color: "FFFFFF" }),
+            cell("Location", { bold: true, width: 25, fill: BRAND, color: "FFFFFF" }),
+            cell("Pages", { bold: true, width: 7, fill: BRAND, color: "FFFFFF", align: AlignmentType.RIGHT }),
+            cell("Read", { bold: true, width: 6, fill: BRAND, color: "FFFFFF" }),
+          ]),
+          ...c.documents.map((d, i) => {
+            const fill = i % 2 ? "F8FAFC" : "FFFFFF";
+            const who = d.authorName ? `${d.authorName}${d.authorCredentials ? `, ${d.authorCredentials}` : ""}${d.authorRole ? ` — ${d.authorRole}` : ""}` : d.authorRole || "—";
+            return row([
+              cell(d.serviceDate ? fmtDate(d.serviceDate) : "—", { size: 16, fill }),
+              cell(typeLabel(d.type), { size: 16, fill }),
+              cell(who, { size: 16, fill }),
+              cell(d.facility || "—", { size: 16, fill }),
+              cell(String(d.pageCount || "—"), { align: AlignmentType.RIGHT, size: 16, fill }),
+              cell(d.classifiedBy === "content" ? "content" : "filename", { size: 14, fill }),
+            ]);
+          }),
         ],
       }),
     );

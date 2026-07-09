@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { extractText } from "@/lib/documents/extract";
 import { classifyDocument } from "@/lib/documents/classify";
+import { parseRecordMeta } from "@/lib/documents/meta";
 import type { Document, DocumentType } from "@/generated/prisma";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -61,6 +62,10 @@ export async function ingestDocument(input: IngestInput): Promise<IngestResult> 
   else if (c.method !== "content") flags.push(c.note);
   if (pageCount > 35) flags.push("Large document — confirm no missing pages");
 
+  // 4. Read the record descriptors from the content: documented date, the
+  //    documenting individual (name/credentials/role), and the facility.
+  const meta = parseRecordMeta(text, c.type);
+
   const document = await prisma.document.create({
     data: {
       caseId: input.caseId,
@@ -74,7 +79,12 @@ export async function ingestDocument(input: IngestInput): Promise<IngestResult> 
       ocrConfidence,
       classifiedBy: c.method,
       classifyScore: c.score,
-      provider: c.type === "OPERATIVE_NOTE" ? "Surgical Facility" : "Treating Provider",
+      serviceDate: meta.serviceDate,
+      authorName: meta.authorName,
+      authorCredentials: meta.authorCredentials,
+      authorRole: meta.authorRole,
+      facility: meta.facility,
+      provider: meta.facility ?? meta.authorName ?? (c.type === "OPERATIVE_NOTE" ? "Surgical Facility" : "Treating Provider"),
       extractedText: text.slice(0, 4000),
       flags: flags.join("; ") || null,
     },
