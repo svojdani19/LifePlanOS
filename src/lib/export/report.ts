@@ -158,8 +158,18 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
 
   const a = assumptionsFor(c);
   const items = c.futureCareItems;
-  const totalLifetime = items.reduce((s, i) => s + i.lifetimeCost, 0);
-  const totalPresentValue = items.reduce((s, i) => s + i.presentValue, 0);
+  // The finalized plan reflects physician-endorsed care. Once review has begun,
+  // only ACCEPTED (approved) or MODIFIED items drive the damages figures and the
+  // Medical Cost Table; rejected and still-pending items are disclosed for
+  // completeness but are not totaled. Before any review, all items are presented
+  // provisionally so the report is never empty.
+  const accepted = items.filter((i) => i.physicianStatus === "APPROVED" || i.physicianStatus === "MODIFIED");
+  const rejected = items.filter((i) => i.physicianStatus === "REJECTED");
+  const reviewStarted = items.length > 0 && items.some((i) => i.physicianStatus !== "PENDING");
+  const reportItems = reviewStarted ? accepted : items;
+  const excludedForReview = reviewStarted ? items.filter((i) => i.physicianStatus === "REJECTED" || i.physicianStatus === "PENDING") : [];
+  const totalLifetime = reportItems.reduce((s, i) => s + i.lifetimeCost, 0);
+  const totalPresentValue = reportItems.reduce((s, i) => s + i.presentValue, 0);
 
   const subject = subjectName(c.clientName, c.sex);
   const age = ageFrom(c.dateOfBirth);
@@ -191,7 +201,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
   body.push(new Table({ width: { size: 80, type: WidthType.PERCENTAGE }, alignment: AlignmentType.CENTER, borders: allBorders("E2E8F0"), rows: demo.map(([k, v]) => row([cell(k, { bold: true, width: 40, fill: "F1F5F9" }), cell(v, { width: 60 })])) }));
   body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 260, after: 40 }, children: [new TextRun({ text: "Estimated Future Medical Damages", size: 20, color: INK })] }));
   body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 20 }, children: [new TextRun({ text: money(totalLifetime), bold: true, size: 48, color: BRAND })] }));
-  body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 40 }, children: [new TextRun({ text: `Present value ${money(totalPresentValue)} · ${items.length} projected care items`, italics: true, size: 18, color: INK })] }));
+  body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 40 }, children: [new TextRun({ text: `Present value ${money(totalPresentValue)} · ${reportItems.length} projected care items${reviewStarted ? " (physician-endorsed)" : ""}`, italics: true, size: 18, color: INK })] }));
 
   // ── Abbreviations ────────────────────────────────────────────────────────────
   body.push(h1("Abbreviations", { pageBreak: true }));
@@ -284,9 +294,9 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
 
   // ── Future care — detailed recommendations ───────────────────────────────────
   body.push(h1("Future Care — Detailed Recommendations", { pageBreak: true }));
-  if (!items.length) body.push(p("No future-care recommendations have been generated for this case.", { italics: true }));
+  if (!reportItems.length) body.push(p(reviewStarted ? "No future-care items have been endorsed on physician review." : "No future-care recommendations have been generated for this case.", { italics: true }));
   for (const g of CATEGORY_GROUPS) {
-    const groupItems = items.filter((i) => g.cats.includes(i.category));
+    const groupItems = reportItems.filter((i) => g.cats.includes(i.category));
     if (!groupItems.length) continue;
     body.push(h2(g.title));
     for (const i of groupItems) {
@@ -317,7 +327,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
     ]),
   ];
   for (const g of CATEGORY_GROUPS) {
-    const groupItems = items.filter((i) => g.cats.includes(i.category));
+    const groupItems = reportItems.filter((i) => g.cats.includes(i.category));
     if (!groupItems.length) continue;
     mctRows.push(row([cell(g.title, { bold: true, fill: "E2F2F5" }), ...Array.from({ length: 6 }, () => cell("", { fill: "E2F2F5" }))]));
     for (const i of groupItems) {
@@ -334,8 +344,9 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
   // ── Potential costs not included ─────────────────────────────────────────────
   body.push(h1("Potential Medical Costs Not Included"));
   body.push(p(`The following contingencies are not reasonably medically probable and are therefore excluded from the Medical Cost Table, but would not be unexpected for the conditions at issue and are noted for completeness:`));
-  const speculative = items.filter((i) => i.probability === "SPECULATIVE" || i.probability === "NOT_SUPPORTED");
+  const speculative = reportItems.filter((i) => i.probability === "SPECULATIVE" || i.probability === "NOT_SUPPORTED");
   for (const i of speculative) body.push(bullet(`${i.service} — ${i.probability.toLowerCase()}${i.missingSupport ? `; ${i.missingSupport}` : ""}.`));
+  for (const i of excludedForReview) body.push(bullet(`${i.service} — ${i.physicianStatus === "REJECTED" ? "declined on physician review" : "pending physician sign-off"}${i.physicianNote ? `; ${i.physicianNote}` : ""}.`));
   body.push(bullet("Medical costs associated with unexpected complications of surgery or procedures."));
   body.push(bullet("Accelerated costs should the condition progress more rapidly than anticipated, including the potential need for repeat or revision surgery, adjacent-segment disease, or long-term higher levels of attendant/facility care."));
 
@@ -360,7 +371,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
     for (const f of completeness) body.push(bullet(`[${f.vulnerability}] ${f.category}: ${f.description}`));
   }
   body.push(h1("Appendix B — Physician Review"));
-  body.push(p(`${items.length - pendingMd} of ${items.length} projected care items carry treating-physician sign-off. Items pending confirmation of medical necessity are reserved for physician review prior to testimony.`));
+  body.push(p(`${accepted.length} of ${items.length} projected care items carry treating-physician sign-off and are included in the Medical Cost Table.${rejected.length ? ` ${rejected.length} item${rejected.length === 1 ? " was" : "s were"} declined on physician review and excluded from the totals.` : ""}${pendingMd ? ` ${pendingMd} item${pendingMd === 1 ? " remains" : "s remain"} pending confirmation of medical necessity and ${pendingMd === 1 ? "is" : "are"} reserved for physician review prior to testimony.` : ""}`));
 
   // ── References ───────────────────────────────────────────────────────────────
   body.push(h1("References"));

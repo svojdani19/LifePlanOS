@@ -647,6 +647,57 @@ function CausationPanel({ data }: { data: AnyRec }) {
 }
 
 // ── Future care ──────────────────────────────────────────────────────────────
+// One-line rationale for the item's probability rating, woven from its own
+// evidence/confidence fields (deterministic — mirrors the report's language).
+function probabilityReasoning(it: AnyRec): string {
+  const conf = it.confidence != null ? ` (confidence ${it.confidence}%)` : "";
+  const basis = /case-specific|physician confirmation|confirmation required/i.test(it.evidenceStrength || "")
+    ? "the clinical picture and standard-of-care practice"
+    : (it.evidenceStrength || "standard-of-care guidance").toLowerCase();
+  switch (it.probability) {
+    case "PROBABLE":
+      return `Probable — the need follows directly from the accepted diagnoses and is supported by ${basis}, making it more likely than not to be required${conf}.`;
+    case "POSSIBLE":
+      return `Possible — clinically foreseeable given the injury pattern but contingent on symptom progression or treatment response, so it is not established to a probability${conf}.`;
+    case "SPECULATIVE":
+      return `Speculative — a recognized contingency of the condition that the current record does not establish as more likely than not${it.missingSupport ? `; ${it.missingSupport.toLowerCase()}` : ""}${conf}.`;
+    default:
+      return `Not supported on the present record — retained only for completeness pending further documentation${conf}.`;
+  }
+}
+
+// One-line read on how exposed the item is to a defense challenge, factoring in
+// physician sign-off status and any lower-cost alternative.
+function vulnerabilityReasoning(it: AnyRec): string {
+  const md =
+    it.physicianStatus === "APPROVED" || it.physicianStatus === "MODIFIED"
+      ? "physician sign-off is on file, which blunts the challenge"
+      : it.physicianStatus === "REJECTED"
+        ? "the reviewing physician declined to endorse it, so it should be withdrawn"
+        : "physician sign-off is still pending, which the defense will press on";
+  switch (it.defenseVulnerability) {
+    case "LOW":
+      return `Low — a guideline-supported, standard-of-care item with strong record support; ${md}.`;
+    case "MODERATE":
+      return `Moderate — defensible but exposed on frequency, duration${it.lowerCostAlternative ? ", or the availability of a lower-cost alternative" : ""}; ${md}.`;
+    default:
+      return `High — ${it.probability === "SPECULATIVE" || it.probability === "NOT_SUPPORTED" ? "its speculative basis" : "its cost or evidentiary basis"} invites a defense challenge; ${md}.`;
+  }
+}
+
+// The single strongest, honestly-citable source behind the item (the governing
+// guideline/registry rather than a fabricated article — no hallucinated cites).
+function mostAgreeableReference(it: AnyRec): string {
+  const es = (it.evidenceStrength || "").toLowerCase();
+  const spec = it.specialty || "the treating specialty";
+  if (/odg|official disability/.test(es)) return "Official Disability Guidelines (ODG) — condition-specific treatment guideline.";
+  if (/guideline|cpg|aaos|acr|\baan\b/.test(es)) return `Applicable specialty clinical practice guideline (${spec}).`;
+  if (/registry|survivorship/.test(es)) return "National procedure registry / peer-reviewed survivorship data.";
+  if (/literature|peer-review|studies|evidence/.test(es)) return "Peer-reviewed clinical literature for the condition.";
+  if (/case-specific|physician|treating/.test(es)) return "Treating-physician documentation (case-specific standard of care).";
+  return it.literatureSupport || "Accepted standard-of-care practice for the condition.";
+}
+
 function FutureCarePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; call: any }) {
   const [open, setOpen] = useState<string | null>(null);
   if (data.futureCareItems.length === 0) return <Empty>Run the AI pipeline to generate future care recommendations.</Empty>;
@@ -676,7 +727,9 @@ function FutureCarePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
           {open === it.id && (
             <div className="mt-3 grid gap-3 border-t border-ink-100 pt-3 text-sm md:grid-cols-2">
               <div><p className="text-xs font-medium text-ink-500">Medical necessity</p><p className="text-ink-700">{it.rationale}</p></div>
-              <div><p className="text-xs font-medium text-ink-500">Evidence</p><p className="text-ink-700">{it.evidenceStrength} — {it.literatureSupport}</p></div>
+              <div><p className="text-xs font-medium text-ink-500">Why {it.probability.toLowerCase()}</p><p className="text-ink-700">{probabilityReasoning(it)}</p></div>
+              <div><p className="text-xs font-medium text-ink-500">Vulnerability ({it.defenseVulnerability.toLowerCase()})</p><p className="text-ink-700">{vulnerabilityReasoning(it)}</p></div>
+              <div><p className="text-xs font-medium text-ink-500">Evidence</p><p className="text-ink-700">{it.evidenceStrength} — {it.literatureSupport}</p><p className="mt-1 text-ink-700"><span className="font-medium text-ink-500">Most agreeable reference: </span>{mostAgreeableReference(it)}</p></div>
               {it.lowerCostAlternative && <div><p className="text-xs font-medium text-ink-500">Lower-cost alternative</p><p className="text-ink-700">{it.lowerCostAlternative}</p></div>}
               {it.missingSupport && <div><p className="text-xs font-medium text-amber-700">Missing support</p><p className="text-amber-700">{it.missingSupport}</p></div>}
               <div><p className="text-xs font-medium text-ink-500">Cost basis</p><p className="text-ink-700">{formatMoney(it.unitCost)}/unit · {it.pricingSource} · range {formatMoney(it.lowCost)}–{formatMoney(it.highCost)}</p></div>
@@ -837,16 +890,28 @@ function PhysicianPanel({ data, canReview, call }: { data: AnyRec; canReview: bo
   const [open, setOpen] = useState<string | null>(null);
   if (data.futureCareItems.length === 0) return <Empty>Run the AI pipeline first to build the physician review packet.</Empty>;
 
+  const pending = data.futureCareItems.filter((i: AnyRec) => i.physicianStatus === "PENDING").length;
+
   function modify(it: AnyRec) {
     const info = prompt(`Add information for "${it.service}". The paraphrased summary will be updated to include it.`);
     if (info == null) return;
     call(`/api/cases/${data.id}/future-care/${it.id}/physician`, "POST", { status: "MODIFIED", note: info });
   }
 
+  function acceptAll() {
+    if (!confirm(`Accept all ${pending} pending item${pending === 1 ? "" : "s"}? Each will carry physician sign-off and be included in the report.`)) return;
+    call(`/api/cases/${data.id}/future-care/accept-all`, "POST", undefined, "op");
+  }
+
   return (
     <div className="space-y-3">
-      <div className="card p-4 text-sm text-ink-600">
-        Physician review packet — {canReview ? "review the paraphrased summary of each point, then accept, reject, or modify by adding information (the summary updates automatically)." : "read-only: your role cannot sign off on medical necessity."}
+      <div className="card flex flex-wrap items-center justify-between gap-3 p-4 text-sm text-ink-600">
+        <span className="min-w-0 flex-1">
+          Physician review packet — {canReview ? "review the paraphrased summary of each point, then accept, reject, or modify by adding information (the summary updates automatically)." : "read-only: your role cannot sign off on medical necessity."}
+        </span>
+        {canReview && pending > 0 && (
+          <button className="btn-primary shrink-0 py-1.5 text-xs" onClick={acceptAll}>Accept All ({pending})</button>
+        )}
       </div>
       {data.futureCareItems.map((it: AnyRec) => (
         <div key={it.id} className="card p-4">
