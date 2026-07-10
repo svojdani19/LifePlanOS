@@ -131,8 +131,44 @@ model Firm {
   usageRecords UsageRecord[]
   documents    Document[]
   reports      ReportExport[]
+  precedents   PrecedentPlan[]
 
   @@index([slug])
+}
+
+// A finalized life care plan in the firm's precedent library — uploaded or
+// synced from an accessible server. Indexed on the attributes that drive the
+// "likeness" match so an active case can surface comparable prior LCPs.
+model PrecedentPlan {
+  id     String @id @default(uuid())
+  firmId String
+  firm   Firm   @relation(fields: [firmId], references: [id], onDelete: Cascade)
+
+  title       String // de-identified label, e.g. "L1 burst fracture — CA (2023)"
+  clientRef   String? // optional de-identified matter/reference id
+  diagnosis   String?
+  icd10Code   String?
+  injurySpecialty String? // engine injury category label
+  jurisdiction String?
+  mechanism   String?
+  age         Int?
+  sex         String?
+  lifeExpectancyYears Float?
+  lifetimeCost Float?
+  presentValue Float?
+  careCategories Json? // string[] of CareCategory present (for overlap scoring)
+  outcome     String? // free-text note: settlement/verdict/status
+
+  source      String  @default("upload") // "upload" | "server"
+  filename    String?
+  storageKey  String?
+  extractedText String?
+
+  createdById String?
+  createdAt   DateTime @default(now())
+
+  @@index([firmId, createdAt])
+  @@index([firmId, injurySpecialty])
 }
 
 model Subscription {

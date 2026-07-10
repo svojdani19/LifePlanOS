@@ -1,5 +1,6 @@
 import { PrismaClient } from "../src/generated/prisma";
 import { hashPassword } from "../src/lib/auth/password";
+import { SAMPLE_PRECEDENTS } from "../src/lib/precedents/samples";
 
 const prisma = new PrismaClient();
 
@@ -90,6 +91,17 @@ async function main() {
   });
 
   await prisma.auditLog.create({ data: { firmId: firm.id, userId: admin.id, action: "auth.login" } });
+
+  // Firm LCP precedent library (drives the case "Precedents" likeness match).
+  await prisma.precedentPlan.createMany({
+    data: SAMPLE_PRECEDENTS.map((s) => ({
+      firmId: firm.id, createdById: planner.id, source: "upload",
+      title: s.title, clientRef: s.clientRef, diagnosis: s.diagnosis, icd10Code: s.icd10Code,
+      injurySpecialty: s.injurySpecialty, jurisdiction: s.jurisdiction, mechanism: s.mechanism,
+      age: s.age, sex: s.sex, lifeExpectancyYears: s.lifeExpectancyYears, lifetimeCost: s.lifetimeCost, presentValue: s.presentValue,
+      careCategories: s.careCategories as unknown as object, outcome: s.outcome, filename: s.filename, extractedText: s.text,
+    })),
+  });
 
   console.log("✔ Seeded firm:", firm.name);
   console.log("  Login →", DEMO_EMAIL, "/", DEMO_PASSWORD);

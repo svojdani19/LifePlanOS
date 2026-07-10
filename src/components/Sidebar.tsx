@@ -26,7 +26,7 @@ const NAV: NavItem[] = [
   { href: "/cases", label: "Cases", icon: FolderKanban, perm: "case.view" },
   { href: "/team", label: "Team & Seats", icon: Users, perm: "team.manage" },
   { href: "/billing", label: "Billing", icon: CreditCard, perm: "billing.manage" },
-  { href: "/settings", label: "Firm Settings", icon: Settings, perm: "firm.settings" },
+  { href: "/settings", label: "Firm Management", icon: Settings, perm: "firm.settings" },
 ];
 
 export function Sidebar({

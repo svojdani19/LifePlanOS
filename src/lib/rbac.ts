@@ -19,6 +19,7 @@ export type Permission =
   | "team.manage" // invite / suspend / change roles
   | "billing.manage" // subscription + payment
   | "firm.settings" // branding, templates, retention
+  | "precedents.manage" // upload/curate the firm LCP precedent library
   | "audit.view";
 
 const ALL: Permission[] = [
@@ -34,6 +35,7 @@ const ALL: Permission[] = [
   "team.manage",
   "billing.manage",
   "firm.settings",
+  "precedents.manage",
   "audit.view",
 ];
 
@@ -47,6 +49,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, Permission[]> = {
     "chronology.edit",
     "futurecare.edit",
     "report.export",
+    "precedents.manage",
   ],
   PHYSICIAN_REVIEWER: ["case.view", "physician.review", "report.export"],
   ATTORNEY_REVIEWER: ["case.view", "report.export"],

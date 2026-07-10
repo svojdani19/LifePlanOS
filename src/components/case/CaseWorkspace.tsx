@@ -21,6 +21,7 @@ import {
   Calendar,
   UserRound,
   MapPin,
+  Library,
   Siren,
   Syringe,
   Dumbbell,
@@ -65,11 +66,13 @@ export function CaseWorkspace({
   assumptions,
   totals,
   permissions,
+  precedents = [],
 }: {
   data: AnyRec;
   assumptions: { lifeExpectancyYears: number; discountRate: number; medicalInflation: number; geographicFactor: number };
   totals: { totalLifetime: number; totalPresentValue: number };
   permissions: Permission[];
+  precedents?: AnyRec[];
 }) {
   const router = useRouter();
   const [tab, setTab] = useState("overview");
@@ -101,6 +104,7 @@ export function CaseWorkspace({
     { id: "costs", label: "Costs", icon: Calculator },
     { id: "reviews", label: `Reviews (${data.reviewFindings.length})`, icon: ShieldAlert },
     { id: "physician", label: `Physician (${pendingPhysician})`, icon: ClipboardCheck },
+    { id: "precedents", label: `Precedents (${precedents.length})`, icon: Library },
     { id: "report", label: "Report", icon: FileOutput },
   ];
 
@@ -192,6 +196,7 @@ export function CaseWorkspace({
         {tab === "costs" && <CostsPanel data={data} assumptions={assumptions} totals={totals} canEdit={can("case.edit")} call={call} />}
         {tab === "reviews" && <ReviewsPanel points={data.reviewFindings} hasPlan={hasPlan} />}
         {tab === "physician" && <PhysicianPanel data={data} canReview={can("physician.review")} call={call} />}
+        {tab === "precedents" && <PrecedentsPanel precedents={precedents} data={data} />}
         {tab === "report" && <ReportPanel data={data} canExport={can("report.export")} call={call} busy={busy} totals={totals} />}
       </div>
     </div>
@@ -1193,6 +1198,71 @@ function PhysicianPanel({ data, canReview, call }: { data: AnyRec; canReview: bo
           )}
         </div>
       ))}
+    </div>
+  );
+}
+
+// ── Precedents (comparable finalized LCPs, ranked by likeness) ───────────────
+const injuryLabel = (s?: string | null) => (s || "").replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (m) => m.toUpperCase());
+function PrecedentsPanel({ precedents, data }: { precedents: AnyRec[]; data: AnyRec }) {
+  if (!precedents.length) {
+    return <Empty>No precedents in the firm library yet. Add finalized LCPs in Firm Management → LCP Precedent Library, then return here to see the closest comparables to this case.</Empty>;
+  }
+  const barColor = (n: number) => (n >= 70 ? "bg-emerald-500" : n >= 45 ? "bg-amber-500" : "bg-ink-300");
+  const numColor = (n: number) => (n >= 70 ? "text-emerald-600" : n >= 45 ? "text-amber-600" : "text-ink-400");
+  return (
+    <div className="space-y-4">
+      <p className="text-sm text-ink-500">
+        Finalized LCPs from your firm library ranked by <span className="font-medium text-ink-700">likeness</span> to {data.clientName}&apos;s case — the closest precedents to compare against, benchmark, and cite.
+      </p>
+      <div className="space-y-3">
+        {precedents.map((p) => {
+          const m = p.match || { likeness: 0, factors: [] };
+          const hits = (m.factors || []).filter((f: AnyRec) => f.got > 0).sort((a: AnyRec, b: AnyRec) => b.got - a.got);
+          const misses = (m.factors || []).filter((f: AnyRec) => f.got === 0);
+          return (
+            <div key={p.id} className="card p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-semibold text-ink-900">{p.title}</p>
+                  <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                    {p.injurySpecialty && <Badge tone="brand">{injuryLabel(p.injurySpecialty)}</Badge>}
+                    {p.icd10Code && <span className="rounded bg-ink-100 px-1.5 py-0.5 font-mono text-[11px] text-ink-600">{p.icd10Code}</span>}
+                    {p.jurisdiction && <span className="text-xs text-ink-500">{p.jurisdiction}</span>}
+                  </div>
+                  {p.diagnosis && <p className="mt-1 text-xs text-ink-600">{p.diagnosis}{p.mechanism ? ` · ${String(p.mechanism).toLowerCase()}` : ""}</p>}
+                  <div className="mt-1 flex flex-wrap gap-x-3 text-xs text-ink-500">
+                    {p.age != null && <span>age {p.age}</span>}
+                    {p.presentValue != null && <span>PV {formatMoney(p.presentValue)}</span>}
+                    {p.lifetimeCost != null && <span>lifetime {formatMoney(p.lifetimeCost)}</span>}
+                    {p.outcome && <span className="italic">{p.outcome}</span>}
+                  </div>
+                </div>
+                <div className="shrink-0 text-right">
+                  <div className={cn("text-2xl font-bold leading-none", numColor(m.likeness))}>{m.likeness}%</div>
+                  <div className="text-[10px] uppercase tracking-wide text-ink-400">likeness</div>
+                </div>
+              </div>
+              <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-ink-100">
+                <div className={cn("h-full rounded-full transition-all", barColor(m.likeness))} style={{ width: `${m.likeness}%` }} />
+              </div>
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                {hits.map((f: AnyRec, i: number) => (
+                  <span key={i} className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] text-emerald-800"><Check className="h-3 w-3" />{f.label}: {f.note}</span>
+                ))}
+                {misses.map((f: AnyRec, i: number) => (
+                  <span key={`m${i}`} className="rounded-full bg-ink-50 px-2 py-0.5 text-[11px] text-ink-400">{f.label}: {f.note}</span>
+                ))}
+              </div>
+              <div className="mt-3">
+                <a href={`/api/precedents/${p.id}/view`} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs font-medium text-brand-700 hover:underline">
+                  <ExternalLink className="h-3.5 w-3.5" /> Open precedent LCP
+                </a>
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
