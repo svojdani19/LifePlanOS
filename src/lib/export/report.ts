@@ -525,14 +525,24 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
     if (evSources.length) body.push(labeled("Evidence sources (record · page)", evSources.map((s) => `${s.filename}${s.page ? `, p. ${s.page}` : ""}${s.quote ? ` — "${s.quote}"` : ""}`).join("  ·  ")));
     if (cond.supportingRecords) body.push(labeled("Supporting records / physician", cond.supportingRecords));
     // Standard-of-care analysis: cited guidance quoted verbatim + documentation status.
-    const soc = cond.socAnalysis as unknown as { standard?: string; documentation?: string; rationale?: string; gaps?: string | null; guidelines?: { title?: string; journal?: string; year?: string; pmid?: string; doi?: string; quote?: string }[] } | null;
+    const soc = cond.socAnalysis as unknown as {
+      standard?: string; documentation?: string; rationale?: string; gaps?: string | null;
+      assessment?: { verdict?: string; narrative?: string; points?: { guideline?: string; addressed?: boolean; support?: string | null }[] };
+      guidelines?: { title?: string; journal?: string; year?: string; pmid?: string; doi?: string; quote?: string }[];
+    } | null;
     if (soc) {
-      body.push(labeled("Standard-of-care documentation", `${String(soc.documentation ?? "").replace(/_/g, " ")} — ${soc.rationale ?? ""}`));
-      for (const g of (soc.guidelines ?? []).slice(0, 3)) {
-        body.push(labeled("Guidance (quoted verbatim)", `"${g.quote}" — ${g.title}. ${g.journal ?? ""}${g.year ? ` ${g.year}` : ""}${g.pmid ? ` (PMID ${g.pmid})` : g.doi ? ` (doi:${g.doi})` : ""}.`));
+      const VLABEL: Record<string, string> = { CONSISTENT: "Consistent with cited guidance", PARTIAL: "Partially consistent — gaps noted", POTENTIAL_GAP: "Potential gap — recommended care not documented", INDETERMINATE: "Indeterminate — insufficient documentation" };
+      if (soc.assessment) {
+        body.push(labeled("Standard-of-care assessment", `${VLABEL[soc.assessment.verdict ?? ""] ?? soc.assessment.verdict ?? ""} — ${soc.assessment.narrative ?? ""}`));
+      }
+      body.push(labeled("Documentation", `${String(soc.documentation ?? "").replace(/_/g, " ")} — ${soc.rationale ?? ""}`));
+      for (const g of soc.guidelines ?? []) {
+        const pt = soc.assessment?.points?.find((p) => p.guideline && (g.title ?? "").startsWith(p.guideline.replace(/…$/, "")));
+        const mark = pt ? (pt.addressed ? `[Addressed${pt.support ? ` — ${pt.support}` : ""}] ` : "[Not evidenced in the reviewed records] ") : "";
+        body.push(labeled("Guidance (quoted verbatim)", `${mark}"${g.quote}" — ${g.title}. ${g.journal ?? ""}${g.year ? ` ${g.year}` : ""}${g.pmid ? ` (PMID ${g.pmid})` : g.doi ? ` (doi:${g.doi})` : ""}.`));
       }
       if (soc.gaps) body.push(labeled("Standard-of-care gap", soc.gaps));
-      body.push(labeled("Compliance determination", "Reserved to the reviewing physician; the cited guidance provides the reference standard."));
+      body.push(labeled("Determination", "The assessment is a preliminary, evidence-grounded aid; the final standard-of-care determination is the reviewing physician's."));
     }
     if (cond.reasoning) body.push(labeled("Analysis", cond.reasoning));
     body.push(labeled("Pre-existing / aggravation", cond.relatedness === "AGGRAVATION" ? "Aggravation of a pre-existing condition — apportionment addressed in §10." : cond.relatedness === "PREEXISTING_UNRELATED" ? "Pre-existing and unrelated — excluded from causally-related damages." : "No pre-existing basis identified in the reviewed records for this diagnosis."));

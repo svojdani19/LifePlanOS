@@ -12,7 +12,7 @@
 
 import { prisma } from "@/lib/db";
 import { findCandidates, literatureReachable, type Article } from "@/lib/literature";
-import { documentsDiagnosis, hasTerm, sigTerms } from "./chronology";
+import { hasTerm, sigTerms } from "./chronology";
 import { Prisma } from "@/generated/prisma";
 
 export interface SocGuideline {
@@ -37,14 +37,47 @@ export interface SocRecordSupport {
 
 export type SocDocumentation = "DOCUMENTED" | "LIMITED" | "NOT_DOCUMENTED";
 
+// The actual analysis conclusion — whether the documented/planned care aligns
+// with the cited guidance. A preliminary, evidence-grounded assessment for the
+// reviewing physician, not a legal conclusion of breach.
+export type SocVerdict = "CONSISTENT" | "PARTIAL" | "POTENTIAL_GAP" | "INDETERMINATE";
+
+export interface SocAlignmentPoint {
+  /** the guideline the recommendation comes from (short title) */
+  guideline: string;
+  /** whether the documented/planned care evidences this guidance */
+  addressed: boolean;
+  /** the record entry (or planned care) that evidences it, when addressed */
+  support: string | null;
+}
+
+export interface SocAssessment {
+  verdict: SocVerdict;
+  /** the actual standard-of-care analysis narrative */
+  narrative: string;
+  points: SocAlignmentPoint[];
+}
+
 export interface SocAnalysis {
-  /** framing statement — what was located and what remains the physician's call */
+  /** framing statement — what was located */
   standard: string;
   guidelines: SocGuideline[];
   recordSupport: SocRecordSupport[];
   documentation: SocDocumentation;
+  /** whether the standard of care appears met, with reasoning */
+  assessment: SocAssessment;
   rationale: string;
   gaps: string | null;
+}
+
+const VERDICT_LABEL: Record<SocVerdict, string> = {
+  CONSISTENT: "Consistent with cited guidance",
+  PARTIAL: "Partially consistent — gaps noted",
+  POTENTIAL_GAP: "Potential gap — recommended care not documented",
+  INDETERMINATE: "Indeterminate — insufficient documentation",
+};
+export function socVerdictLabel(v: SocVerdict): string {
+  return VERDICT_LABEL[v] ?? v;
 }
 
 const SOURCE_LABEL: Record<string, string> = { europepmc: "Europe PMC", crossref: "Crossref", semanticscholar: "Semantic Scholar" };
@@ -88,12 +121,22 @@ const SOC_GENERIC = new Set([
   "pain", "disorder", "disorders", "syndrome", "disease", "chronic", "acute", "management", "treatment", "care",
   "internal", "external", "primary", "secondary", "unspecified", "initial", "encounter", "status", "post", "residual",
   "deficit", "complication", "complications", "surgical", "surgery", "procedure", "clinical", "medical", "patient", "adult",
+  "traumatic", "posttraumatic", "sequela", "sequelae", "displaced", "closed", "open", "affected", "level", "due",
 ]);
 // Distinctive (anatomy/procedure/pathology) terms of a diagnosis — the words a
 // truly on-point guideline must speak to. Generic clinical nouns removed.
 function distinctiveTerms(name: string): string[] {
   return sigTerms(name).filter((t) => !SOC_GENERIC.has(t));
 }
+// Weak, process-y words that must NOT count as a documented "intervention"
+// (they appear in almost any note and cause cross-topic false matches).
+const MATCH_STOP = new Set([
+  "therapy", "therapies", "therapeutic", "function", "functional", "improvement", "improvements", "improve", "advised",
+  "program", "exercise", "exercises", "evaluation", "assessment", "recommendation", "recommendations", "recommend",
+  "guideline", "guidelines", "guidance", "clinical", "patient", "patients", "standard", "evidence", "study", "review",
+  "general", "follow", "followup", "visit", "visits", "consider", "considering", "including", "increased", "reduced",
+  "outcome", "outcomes", "quality", "safety", "should", "options", "provider", "providers",
+]);
 
 // Compact query phrase from a diagnosis name (drops severity/laterality filler).
 const HINT_STOP = new Set(["severe", "chronic", "acute", "status", "post", "with", "and", "the", "mild", "moderate", "left", "right", "bilateral", "initial", "encounter", "unspecified", "history", "type", "residual", "deficit", "anticipated", "due", "internal", "affected"]);
@@ -206,6 +249,12 @@ export async function generateStandardOfCare(caseId: string): Promise<number> {
   const conditions = await prisma.condition.findMany({ where: { caseId } });
   if (!conditions.length) return 0;
   const events = await prisma.chronologyEvent.findMany({ where: { caseId }, orderBy: { eventDate: "asc" } });
+  // Planned future care counts toward the standard (e.g. a documented plan for
+  // revision arthroplasty). Items are diagnosis-driven and linked to the primary
+  // condition, so they apply case-wide unless the service names another region.
+  const careItems = await prisma.futureCareItem.findMany({ where: { caseId }, select: { service: true } });
+  const careServices = careItems.map((i) => i.service);
+  const primaryConditionId = conditions[0]?.id;
   const online = await literatureReachable();
   const yearNow = new Date().getFullYear();
 
@@ -249,12 +298,18 @@ export async function generateStandardOfCare(caseId: string): Promise<number> {
       }
     }
 
-    // ── Map the documented care in the chronology against the item. ──────────
+    // ── Map the documented care in the chronology against the item. A record
+    //    pertains only if it names a DISTINCTIVE term of the diagnosis (anatomy/
+    //    pathology) — so a knee record never attaches to "post-traumatic
+    //    headache" on the shared word "traumatic".
+    const condDistinct = distinctiveTerms(cond.name);
+    const recordPertains = (e: (typeof events)[number]): boolean => {
+      if (!condDistinct.length) return false;
+      const hay = [e.summary, e.diagnosis, e.treatment, e.clinicalSignificance].filter(Boolean).join("\n").toLowerCase();
+      return condDistinct.some((t) => hasTerm(hay, t));
+    };
     const recordSupport: SocRecordSupport[] = events
-      .filter((e) => {
-        const hay = [e.summary, e.diagnosis, e.treatment, e.clinicalSignificance].filter(Boolean).join("\n").toLowerCase();
-        return documentsDiagnosis(hay, cond.name);
-      })
+      .filter(recordPertains)
       .map((e) => ({
         date: e.eventDate.toISOString().slice(0, 10),
         summary: e.summary,
@@ -263,9 +318,87 @@ export async function generateStandardOfCare(caseId: string): Promise<number> {
       }));
 
     const documentation: SocDocumentation = recordSupport.length >= 2 ? "DOCUMENTED" : recordSupport.length === 1 ? "LIMITED" : "NOT_DOCUMENTED";
+
+    // ── The actual analysis: does the documented + planned care align with the
+    //    interventions the cited guidance recommends? Each guideline's
+    //    recommended-intervention terms are matched against the care actually
+    //    documented in the chronology and the care planned for this diagnosis.
+    const condTerms = new Set(distinctiveTerms(cond.name));
+    // Planned care: items are linked to the primary condition, so for the
+    // primary diagnosis all planned care applies; for others only items whose
+    // service names the diagnosis.
+    const careForAll = cond.id === primaryConditionId;
+    const carePlanned = careServices.filter((s) => careForAll || condDistinct.some((t) => hasTerm(s.toLowerCase(), t)));
+    // Records that pertain to this diagnosis, each kept with its full text so an
+    // intervention must CO-OCCUR with the diagnosis in the SAME record — a knee
+    // PT note can't satisfy a headache guideline just because another note
+    // mentions "headache" and this one mentions "exercise".
+    const pertinentEvents = events.filter(recordPertains).map((e) => ({
+      date: e.eventDate.toISOString().slice(0, 10),
+      summary: e.summary,
+      page: e.sourcePage,
+      text: [e.summary, e.treatment, e.diagnosis, e.clinicalSignificance].filter(Boolean).join(" ").toLowerCase(),
+    }));
+
+    const points: SocAlignmentPoint[] = guidelines.map((g) => {
+      // Intervention terms = the guidance quote's specific clinical acts,
+      // excluding the condition's own anatomy and generic care/process words.
+      const interventions = sigTerms(g.quote).filter((t) => t.length >= 5 && !SOC_GENERIC.has(t) && !MATCH_STOP.has(t) && !condTerms.has(t));
+      // Addressed only if a SINGLE pertinent record documents an intervention…
+      const rec = pertinentEvents.find((e) => interventions.some((t) => hasTerm(e.text, t)));
+      // …or the diagnosis-scoped planned care includes one.
+      const planned = !rec ? carePlanned.find((s) => interventions.some((t) => hasTerm(s.toLowerCase(), t))) : undefined;
+      return {
+        guideline: g.title.length > 90 ? g.title.slice(0, 89) + "…" : g.title,
+        addressed: !!rec || !!planned,
+        support: rec ? `${rec.date}: ${rec.summary}${rec.page ? ` (p. ${rec.page})` : ""}` : planned ? `Planned care: ${planned}` : null,
+      };
+    });
+
+    // ── Verdict + narrative. Deliberately conservative: a positive match asserts
+    //    consistency; a failure to auto-match is "not confirmable from the
+    //    reviewed records" (physician review), NOT an assertion of breach. The
+    //    one hard gap we do assert is an undocumented diagnosis. ───────────────
+    const addressed = points.filter((p) => p.addressed).length;
+    const total = points.length;
+    const plannedAddresses = points.some((p) => p.addressed && p.support?.startsWith("Planned care"));
+    let verdict: SocVerdict;
+    let narrative: string;
+    if (total === 0) {
+      verdict = "INDETERMINATE";
+      narrative = online
+        ? "No indexed clinical practice guideline with pertinent quotable language was located for this diagnosis, so concordance with a published standard cannot be assessed. The reviewing physician should identify the applicable specialty standard."
+        : "Guideline lookup was unavailable (offline), so the standard of care could not be assessed. Re-run with network access.";
+    } else if (recordSupport.length === 0) {
+      // Guidance exists but the diagnosis is not managed in the reviewed records.
+      if (plannedAddresses) {
+        verdict = "PARTIAL";
+        narrative = `${total} applicable ${total === 1 ? "guideline was" : "guidelines were"} located. The reviewed records do not document management of this diagnosis, though the projected care plan addresses the cited guidance. Whether guideline-concordant care was rendered cannot be confirmed from the present record — obtain the treating providers' records for this diagnosis.`;
+      } else {
+        verdict = "POTENTIAL_GAP";
+        narrative = `${total} applicable clinical practice ${total === 1 ? "guideline was" : "guidelines were"} located, but the reviewed records do not document evaluation or management of this diagnosis. This is a potential gap against the cited standard — the care may have been rendered but is not in the reviewed records; obtain the complete treating records or physician review before drawing any conclusion.`;
+      }
+    } else if (addressed === total) {
+      verdict = documentation === "DOCUMENTED" ? "CONSISTENT" : "PARTIAL";
+      narrative =
+        documentation === "DOCUMENTED"
+          ? `The documented and planned care corresponds to the interventions the cited ${total === 1 ? "guideline recommends" : "guidelines recommend"} for this diagnosis, across ${recordSupport.length} dated encounters plus the projected plan. On the reviewed record the care appears consistent with the cited standard of care; final concordance is the reviewing physician's determination.`
+          : `The documented and planned care aligns with the cited guidance, but management is documented in only a single encounter — thin documentation. It appears consistent as far as the record goes; obtain the full treating records to confirm.`;
+    } else if (addressed > 0) {
+      verdict = "PARTIAL";
+      const missing = points.filter((p) => !p.addressed).map((p) => p.guideline);
+      narrative = `The documented/planned care aligns with ${addressed} of ${total} cited ${total === 1 ? "guideline" : "guidelines"}; it appears partially consistent with the cited standard. Alignment with ${missing.slice(0, 2).join("; ")}${missing.length > 2 ? `, and ${missing.length - 2} more` : ""} could not be confirmed from the reviewed records — obtain the treating records addressing those elements or physician clarification.`;
+    } else {
+      // Care IS documented, but keyword matching couldn't confirm the specific
+      // recommended interventions — do NOT assert a gap on that basis.
+      verdict = "PARTIAL";
+      narrative = `The reviewed records document ${recordSupport.length} encounter${recordSupport.length === 1 ? "" : "s"} for this diagnosis, but the specific interventions in the cited guidance could not be automatically matched to the record's language. Concordance with the cited standard requires physician review of the records against the quoted guidance below.`;
+    }
+    const assessment: SocAssessment = { verdict, narrative, points };
+
     const rationale =
       documentation === "DOCUMENTED"
-        ? `The chronology documents ${recordSupport.length} dated encounters addressing this diagnosis; the cited guidance provides the reference standard against which the reviewing physician can assess that care.`
+        ? `The chronology documents ${recordSupport.length} dated encounters addressing this diagnosis, mapped against the cited guidance below.`
         : documentation === "LIMITED"
           ? "A single dated encounter addressing this diagnosis appears in the reviewed records — thin documentation against the cited guidance."
           : "No dated encounter addressing this diagnosis was identified in the reviewed records.";
@@ -275,12 +408,12 @@ export async function generateStandardOfCare(caseId: string): Promise<number> {
         : null;
 
     const standard = guidelines.length
-      ? `${guidelines.length} published clinical practice ${guidelines.length === 1 ? "guideline was" : "guidelines were"} located for this diagnosis; the pertinent language is quoted verbatim below. Whether the documented care met the standard of care is a determination reserved to the reviewing physician.`
+      ? `${guidelines.length} published clinical practice ${guidelines.length === 1 ? "guideline was" : "guidelines were"} located for this diagnosis; the pertinent language is quoted verbatim below and the documented/planned care is assessed against it. The assessment is a preliminary, evidence-grounded aid — the final standard-of-care determination is the reviewing physician's.`
       : online
         ? "No indexed clinical practice guideline with pertinent quotable language could be located for this diagnosis — the reviewing physician should identify the applicable specialty standard."
         : "Guideline lookup was unavailable (offline); re-run the pipeline with network access to populate cited guidance.";
 
-    const soc: SocAnalysis = { standard, guidelines, recordSupport, documentation, rationale, gaps };
+    const soc: SocAnalysis = { standard, guidelines, recordSupport, documentation, assessment, rationale, gaps };
     await prisma.condition.update({ where: { id: cond.id }, data: { socAnalysis: soc as unknown as Prisma.InputJsonValue } });
     n++;
   }

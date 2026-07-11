@@ -1112,6 +1112,12 @@ function CausationPanel({ data }: { data: AnyRec }) {
 // care that corresponds, and a documentation status. Compliance determination
 // is explicitly reserved to the reviewing physician.
 const SOC_TONE: Record<string, "green" | "amber" | "red"> = { DOCUMENTED: "green", LIMITED: "amber", NOT_DOCUMENTED: "red" };
+const VERDICT_META: Record<string, { tone: "green" | "amber" | "red" | "neutral"; label: string }> = {
+  CONSISTENT: { tone: "green", label: "Consistent with cited guidance" },
+  PARTIAL: { tone: "amber", label: "Partially consistent — gaps noted" },
+  POTENTIAL_GAP: { tone: "red", label: "Potential gap — not documented" },
+  INDETERMINATE: { tone: "neutral", label: "Indeterminate" },
+};
 function StandardOfCarePanel({ data }: { data: AnyRec }) {
   if (data.conditions.length === 0) return <Empty>Run the AI pipeline to build the standard-of-care analysis from the causation items.</Empty>;
   const withSoc = data.conditions.filter((c: AnyRec) => c.socAnalysis);
@@ -1125,6 +1131,10 @@ function StandardOfCarePanel({ data }: { data: AnyRec }) {
         const soc: AnyRec = c.socAnalysis;
         const guidelines: AnyRec[] = Array.isArray(soc.guidelines) ? soc.guidelines : [];
         const support: AnyRec[] = Array.isArray(soc.recordSupport) ? soc.recordSupport : [];
+        const assessment: AnyRec | null = soc.assessment ?? null;
+        const points: AnyRec[] = assessment && Array.isArray(assessment.points) ? assessment.points : [];
+        const vmeta = assessment ? VERDICT_META[assessment.verdict] ?? VERDICT_META.INDETERMINATE : null;
+        const addressedOf = (g: AnyRec) => points.find((p) => p.guideline && (g.title.startsWith(p.guideline.replace(/…$/, "")) || p.guideline.startsWith(g.title.slice(0, 60))));
         return (
           <div key={c.id} className="card p-5">
             <div className="flex flex-wrap items-start justify-between gap-2">
@@ -1134,21 +1144,43 @@ function StandardOfCarePanel({ data }: { data: AnyRec }) {
                 <Badge tone={SOC_TONE[soc.documentation] ?? "amber"}>{String(soc.documentation).replace(/_/g, " ").toLowerCase()}</Badge>
               </div>
             </div>
-            <p className="mt-2 text-xs text-ink-500">{soc.standard}</p>
+
+            {/* The actual standard-of-care determination. */}
+            {assessment && vmeta && (
+              <div className={cn("mt-3 rounded-lg border p-3", vmeta.tone === "green" ? "border-emerald-200 bg-emerald-50" : vmeta.tone === "red" ? "border-red-200 bg-red-50" : vmeta.tone === "amber" ? "border-amber-200 bg-amber-50" : "border-ink-200 bg-ink-50")}>
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">Standard-of-care assessment</span>
+                  <Badge tone={vmeta.tone}>{vmeta.label}</Badge>
+                </div>
+                <p className="mt-1.5 text-sm text-ink-800">{assessment.narrative}</p>
+              </div>
+            )}
+
+            <p className="mt-3 text-xs text-ink-500">{soc.standard}</p>
 
             {guidelines.length > 0 && (
               <div className="mt-3">
                 <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Applicable guidance — direct language from the source</p>
                 <ol className="mt-1.5 space-y-3">
-                  {guidelines.map((g, i) => (
-                    <li key={g.pmid ?? g.doi ?? i} className="rounded-lg bg-brand-50/50 p-3">
-                      <blockquote className="border-l-2 border-brand-300 pl-3 text-sm italic text-ink-800">“{g.quote}”</blockquote>
-                      <p className="mt-1.5 text-xs text-ink-500">
-                        <a href={g.url} target="_blank" rel="noopener noreferrer" className="font-medium text-brand-700 hover:underline">{g.title}</a>
-                      </p>
-                      <p className="text-[11px] text-ink-400">{[g.authors, g.journal, g.year, g.pmid ? `PMID ${g.pmid}` : g.doi ? `doi:${g.doi}` : "", g.source].filter(Boolean).join(" · ")}</p>
-                    </li>
-                  ))}
+                  {guidelines.map((g, i) => {
+                    const pt = addressedOf(g);
+                    return (
+                      <li key={g.pmid ?? g.doi ?? i} className="rounded-lg bg-brand-50/50 p-3">
+                        {pt && (
+                          <p className={cn("mb-1.5 flex items-center gap-1 text-[11px] font-medium", pt.addressed ? "text-emerald-700" : "text-ink-400")}>
+                            {pt.addressed ? <Check className="h-3.5 w-3.5" /> : <span className="text-xs">○</span>}
+                            {pt.addressed ? "Addressed by the record" : "Not evidenced in the reviewed records"}
+                            {pt.addressed && pt.support && <span className="font-normal text-ink-500">— {pt.support}</span>}
+                          </p>
+                        )}
+                        <blockquote className="border-l-2 border-brand-300 pl-3 text-sm italic text-ink-800">“{g.quote}”</blockquote>
+                        <p className="mt-1.5 text-xs text-ink-500">
+                          <a href={g.url} target="_blank" rel="noopener noreferrer" className="font-medium text-brand-700 hover:underline">{g.title}</a>
+                        </p>
+                        <p className="text-[11px] text-ink-400">{[g.authors, g.journal, g.year, g.pmid ? `PMID ${g.pmid}` : g.doi ? `doi:${g.doi}` : "", g.source].filter(Boolean).join(" · ")}</p>
+                      </li>
+                    );
+                  })}
                 </ol>
               </div>
             )}
@@ -1171,8 +1203,8 @@ function StandardOfCarePanel({ data }: { data: AnyRec }) {
               )}
             </div>
 
-            <p className="mt-3 text-xs text-ink-500"><span className="font-medium">Assessment basis:</span> {soc.rationale}</p>
-            {soc.gaps && <p className="mt-1 text-xs text-amber-700"><span className="font-medium">Gap:</span> {soc.gaps}</p>}
+            {soc.gaps && <p className="mt-3 text-xs text-amber-700"><span className="font-medium">Gap:</span> {soc.gaps}</p>}
+            <p className="mt-2 text-[11px] text-ink-400">The assessment is a preliminary, evidence-grounded aid; the final standard-of-care determination is the reviewing physician&apos;s.</p>
           </div>
         );
       })}
