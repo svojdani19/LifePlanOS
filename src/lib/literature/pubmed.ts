@@ -15,6 +15,8 @@ export interface Article {
   journal: string;
   year: string;
   url: string;
+  /** PubMed publication types (e.g. "Systematic Review") — used for ranking. */
+  pubtype?: string[];
 }
 
 const BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils";
@@ -43,20 +45,21 @@ async function eFetch(url: string): Promise<Response | null> {
   return null;
 }
 
-async function esearchTop(term: string): Promise<string | null> {
-  const url = `${BASE}/esearch.fcgi?db=pubmed&retmode=json&retmax=1&sort=relevance&term=${encodeURIComponent(term)}${KEY}`;
+async function esearchIds(term: string, retmax = 1): Promise<string[]> {
+  const url = `${BASE}/esearch.fcgi?db=pubmed&retmode=json&retmax=${retmax}&sort=relevance&term=${encodeURIComponent(term)}${KEY}`;
   const r = await eFetch(url);
-  if (!r) return null;
+  if (!r) return [];
   const j = (await r.json()) as { esearchresult?: { idlist?: string[] } };
-  return j.esearchresult?.idlist?.[0] ?? null;
+  return j.esearchresult?.idlist ?? [];
 }
 
-async function esummary(pmid: string): Promise<Article | null> {
-  const url = `${BASE}/esummary.fcgi?db=pubmed&retmode=json&id=${pmid}${KEY}`;
-  const r = await eFetch(url);
-  if (!r) return null;
-  const j = (await r.json()) as { result?: Record<string, { title?: string; source?: string; pubdate?: string; authors?: { name: string }[] }> };
-  const a = j.result?.[pmid];
+async function esearchTop(term: string): Promise<string | null> {
+  return (await esearchIds(term, 1))[0] ?? null;
+}
+
+type Summary = { title?: string; source?: string; pubdate?: string; sortpubdate?: string; authors?: { name: string }[]; pubtype?: string[] };
+
+function toArticle(pmid: string, a: Summary): Article | null {
   if (!a || !a.title) return null;
   const names = (a.authors ?? []).map((x) => x.name).filter(Boolean);
   const authors = names.slice(0, 3).join(", ") + (names.length > 3 ? ", et al." : "");
@@ -65,25 +68,53 @@ async function esummary(pmid: string): Promise<Article | null> {
     title: a.title.replace(/\.$/, ""),
     authors,
     journal: a.source ?? "",
-    year: (a.pubdate ?? "").slice(0, 4),
+    year: (a.sortpubdate ?? a.pubdate ?? "").slice(0, 4),
     url: `https://pubmed.ncbi.nlm.nih.gov/${pmid}/`,
+    pubtype: a.pubtype ?? [],
   };
 }
 
+// One batched esummary call for many PMIDs (preserving PubMed's relevance order).
+async function esummaryMany(pmids: string[]): Promise<Article[]> {
+  if (!pmids.length) return [];
+  const url = `${BASE}/esummary.fcgi?db=pubmed&retmode=json&id=${pmids.join(",")}${KEY}`;
+  const r = await eFetch(url);
+  if (!r) return [];
+  const j = (await r.json()) as { result?: Record<string, Summary> };
+  const out: Article[] = [];
+  for (const pmid of pmids) {
+    const art = j.result?.[pmid] ? toArticle(pmid, j.result[pmid]!) : null;
+    if (art) out.push(art);
+  }
+  return out;
+}
+
+async function esummary(pmid: string): Promise<Article | null> {
+  return (await esummaryMany([pmid]))[0] ?? null;
+}
+
 /**
- * The single strongest real supporting article for a clinical topic, or null.
- * Relevance-first (keeps results on-topic), restricted to review-type / trial
- * evidence so the match is both relevant AND high-quality; falls back to plain
- * relevance if that yields nothing.
+ * A pool of candidate articles for a clinical topic (PubMed relevance order),
+ * so a caller can re-rank for service-specificity. Requests the high-evidence
+ * pool first (reviews / meta-analyses / guidelines / RCTs), then tops up with a
+ * plain-relevance pool so specific primary studies are also considered. Returns
+ * de-duplicated Articles carrying their publication types. Best-effort → [].
  */
-export async function findBestArticle(query: string): Promise<Article | null> {
+export async function findArticles(query: string, limit = 12): Promise<Article[]> {
   try {
     const filtered = `(${query}) AND (Review[pt] OR systematic[sb] OR "meta-analysis"[pt] OR "practice guideline"[pt] OR "randomized controlled trial"[pt])`;
-    const pmid = (await esearchTop(filtered)) ?? (await esearchTop(query));
-    return pmid ? await esummary(pmid) : null;
+    const ids = new Set<string>();
+    for (const id of await esearchIds(filtered, limit)) ids.add(id);
+    if (ids.size < limit) for (const id of await esearchIds(query, limit)) ids.add(id);
+    return await esummaryMany([...ids].slice(0, limit * 2));
   } catch {
-    return null;
+    return [];
   }
+}
+
+/** The single strongest real supporting article for a clinical topic, or null. */
+export async function findBestArticle(query: string): Promise<Article | null> {
+  return (await findArticles(query, 1))[0] ?? null;
 }
 
 /** Quick connectivity probe so enrichment can fail fast when offline. */

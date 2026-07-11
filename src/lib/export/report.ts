@@ -218,10 +218,18 @@ export interface ReportPayload {
   itemCount: number;
 }
 
+type Cite = { title?: string; authors?: string; journal?: string; year?: string; pmid?: string };
+function citationList(citation: unknown): Cite[] {
+  const arr = Array.isArray(citation) ? citation : citation ? [citation] : [];
+  return (arr as Cite[]).filter((c) => c && c.title);
+}
+function oneCitation(c: Cite): string {
+  return `${c.authors ? `${c.authors}. ` : ""}${c.title}. ${c.journal ?? ""}${c.year ? ` ${c.year}` : ""} (PMID ${c.pmid}).`;
+}
 function citationText(citation: unknown): string {
-  const c = citation as { title?: string; authors?: string; journal?: string; year?: string; pmid?: string } | null;
-  if (!c || !c.title) return "None located in the indexed literature — verify.";
-  return `${c.authors ? `${c.authors}. ` : ""}${c.title}. ${c.journal ?? ""}${c.year ? ` ${c.year}` : ""} (PMID ${c.pmid}). Auto-sourced from PubMed — verify relevance.`;
+  const list = citationList(citation);
+  if (!list.length) return "None located in the indexed literature — verify.";
+  return list.map((c, i) => `${i + 1}. ${oneCitation(c)}`).join("  ") + " Auto-sourced & ranked from PubMed — verify relevance.";
 }
 
 function freqText(i: { frequencyPerYear: number; isLifetime: boolean; durationYears: number | null }, life: number): string {
@@ -334,7 +342,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
         ["Confidence basis", confidenceExplain(it)],
         ["Guideline / evidence support", it.evidenceStrength || "—"],
         ["Supporting literature", it.literatureSupport || "—"],
-        ["Strongest cited article (PubMed)", citationText(it.citation)],
+        ["Most specific cited articles (PubMed)", citationText(it.citation)],
         ["Supporting records", cond?.supportingRecords || "See chronology & Records-Reviewed index"],
         ["Supporting physician", mdSupport],
         ["Expected frequency", `${it.frequencyPerYear}× per year`],

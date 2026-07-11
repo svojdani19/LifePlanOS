@@ -81,6 +81,12 @@ const CARE_GROUPS: { title: string; icon: LucideIcon; cats: string[] }[] = [
 ];
 const careGroupOf = (cat: string) => CARE_GROUPS.find((g) => g.cats.includes(cat)) ?? CARE_GROUPS[CARE_GROUPS.length - 1];
 
+// Citations are stored as an array of up to two articles; tolerate legacy single
+// objects and null. Returns only entries with a resolvable title + PMID.
+type Cite = { title?: string; authors?: string; journal?: string; year?: string; pmid?: string; url?: string };
+const citationList = (c: unknown): Cite[] =>
+  ((Array.isArray(c) ? c : c ? [c] : []) as Cite[]).filter((x) => x && x.title && x.pmid);
+
 export function CaseWorkspace({
   data,
   assumptions,
@@ -1073,12 +1079,19 @@ function FutureCarePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
               <div><p className="text-xs font-medium text-ink-500">Vulnerability ({it.defenseVulnerability.toLowerCase()})</p><p className="text-ink-700">{vulnerabilityReasoning(it)}</p></div>
               <div><p className="text-xs font-medium text-ink-500">Evidence</p><p className="text-ink-700">{it.evidenceStrength} — {it.literatureSupport}</p><p className="mt-1 text-ink-700"><span className="font-medium text-ink-500">Most agreeable reference: </span>{mostAgreeableReference(it)}</p></div>
               <div className="md:col-span-2">
-                <p className="text-xs font-medium text-ink-500">Strongest supporting article <span className="font-normal text-ink-400">(auto-sourced from PubMed — verify relevance)</span></p>
-                {it.citation?.title && it.citation?.pmid ? (
-                  <>
-                    <a href={it.citation.url} target="_blank" rel="noopener noreferrer" className="font-medium text-brand-700 hover:underline">{it.citation.title}</a>
-                    <p className="text-xs text-ink-500">{[it.citation.authors, it.citation.journal, it.citation.year, `PMID ${it.citation.pmid}`].filter(Boolean).join(" · ")}</p>
-                  </>
+                <p className="text-xs font-medium text-ink-500">Most specific supporting articles <span className="font-normal text-ink-400">(auto-sourced &amp; ranked from PubMed — verify relevance)</span></p>
+                {citationList(it.citation).length ? (
+                  <ol className="mt-1 space-y-1.5">
+                    {citationList(it.citation).map((cit, i) => (
+                      <li key={cit.pmid ?? i} className="flex gap-2">
+                        <span className="text-xs font-semibold text-ink-400">{i + 1}.</span>
+                        <span>
+                          <a href={cit.url} target="_blank" rel="noopener noreferrer" className="font-medium text-brand-700 hover:underline">{cit.title}</a>
+                          <p className="text-xs text-ink-500">{[cit.authors, cit.journal, cit.year, `PMID ${cit.pmid}`].filter(Boolean).join(" · ")}</p>
+                        </span>
+                      </li>
+                    ))}
+                  </ol>
                 ) : (
                   <p className="text-ink-400">No indexed article located — see the guideline reference above. (Re-run the pipeline with network access to fetch one.)</p>
                 )}

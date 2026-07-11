@@ -3,7 +3,7 @@ import { packFor, type CareTemplate } from "@/lib/engine/specialty";
 import { CONDITION_CARE, BASELINE_CARE, resolveConditionKeys } from "@/lib/engine/careLibrary";
 import { project, type CaseAssumptions } from "@/lib/engine/cost";
 import { buildChronologyFromRecords } from "@/lib/engine/chronology";
-import { findBestArticle, pubmedReachable, type Article } from "@/lib/literature/pubmed";
+import { findArticles, pubmedReachable, type Article } from "@/lib/literature/pubmed";
 import { Prisma } from "@/generated/prisma";
 import type { Case, CareCategory } from "@/generated/prisma";
 
@@ -206,21 +206,30 @@ export async function generatePlan(caseId: string): Promise<PlanResult> {
 }
 
 /**
- * For each future-care item, look up and store the single strongest real
- * supporting article from PubMed (systematic reviews / guidelines / RCTs
- * preferred). Deduped by topic; requests are globally rate-limited in the
- * pubmed module. Returns the number of items cited.
+ * For each future-care item, find the TWO most service-specific real supporting
+ * articles from PubMed. A candidate pool is gathered from a specificity-ordered
+ * query chain and every candidate is scored on how directly it supports THIS
+ * service (service terms present in the title, matching anatomical region,
+ * evidence level, recency, and how specific the query that surfaced it was); the
+ * two highest-scoring on-topic articles are stored. Requests are globally
+ * rate-limited/retried in the pubmed module. Returns the number of items cited.
  */
 // Keep parenthetical qualifiers ("(neurogenic bladder)") — they carry meaning.
 const CLEAN_SERVICE = (s: string) => s.replace(/[()\/,&]/g, " ").replace(/\s+/g, " ").trim();
 const REGION = /\b(lumbar|cervical|thoracic|spinal cord|spine|spinal|knee|hip|shoulder|brain|amputation|rotator cuff|radiculopath\w*|neuropath\w*|migraine|headache|concussion|arthroplasty)/i;
-// Generic clinical filler that must NOT count as a relevance hit on its own.
+// Generic clinical filler that must NOT count as a service-specific hit on its
+// own — otherwise an off-topic article whose title merely contains "follow-up"
+// or "surveillance" would be scored as if it supported the recommendation.
 const CITE_STOP = new Set([
-  "with", "from", "after", "hours", "ongoing", "episodes", "follow", "office", "per", "one", "anticipated",
-  "management", "outcomes", "medical", "equipment", "supplies", "unit", "units", "device", "devices", "care",
+  "with", "from", "after", "hours", "ongoing", "episodes", "follow", "followup", "office", "per", "one", "anticipated",
+  "management", "outcomes", "outcome", "medical", "equipment", "supplies", "supply", "unit", "units", "device", "devices", "care",
   "health", "chronic", "disease", "illness", "prevention", "clinical", "patient", "patients", "guideline",
   "guidelines", "treatment", "therapy", "intervention", "interventions", "visits", "visit", "maintenance",
-  "post", "operative", "serial", "surgery", "surgical", "home", "services", "study", "studies",
+  "post", "operative", "serial", "surgery", "surgical", "home", "services", "service", "study", "studies",
+  // clinical-process words: describe the encounter, not the specific service
+  "referral", "specialty", "specialist", "routine", "consultation", "consult", "evaluation", "assessment",
+  "monitoring", "surveillance", "screening", "education", "documentation", "total", "general", "annual",
+  "periodic", "review", "reviews", "coordination", "ongoing", "adherence", "case", "report",
 ]);
 // Broader body-region synonyms accepted by the relevance guard.
 const REGION_SYN: Record<string, string[]> = {
@@ -258,16 +267,31 @@ const CATEGORY_TOPIC: Record<string, string> = {
   VEHICLE_MODIFICATION: "driving adaptation disability",
   ATTENDANT_CARE: "personal assistance disability",
   SKILLED_NURSING: "home nursing rehabilitation",
-  CASE_MANAGEMENT: "nurse case management",
+  CASE_MANAGEMENT: "nurse manager care coordination",
   VOCATIONAL_REHAB: "vocational rehabilitation employment",
   FUTURE_SURGERY: "reoperation outcomes",
   REVISION_SURGERY: "revision arthroplasty reoperation",
   COMPLICATION_MANAGEMENT: "complication prevention rehabilitation",
   ASSISTIVE_TECH: "assistive technology disability",
-  SUPPLIES: "activities of daily living equipment",
+  SUPPLIES: "neurogenic bladder bowel continence supplies",
   TRANSPORTATION: "transportation barriers disability",
   MISC: "rehabilitation",
 };
+
+// Administrative / non-anatomical services: their literature is about the
+// service CONCEPT (care coordination, case management, personal-care attendant),
+// not the patient's body region — so the anatomical region must not dominate.
+const ADMIN_CATEGORIES = new Set<string>([
+  "PRIMARY_CARE", "CASE_MANAGEMENT", "ATTENDANT_CARE", "SKILLED_NURSING", "TRANSPORTATION",
+  "HOME_MODIFICATION", "VEHICLE_MODIFICATION", "VOCATIONAL_REHAB", "SUPPLIES", "MISC",
+]);
+// Distinctive words of a category topic (kept even when they are generic-clinical
+// filler elsewhere) — for administrative items these ARE the service concept.
+const TOPIC_STOP = new Set([
+  "care", "disability", "rehabilitation", "chronic", "pain", "and", "the", "of", "for", "with",
+  "case", "report", "home", "management", "services", "medical", "general",
+]);
+const topicTerms = (topic: string) => (topic.toLowerCase().match(/[a-z][a-z-]{2,}/g) ?? []).filter((t) => !TOPIC_STOP.has(t));
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // Canonical anatomical region for a clinical phrase — understands vertebral
@@ -284,32 +308,78 @@ function regionOf(s: string): string {
 // Word-boundary, plural-insensitive term hit ("radiograph" ⊂ "radiographic",
 // but "tens" no longer matches "hypertension").
 const termHit = (hay: string, t: string) => new RegExp(`\\b${escapeRe(t.replace(/s$/, ""))}`).test(hay);
+// Region match: multi-word regions ("spinal cord") by substring, single words by
+// word boundary so "sci" cannot match "conscious"/"fascia".
+const regionHit = (hay: string, r: string) => (r.includes(" ") ? hay.includes(r) : new RegExp(`\\b${escapeRe(r)}\\b`).test(hay));
 
-// Keep a fetched article only if it is plausibly on-topic for the QUERY that
-// produced it — title/journal shares the anatomical region (or a synonym) or a
-// significant, non-generic query term. Prevents an off-topic (but real) article
-// from being attached to a recommendation.
-function citationIsRelevant(a: Article, query: string, region: string): boolean {
-  const hay = `${a.title} ${a.journal}`.toLowerCase();
-  const regions = region ? [region.toLowerCase(), ...(REGION_SYN[region.toLowerCase()] ?? [])] : [];
-  if (regions.some((r) => hay.includes(r))) return true;
-  const terms = (query.toLowerCase().match(/[a-z][a-z-]{3,}/g) ?? []).filter((t) => !CITE_STOP.has(t));
-  return terms.some((t) => termHit(hay, t));
+// Significant, service-specific terms of a service name — the words a truly
+// on-point article must speak to. Hyphenated tokens are split so "follow-up"
+// contributes only its parts (both filtered out), never a spurious whole token;
+// region words and generic clinical filler are removed. 3-char tokens are kept
+// so specific acronyms survive (MRI, EMG, TKA, LSO, TENS).
+function serviceTerms(svc: string): string[] {
+  const out = new Set<string>();
+  for (const tok of svc.toLowerCase().match(/[a-z][a-z-]{2,}/g) ?? []) {
+    for (const part of tok.split("-")) {
+      if (part.length >= 3 && !CITE_STOP.has(part) && !REGION.test(part)) out.add(part);
+    }
+  }
+  return [...out];
+}
+
+// Evidence-level weight from PubMed publication types (guideline > meta-analysis
+// ≈ systematic review > RCT > narrative review).
+function evidenceScore(a: Article): number {
+  const pts = (a.pubtype ?? []).map((p) => p.toLowerCase());
+  const t = a.title.toLowerCase();
+  if (pts.some((p) => p.includes("guideline")) || /\bguideline/.test(t)) return 8;
+  if (pts.some((p) => p.includes("meta-analysis")) || /meta-analysis/.test(t)) return 7;
+  if (pts.some((p) => p.includes("systematic")) || /systematic review/.test(t)) return 6;
+  if (pts.some((p) => p.includes("randomized"))) return 4;
+  if (pts.some((p) => p.includes("review"))) return 2;
+  return 0;
+}
+
+interface Scored { art: Article; score: number; strong: boolean }
+
+// Score one candidate for how specifically it supports THIS service. A candidate
+// with none of the service terms AND no regional match is off-topic → null.
+// When the anatomical region is known it dominates the score, so an article on
+// the WRONG body region can never outrank an on-region one on the strength of a
+// single generic shared word; service-term hits then rank the on-region pool by
+// how precisely each addresses the specific service.
+function scoreCandidate(a: Article, terms: string[], regions: string[], regionDominant: boolean, tierBonus: number, yearNow: number): Scored | null {
+  const title = a.title.toLowerCase();
+  const journal = a.journal.toLowerCase();
+  const svcHits = terms.filter((t) => termHit(title, t)).length;
+  const regionInTitle = regions.some((r) => regionHit(title, r));
+  const regionInJournal = regions.some((r) => regionHit(journal, r));
+  if (svcHits === 0 && !regionInTitle && !regionInJournal) return null; // off-topic
+  const year = parseInt(a.year, 10) || 0;
+  const recency = year >= yearNow - 5 ? 3 : year >= yearNow - 12 ? 2 : year >= 2000 ? 1 : 0;
+  // When the service has an anatomical target, region dominates so a wrong-region
+  // article can't win on one shared word; for administrative services the service
+  // concept (terms) leads and region is only a mild tie-breaker.
+  const regionPts = regionDominant ? (regionInTitle ? 40 : regionInJournal ? 15 : 0) : regionInTitle ? 8 : regionInJournal ? 4 : 0;
+  // The query-specificity bonus is earned only when the candidate actually names
+  // a service term — a region-only match from a specific query is not itself
+  // service-specific and must not out-rank an on-concept article.
+  const score = regionPts + svcHits * 10 + evidenceScore(a) + recency + (svcHits > 0 ? tierBonus : 0);
+  const strong = regionDominant ? regionInTitle || regionInJournal || svcHits >= 2 : svcHits > 0;
+  return { art: a, score, strong };
 }
 
 export async function enrichCitations(caseId: string): Promise<number> {
   if (!(await pubmedReachable())) return 0;
   const c = await prisma.case.findUnique({ where: { id: caseId } });
   const items = await prisma.futureCareItem.findMany({ where: { caseId }, include: { condition: true } });
-  // Cache guarded results per query+region so repeated lookups cost one fetch.
-  const cache = new Map<string, Article | null>();
-  const lookup = async (query: string, region: string): Promise<Article | null> => {
-    const key = `${region}|${query.toLowerCase()}`;
-    if (!cache.has(key)) {
-      const art = await findBestArticle(query);
-      cache.set(key, art && citationIsRelevant(art, query, region) ? art : null);
-    }
-    return cache.get(key) ?? null;
+  const yearNow = new Date().getFullYear();
+  // Cache the candidate pool per query so repeated lookups cost one fetch.
+  const cache = new Map<string, Article[]>();
+  const pool = async (query: string): Promise<Article[]> => {
+    const key = query.toLowerCase();
+    if (!cache.has(key)) cache.set(key, await findArticles(query, 12));
+    return cache.get(key)!;
   };
   let n = 0;
   for (const it of items) {
@@ -317,24 +387,43 @@ export async function enrichCitations(caseId: string): Promise<number> {
     // Prefer the region named by the service itself (a knee item on a spine
     // case should search knee literature), else the condition's region.
     const region = regionOf(it.service) || regionOf(context);
+    const regions = region ? [region, ...(REGION_SYN[region] ?? [])] : [];
     const svc = CLEAN_SERVICE(it.service);
     const catTopic = CATEGORY_TOPIC[it.category] ?? "rehabilitation";
-    // Fallback chain: most specific first, ending at the underlying condition
-    // itself so every item anchors to literature for the diagnosis it serves.
-    const queries = [
-      new RegExp(`\\b${escapeRe(region)}\\b`, "i").test(svc) ? svc : `${svc} ${region}`.trim(),
-      svc,
-      `${catTopic} ${region}`.trim(),
-      catTopic,
-      context,
-    ].filter((q, i, arr) => q.trim() && arr.indexOf(q) === i);
-    let art: Article | null = null;
-    for (const q of queries) {
-      art = await lookup(q, region);
-      if (art) break;
+    const isAdmin = ADMIN_CATEGORIES.has(it.category);
+    // For administrative services fold the category concept into the scored terms
+    // so the service concept (coordination, case management, attendant) can win.
+    const terms = isAdmin ? [...new Set([...serviceTerms(svc), ...topicTerms(catTopic)])] : serviceTerms(svc);
+    const regionDominant = !!region && !isAdmin;
+    // Specificity-ordered query chain; the tier bonus rewards candidates that
+    // surface from the more specific queries.
+    const svcHasRegion = region ? new RegExp(`\\b${escapeRe(region)}\\b`, "i").test(svc) : true;
+    const chain: { q: string; bonus: number }[] = [
+      { q: svcHasRegion ? svc : `${svc} ${region}`.trim(), bonus: 6 },
+      { q: svc, bonus: 5 },
+      { q: `${catTopic} ${region}`.trim(), bonus: 1 },
+      { q: catTopic, bonus: 0 },
+      { q: context, bonus: 0 },
+    ].filter((e, i, arr) => e.q.trim() && arr.findIndex((x) => x.q.toLowerCase() === e.q.toLowerCase()) === i);
+
+    const best = new Map<string, Scored>(); // pmid → best score across tiers
+    for (const { q, bonus } of chain) {
+      for (const a of await pool(q)) {
+        const s = scoreCandidate(a, terms, regions, regionDominant, bonus, yearNow);
+        if (!s) continue;
+        const prev = best.get(a.pmid);
+        if (!prev || s.score > prev.score) best.set(a.pmid, s);
+      }
+      // Stop early once we hold two confidently on-topic articles.
+      if ([...best.values()].filter((s) => s.strong).length >= 2) break;
     }
-    await prisma.futureCareItem.update({ where: { id: it.id }, data: { citation: (art as unknown as Prisma.InputJsonValue) ?? Prisma.DbNull } });
-    if (art) n++;
+
+    const picks = [...best.values()].sort((x, y) => y.score - x.score).slice(0, 2).map((s) => s.art);
+    await prisma.futureCareItem.update({
+      where: { id: it.id },
+      data: { citation: picks.length ? (picks as unknown as Prisma.InputJsonValue) : Prisma.DbNull },
+    });
+    if (picks.length) n++;
   }
   return n;
 }
