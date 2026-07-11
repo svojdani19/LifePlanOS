@@ -184,7 +184,7 @@ const SECTIONS = {
 
 // Significant, non-generic terms — for matching an event to a diagnosis or a
 // future-care service. Anatomy/procedure words are kept; filler is dropped.
-const SIG_STOP = new Set([...STOP, "patient", "status", "note", "record", "records", "visit", "visits", "history", "clinical", "management", "care", "chronic", "severe", "acute", "initial", "residual", "incomplete", "follow", "followup", "ongoing", "maintenance", "general", "exam", "examination", "reached", "provided", "report", "review", "medical", "additional", "level", "unspecified", "encounter"]);
+const SIG_STOP = new Set([...STOP, "patient", "status", "note", "record", "records", "visit", "visits", "history", "clinical", "management", "care", "chronic", "severe", "acute", "initial", "residual", "incomplete", "follow", "followup", "ongoing", "maintenance", "general", "exam", "examination", "reached", "provided", "report", "review", "medical", "additional", "level", "unspecified", "encounter", "affected", "anticipated", "internal", "reaction"]);
 // Words too generic to link an event to a specific future-care service — care
 // linkage must be driven by anatomy/pathology (knee, lumbar, arthroplasty…), not
 // by who wrote the note or a bare action word.

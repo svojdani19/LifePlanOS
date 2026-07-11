@@ -169,6 +169,8 @@ export function parseRecordMeta(text: string | null | undefined, type?: string):
     // Without an explicit ":"/"-" after the label, accept only name + credentials
     // ("Provider JOHN FENNESSY, MD") — never bare prose after the label word.
     if (!/[:\-]/.test(am[0]) && !tail[2]) continue;
+    // Document/section words are never a person's name ("Brief Progress Note").
+    if (/\b(note|notes|progress|report|record|records|summary|history|assessment|plan|form|page|brief|discharge|visit|orders?|facesheet|chart)\b/i.test(tail[1])) continue;
     const name = tail[1].trim();
     const cred = tail[2]?.trim() || null;
     const role = tail[3]?.trim() || ROLE_BY_TYPE[type ?? ""] || titleCase(am[1]);
