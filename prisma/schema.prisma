@@ -210,6 +210,12 @@ model User {
   status       UserStatus @default(ACTIVE)
   passwordHash String? // null while INVITED (set on invite acceptance)
 
+  // Two-factor authentication (TOTP). Secret is stored server-side; codes are
+  // never persisted. Backup codes are stored as one-way hashes.
+  mfaEnabled      Boolean @default(false)
+  totpSecret      String? // base32 TOTP secret (set once enabled)
+  mfaBackupCodes  Json? // string[] of sha-256 hashes of unused recovery codes
+
   // Invitation flow.
   inviteToken     String?   @unique
   inviteExpiresAt DateTime?

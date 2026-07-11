@@ -84,13 +84,15 @@ export function Sidebar({
 
       <div className="border-t border-ink-200 p-3">
         <div className="flex items-center gap-3 rounded-lg px-2 py-2">
-          <div className="grid h-9 w-9 place-items-center rounded-full bg-brand-100 text-sm font-semibold text-brand-800">
-            {initials(user.name)}
-          </div>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-medium text-ink-900">{user.name}</p>
-            <p className="truncate text-xs text-ink-500">{user.roleLabel}</p>
-          </div>
+          <Link href="/account" title="Account & security" className="flex min-w-0 flex-1 items-center gap-3 rounded-lg hover:opacity-80">
+            <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-brand-100 text-sm font-semibold text-brand-800">
+              {initials(user.name)}
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium text-ink-900">{user.name}</p>
+              <p className="truncate text-xs text-ink-500">{user.roleLabel}</p>
+            </div>
+          </Link>
           <button onClick={logout} title="Log out" className="rounded-md p-1.5 text-ink-400 hover:bg-ink-100 hover:text-ink-700">
             <LogOut className="h-4 w-4" />
           </button>
