@@ -218,18 +218,25 @@ export interface ReportPayload {
   itemCount: number;
 }
 
-type Cite = { title?: string; authors?: string; journal?: string; year?: string; pmid?: string };
+type Cite = { source?: string; title?: string; authors?: string; journal?: string; year?: string; pmid?: string; doi?: string; url?: string };
 function citationList(citation: unknown): Cite[] {
   const arr = Array.isArray(citation) ? citation : citation ? [citation] : [];
-  return (arr as Cite[]).filter((c) => c && c.title);
+  return (arr as Cite[]).filter((c) => c && c.title && (c.pmid || c.doi || c.url));
+}
+const SOURCE_LABEL: Record<string, string> = { europepmc: "Europe PMC", crossref: "Crossref", semanticscholar: "Semantic Scholar" };
+function citeId(c: Cite): string {
+  if (c.pmid) return `PMID ${c.pmid}`;
+  if (c.doi) return `doi:${c.doi}`;
+  return c.url ?? "";
 }
 function oneCitation(c: Cite): string {
-  return `${c.authors ? `${c.authors}. ` : ""}${c.title}. ${c.journal ?? ""}${c.year ? ` ${c.year}` : ""} (PMID ${c.pmid}).`;
+  const src = c.source ? ` [${SOURCE_LABEL[c.source] ?? c.source}]` : "";
+  return `${c.authors ? `${c.authors}. ` : ""}${c.title}. ${c.journal ?? ""}${c.year ? ` ${c.year}` : ""} (${citeId(c)})${src}.`;
 }
 function citationText(citation: unknown): string {
   const list = citationList(citation);
   if (!list.length) return "None located in the indexed literature — verify.";
-  return list.map((c, i) => `${i + 1}. ${oneCitation(c)}`).join("  ") + " Auto-sourced & ranked from PubMed — verify relevance.";
+  return list.map((c, i) => `${i + 1}. ${oneCitation(c)}`).join("  ") + " Auto-sourced & ranked across literature databases — verify relevance.";
 }
 
 function freqText(i: { frequencyPerYear: number; isLifetime: boolean; durationYears: number | null }, life: number): string {

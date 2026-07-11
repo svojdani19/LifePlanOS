@@ -686,9 +686,10 @@ model FutureCareItem {
   // Evidence (Module 9) — never fabricated; states when support is limited.
   evidenceStrength String? // e.g. "Guideline-supported", "Limited — physician confirmation required"
   literatureSupport String?
-  // The two most service-specific real supporting articles, fetched & ranked
-  // from PubMed (never invented). Stored as an array of
-  // { pmid, title, authors, journal, year, url }. Null if none found/offline.
+  // The two most relevant real supporting articles, ranked across multiple
+  // literature sources (Europe PMC, Crossref, Semantic Scholar). Never invented.
+  // Array of { source, title, authors, journal, year, url, pmid?, doi? }.
+  // Null if none found/offline.
   citation Json?
 
   // Alternatives & adversarial framing.

@@ -81,11 +81,15 @@ const CARE_GROUPS: { title: string; icon: LucideIcon; cats: string[] }[] = [
 ];
 const careGroupOf = (cat: string) => CARE_GROUPS.find((g) => g.cats.includes(cat)) ?? CARE_GROUPS[CARE_GROUPS.length - 1];
 
-// Citations are stored as an array of up to two articles; tolerate legacy single
-// objects and null. Returns only entries with a resolvable title + PMID.
-type Cite = { title?: string; authors?: string; journal?: string; year?: string; pmid?: string; url?: string };
+// Citations are stored as an array of up to two articles from any literature
+// source; tolerate legacy single objects and null. Returns only entries with a
+// resolvable title + link (PMID, DOI, or URL).
+type Cite = { source?: string; title?: string; authors?: string; journal?: string; year?: string; pmid?: string; doi?: string; url?: string };
+const SOURCE_LABEL: Record<string, string> = { europepmc: "Europe PMC", crossref: "Crossref", semanticscholar: "Semantic Scholar" };
 const citationList = (c: unknown): Cite[] =>
-  ((Array.isArray(c) ? c : c ? [c] : []) as Cite[]).filter((x) => x && x.title && x.pmid);
+  ((Array.isArray(c) ? c : c ? [c] : []) as Cite[]).filter((x) => x && x.title && (x.pmid || x.doi || x.url));
+const citeMeta = (c: Cite): string =>
+  [c.authors, c.journal, c.year, c.pmid ? `PMID ${c.pmid}` : c.doi ? `doi:${c.doi}` : "", c.source ? (SOURCE_LABEL[c.source] ?? c.source) : ""].filter(Boolean).join(" · ");
 
 export function CaseWorkspace({
   data,
@@ -1079,15 +1083,15 @@ function FutureCarePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
               <div><p className="text-xs font-medium text-ink-500">Vulnerability ({it.defenseVulnerability.toLowerCase()})</p><p className="text-ink-700">{vulnerabilityReasoning(it)}</p></div>
               <div><p className="text-xs font-medium text-ink-500">Evidence</p><p className="text-ink-700">{it.evidenceStrength} — {it.literatureSupport}</p><p className="mt-1 text-ink-700"><span className="font-medium text-ink-500">Most agreeable reference: </span>{mostAgreeableReference(it)}</p></div>
               <div className="md:col-span-2">
-                <p className="text-xs font-medium text-ink-500">Most specific supporting articles <span className="font-normal text-ink-400">(auto-sourced &amp; ranked from PubMed — verify relevance)</span></p>
+                <p className="text-xs font-medium text-ink-500">Most relevant supporting articles <span className="font-normal text-ink-400">(auto-sourced &amp; ranked across literature databases — verify relevance)</span></p>
                 {citationList(it.citation).length ? (
                   <ol className="mt-1 space-y-1.5">
                     {citationList(it.citation).map((cit, i) => (
-                      <li key={cit.pmid ?? i} className="flex gap-2">
+                      <li key={cit.pmid ?? cit.doi ?? i} className="flex gap-2">
                         <span className="text-xs font-semibold text-ink-400">{i + 1}.</span>
                         <span>
                           <a href={cit.url} target="_blank" rel="noopener noreferrer" className="font-medium text-brand-700 hover:underline">{cit.title}</a>
-                          <p className="text-xs text-ink-500">{[cit.authors, cit.journal, cit.year, `PMID ${cit.pmid}`].filter(Boolean).join(" · ")}</p>
+                          <p className="text-xs text-ink-500">{citeMeta(cit)}</p>
                         </span>
                       </li>
                     ))}
