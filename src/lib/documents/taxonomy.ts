@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Document taxonomy + auto-classification (ported from OrthoCaseIQ).
+// Document taxonomy + content-based auto-classification.
 //
 // `guessDocType` is a filename heuristic used to auto-assign a label to any
 // uploaded document when the user does not pick a type. `DOC_TYPE_GROUPS` gives
