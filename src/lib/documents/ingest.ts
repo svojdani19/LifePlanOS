@@ -2,6 +2,7 @@ import { prisma } from "@/lib/db";
 import { extractText } from "@/lib/documents/extract";
 import { classifyDocument } from "@/lib/documents/classify";
 import { parseRecordMeta } from "@/lib/documents/meta";
+import { enqueueOcr, MAX_TEXT } from "@/lib/documents/ocrQueue";
 import { Prisma } from "@/generated/prisma";
 import type { Document, DocumentType } from "@/generated/prisma";
 
@@ -38,12 +39,17 @@ export async function ingestDocument(input: IngestInput): Promise<IngestResult> 
   let text = input.text ?? "";
   let pageCount: number;
   let hasText: boolean;
+  let needsOcr = false;
 
   if (input.buffer) {
     const extraction = await extractText(input.buffer, input.mimeType ?? "", input.filename);
     text = extraction.text;
     pageCount = extraction.pageCount || 1;
     hasText = extraction.hasText;
+    // A PDF with no text layer (or a token amount for its size) is a scan —
+    // queue it for OCR so the content becomes readable like any other record.
+    const isPdf = (input.mimeType ?? "").includes("pdf") || /\.pdf$/i.test(input.filename);
+    needsOcr = isPdf && !!input.storageKey && (!hasText || text.length / Math.max(1, pageCount) < 60);
   } else {
     hasText = text.trim().length > 40;
     pageCount = Math.max(1, Math.round((text.length || 1) / 1200));
@@ -59,7 +65,8 @@ export async function ingestDocument(input: IngestInput): Promise<IngestResult> 
   //    (scan/image) so the reviewer knows to verify.
   const ocrConfidence = hasText ? 0.96 : 0.5;
   const flags: string[] = [];
-  if (!hasText) flags.push("No extractable text (possible scan) — classified from filename; verify and reassign if needed");
+  if (needsOcr) flags.push("Scanned document — OCR queued; text will be readable shortly");
+  else if (!hasText) flags.push("No extractable text (possible scan) — classified from filename; verify and reassign if needed");
   else if (c.method !== "content") flags.push(c.note);
   if (pageCount > 35) flags.push("Large document — confirm no missing pages");
 
@@ -94,10 +101,14 @@ export async function ingestDocument(input: IngestInput): Promise<IngestResult> 
       providers: meta.providers.length > 1 ? (meta.providers as unknown as Prisma.InputJsonValue) : undefined,
       locations: meta.locations.length > 1 ? (meta.locations as unknown as Prisma.InputJsonValue) : undefined,
       provider: meta.facility ?? meta.authorName ?? (c.type === "OPERATIVE_NOTE" ? "Surgical Facility" : "Treating Provider"),
-      extractedText: text.slice(0, 4000),
+      extractedText: text.slice(0, MAX_TEXT),
       flags: flags.join("; ") || null,
     },
   });
+
+  // Kick the background OCR after the row exists; the upload response returns
+  // immediately and the document updates in place as pages are read.
+  if (needsOcr) enqueueOcr({ documentId: document.id, forcedType: !!input.forcedType });
 
   return { document, method: c.method, pages: pageCount };
 }

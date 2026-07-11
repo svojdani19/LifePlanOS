@@ -8,3 +8,4 @@ next-env.d.ts
 # Runtime-uploaded record files (not source)
 uploads/
 .next*/
+.ocr-cache

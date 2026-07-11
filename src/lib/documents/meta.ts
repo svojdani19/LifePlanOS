@@ -45,14 +45,23 @@ const AUTHOR_LABELS = [
   "examining physician", "attending", "physician", "therapist", "examiner", "evaluated by", "dictated by",
   "electronically signed by", "signed by", "reviewed by", "reported by", "ordered by", "prepared by", "provider", "pharmacist",
 ];
-const AUTHOR_LABEL = new RegExp("\\b(" + AUTHOR_LABELS.join("|") + ")\\b\\s*[:\\-]\\s*(?:by\\s+)?(?:Dr\\.?\\s+)?", "i");
+// The separator is optional so real-chart layouts like "Provider JOHN FENNESSY,
+// MD" (no colon) still parse — the strict AUTHOR_TAIL name/credential pattern is
+// what prevents prose ("the provider was seen…") from matching.
+const AUTHOR_LABEL = new RegExp("\\b(" + AUTHOR_LABELS.join("|") + ")\\b\\s*[:\\-]?\\s*(?:by\\s+)?(?:Dr\\.?\\s+)?", "i");
 const AUTHOR_TAIL = new RegExp(
   "^([A-Z][A-Za-z.'\\-]+(?:\\s+[A-Z][A-Za-z.'\\-]+){0,2})" +
     "(?:\\s*,\\s*((?:" + CRED + ")(?:\\s*#?\\d+)?(?:\\s*,\\s*(?:" + CRED + "))*))?" +
     "(?:\\s*[—–-]\\s*([^.\\n]+?))?\\s*(?:[.\\n]|$)",
 );
 
-const FACILITY_LABEL = new RegExp("\\b(?:facility|location|hospital|clinic|laboratory|performed at)\\b\\s*[:\\-]\\s*([^\\n]+?)\\s*\\.?\\s*(?:\\n|$)", "i");
+// Facility value: requires a real ":" label (a hyphen would let prose like
+// "laboratory-confirmed" match), capped length, terminated at the next label —
+// so a messy OCR line can never yield a paragraph-sized "facility".
+const FACILITY_LABEL = new RegExp("\\b(?:facility|location|hospital|clinic|laboratory|performed at)\\b\\s*:\\s*([^\\n]{3,90}?)\\s*\\.?\\s*(?=\\n|$|\\s[A-Z][a-zA-Z ]{2,24}:)", "i");
+// Letterhead fallback: an organization name in the first lines of the document
+// ("PHOEBE SUMTER ORTHOPEDIC ASSOCIATES · 132 HIGHWAY 280 W …").
+const LETTERHEAD = /\b([A-Z][A-Z&.,'()\- ]{6,70}(?:ASSOCIATES|CENTER|CENTRE|HOSPITAL|CLINIC|MEDICAL CENTER|MEDICAL GROUP|ORTHOPEDICS?|ORTHOPEDIC ASSOCIATES|HEALTH(?:CARE)?|GROUP|INSTITUTE|IMAGING|REHABILITATION|SERVICES|SURGERY CENTER|PHYSICAL THERAPY))\b/;
 
 const ROLE_BY_TYPE: Record<string, string> = {
   OPERATIVE_NOTE: "Operating Surgeon",
@@ -129,9 +138,13 @@ export function parseRecordMeta(text: string | null | undefined, type?: string):
   const dateMap = new Map<string, { date: Date; pages: Set<number> }>();
   const dre = new RegExp(DATE_LABEL.source, "gi");
   let dm: RegExpExecArray | null;
+  // Service dates must be plausible: not in the future (insurance expiries and
+  // scheduled follow-ups carry future dates) and not implausibly old.
+  const maxDate = Date.now() + 60 * 24 * 3600 * 1000;
+  const minDate = new Date("1990-01-01").getTime();
   while ((dm = dre.exec(t))) {
     const d = toDate(dm[1]);
-    if (!d) continue;
+    if (!d || d.getTime() > maxDate || d.getTime() < minDate) continue;
     const key = d.toISOString().slice(0, 10);
     const pg = pageForOffset(dm.index, marks);
     const e = dateMap.get(key) ?? { date: d, pages: new Set<number>() };
@@ -153,6 +166,9 @@ export function parseRecordMeta(text: string | null | undefined, type?: string):
     const tail = t.slice(am.index + am[0].length).match(AUTHOR_TAIL);
     const pg = pageForOffset(am.index, marks);
     if (!tail || !tail[1]) continue; // only list named individuals
+    // Without an explicit ":"/"-" after the label, accept only name + credentials
+    // ("Provider JOHN FENNESSY, MD") — never bare prose after the label word.
+    if (!/[:\-]/.test(am[0]) && !tail[2]) continue;
     const name = tail[1].trim();
     const cred = tail[2]?.trim() || null;
     const role = tail[3]?.trim() || ROLE_BY_TYPE[type ?? ""] || titleCase(am[1]);
@@ -187,6 +203,13 @@ export function parseRecordMeta(text: string | null | undefined, type?: string):
   }
   meta.locations = [...locMap.values()].map((l) => ({ ...l, pages: l.pages.sort((a, b) => a - b) }));
   if (meta.locations.length) meta.facility = meta.locations[0].name;
+
+  // No labeled facility → read the letterhead at the top of the document.
+  if (!meta.facility) {
+    const head = t.split("\n").slice(0, 12).join("\n");
+    const lh = head.match(LETTERHEAD);
+    if (lh) meta.facility = lh[1].replace(/\s+/g, " ").replace(/[.,\s]+$/, "").trim();
+  }
 
   return meta;
 }
