@@ -1074,10 +1074,10 @@ function FutureCarePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
               <div><p className="text-xs font-medium text-ink-500">Evidence</p><p className="text-ink-700">{it.evidenceStrength} — {it.literatureSupport}</p><p className="mt-1 text-ink-700"><span className="font-medium text-ink-500">Most agreeable reference: </span>{mostAgreeableReference(it)}</p></div>
               <div className="md:col-span-2">
                 <p className="text-xs font-medium text-ink-500">Strongest supporting article <span className="font-normal text-ink-400">(auto-sourced from PubMed — verify relevance)</span></p>
-                {it.citation ? (
+                {it.citation?.title && it.citation?.pmid ? (
                   <>
                     <a href={it.citation.url} target="_blank" rel="noopener noreferrer" className="font-medium text-brand-700 hover:underline">{it.citation.title}</a>
-                    <p className="text-xs text-ink-500">{[it.citation.authors, it.citation.journal, it.citation.year].filter(Boolean).join(" · ")} · PMID {it.citation.pmid}</p>
+                    <p className="text-xs text-ink-500">{[it.citation.authors, it.citation.journal, it.citation.year, `PMID ${it.citation.pmid}`].filter(Boolean).join(" · ")}</p>
                   </>
                 ) : (
                   <p className="text-ink-400">No indexed article located — see the guideline reference above. (Re-run the pipeline with network access to fetch one.)</p>

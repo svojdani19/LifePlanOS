@@ -22,7 +22,7 @@ const KEY = process.env.PUBMED_API_KEY ? `&api_key=${process.env.PUBMED_API_KEY}
 
 // Global request throttle so ALL calls stay under PubMed's rate limit (3/s
 // without a key, 10/s with one).
-const MIN_GAP = process.env.PUBMED_API_KEY ? 120 : 360;
+const MIN_GAP = process.env.PUBMED_API_KEY ? 120 : 400;
 let lastCall = 0;
 async function throttle() {
   const wait = MIN_GAP - (Date.now() - lastCall);
@@ -30,20 +30,31 @@ async function throttle() {
   lastCall = Date.now();
 }
 
+// Throttled fetch with retry/backoff on rate-limit or transient server errors —
+// a sustained enrichment run must not silently turn 429s into "no article".
+async function eFetch(url: string): Promise<Response | null> {
+  for (let attempt = 0; attempt < 3; attempt++) {
+    await throttle();
+    const r = await fetch(url, { signal: AbortSignal.timeout(9000) }).catch(() => null);
+    if (r?.ok) return r;
+    if (r && r.status !== 429 && r.status < 500) return null; // real error — don't retry
+    await new Promise((res) => setTimeout(res, 1000 * (attempt + 1)));
+  }
+  return null;
+}
+
 async function esearchTop(term: string): Promise<string | null> {
-  await throttle();
   const url = `${BASE}/esearch.fcgi?db=pubmed&retmode=json&retmax=1&sort=relevance&term=${encodeURIComponent(term)}${KEY}`;
-  const r = await fetch(url, { signal: AbortSignal.timeout(9000) });
-  if (!r.ok) return null;
+  const r = await eFetch(url);
+  if (!r) return null;
   const j = (await r.json()) as { esearchresult?: { idlist?: string[] } };
   return j.esearchresult?.idlist?.[0] ?? null;
 }
 
 async function esummary(pmid: string): Promise<Article | null> {
-  await throttle();
   const url = `${BASE}/esummary.fcgi?db=pubmed&retmode=json&id=${pmid}${KEY}`;
-  const r = await fetch(url, { signal: AbortSignal.timeout(9000) });
-  if (!r.ok) return null;
+  const r = await eFetch(url);
+  if (!r) return null;
   const j = (await r.json()) as { result?: Record<string, { title?: string; source?: string; pubdate?: string; authors?: { name: string }[] }> };
   const a = j.result?.[pmid];
   if (!a || !a.title) return null;
