@@ -645,6 +645,11 @@ model Condition {
   evidenceSources Json?
   missingInfo     String?
   reasoning       String?
+  // Standard-of-care analysis for this causation item: located clinical
+  // practice guidelines with VERBATIM quoted language (never fabricated — the
+  // quote is lifted from the retrieved source), the documented care that
+  // corresponds to the guidance, and a documentation status. See SocAnalysis.
+  socAnalysis Json?
 
   physicianConfirmed Boolean @default(false)
 

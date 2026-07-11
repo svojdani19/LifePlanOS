@@ -51,6 +51,7 @@ import { PreExistingConditionsModal } from "@/components/PreExistingConditionsMo
 import { parseConditions, serializeConditions, findConditionsInRecords } from "@/lib/intake/preExisting";
 import { suggestDiagnoses } from "@/lib/intake/diagnosisSuggest";
 import { confidenceBand, confidenceDefinition } from "@/lib/engine/confidence";
+import { BookOpenCheck } from "lucide-react";
 import { MEDICAL_SPECIALTIES } from "@/lib/intake/specialties";
 import { US_STATES } from "@/lib/intake/jurisdictions";
 
@@ -131,6 +132,7 @@ export function CaseWorkspace({
     { id: "records", label: `Records (${data.documents.length})`, icon: Upload },
     { id: "chronology", label: `Chronology (${data.chronologyEvents.length})`, icon: Activity },
     { id: "causation", label: "Causation", icon: GitBranch },
+    { id: "soc", label: "Standard of Care", icon: BookOpenCheck },
     { id: "futurecare", label: `Future Care (${data.futureCareItems.length})`, icon: Stethoscope },
     { id: "costs", label: "Costs", icon: Calculator },
     { id: "reviews", label: `Reviews (${data.reviewFindings.length})`, icon: ShieldAlert },
@@ -223,6 +225,7 @@ export function CaseWorkspace({
         {tab === "records" && <RecordsPanel data={data} canEdit={can("records.upload")} call={call} busy={busy} />}
         {tab === "chronology" && <ChronologyPanel data={data} canEdit={can("chronology.edit")} call={call} />}
         {tab === "causation" && <CausationPanel data={data} />}
+        {tab === "soc" && <StandardOfCarePanel data={data} />}
         {tab === "futurecare" && <FutureCarePanel data={data} canEdit={can("futurecare.edit")} call={call} />}
         {tab === "costs" && <CostsPanel data={data} assumptions={assumptions} totals={totals} canEdit={can("case.edit")} call={call} />}
         {tab === "reviews" && <ReviewsPanel points={data.reviewFindings} hasPlan={hasPlan} />}
@@ -1096,6 +1099,80 @@ function CausationPanel({ data }: { data: AnyRec }) {
               </ul>
             )}
             {c.missingInfo && <p className="mt-1 text-xs text-amber-700"><span className="font-medium">Missing:</span> {c.missingInfo}</p>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── Standard of Care ─────────────────────────────────────────────────────────
+// Per causation item: the located clinical practice guidelines with their
+// DIRECT LANGUAGE quoted verbatim from the retrieved source, the documented
+// care that corresponds, and a documentation status. Compliance determination
+// is explicitly reserved to the reviewing physician.
+const SOC_TONE: Record<string, "green" | "amber" | "red"> = { DOCUMENTED: "green", LIMITED: "amber", NOT_DOCUMENTED: "red" };
+function StandardOfCarePanel({ data }: { data: AnyRec }) {
+  if (data.conditions.length === 0) return <Empty>Run the AI pipeline to build the standard-of-care analysis from the causation items.</Empty>;
+  const withSoc = data.conditions.filter((c: AnyRec) => c.socAnalysis);
+  if (withSoc.length === 0) return <Empty>Re-run the AI pipeline to generate the standard-of-care analysis (requires network access for guideline lookup).</Empty>;
+  return (
+    <div className="space-y-4">
+      <p className="rounded-lg bg-ink-50 px-4 py-3 text-xs leading-relaxed text-ink-500">
+        For each causation item, published clinical practice guidance is located across the literature databases and its pertinent language quoted <span className="font-medium">verbatim from the retrieved source</span> — never paraphrased into the source&apos;s voice, never invented. The documented care from the chronology is mapped against that guidance. Whether the care <span className="font-medium">met</span> the standard of care is a determination reserved to the reviewing physician.
+      </p>
+      {withSoc.map((c: AnyRec) => {
+        const soc: AnyRec = c.socAnalysis;
+        const guidelines: AnyRec[] = Array.isArray(soc.guidelines) ? soc.guidelines : [];
+        const support: AnyRec[] = Array.isArray(soc.recordSupport) ? soc.recordSupport : [];
+        return (
+          <div key={c.id} className="card p-5">
+            <div className="flex flex-wrap items-start justify-between gap-2">
+              <h3 className="font-semibold text-ink-900">{c.name}</h3>
+              <div className="flex items-center gap-2">
+                <Badge tone={REL_TONE[c.relatedness]}>{c.relatedness.replace(/_/g, " ").toLowerCase()}</Badge>
+                <Badge tone={SOC_TONE[soc.documentation] ?? "amber"}>{String(soc.documentation).replace(/_/g, " ").toLowerCase()}</Badge>
+              </div>
+            </div>
+            <p className="mt-2 text-xs text-ink-500">{soc.standard}</p>
+
+            {guidelines.length > 0 && (
+              <div className="mt-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Applicable guidance — direct language from the source</p>
+                <ol className="mt-1.5 space-y-3">
+                  {guidelines.map((g, i) => (
+                    <li key={g.pmid ?? g.doi ?? i} className="rounded-lg bg-brand-50/50 p-3">
+                      <blockquote className="border-l-2 border-brand-300 pl-3 text-sm italic text-ink-800">“{g.quote}”</blockquote>
+                      <p className="mt-1.5 text-xs text-ink-500">
+                        <a href={g.url} target="_blank" rel="noopener noreferrer" className="font-medium text-brand-700 hover:underline">{g.title}</a>
+                      </p>
+                      <p className="text-[11px] text-ink-400">{[g.authors, g.journal, g.year, g.pmid ? `PMID ${g.pmid}` : g.doi ? `doi:${g.doi}` : "", g.source].filter(Boolean).join(" · ")}</p>
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            )}
+
+            <div className="mt-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Documented care corresponding to this item</p>
+              {support.length ? (
+                <ul className="mt-1 space-y-1">
+                  {support.map((s, i) => (
+                    <li key={i} className="text-xs text-ink-700">
+                      <span className="font-medium text-ink-900">{s.date}</span>
+                      {s.eventType && <span className="ml-1.5 rounded bg-ink-100 px-1.5 py-0.5 text-[10px] font-medium text-ink-600">{String(s.eventType).replace(/_/g, " ").toLowerCase()}</span>}
+                      <span className="ml-1.5">{s.summary}</span>
+                      {s.page != null && <span className="text-ink-400"> (p. {s.page})</span>}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="mt-1 text-xs text-ink-400">None identified in the reviewed records.</p>
+              )}
+            </div>
+
+            <p className="mt-3 text-xs text-ink-500"><span className="font-medium">Assessment basis:</span> {soc.rationale}</p>
+            {soc.gaps && <p className="mt-1 text-xs text-amber-700"><span className="font-medium">Gap:</span> {soc.gaps}</p>}
           </div>
         );
       })}

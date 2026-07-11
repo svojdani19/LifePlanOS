@@ -4,6 +4,7 @@ import { CONDITION_CARE, BASELINE_CARE, resolveConditionKeys } from "@/lib/engin
 import { project, type CaseAssumptions } from "@/lib/engine/cost";
 import { buildChronologyFromRecords } from "@/lib/engine/chronology";
 import { locateConditionEvidence } from "@/lib/engine/evidence";
+import { generateStandardOfCare } from "@/lib/engine/standardOfCare";
 import { findCandidates, literatureReachable, activeSources, type Article } from "@/lib/literature";
 import { Prisma } from "@/generated/prisma";
 import type { Case, CareCategory } from "@/generated/prisma";
@@ -215,6 +216,11 @@ export async function generatePlan(caseId: string): Promise<PlanResult> {
   }
 
   await generateReviews(caseId);
+
+  // Standard-of-care analysis per causation item: locate real clinical practice
+  // guidelines, quote their direct language verbatim, and map the documented
+  // care against them. Best-effort — never blocks or fabricates.
+  await generateStandardOfCare(caseId).catch(() => {});
 
   // Attach the strongest real supporting article (PubMed) to each item.
   // Best-effort — never blocks or fabricates; skipped when PubMed is unreachable.

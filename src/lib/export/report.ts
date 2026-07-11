@@ -524,6 +524,16 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
     if (cond.objectiveEvidence) body.push(labeled("Objective evidence / examination", cond.objectiveEvidence));
     if (evSources.length) body.push(labeled("Evidence sources (record · page)", evSources.map((s) => `${s.filename}${s.page ? `, p. ${s.page}` : ""}${s.quote ? ` — "${s.quote}"` : ""}`).join("  ·  ")));
     if (cond.supportingRecords) body.push(labeled("Supporting records / physician", cond.supportingRecords));
+    // Standard-of-care analysis: cited guidance quoted verbatim + documentation status.
+    const soc = cond.socAnalysis as unknown as { standard?: string; documentation?: string; rationale?: string; gaps?: string | null; guidelines?: { title?: string; journal?: string; year?: string; pmid?: string; doi?: string; quote?: string }[] } | null;
+    if (soc) {
+      body.push(labeled("Standard-of-care documentation", `${String(soc.documentation ?? "").replace(/_/g, " ")} — ${soc.rationale ?? ""}`));
+      for (const g of (soc.guidelines ?? []).slice(0, 3)) {
+        body.push(labeled("Guidance (quoted verbatim)", `"${g.quote}" — ${g.title}. ${g.journal ?? ""}${g.year ? ` ${g.year}` : ""}${g.pmid ? ` (PMID ${g.pmid})` : g.doi ? ` (doi:${g.doi})` : ""}.`));
+      }
+      if (soc.gaps) body.push(labeled("Standard-of-care gap", soc.gaps));
+      body.push(labeled("Compliance determination", "Reserved to the reviewing physician; the cited guidance provides the reference standard."));
+    }
     if (cond.reasoning) body.push(labeled("Analysis", cond.reasoning));
     body.push(labeled("Pre-existing / aggravation", cond.relatedness === "AGGRAVATION" ? "Aggravation of a pre-existing condition — apportionment addressed in §10." : cond.relatedness === "PREEXISTING_UNRELATED" ? "Pre-existing and unrelated — excluded from causally-related damages." : "No pre-existing basis identified in the reviewed records for this diagnosis."));
     body.push(labeled("Contradictory evidence", cond.opposingRecords || "None identified in the reviewed records."));
