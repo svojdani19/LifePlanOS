@@ -17,6 +17,7 @@ const createSchema = z.object({
   dateOfInjury: z.string().optional(),
   mechanism: z.string().optional(),
   diagnosis: z.string().optional(),
+  icd10Code: z.string().optional(),
 });
 
 // Cases are always scoped to the caller's firm — the client can never pass firmId.
@@ -60,6 +61,7 @@ export async function POST(req: Request) {
         dateOfInjury: input.dateOfInjury ? new Date(input.dateOfInjury) : null,
         mechanism: input.mechanism,
         diagnosis: input.diagnosis,
+        icd10Code: input.icd10Code,
       },
     });
 

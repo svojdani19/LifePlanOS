@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { Plus, X } from "lucide-react";
+import { Icd10Search } from "@/components/Icd10Search";
 
 const CASE_TYPES = [
   ["PERSONAL_INJURY", "Personal Injury"],
@@ -30,6 +31,7 @@ export function NewCaseForm() {
     jurisdiction: "",
     mechanism: "",
     diagnosis: "",
+    icd10Code: "",
   });
 
   function set(k: keyof typeof form, v: string) {
@@ -52,7 +54,7 @@ export function NewCaseForm() {
       return;
     }
     setOpen(false);
-    setForm({ clientName: "", caseType: "PERSONAL_INJURY", side: "PLAINTIFF", jurisdiction: "", mechanism: "", diagnosis: "" });
+    setForm({ clientName: "", caseType: "PERSONAL_INJURY", side: "PLAINTIFF", jurisdiction: "", mechanism: "", diagnosis: "", icd10Code: "" });
     router.refresh();
   }
 
@@ -109,8 +111,13 @@ export function NewCaseForm() {
             <input className="input" value={form.mechanism} onChange={(e) => set("mechanism", e.target.value)} placeholder="e.g. MVC, fall, surgical complication" />
           </div>
           <div>
-            <label className="label">Primary Diagnosis</label>
-            <input className="input" value={form.diagnosis} onChange={(e) => set("diagnosis", e.target.value)} />
+            <label className="label">Primary Diagnosis (ICD-10)</label>
+            <Icd10Search
+              value={form.diagnosis}
+              code={form.icd10Code}
+              onChange={({ diagnosis, icd10Code }) => setForm((f) => ({ ...f, diagnosis, icd10Code }))}
+            />
+            <p className="mt-1 text-xs text-ink-400">Search by keyword and select a code. Optional here — it can also be set at intake.</p>
           </div>
           {error && <p className="text-sm text-red-600">{error}</p>}
           <div className="flex justify-end gap-2 pt-2">
