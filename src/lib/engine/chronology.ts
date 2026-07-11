@@ -220,6 +220,73 @@ const SECTIONS = {
   provider: [/(?:attending physician|treating physician|examining physician|dictated by|reported by|reviewed by|surgeon|therapist|examiner|provider|physician)\s*:\s*(?:dr\.?\s+)?([A-Z][a-z][A-Za-z.'-]*(?:\s+[A-Z][a-z][A-Za-z.'-]*){0,3}(?:,\s*[A-Za-z.]+)*(?:\s*[—–-]\s*[A-Z][a-z][^\n.]{0,40})?)/],
 };
 
+// ── Provider extraction ──────────────────────────────────────────────────────
+// A person-name core: First [middle initial(s)] Last — first and last are full
+// Title-case words so it won't truncate at "M" or absorb trailing "MD".
+const NAME_CORE = "[A-Z][a-z]+(?:\\s+[A-Z](?![a-z])\\.?){0,2}\\s+[A-Z][a-z]+";
+const CRED_RE = "M\\.?D\\.?|D\\.?O\\.?|APRN|PA-?C|N\\.?P\\.?|DPT|P\\.?T\\.?|R\\.?N\\.?|MSN|PharmD|CRNA|FNP|DNP|PhD|OTR";
+// Ordered from most to least authoritative; each captures (name[, credentials]).
+const PROVIDER_PATTERNS: { re: RegExp; lastFirst?: boolean }[] = [
+  { re: new RegExp(`attending\\s+dr\\.?\\s*[:\\-]?\\s*(${NAME_CORE})(?:\\s*,?\\s*(${CRED_RE}))?`, "i") },
+  { re: new RegExp(`electronically signed by\\s+(${NAME_CORE})(?:\\s*,?\\s*(${CRED_RE}))?`, "i") },
+  { re: new RegExp(`attending\\s+physician\\s*[:\\-]\\s*(${NAME_CORE})(?:\\s*,?\\s*(${CRED_RE}))?`, "i") },
+  { re: new RegExp(`(?:surgeon|treating physician|examining physician|provider|physician|examiner|therapist|dictated by|reported by|signed by)\\s*[:\\-]\\s*(?:dr\\.?\\s+)?(${NAME_CORE})(?:\\s*,?\\s*(${CRED_RE}))?`, "i") },
+  { re: new RegExp(`\\bdr\\.?\\s+(${NAME_CORE})(?:\\s*,?\\s*(${CRED_RE}))?`, "i") },
+];
+const PROVIDER_REJECT = /\b(date|time|name|number|note|comment|complete|completes|site|order|record|id|patient|resident|nursing|home|facility|hospital|center|report|signed)\b/i;
+
+// Normalize a name to Title Case (all-caps OCR → "Vincent S Culpepper"),
+// preserving single-letter middle initials.
+function titleCaseName(s: string): string {
+  return s
+    .split(/\s+/)
+    .map((w) => (w.length <= 1 || /^[A-Za-z]\.$/.test(w) ? w.toUpperCase() : w[0].toUpperCase() + w.slice(1).toLowerCase()))
+    .join(" ");
+}
+
+/** The treating provider named in a record/segment, "Name, CRED" — or null. */
+function extractProviderName(text: string, patientName?: string): string | null {
+  const patientTokens = new Set((patientName ?? "").toLowerCase().match(/[a-z]+/g) ?? []);
+  for (const { re } of PROVIDER_PATTERNS) {
+    const m = text.match(re);
+    if (!m || !m[1]) continue;
+    const name = m[1].replace(/\s+/g, " ").trim();
+    if (PROVIDER_REJECT.test(name)) continue;
+    // Never surface the patient's own name as the provider.
+    const nameTokens = name.toLowerCase().match(/[a-z]+/g) ?? [];
+    if (nameTokens.length && nameTokens.every((t) => patientTokens.has(t))) continue;
+    const cred = m[2] ? `, ${m[2].replace(/\./g, "").toUpperCase()}` : "";
+    return titleCaseName(name) + cred;
+  }
+  return null;
+}
+
+// A single token that looks like a real word (right length, sane vowel ratio,
+// no run of 4+ consonants) — used to detect OCR garbage.
+function plausibleWord(w: string): boolean {
+  if (!/^[A-Za-z][A-Za-z'-]*$/.test(w) || w.length < 2) return false;
+  if (w.length <= 3) return true; // short tokens/abbreviations pass
+  const vowels = (w.match(/[aeiou]/gi) ?? []).length;
+  const vr = vowels / w.length;
+  return vr >= 0.2 && vr <= 0.75 && !/[^aeiou]{4,}/i.test(w);
+}
+
+// A headline reads cleanly only if it looks like real prose, not a lab-value row
+// ("Total Bili 0.8(b) 0.3-1.0 mg/dL"), an abbreviation string ("1 MO FU BIL
+// KNEE"), or OCR consonant-soup ("RX: B67 37 RC RKTT Adon to ower…").
+function isCleanClinical(s: string): boolean {
+  if (/[\[\]{}|~^\\]/.test(s)) return false; // stray OCR bracket/symbol noise
+  const words = s.match(/[A-Za-z][A-Za-z'-]*/g) ?? [];
+  if (words.length < 4) return false;
+  const implausible = words.filter((w) => !plausibleWord(w)).length;
+  if (implausible >= 3 || implausible / words.length > 0.28) return false;
+  const realWords = words.filter((w) => /[a-z]{3,}/.test(w) && /[aeiou]/i.test(w));
+  if (realWords.length < 3) return false; // mostly all-caps / abbreviations
+  const digits = (s.match(/\d/g) ?? []).length;
+  if (digits / s.length > 0.18) return false; // value-laden lab line
+  return true;
+}
+
 // Significant, non-generic terms — for matching an event to a diagnosis or a
 // future-care service. Anatomy/procedure words are kept; filler is dropped.
 const SIG_STOP = new Set([...STOP, "patient", "status", "note", "record", "records", "visit", "visits", "history", "clinical", "management", "care", "chronic", "severe", "acute", "initial", "residual", "incomplete", "follow", "followup", "ongoing", "maintenance", "general", "exam", "examination", "reached", "provided", "report", "review", "medical", "additional", "level", "unspecified", "encounter", "affected", "anticipated", "internal", "reaction"]);
@@ -565,10 +632,10 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
       const segFacilityRaw = pickSection(body, [/\bfacility\s*:?\s*([^\n]{3,90})/i, /\blocation\s*:?\s*([^\n]{3,90})/i], 90);
       // Trim trailing OCR labels that ran into the facility ("… Date Taken: …").
       const segFacility = segFacilityRaw?.replace(/\s+(?:date|time|dob|mrn|account|device|room|bed|unit|provider|taken)\b.*$/i, "").replace(/\s+[A-Z][a-z]+\s*:.*$/, "").trim() || null;
-      const segProvider = pickSection(body, SECTIONS.provider, 90);
+      const segProvider = extractProviderName(body, c.clientName) ?? pickSection(body, SECTIONS.provider, 90);
       // For a consolidated chart, each encounter must use ITS OWN provider — the
       // document-level author would wrongly stamp every line. Single-encounter
-      // records use the parsed record author.
+      // records prefer the parsed record author, then a name found in the body.
       const provider = encounter ? segProvider : (docProvider ?? segProvider);
       // Per-encounter record type from the segment's content; single-encounter
       // records keep the document's classified type.
@@ -579,10 +646,19 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
       // For messy segments with no clean labeled sections, headline the sentence
       // that actually speaks to the case rather than an incidental OCR line.
       const caseSentence = !subjective && !objectiveFindings && !diagnosis && !treatment && !procedure ? caseRelevantSentence(body, condNames) : null;
-      const summary = composeSummary(
+      let summary = composeSummary(
         { treatment: prose(procedure ?? treatment), diagnosis: prose(diagnosis), objectiveFindings: prose(subjective ?? objectiveFindings), imaging: prose(imaging) },
         prose(caseSentence) ?? (looksLikeProse(finding) ? finding : "Documented clinical encounter — see the cited page of the source record."),
       );
+      // Final guard: if the OCR headline is still garbled, derive a clean one
+      // naming the diagnosis this encounter documents (the significance already
+      // establishes the link) so no OCR soup ever surfaces as the summary.
+      if (!isCleanClinical(summary)) {
+        const topCond = condNames.find((n) => documentsDiagnosis(hay, n));
+        summary = topCond
+          ? `${ev.recordType ?? typeLabel(doc.type)} addressing ${topCond.replace(/,\s*initial encounter$/i, "").toLowerCase()}`
+          : "Documented clinical encounter — see the cited page of the source record.";
+      }
       return {
         eventDate,
         eventDateEnd,

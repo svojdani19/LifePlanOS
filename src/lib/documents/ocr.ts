@@ -26,21 +26,37 @@ export interface OcrResult {
   confidence: number;
 }
 
-// Render scale ≈ 150 DPI — the OCR sweet spot between accuracy and speed.
-const RENDER_SCALE = 150 / 72;
+// Render at ~200 DPI — a modest bump over 150 for small chart text without the
+// memory/time cost (and OCR regressions) of 300 DPI + binarization.
+const RENDER_DPI = 200;
+const RENDER_SCALE = RENDER_DPI / 72;
+// Bound the rendered bitmap so a large page can't exhaust memory.
+const MAX_EDGE = 3200;
 // A page whose text layer has fewer characters than this is treated as a scan.
 const MIN_PAGE_TEXT = 30;
+// A page OCR'd below this confidence is retried with a different segmentation.
+const RETRY_BELOW = 0.6;
 const OCR_WORKERS = Math.max(2, Math.min(4, (globalThis.navigator?.hardwareConcurrency ?? 4) - 2));
 
-type TesseractWorker = { recognize: (img: Buffer) => Promise<{ data: { text: string; confidence: number } }>; terminate: () => Promise<unknown> };
+type RecognizeOpts = { rotateAuto?: boolean };
+type TesseractWorker = {
+  recognize: (img: Buffer, opts?: unknown, out?: unknown) => Promise<{ data: { text: string; confidence: number } }>;
+  setParameters: (p: Record<string, string>) => Promise<unknown>;
+  terminate: () => Promise<unknown>;
+};
 
 async function makeWorkers(n: number): Promise<TesseractWorker[]> {
   const { createWorker } = await import("tesseract.js");
   const cachePath = path.join(process.cwd(), ".ocr-cache");
-  return Promise.all(
+  const workers = (await Promise.all(
     Array.from({ length: n }, () => createWorker("eng", 1, { cachePath }) as unknown as Promise<TesseractWorker>),
-  );
+  )) as TesseractWorker[];
+  // LSTM engine (default), page-segmentation "auto", and tell Tesseract the DPI
+  // so its internal scaling is right; preserve spacing for the line extractors.
+  await Promise.all(workers.map((w) => w.setParameters({ tessedit_pageseg_mode: "3", user_defined_dpi: String(RENDER_DPI), preserve_interword_spaces: "1" })));
+  return workers;
 }
+
 
 /**
  * Read a PDF end-to-end: digital text where it exists, Tesseract OCR where it
@@ -85,17 +101,34 @@ export async function readPdf(buffer: Buffer, onProgress?: (p: OcrProgress) => v
             if (idx >= needsOcr.length) return;
             const pageNo = needsOcr[idx];
             const page = await doc.getPage(pageNo);
-            const viewport = page.getViewport({ scale: RENDER_SCALE });
+            const base = page.getViewport({ scale: 1 });
+            // Scale to ~300 DPI, but cap the longest edge to bound memory.
+            const scale = Math.min(RENDER_SCALE, MAX_EDGE / Math.max(base.width, base.height));
+            const viewport = page.getViewport({ scale });
             const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
             const ctx = canvas.getContext("2d");
+            // Flatten onto white first (transparent scans otherwise render black).
+            ctx.fillStyle = "#ffffff";
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            await page.render({ canvasContext: ctx as any, viewport, canvas: canvas as any }).promise;
-            const png = canvas.toBuffer("image/png");
+            await page.render({ canvasContext: ctx as any, viewport, canvas: canvas as any, background: "#ffffff" }).promise;
             page.cleanup();
-            const r = await w.recognize(png);
-            // Keep Tesseract's line breaks — the extractors are line-based.
-            pageText[pageNo - 1] = (r.data.text ?? "").replace(/[ \t]+/g, " ").replace(/\s*\n\s*/g, "\n").trim();
-            confSum += (r.data.confidence ?? 0) / 100;
+            const png = canvas.toBuffer("image/png");
+
+            const clean = (s: string) => (s ?? "").replace(/[ \t]+/g, " ").replace(/\s*\n\s*/g, "\n").trim();
+            let r = await w.recognize(png);
+            let conf = (r.data.confidence ?? 0) / 100;
+            let outText = clean(r.data.text);
+            // Low-confidence page → retry as a single uniform text block (PSM 6),
+            // which often recovers dense chart pages the auto layout mangles.
+            if (conf < RETRY_BELOW) {
+              await w.setParameters({ tessedit_pageseg_mode: "6" });
+              const r2 = await w.recognize(png);
+              await w.setParameters({ tessedit_pageseg_mode: "3" });
+              if ((r2.data.confidence ?? 0) / 100 > conf) { r = r2; conf = (r2.data.confidence ?? 0) / 100; outText = clean(r2.data.text); }
+            }
+            pageText[pageNo - 1] = outText;
+            confSum += conf;
             done++;
             await onProgress?.({ page: pageNo, totalPages: total, ocred: done });
           }
