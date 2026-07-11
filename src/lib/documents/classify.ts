@@ -41,7 +41,7 @@ const SIGNATURES: Record<string, string[]> = {
   CHIROPRACTIC_RECORD: ["chiropractic", "spinal adjustment", "manipulation", "subluxation"],
   NEUROLOGY_RECORD: ["cranial nerves", "deep tendon reflexes", "neurologic examination", "seizure", "gait is"],
   NEUROSURGERY_RECORD: ["neurosurgery", "laminectomy", "craniotomy", "decompression", "instrumented fusion"],
-  ORTHOPEDIC_CLINIC: ["orthopedic", "range of motion", "hardware", "fracture", "weight bearing", "follow-up in", "orif"],
+  ORTHOPEDIC_CLINIC: ["orthopedic", "orthopedic associates", "orthopaedic", "orthopedic surgery", "range of motion", "hardware", "fracture", "weight bearing", "follow-up in", "orif"],
   PSYCHIATRY_RECORD: ["psychiatric", "mental status exam", "affect", "suicidal ideation", "psychiatric evaluation"],
   PSYCHOLOGY_RECORD: ["psychotherapy", "counseling session", "coping", "psychological"],
   CARDIOLOGY_RECORD: ["cardiology", "ejection fraction", "echocardiogram", "coronary"],
@@ -93,8 +93,27 @@ export function classifyByContent(text: string): ContentResult {
   }
 
   scores.sort((a, b) => b.score - a.score);
-  const top = scores[0];
-  const second = scores[1];
+  let top = scores[0];
+  let second = scores[1];
+
+  // Encounter-structure override: a clinic/office chart carries per-visit
+  // medication lists and lab values, so ancillary types (pharmacy, lab,
+  // billing) can out-score the encounter type on phrase counts alone. When the
+  // document clearly has encounter structure (chief complaint / exam /
+  // assessment / ROS…), the best ENCOUNTER type wins over an ancillary top.
+  const ANCILLARY = new Set(["PHARMACY_RECORD", "LAB_REPORT", "BILLING_RECORD", "INSURANCE_RECORDS"]);
+  const ENCOUNTER_HINTS = ["chief complaint", "physical exam", "review of systems", "assessment", "history of present illness", "hpi", "office visit", "follow-up visit", "plan:"];
+  if (top && ANCILLARY.has(top.type)) {
+    const encounterHits = ENCOUNTER_HINTS.filter((p) => lower.includes(p)).length;
+    if (encounterHits >= 3) {
+      const alt = scores.find((s) => !ANCILLARY.has(s.type));
+      if (alt) {
+        second = top;
+        top = alt;
+      }
+    }
+  }
+
   return {
     type: top?.type ?? "MEDICAL_RECORD",
     score: top?.score ?? 0,
