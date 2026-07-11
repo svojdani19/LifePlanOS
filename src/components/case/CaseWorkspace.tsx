@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, Fragment } from "react";
+import { useState, useMemo, useRef, Fragment } from "react";
 import { useRouter } from "next/navigation";
 import {
   Sparkles,
@@ -225,7 +225,7 @@ export function CaseWorkspace({
         {tab === "records" && <RecordsPanel data={data} canEdit={can("records.upload")} call={call} busy={busy} />}
         {tab === "chronology" && <ChronologyPanel data={data} canEdit={can("chronology.edit")} call={call} />}
         {tab === "causation" && <CausationPanel data={data} />}
-        {tab === "soc" && <StandardOfCarePanel data={data} />}
+        {tab === "soc" && <StandardOfCarePanel data={data} canEdit={can("case.edit")} call={call} />}
         {tab === "futurecare" && <FutureCarePanel data={data} canEdit={can("futurecare.edit")} call={call} />}
         {tab === "costs" && <CostsPanel data={data} assumptions={assumptions} totals={totals} canEdit={can("case.edit")} call={call} />}
         {tab === "reviews" && <ReviewsPanel points={data.reviewFindings} hasPlan={hasPlan} />}
@@ -1118,7 +1118,73 @@ const VERDICT_META: Record<string, { tone: "green" | "amber" | "red" | "neutral"
   POTENTIAL_GAP: { tone: "red", label: "Potential gap — not documented" },
   INDETERMINATE: { tone: "neutral", label: "Indeterminate" },
 };
-function StandardOfCarePanel({ data }: { data: AnyRec }) {
+// Add a reviewer note, paste a source, or upload an article for one condition.
+// Notes join the evidence corpus; sources become cited guidance; both recompute
+// the assessment server-side. router.refresh() (inside `call`) pulls the update.
+function SocInputControls({ caseId, conditionName, call }: { caseId: string; conditionName: string; call: any }) {
+  const [mode, setMode] = useState<null | "note" | "source">(null);
+  const [text, setText] = useState("");
+  const [title, setTitle] = useState("");
+  const [url, setUrl] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const router = useRouter();
+
+  async function submit() {
+    if (!text.trim()) return;
+    const body = mode === "note" ? { kind: "note", conditionName, text } : { kind: "source", conditionName, text, title: title || undefined, url: url || undefined };
+    const r = await call(`/api/cases/${caseId}/soc`, "POST", body, "soc");
+    if (r) { setText(""); setTitle(""); setUrl(""); setMode(null); }
+  }
+
+  async function upload(file: File) {
+    setUploading(true);
+    const fd = new FormData();
+    fd.append("conditionName", conditionName);
+    fd.append("file", file);
+    const res = await fetch(`/api/cases/${caseId}/soc`, { method: "POST", body: fd });
+    setUploading(false);
+    if (!res.ok) { const e = await res.json().catch(() => ({})); alert(e.error ?? "Upload failed"); return; }
+    router.refresh();
+  }
+
+  return (
+    <div className="mt-3 border-t border-ink-100 pt-3">
+      {mode === null ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs text-ink-500">Add to this analysis:</span>
+          <button className="btn-outline px-2.5 py-1 text-xs" onClick={() => setMode("note")}><Plus className="h-3 w-3" /> Note</button>
+          <button className="btn-outline px-2.5 py-1 text-xs" onClick={() => setMode("source")}><Plus className="h-3 w-3" /> Source / citation</button>
+          <button className="btn-outline px-2.5 py-1 text-xs" disabled={uploading} onClick={() => fileRef.current?.click()}>
+            {uploading ? <Loader2 className="h-3 w-3 animate-spin" /> : <Upload className="h-3 w-3" />} Upload article
+          </button>
+          <input ref={fileRef} type="file" accept=".pdf,.docx,.doc,.txt" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f); e.target.value = ""; }} />
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {mode === "source" && (
+            <div className="grid gap-2 sm:grid-cols-2">
+              <input className="input py-1 text-sm" placeholder="Source title / citation (optional)" value={title} onChange={(e) => setTitle(e.target.value)} />
+              <input className="input py-1 text-sm" placeholder="URL / DOI (optional)" value={url} onChange={(e) => setUrl(e.target.value)} />
+            </div>
+          )}
+          <textarea
+            className="input min-h-[70px] text-sm"
+            placeholder={mode === "note" ? "Reviewer note — will be incorporated into the assessment (e.g. documented care not captured in the records)…" : "Paste the pertinent guideline / article language to cite…"}
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+          />
+          <div className="flex gap-2">
+            <button className="btn-primary px-3 py-1 text-xs" onClick={submit}>Add {mode}</button>
+            <button className="btn-outline px-3 py-1 text-xs" onClick={() => { setMode(null); setText(""); }}>Cancel</button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StandardOfCarePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; call: any }) {
   if (data.conditions.length === 0) return <Empty>Run the AI pipeline to build the standard-of-care analysis from the causation items.</Empty>;
   const withSoc = data.conditions.filter((c: AnyRec) => c.socAnalysis);
   if (withSoc.length === 0) return <Empty>Re-run the AI pipeline to generate the standard-of-care analysis (requires network access for guideline lookup).</Empty>;
@@ -1174,10 +1240,20 @@ function StandardOfCarePanel({ data }: { data: AnyRec }) {
                           </p>
                         )}
                         <blockquote className="border-l-2 border-brand-300 pl-3 text-sm italic text-ink-800">“{g.quote}”</blockquote>
-                        <p className="mt-1.5 text-xs text-ink-500">
-                          <a href={g.url} target="_blank" rel="noopener noreferrer" className="font-medium text-brand-700 hover:underline">{g.title}</a>
-                        </p>
-                        <p className="text-[11px] text-ink-400">{[g.authors, g.journal, g.year, g.pmid ? `PMID ${g.pmid}` : g.doi ? `doi:${g.doi}` : "", g.source].filter(Boolean).join(" · ")}</p>
+                        <div className="mt-1.5 flex items-start justify-between gap-2">
+                          <div>
+                            <p className="text-xs text-ink-500">
+                              {g.url ? <a href={g.url} target="_blank" rel="noopener noreferrer" className="font-medium text-brand-700 hover:underline">{g.title}</a> : <span className="font-medium text-ink-700">{g.title}</span>}
+                            </p>
+                            <p className="text-[11px] text-ink-400">{[g.authors, g.journal, g.year, g.pmid ? `PMID ${g.pmid}` : g.doi ? `doi:${g.doi}` : "", g.source].filter(Boolean).join(" · ")}</p>
+                          </div>
+                          {g.userProvided && (
+                            <span className="flex shrink-0 items-center gap-1">
+                              <Badge tone="brand">added by reviewer</Badge>
+                              {canEdit && g.userInputId && <button className="text-ink-300 hover:text-red-600" title="Remove source" onClick={() => call(`/api/cases/${data.id}/soc/${g.userInputId}`, "DELETE", undefined, "soc")}><X className="h-3.5 w-3.5" /></button>}
+                            </span>
+                          )}
+                        </div>
                       </li>
                     );
                   })}
@@ -1204,6 +1280,24 @@ function StandardOfCarePanel({ data }: { data: AnyRec }) {
             </div>
 
             {soc.gaps && <p className="mt-3 text-xs text-amber-700"><span className="font-medium">Gap:</span> {soc.gaps}</p>}
+
+            {/* Reviewer notes (incorporated into the corpus) with removal. */}
+            {Array.isArray(soc.userNotes) && soc.userNotes.length > 0 && (
+              <div className="mt-3">
+                <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Reviewer notes (incorporated)</p>
+                <ul className="mt-1 space-y-1">
+                  {soc.userNotes.map((nn: AnyRec) => (
+                    <li key={nn.id} className="flex items-start gap-2 text-xs text-ink-700">
+                      <span className="mt-0.5 text-ink-300">•</span>
+                      <span className="flex-1">{nn.text}</span>
+                      {canEdit && <button className="text-ink-300 hover:text-red-600" title="Remove" onClick={() => call(`/api/cases/${data.id}/soc/${nn.id}`, "DELETE", undefined, "soc")}><X className="h-3.5 w-3.5" /></button>}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {canEdit && <SocInputControls caseId={data.id} conditionName={c.name} call={call} />}
+
             <p className="mt-2 text-[11px] text-ink-400">The assessment is a preliminary, evidence-grounded aid; the final standard-of-care determination is the reviewing physician&apos;s.</p>
           </div>
         );

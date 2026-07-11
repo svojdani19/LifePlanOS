@@ -311,10 +311,33 @@ model Case {
   futureCareItems  FutureCareItem[]
   reviewFindings   ReviewFinding[]
   reports          ReportExport[]
+  socUserInputs    SocUserInput[]
 
   @@unique([firmId, caseNumber])
   @@index([firmId])
   @@index([firmId, status])
+}
+
+// User-supplied input for the Standard-of-Care analysis: free-text notes and
+// added source articles/guidelines. Keyed by condition NAME (not id) so it
+// survives pipeline regeneration, which recreates conditions. Incorporated into
+// the analysis: notes join the evidence corpus; sources become cited guidance.
+model SocUserInput {
+  id            String @id @default(uuid())
+  caseId        String
+  case          Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  conditionName String
+
+  kind  String // "note" | "source"
+  text  String // note body, or the pertinent quote extracted from the source
+  title String? // source title
+  url   String? // source URL / DOI, when provided
+  filename String? // uploaded file name, when a file was the source
+
+  addedById String?
+  createdAt DateTime @default(now())
+
+  @@index([caseId, conditionName])
 }
 
 // Append-only usage meter. Aggregated per billing period for plan-limit checks

@@ -528,7 +528,8 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
     const soc = cond.socAnalysis as unknown as {
       standard?: string; documentation?: string; rationale?: string; gaps?: string | null;
       assessment?: { verdict?: string; narrative?: string; points?: { guideline?: string; addressed?: boolean; support?: string | null }[] };
-      guidelines?: { title?: string; journal?: string; year?: string; pmid?: string; doi?: string; quote?: string }[];
+      guidelines?: { title?: string; journal?: string; year?: string; pmid?: string; doi?: string; quote?: string; userProvided?: boolean }[];
+      userNotes?: { text?: string }[];
     } | null;
     if (soc) {
       const VLABEL: Record<string, string> = { CONSISTENT: "Consistent with cited guidance", PARTIAL: "Partially consistent — gaps noted", POTENTIAL_GAP: "Potential gap — recommended care not documented", INDETERMINATE: "Indeterminate — insufficient documentation" };
@@ -539,8 +540,10 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
       for (const g of soc.guidelines ?? []) {
         const pt = soc.assessment?.points?.find((p) => p.guideline && (g.title ?? "").startsWith(p.guideline.replace(/…$/, "")));
         const mark = pt ? (pt.addressed ? `[Addressed${pt.support ? ` — ${pt.support}` : ""}] ` : "[Not evidenced in the reviewed records] ") : "";
-        body.push(labeled("Guidance (quoted verbatim)", `${mark}"${g.quote}" — ${g.title}. ${g.journal ?? ""}${g.year ? ` ${g.year}` : ""}${g.pmid ? ` (PMID ${g.pmid})` : g.doi ? ` (doi:${g.doi})` : ""}.`));
+        const label = g.userProvided ? "Guidance — reviewer-added (quoted)" : "Guidance (quoted verbatim)";
+        body.push(labeled(label, `${mark}"${g.quote}" — ${g.title}.${g.userProvided ? "" : ` ${g.journal ?? ""}${g.year ? ` ${g.year}` : ""}${g.pmid ? ` (PMID ${g.pmid})` : g.doi ? ` (doi:${g.doi})` : ""}.`}`));
       }
+      for (const nt of soc.userNotes ?? []) body.push(labeled("Reviewer note (incorporated)", nt.text ?? ""));
       if (soc.gaps) body.push(labeled("Standard-of-care gap", soc.gaps));
       body.push(labeled("Determination", "The assessment is a preliminary, evidence-grounded aid; the final standard-of-care determination is the reviewing physician's."));
     }
