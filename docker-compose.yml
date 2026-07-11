@@ -1,0 +1,30 @@
+# Fully self-hosted database for LifePlanOS — zero external (Neon) dependency.
+#
+#   docker compose up -d          # start Postgres
+#   # set .env DATABASE_URL/DIRECT_URL to the local URL below, then:
+#   npm run setup                 # migrate + seed
+#   npm run dev
+#
+# Local connection string (no SSL for localhost):
+#   postgresql://lifeplanos:lifeplanos@localhost:5432/lifeplanos?sslmode=disable
+services:
+  db:
+    image: postgres:16
+    container_name: lifeplanos-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: lifeplanos
+      POSTGRES_PASSWORD: lifeplanos
+      POSTGRES_DB: lifeplanos
+    ports:
+      - "5432:5432"
+    volumes:
+      - lifeplanos-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lifeplanos -d lifeplanos"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  lifeplanos-pgdata:
