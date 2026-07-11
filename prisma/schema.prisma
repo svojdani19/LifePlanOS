@@ -686,6 +686,9 @@ model FutureCareItem {
   // Evidence (Module 9) — never fabricated; states when support is limited.
   evidenceStrength String? // e.g. "Guideline-supported", "Limited — physician confirmation required"
   literatureSupport String?
+  // Strongest real supporting article, fetched from PubMed (never invented):
+  // { pmid, title, authors, journal, year, url }. Null if none found/offline.
+  citation Json?
 
   // Alternatives & adversarial framing.
   lowerCostAlternative String?

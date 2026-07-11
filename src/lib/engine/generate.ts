@@ -3,6 +3,8 @@ import { packFor, type CareTemplate } from "@/lib/engine/specialty";
 import { CONDITION_CARE, BASELINE_CARE, resolveConditionKeys } from "@/lib/engine/careLibrary";
 import { project, type CaseAssumptions } from "@/lib/engine/cost";
 import { buildChronologyFromRecords } from "@/lib/engine/chronology";
+import { findBestArticle, pubmedReachable, type Article } from "@/lib/literature/pubmed";
+import { Prisma } from "@/generated/prisma";
 import type { Case, CareCategory } from "@/generated/prisma";
 
 const money = (n: number) => "$" + Math.round(n).toLocaleString("en-US");
@@ -190,6 +192,10 @@ export async function generatePlan(caseId: string): Promise<PlanResult> {
 
   await generateReviews(caseId);
 
+  // Attach the strongest real supporting article (PubMed) to each item.
+  // Best-effort — never blocks or fabricates; skipped when PubMed is unreachable.
+  await enrichCitations(caseId).catch(() => {});
+
   return {
     conditions: conditions.length,
     chronology: chronologyCount,
@@ -197,6 +203,48 @@ export async function generatePlan(caseId: string): Promise<PlanResult> {
     totalLifetime: Math.round(totalLifetime),
     totalPresentValue: Math.round(totalPresentValue),
   };
+}
+
+/**
+ * For each future-care item, look up and store the single strongest real
+ * supporting article from PubMed (systematic reviews / guidelines / RCTs
+ * preferred). Deduped by topic; requests are globally rate-limited in the
+ * pubmed module. Returns the number of items cited.
+ */
+const CLEAN_SERVICE = (s: string) => s.replace(/\([^)]*\)/g, "").replace(/[\/,&]/g, " ").replace(/\s+/g, " ").trim();
+const REGION = /\b(lumbar|cervical|thoracic|spinal cord|spine|spinal|knee|hip|shoulder|brain|amputation|rotator cuff|radiculopath\w*|neuropath\w*|migraine|headache|concussion|arthroplasty)/i;
+// Administrative/logistical items have no clinical evidence base to cite.
+const NO_CITATION = new Set<string>(["CASE_MANAGEMENT", "TRANSPORTATION", "MISC", "SUPPLIES"]);
+const CITE_STOP = new Set(["with", "from", "after", "care", "home", "hours", "visit", "visits", "ongoing", "episodes", "management", "follow", "medications", "program"]);
+
+// Keep a fetched article only if it is plausibly on-topic — its title/journal
+// shares the anatomical region or a significant service term. Prevents an
+// off-topic (but real) article from being attached to a recommendation.
+function citationIsRelevant(a: Article, service: string, region: string): boolean {
+  const hay = `${a.title} ${a.journal}`.toLowerCase();
+  if (region && hay.includes(region.toLowerCase())) return true;
+  const terms = (CLEAN_SERVICE(service).toLowerCase().match(/[a-z]{4,}/g) ?? []).filter((t) => !CITE_STOP.has(t));
+  return terms.some((t) => hay.includes(t));
+}
+
+export async function enrichCitations(caseId: string): Promise<number> {
+  if (!(await pubmedReachable())) return 0;
+  const c = await prisma.case.findUnique({ where: { id: caseId } });
+  const items = await prisma.futureCareItem.findMany({ where: { caseId }, include: { condition: true } });
+  const cache = new Map<string, Article | null>();
+  let n = 0;
+  for (const it of items) {
+    if (NO_CITATION.has(it.category)) continue;
+    const context = it.condition?.name ?? c?.diagnosis ?? "";
+    const region = context.match(REGION)?.[0] ?? "";
+    const topic = `${CLEAN_SERVICE(it.service)} ${region}`.trim();
+    if (!cache.has(topic)) cache.set(topic, await findBestArticle(topic));
+    let art = cache.get(topic) ?? null;
+    if (art && !citationIsRelevant(art, it.service, region)) art = null; // drop off-topic matches
+    await prisma.futureCareItem.update({ where: { id: it.id }, data: { citation: (art as unknown as Prisma.InputJsonValue) ?? Prisma.DbNull } });
+    if (art) n++;
+  }
+  return n;
 }
 
 // ── Adversarial reviews (Modules 10 & 11) ────────────────────────────────────
