@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, Fragment } from "react";
+import { useState, useMemo, Fragment } from "react";
 import { useRouter } from "next/navigation";
 import {
   Sparkles,
@@ -22,6 +22,11 @@ import {
   UserRound,
   MapPin,
   Library,
+  Pill,
+  Accessibility,
+  HeartHandshake,
+  Bus,
+  Lightbulb,
   Siren,
   Syringe,
   Dumbbell,
@@ -44,6 +49,7 @@ import { pageRange } from "@/lib/documents/meta";
 import { Icd10Search } from "@/components/Icd10Search";
 import { PreExistingConditionsModal } from "@/components/PreExistingConditionsModal";
 import { parseConditions, serializeConditions, findConditionsInRecords } from "@/lib/intake/preExisting";
+import { suggestDiagnoses } from "@/lib/intake/diagnosisSuggest";
 import { MEDICAL_SPECIALTIES } from "@/lib/intake/specialties";
 import { US_STATES } from "@/lib/intake/jurisdictions";
 
@@ -60,6 +66,20 @@ const PROB_TONE: Record<string, "green" | "brand" | "amber" | "red"> = {
 };
 const VULN_TONE: Record<string, "green" | "amber" | "red"> = { LOW: "green", MODERATE: "amber", HIGH: "red" };
 const PHYS_TONE: Record<string, "neutral" | "green" | "red" | "amber"> = { PENDING: "neutral", APPROVED: "green", REJECTED: "red", MODIFIED: "amber" };
+
+// Future-care category groups (mirrors the report's Medical Cost Table
+// grouping), each with a representative icon for the filter chips and headers.
+const CARE_GROUPS: { title: string; icon: LucideIcon; cats: string[] }[] = [
+  { title: "Physician & Specialist Visits", icon: Stethoscope, cats: ["PHYSICIAN_VISIT", "SPECIALIST_VISIT", "PRIMARY_CARE", "NEUROLOGY", "PMR", "PAIN_MANAGEMENT", "PSYCH"] },
+  { title: "Surgical & Interventional", icon: Syringe, cats: ["ORTHOPEDIC_SURGERY", "NEUROSURGERY", "FUTURE_SURGERY", "REVISION_SURGERY", "INJECTION", "COMPLICATION_MANAGEMENT"] },
+  { title: "Rehabilitation & Therapies", icon: Dumbbell, cats: ["PHYSICAL_THERAPY", "OCCUPATIONAL_THERAPY", "SPEECH_THERAPY", "COGNITIVE_THERAPY"] },
+  { title: "Diagnostics & Laboratory", icon: Microscope, cats: ["IMAGING", "LABS"] },
+  { title: "Medications & Supplies", icon: Pill, cats: ["MEDICATION", "SUPPLIES"] },
+  { title: "Equipment & Modifications", icon: Accessibility, cats: ["DME", "ORTHOTICS_PROSTHETICS", "MOBILITY_AID", "HOME_MODIFICATION", "VEHICLE_MODIFICATION", "ASSISTIVE_TECH"] },
+  { title: "Attendant & Facility Care", icon: HeartHandshake, cats: ["ATTENDANT_CARE", "SKILLED_NURSING", "CASE_MANAGEMENT"] },
+  { title: "Vocational & Transportation", icon: Bus, cats: ["VOCATIONAL_REHAB", "TRANSPORTATION", "MISC"] },
+];
+const careGroupOf = (cat: string) => CARE_GROUPS.find((g) => g.cats.includes(cat)) ?? CARE_GROUPS[CARE_GROUPS.length - 1];
 
 export function CaseWorkspace({
   data,
@@ -266,10 +286,59 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
     ...additional.map((d, i) => (d.diagnosis.trim() && !d.icd10Code.trim() ? `Additional Diagnosis ${i + 1}` : "")).filter(Boolean),
   ];
 
+  // Diagnoses supported by the record CONTENT that are not yet on the case —
+  // suggested to the user; on approval they are saved to the case and flow into
+  // the AI pipeline (diagnosis corpus) on the next run.
+  const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  const suggestions = useMemo(
+    () =>
+      suggestDiagnoses(data.documents ?? [], [{ diagnosis: form.diagnosis, icd10Code: form.icd10Code }, ...additional]).filter(
+        (s) => !dismissed.has(s.icd10Code),
+      ),
+    [data.documents, form.diagnosis, form.icd10Code, additional, dismissed],
+  );
+
+  async function approveSuggestion(s: { diagnosis: string; icd10Code: string }, asPrimary: boolean) {
+    if (asPrimary) {
+      setForm((f) => ({ ...f, diagnosis: s.diagnosis, icd10Code: s.icd10Code }));
+      await call(`/api/cases/${data.id}`, "PATCH", { diagnosis: s.diagnosis, icd10Code: s.icd10Code }, "dx");
+    } else {
+      const next = [...additional, { diagnosis: s.diagnosis, icd10Code: s.icd10Code }];
+      setAdditional(next);
+      await call(`/api/cases/${data.id}`, "PATCH", { additionalDiagnoses: next.filter((d) => d.diagnosis.trim()) }, "dx");
+    }
+  }
+
   return (
     <div className="card max-w-3xl p-6">
       <h3 className="text-sm font-semibold text-ink-900">Case Intake</h3>
       <p className="mt-1 text-xs text-ink-500">Structured intake. The future-care engine infers specialty-specific rules from the diagnosis.</p>
+
+      {/* Diagnoses detected in the record content, pending user approval. */}
+      {canEdit && suggestions.length > 0 && (
+        <div className="mt-4 rounded-lg border border-brand-200 bg-brand-50/50 p-4">
+          <div className="flex items-center gap-2">
+            <Lightbulb className="h-4 w-4 text-brand-700" />
+            <p className="text-sm font-semibold text-ink-900">Suggested Diagnoses From the Records</p>
+          </div>
+          <p className="mt-1 text-xs text-ink-500">Found in the content of the ingested records and not yet on this case. Approving adds the diagnosis to the case; the AI pipeline incorporates it on the next run.</p>
+          <div className="mt-3 space-y-2">
+            {suggestions.map((s) => (
+              <div key={s.icd10Code} className="flex flex-wrap items-center gap-2 rounded-md bg-white px-3 py-2">
+                <span className="text-sm font-medium text-ink-900">{s.diagnosis}</span>
+                <span className="rounded bg-ink-100 px-1.5 py-0.5 font-mono text-[11px] text-ink-600">{s.icd10Code}</span>
+                <span className="min-w-0 flex-1 truncate text-xs text-ink-400" title={s.sources.join(", ")}>in {s.sources.length} record{s.sources.length === 1 ? "" : "s"}: {s.sources.join(", ")}</span>
+                <div className="flex shrink-0 items-center gap-1.5">
+                  {!form.diagnosis.trim() && <button className="btn-primary px-2.5 py-1 text-xs" onClick={() => approveSuggestion(s, true)}>Set as Primary</button>}
+                  <button className="btn-outline px-2.5 py-1 text-xs" onClick={() => approveSuggestion(s, false)}>Add as Additional</button>
+                  <button className="rounded-md p-1 text-ink-300 hover:bg-ink-100 hover:text-ink-600" title="Dismiss" onClick={() => setDismissed((d) => new Set(d).add(s.icd10Code))}><X className="h-3.5 w-3.5" /></button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="mt-4 grid gap-4 sm:grid-cols-2">
         <Field label="Primary Diagnosis (ICD-10)" wide>
           <Icd10Search
@@ -951,10 +1020,32 @@ function mostAgreeableReference(it: AnyRec): string {
 
 function FutureCarePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; call: any }) {
   const [open, setOpen] = useState<string | null>(null);
+  const [filter, setFilter] = useState<string>("All");
   if (data.futureCareItems.length === 0) return <Empty>Run the AI pipeline to generate future care recommendations.</Empty>;
+
+  // Organize by care category group; chips allow selective viewing per group.
+  const groups = CARE_GROUPS.map((g) => ({ ...g, items: data.futureCareItems.filter((it: AnyRec) => g.cats.includes(it.category)) })).filter((g) => g.items.length > 0);
+  const shown = filter === "All" ? groups : groups.filter((g) => g.title === filter);
+
   return (
-    <div className="space-y-2">
-      {data.futureCareItems.map((it: AnyRec) => (
+    <div className="space-y-5">
+      <div className="flex flex-wrap gap-2">
+        <FilterChip label="All" count={data.futureCareItems.length} active={filter === "All"} onClick={() => setFilter("All")} />
+        {groups.map((g) => (
+          <FilterChip key={g.title} label={g.title} count={g.items.length} icon={g.icon} active={filter === g.title} onClick={() => setFilter(g.title)} />
+        ))}
+      </div>
+
+      {shown.map((g) => (
+        <div key={g.title}>
+          <div className="mb-2 flex items-center gap-2 border-b border-ink-200 pb-2">
+            <div className="grid h-8 w-8 place-items-center rounded-lg bg-brand-50 text-brand-700"><g.icon className="h-4.5 w-4.5" /></div>
+            <h3 className="text-sm font-semibold text-ink-900">{g.title}</h3>
+            <span className="text-xs text-ink-400">{g.items.length} item{g.items.length === 1 ? "" : "s"}</span>
+            <span className="ml-auto text-xs font-medium text-brand-800">{formatMoney(g.items.reduce((s: number, it: AnyRec) => s + it.presentValue, 0))} PV</span>
+          </div>
+          <div className="space-y-2">
+      {g.items.map((it: AnyRec) => (
         <div key={it.id} className="card p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="min-w-0">
@@ -1006,6 +1097,9 @@ function FutureCarePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
               )}
             </div>
           )}
+        </div>
+      ))}
+          </div>
         </div>
       ))}
     </div>
