@@ -34,6 +34,8 @@ import type { CaseSide, CareCategory, FutureCareItem } from "@/generated/prisma"
 const money = (n: number) => "$" + Math.round(n).toLocaleString("en-US");
 const pct = (n: number) => `${Math.round(n)}%`;
 const fmtDate = (d: Date | null) => (d ? d.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric", timeZone: "UTC" }) : "—");
+// MM/DD/YYYY — the LCP "Treatment and Surgeries" date format.
+const mdY = (d: Date | null) => (d ? `${String(d.getUTCMonth() + 1).padStart(2, "0")}/${String(d.getUTCDate()).padStart(2, "0")}/${d.getUTCFullYear()}` : "—");
 const clamp = (x: number) => Math.max(0, Math.min(100, Math.round(x)));
 const BRAND = "0E7490";
 const INK = "334155";
@@ -492,20 +494,26 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
 
   // ══ 4. MEDICAL CHRONOLOGY ════════════════════════════════════════════════════
   body.push(h1("4. Medical Chronology", { pageBreak: true }));
-  body.push(p(`The records were screened for the clinically pivotal events and those bearing on a diagnosis or an anticipated future-care item — not every document — and organized into a chronology of ${c.chronologyEvents.length} clinical event${c.chronologyEvents.length === 1 ? "" : "s"}. Each entry carries its objective findings, assessment, treatment, imaging, functional impact, work restrictions, its clinical significance (the diagnosis it documents and the future care it grounds), and a citation to the source record (collapsible in the interactive version).`, { size: 19 }));
+  body.push(p(`The records were screened for the clinically pivotal events and those bearing on a diagnosis or an anticipated future-care item — not every document — and organized into a chronology of ${c.chronologyEvents.length} clinical event${c.chronologyEvents.length === 1 ? "" : "s"}. Each entry is headed by the date, treating provider, and facility, and reports the encounter's subjective, examination, diagnostic studies, assessment, plan, procedure, and disposition as documented, with its clinical significance and a citation to the source record.`, { size: 19 }));
   if (!c.chronologyEvents.length) body.push(p("No clinical events were catalogued from the reviewed records.", { italics: true }));
   for (const e of c.chronologyEvents) {
     const src = e.sourceDocumentId ? docById.get(e.sourceDocumentId) : undefined;
-    body.push(new Paragraph({ spacing: { before: 140, after: 24 }, children: [new TextRun({ text: `${fmtDate(e.eventDate)} — ${e.specialty || e.provider || "Treating provider"} (${(e.eventType || "record").replace(/_/g, " ").toLowerCase()})`, bold: true, size: 20, color: INK })] }));
-    body.push(labeled("Objective findings", e.objectiveFindings || e.summary));
+    // LCP-style encounter header: MM/DD/YYYY[ - MM/DD/YYYY] - Provider / Facility - Record Type
+    const header = `${mdY(e.eventDate)}${e.eventDateEnd ? ` – ${mdY(e.eventDateEnd)}` : ""} - ${e.provider || "Treating provider"}${e.facility ? ` / ${String(e.facility).replace(/[.\s]+$/, "")}` : ""}${e.recordType ? ` - ${e.recordType}` : ""}`;
+    body.push(new Paragraph({ spacing: { before: 160, after: 24 }, children: [new TextRun({ text: header, bold: true, size: 19, color: INK })] }));
+    const anySection = e.subjective || e.objectiveFindings || e.imagingFindings || e.diagnosis || e.treatment || e.procedure || e.disposition;
+    if (e.subjective) body.push(labeled("Subjective", e.subjective));
+    if (e.objectiveFindings) body.push(labeled("Exam", e.objectiveFindings));
+    if (e.imagingFindings) body.push(labeled("Diagnostic Studies", e.imagingFindings));
     if (e.diagnosis) body.push(labeled("Assessment", e.diagnosis));
-    if (e.treatment) body.push(labeled("Treatment", e.treatment));
-    if (e.imagingFindings) body.push(labeled("Imaging", e.imagingFindings));
+    if (e.treatment) body.push(labeled("Plan", e.treatment));
+    if (e.procedure) body.push(labeled("Procedure", e.procedure));
+    if (e.disposition) body.push(labeled("Disposition", e.disposition));
+    if (!anySection) body.push(labeled("Summary", e.summary));
     if (e.functionalStatus) body.push(labeled("Functional impact", e.functionalStatus));
     if (e.restrictions || e.workStatus) body.push(labeled("Work restrictions", [e.restrictions, e.workStatus].filter(Boolean).join("; ")));
     if (e.clinicalSignificance) body.push(labeled("Clinical significance", e.clinicalSignificance));
-    if (e.sourceQuote) body.push(new Paragraph({ spacing: { after: 40 }, border: { left: { style: BorderStyle.SINGLE, size: 12, color: "CBD5E1", space: 8 } }, indent: { left: 200 }, children: [new TextRun({ text: `"${e.sourceQuote}"`, italics: true, size: 17, color: MUTED })] }));
-    body.push(new Paragraph({ spacing: { after: 40 }, children: [new TextRun({ text: `Source: ${src ? src.filename : "record on file"}${e.sourcePage ? `, p. ${e.sourcePage}` : ""}.`, size: 15, color: MUTED })] }));
+    body.push(new Paragraph({ spacing: { after: 40 }, children: [new TextRun({ text: `(Source: ${src ? src.filename : "record on file"}${e.sourcePage ? `, p. ${e.sourcePage}` : ""})`, size: 15, color: MUTED })] }));
   }
 
   // ══ 5. INJURY ANALYSIS ═══════════════════════════════════════════════════════

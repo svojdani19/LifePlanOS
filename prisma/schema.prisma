@@ -618,15 +618,22 @@ model ChronologyEvent {
   case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
 
   eventDate        DateTime
+  eventDateEnd     DateTime? // encounter range end, when the record spans dates
   eventType        String? // SURGERY|IMAGING|LAB|CLINIC_VISIT|ER_VISIT|HOSPITALIZATION|THERAPY|COMPLICATION|LEGAL_EVENT|BILLING|OTHER
   provider         String?
   specialty        String?
+  facility         String? // location/facility for the encounter (LCP header)
   recordType       String?
   summary          String
-  objectiveFindings String?
-  diagnosis        String?
-  treatment        String?
-  imagingFindings  String?
+  // LCP-style encounter fields (Subjective / Exam / Diagnostic Studies /
+  // Assessment / Plan / Procedure / Disposition).
+  subjective       String?
+  objectiveFindings String? // Exam
+  diagnosis        String? // Assessment
+  treatment        String? // Plan
+  procedure        String?
+  disposition      String?
+  imagingFindings  String? // Diagnostic Studies
   medications      String?
   restrictions     String?
   workStatus       String?

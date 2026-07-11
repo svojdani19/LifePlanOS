@@ -948,6 +948,11 @@ const EVENT_STYLE: Record<string, { label: string; dot: string; chip: string }> 
 };
 const styleFor = (t?: string) => EVENT_STYLE[t ?? "OTHER"] ?? EVENT_STYLE.OTHER;
 
+// LCP-style date: MM/DD/YYYY (matches the "Treatment and Surgeries" format).
+const lcpDate = (v: string | Date) => {
+  const d = new Date(v);
+  return `${String(d.getUTCMonth() + 1).padStart(2, "0")}/${String(d.getUTCDate()).padStart(2, "0")}/${d.getUTCFullYear()}`;
+};
 function ChronologyPanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; call: any }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
@@ -991,12 +996,15 @@ function ChronologyPanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
             <li key={e.id} className="relative mb-6">
               <span className="absolute -left-[31px] top-1.5 h-3.5 w-3.5 rounded-full border-2 border-white" style={{ background: s.dot }} />
               <div className="card p-4">
-                <div className="flex flex-wrap items-center gap-2">
+                {/* LCP-style encounter header: date[-range] · provider / facility · record type */}
+                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
                   <span className="text-sm font-semibold text-ink-900">
-                    {new Date(e.eventDate).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" })}
+                    {lcpDate(e.eventDate)}{e.eventDateEnd ? ` – ${lcpDate(e.eventDateEnd)}` : ""}
+                  </span>
+                  <span className="text-sm text-ink-700">
+                    — {e.provider || "Treating provider"}{e.facility ? ` / ${String(e.facility).replace(/[.\s]+$/, "")}` : ""}{e.recordType ? ` — ${e.recordType}` : ""}
                   </span>
                   <span className={cn("rounded-full px-2 py-0.5 text-[11px] font-medium", s.chip)}>{s.label}</span>
-                  {e.specialty && <span className="text-xs text-ink-500">{e.specialty}</span>}
                   {e.dateInferred && <Badge tone="amber">date inferred</Badge>}
                   {e.edited && <Badge tone="amber">edited</Badge>}
                   {canEdit && (
@@ -1013,25 +1021,34 @@ function ChronologyPanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
                     <button className="text-ink-400" onClick={() => setEditing(null)}><X className="h-4 w-4" /></button>
                   </div>
                 ) : (
-                  <p className="mt-1.5 text-sm text-ink-800">{e.summary}</p>
+                  /* Labeled clinical sections in LCP order. Falls back to the
+                     composed summary when the record had no labeled sections. */
+                  <div className="mt-2 space-y-1 text-sm">
+                    {[
+                      ["Subjective", e.subjective],
+                      ["Exam", e.objectiveFindings],
+                      ["Diagnostic Studies", e.imagingFindings],
+                      ["Assessment", e.diagnosis],
+                      ["Plan", e.treatment],
+                      ["Procedure", e.procedure],
+                      ["Disposition", e.disposition],
+                    ].filter(([, v]) => v).map(([label, v]) => (
+                      <p key={label as string} className="text-ink-800"><span className="font-semibold text-ink-600">{label}: </span>{v as string}</p>
+                    ))}
+                    {!e.subjective && !e.objectiveFindings && !e.imagingFindings && !e.diagnosis && !e.treatment && !e.procedure && !e.disposition && (
+                      <p className="text-ink-800">{e.summary}</p>
+                    )}
+                  </div>
                 )}
+
                 {/* Clinical significance — ties the event to diagnoses & future care */}
                 {e.clinicalSignificance && (
                   <p className="mt-2 rounded-md bg-brand-50 px-2.5 py-1.5 text-xs text-brand-800">
                     <span className="font-semibold">Significance: </span>{e.clinicalSignificance}
                   </p>
                 )}
-                {/* Extracted clinical detail */}
-                {(e.diagnosis || e.treatment || e.imagingFindings || e.functionalStatus || e.restrictions || e.workStatus) && (
-                  <dl className="mt-2 grid gap-x-4 gap-y-1 text-xs sm:grid-cols-2">
-                    {e.diagnosis && <div><dt className="inline font-medium text-ink-500">Assessment: </dt><dd className="inline text-ink-700">{e.diagnosis}</dd></div>}
-                    {e.treatment && <div><dt className="inline font-medium text-ink-500">Treatment: </dt><dd className="inline text-ink-700">{e.treatment}</dd></div>}
-                    {e.imagingFindings && <div><dt className="inline font-medium text-ink-500">Imaging: </dt><dd className="inline text-ink-700">{e.imagingFindings}</dd></div>}
-                    {e.functionalStatus && <div><dt className="inline font-medium text-ink-500">Functional: </dt><dd className="inline text-ink-700">{e.functionalStatus}</dd></div>}
-                    {(e.restrictions || e.workStatus) && <div><dt className="inline font-medium text-ink-500">Work/restrictions: </dt><dd className="inline text-ink-700">{[e.restrictions, e.workStatus].filter(Boolean).join("; ")}</dd></div>}
-                  </dl>
-                )}
-                {/* Link to the source document for this finding */}
+
+                {/* Source citation for the encounter. */}
                 {e.sourceDocumentId && (
                   <a
                     href={`/api/cases/${data.id}/documents/${e.sourceDocumentId}/view`}
@@ -1041,7 +1058,7 @@ function ChronologyPanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
                   >
                     <FileText className="h-3.5 w-3.5" />
                     Source: {docName[e.sourceDocumentId] ?? "record"}
-                    {e.sourcePage ? ` · p.${e.sourcePage}` : ""}
+                    {e.sourcePage ? `, p. ${e.sourcePage}` : ""}
                   </a>
                 )}
               </div>
