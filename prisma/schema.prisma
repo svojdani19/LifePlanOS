@@ -608,6 +608,9 @@ model ChronologyEvent {
   restrictions     String?
   workStatus       String?
   functionalStatus String?
+  // Why this event matters: which diagnosis it documents and which future-care
+  // items it grounds. Ties the timeline to the causation map & the care plan.
+  clinicalSignificance String?
 
   // Source citation back to the originating record.
   sourceDocumentId String?

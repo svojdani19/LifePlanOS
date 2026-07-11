@@ -4,10 +4,12 @@ import type { Case } from "@/generated/prisma";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Medical chronology (Module 4). This does NOT put every uploaded document on
-// the timeline. It sorts through all records, keeps only those RELEVANT TO THE
-// COMPLAINT (clinical events that bear on the injury), and for each one emits a
-// single-sentence summary of the relevant finding plus a link back to the
-// source document.
+// the timeline. It sorts through all records and keeps only the clinically
+// PIVOTAL events and those that bear on a DIAGNOSIS or an anticipated FUTURE-CARE
+// item. For each kept event it extracts specific detail (objective findings,
+// assessment/diagnosis, treatment, imaging, functional impact, work status) and
+// states the event's clinical significance — which diagnosis it documents and
+// which future care it grounds — with a link back to the source record.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Purely administrative / financial / legal records — never clinical findings.
@@ -152,6 +154,100 @@ export function extractFinding(text: string, complaint: Set<string>): string | n
   return best ? firstSentence(best.s) : null;
 }
 
+// Pull the remainder of the line after a labeled section header, trimmed. Used
+// to lift the specific clinical detail out of a record (findings, assessment,
+// procedure, plan …) rather than restating the whole note.
+// Non-informative section values (e.g. a post-op diagnosis of "Same") — skip so
+// the extractor falls through to a meaningful label.
+const UNINFORMATIVE = /^(same(\s+as\s+above)?|as\s+above|see\s+above|unchanged|none|n\/?a|not\s+applicable|deferred|noted?)\b/i;
+function pickSection(text: string, labels: RegExp[], max = 200): string | null {
+  for (const re of labels) {
+    const m = text.match(re);
+    if (m && m[1]) {
+      const v = m[1].replace(/\s+/g, " ").trim().replace(/[;,]\s*$/, "");
+      if (v.replace(/[^a-z]/gi, "").length > 3 && !UNINFORMATIVE.test(v)) return v.length > max ? v.slice(0, max - 1).trim() + "…" : v;
+    }
+  }
+  return null;
+}
+
+const SECTIONS = {
+  objectiveFindings: [/\bfindings:?\s*([^\n]+)/i, /\bimpression:?\s*([^\n]+)/i, /physical exam(?:ination)?:?\s*([^\n]+)/i, /objective:?\s*([^\n]+)/i],
+  diagnosis: [/post-?operative diagnosis:?\s*([^\n]+)/i, /pre-?operative diagnosis:?\s*([^\n]+)/i, /discharge diagnosis:?\s*([^\n]+)/i, /assessment(?:\s*&?\s*(?:and\s*)?plan)?:?\s*([^\n]+)/i, /diagnos[ie]s:?\s*([^\n]+)/i, /\bimpression:?\s*([^\n]+)/i],
+  treatment: [/procedure performed:?\s*([^\n]+)/i, /\boperation:?\s*([^\n]+)/i, /plan of care:?\s*([^\n]+)/i, /\btreatment:?\s*([^\n]+)/i, /\bplan:?\s*([^\n]+)/i, /intervention:?\s*([^\n]+)/i],
+  imaging: [/\bimpression:?\s*([^\n]+)/i, /\bfindings:?\s*([^\n]+)/i],
+  functional: [/(?:functional status|ambulation|gait|range of motion|\badls?\b|transfers?)[^:\n]{0,26}:?\s*([^\n]+)/i, /(gait training[^\n]+)/i, /(range of motion[^\n]+)/i],
+  work: [/(?:work status|return to work|disability status)[^:\n]{0,20}:?\s*([^\n]+)/i, /(maximum medical improvement[^\n]*)/i],
+  restrictions: [/(?:restrictions?|limitations?|precautions?|weight[- ]bearing)[^:\n]{0,20}:?\s*([^\n]+)/i],
+  provider: [/(?:surgeon|dictated by|therapist|examiner|attending|physician|provider|author|reported by):?\s*([A-Z][^\n]+)/i],
+};
+
+// Significant, non-generic terms — for matching an event to a diagnosis or a
+// future-care service. Anatomy/procedure words are kept; filler is dropped.
+const SIG_STOP = new Set([...STOP, "patient", "status", "note", "record", "records", "visit", "visits", "history", "clinical", "management", "care", "chronic", "severe", "acute", "initial", "residual", "incomplete", "follow", "followup", "ongoing", "maintenance", "general", "exam", "examination", "reached", "provided", "report", "review", "medical", "additional"]);
+// Words too generic to link an event to a specific future-care service — care
+// linkage must be driven by anatomy/pathology (knee, lumbar, arthroplasty…), not
+// by who wrote the note or a bare action word.
+const CARE_GENERIC = new Set([
+  "therapy", "therapies", "visit", "visits", "follow", "followup", "management", "care", "medication", "medications",
+  "supplies", "surveillance", "evaluation", "injection", "injections", "brace", "unit", "equipment", "ongoing",
+  "maintenance", "general", "coordination", "office", "surgery", "surgical", "surgeon", "procedure", "operative",
+  "preoperative", "postoperative", "clinic", "provider", "physician", "specialist", "consultation", "orthopedic",
+  "orthopaedic", "neurology", "neurologic", "physiatry", "nursing", "assistive", "devices", "device", "serial",
+  "injury", "injuries", "condition", "episodes", "anticipated", "rehabilitation", "rehab",
+]);
+// Pathology words too common to establish a SPECIFIC diagnosis match on their own
+// ("fracture" appears in many diagnoses); a real match needs a distinctive term.
+const DX_GENERIC = new Set(["fracture", "fractures", "injury", "injuries", "pain", "disorder", "syndrome", "disease", "deficit", "dysfunction", "residual"]);
+
+function sigTerms(s: string): string[] {
+  return [...new Set((s.toLowerCase().match(/[a-z][a-z-]{3,}/g) ?? []).filter((w) => !SIG_STOP.has(w)))];
+}
+
+// Does the event text speak to this diagnosis? Requires a DISTINCTIVE shared term
+// (anatomy/pathology beyond the generic ones) so "fracture" alone can't make a
+// lumbar MRI "document" a tibial-plateau fracture.
+function documentsDiagnosis(hay: string, name: string): boolean {
+  const shared = sigTerms(name).filter((t) => hasTerm(hay, t));
+  const distinctive = shared.filter((t) => !DX_GENERIC.has(t));
+  return distinctive.length > 0 && (distinctive.some((t) => t.length >= 5) || shared.length >= 2);
+}
+
+// Which anticipated future-care services this event grounds — a shared
+// distinctive anatomy/procedure term (not a generic care/role word).
+function groundsCare(hay: string, service: string): boolean {
+  return sigTerms(service).some((t) => t.length >= 4 && !CARE_GENERIC.has(t) && hasTerm(hay, t));
+}
+
+function humanList(items: string[]): string {
+  const u = [...new Set(items)];
+  if (u.length <= 1) return u[0] ?? "";
+  if (u.length === 2) return `${u[0]} and ${u[1]}`;
+  return `${u.slice(0, -1).join(", ")}, and ${u[u.length - 1]}`;
+}
+
+// One sentence tying the event to the causation map and the care plan.
+function significance(hay: string, condNames: string[], careServices: string[]): string | null {
+  const dx = condNames.filter((n) => documentsDiagnosis(hay, n));
+  const care = careServices.filter((s) => groundsCare(hay, s)).slice(0, 3);
+  const parts: string[] = [];
+  if (dx.length) parts.push(`Documents ${humanList(dx.slice(0, 2))}`);
+  if (care.length) parts.push(`${dx.length ? "supports the anticipated" : "Supports the anticipated"} ${humanList(care)}`);
+  if (!parts.length) return null;
+  return parts.join("; ") + ".";
+}
+
+// Compose a specific event summary from the extracted detail.
+function composeSummary(fields: { treatment?: string | null; diagnosis?: string | null; objectiveFindings?: string | null; imaging?: string | null }, fallback: string): string {
+  const { treatment, diagnosis, objectiveFindings, imaging } = fields;
+  if (treatment && diagnosis) return firstSentence(`${treatment} for ${diagnosis.replace(/\.$/, "")}`.replace(/\s+/g, " "));
+  if (treatment) return firstSentence(treatment);
+  if (imaging) return firstSentence(imaging);
+  if (objectiveFindings) return firstSentence(objectiveFindings);
+  if (diagnosis) return firstSentence(diagnosis);
+  return fallback;
+}
+
 type EventType = "SURGERY" | "IMAGING" | "LAB" | "CLINIC_VISIT" | "ER_VISIT" | "HOSPITALIZATION" | "THERAPY" | "COMPLICATION" | "LEGAL_EVENT" | "BILLING" | "OTHER";
 
 const TYPE_MAP: Partial<Record<string, { eventType: EventType; specialty: string }>> = {
@@ -216,15 +312,44 @@ export interface RelevanceResult {
   excluded: number;
 }
 
+// Pivotal event types that belong on any medical chronology even absent an
+// explicit diagnosis/care keyword overlap (they establish the injury course).
+const PIVOTAL: Set<EventType> = new Set(["SURGERY", "ER_VISIT", "HOSPITALIZATION", "IMAGING", "COMPLICATION"]);
+
+export interface ChronologyContext {
+  /** diagnosis / condition names for this case (for event significance) */
+  conditions?: string[];
+  /** anticipated future-care service names (for event significance) */
+  careServices?: string[];
+}
+
 /**
- * Rebuild a case's chronology from the records that are relevant to the
- * complaint. Returns how many were kept vs. screened out.
+ * Rebuild a case's chronology from the records. Keeps the clinically pivotal
+ * events and those bearing on a diagnosis or an anticipated future-care item —
+ * not every document — and describes each specifically, stating which diagnosis
+ * it documents and which future care it grounds. Returns kept vs. screened.
  */
-export async function buildChronologyFromRecords(caseId: string): Promise<RelevanceResult> {
+export async function buildChronologyFromRecords(caseId: string, ctx: ChronologyContext = {}): Promise<RelevanceResult> {
   const c = await prisma.case.findUniqueOrThrow({ where: { id: caseId } });
   const docs = await prisma.document.findMany({ where: { caseId }, orderBy: { createdAt: "asc" } });
   const complaint = complaintTerms(c);
   const anchor = c.dateOfInjury ?? c.createdAt;
+
+  // Diagnosis & future-care targets — fall back to the DB when the caller (e.g.
+  // a standalone refresh) doesn't pass them, so significance still populates.
+  const condNames =
+    ctx.conditions ??
+    (await prisma.condition.findMany({ where: { caseId }, select: { name: true } })).map((x) => x.name);
+  if (c.diagnosis && !condNames.some((n) => n.toLowerCase() === c.diagnosis!.toLowerCase())) condNames.unshift(c.diagnosis);
+  const careServices =
+    ctx.careServices ??
+    (await prisma.futureCareItem.findMany({ where: { caseId }, select: { service: true } })).map((x) => x.service);
+  // Distinctive terms that make a record "on-point" for this case: diagnoses +
+  // future care, excluding generic pathology/care words so a bare "injury" or
+  // "rehabilitation" mention can't keep an otherwise-irrelevant note.
+  const targets = new Set<string>(complaint);
+  for (const n of condNames) for (const t of sigTerms(n)) if (!DX_GENERIC.has(t)) targets.add(t);
+  for (const s of careServices) for (const t of sigTerms(s)) if (!CARE_GENERIC.has(t) && !DX_GENERIC.has(t)) targets.add(t);
 
   await prisma.chronologyEvent.deleteMany({ where: { caseId } });
   if (docs.length === 0) return { kept: 0, screened: 0, excluded: 0 };
@@ -233,8 +358,18 @@ export async function buildChronologyFromRecords(caseId: string): Promise<Releva
     eventDate: Date;
     eventType: EventType;
     specialty: string;
+    provider: string | null;
     recordType: string;
     summary: string;
+    objectiveFindings: string | null;
+    diagnosis: string | null;
+    treatment: string | null;
+    imagingFindings: string | null;
+    functionalStatus: string | null;
+    workStatus: string | null;
+    restrictions: string | null;
+    clinicalSignificance: string | null;
+    sourceQuote: string | null;
     relevanceScore: number;
     sourceDocumentId: string;
     dateInferred: boolean;
@@ -248,20 +383,46 @@ export async function buildChronologyFromRecords(caseId: string): Promise<Releva
     const finding = extractFinding(text, complaint);
     if (!finding) continue; // no relevant finding could be pulled → not on the timeline
 
-    const isCore = CORE_CLINICAL.has(doc.type);
-    const overlap = overlapCount(text, complaint);
-    if (!isCore && overlap === 0) continue; // conditional record with no bearing on the complaint
-
     const { eventType, specialty } = classifyEvent(doc.type, text);
+    const hay = `${finding}\n${text}`.toLowerCase();
+    const targetOverlap = overlapCount(text, targets);
+    const sig = significance(hay, condNames, careServices);
+    const isPivotal = PIVOTAL.has(eventType);
+    // Keep only events that establish the injury course (pivotal) OR concretely
+    // bear on a diagnosis / anticipated future-care item (have a significance). A
+    // note tied to neither is screened out — the chronology is not a document
+    // index. (targetOverlap still feeds the relevance score.)
+    if (!isPivotal && !sig) continue;
+
+    const objectiveFindings = pickSection(text, SECTIONS.objectiveFindings);
+    const diagnosis = pickSection(text, SECTIONS.diagnosis);
+    const treatment = pickSection(text, SECTIONS.treatment);
+    const imaging = eventType === "IMAGING" ? pickSection(text, SECTIONS.imaging) : null;
+    const functionalStatus = pickSection(text, SECTIONS.functional);
+    const workStatus = pickSection(text, SECTIONS.work);
+    const restrictions = pickSection(text, SECTIONS.restrictions);
+    const provider = pickSection(text, SECTIONS.provider, 80);
+    const summary = composeSummary({ treatment, diagnosis, objectiveFindings, imaging }, finding);
+
     const dates = extractDates(text);
     const iso = dates[0];
     drafts.push({
       eventDate: iso ? new Date(`${iso}T00:00:00Z`) : (doc.serviceDate ?? anchor),
       eventType,
       specialty,
+      provider,
       recordType: typeLabel(doc.type),
-      summary: finding,
-      relevanceScore: Math.min(100, 40 + overlap * 12 + (isCore ? 20 : 0)),
+      summary,
+      objectiveFindings,
+      diagnosis,
+      treatment,
+      imagingFindings: imaging,
+      functionalStatus,
+      workStatus,
+      restrictions,
+      clinicalSignificance: sig,
+      sourceQuote: finding !== summary ? finding : null,
+      relevanceScore: Math.min(100, 40 + targetOverlap * 10 + (isPivotal ? 25 : 0) + (sig ? 10 : 0)),
       sourceDocumentId: doc.id,
       dateInferred: !iso,
     });
@@ -276,8 +437,18 @@ export async function buildChronologyFromRecords(caseId: string): Promise<Releva
         eventDate: d.eventDate,
         eventType: d.eventType,
         specialty: d.specialty,
+        provider: d.provider,
         recordType: d.recordType,
         summary: d.summary,
+        objectiveFindings: d.objectiveFindings,
+        diagnosis: d.diagnosis,
+        treatment: d.treatment,
+        imagingFindings: d.imagingFindings,
+        functionalStatus: d.functionalStatus,
+        workStatus: d.workStatus,
+        restrictions: d.restrictions,
+        clinicalSignificance: d.clinicalSignificance,
+        sourceQuote: d.sourceQuote,
         relevanceScore: d.relevanceScore,
         sourceDocumentId: d.sourceDocumentId,
         sourcePage: 1,

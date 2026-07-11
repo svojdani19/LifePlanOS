@@ -82,6 +82,7 @@ export async function generatePlan(caseId: string): Promise<PlanResult> {
   // and the specialty-pack conditions, so the causation map is comprehensive.
   const additionalDx = (Array.isArray(c.additionalDiagnoses) ? c.additionalDiagnoses : []) as { diagnosis?: string; icd10Code?: string }[];
   const conditions: { id: string }[] = [];
+  const conditionNames: string[] = [];
   const seenNames = new Set<string>();
   async function addCondition(data: { name: string; relatedness: "RELATED" | "AGGRAVATION" | "PREEXISTING_UNRELATED" | "SUBSEQUENT_UNRELATED" | "UNCLEAR"; confidence: number; reasoning: string; objectiveEvidence: string; missingInfo: string | null }) {
     const key = data.name.trim().toLowerCase();
@@ -89,17 +90,44 @@ export async function generatePlan(caseId: string): Promise<PlanResult> {
     seenNames.add(key);
     const cond = await prisma.condition.create({ data: { caseId, supportingRecords: "Derived from ingested records (see chronology).", ...data } });
     conditions.push(cond);
+    conditionNames.push(data.name);
   }
   if (c.diagnosis) await addCondition({ name: c.diagnosis, relatedness: "RELATED", confidence: 78, reasoning: "Primary diagnosis of record, attributed to the reported injury mechanism.", objectiveEvidence: "See medical records and imaging.", missingInfo: null });
   for (const d of additionalDx) if (d?.diagnosis) await addCondition({ name: d.diagnosis, relatedness: "RELATED", confidence: 70, reasoning: "Injury-related secondary diagnosis pending physician confirmation.", objectiveEvidence: "See medical records.", missingInfo: "Physician confirmation recommended." });
   for (const t of pack.conditions) await addCondition({ name: t.name, relatedness: t.relatedness, confidence: t.confidence, reasoning: t.reasoning, objectiveEvidence: t.objectiveEvidence, missingInfo: t.confidence < 65 ? "Additional records / specialist opinion needed." : null });
   const primaryConditionId = conditions[0]?.id ?? null;
 
-  // Chronology — records are screened for relevance to the complaint; only the
-  // relevant clinical events go on the timeline, each with a one-sentence finding
-  // and a link to its source document. Falls back to the specialty template only
-  // when no relevant records exist yet.
-  const chronoResult = await buildChronologyFromRecords(caseId);
+  // Future care — comprehensive, DIAGNOSIS-DRIVEN, but restricted to
+  // INJURY-RELATED diagnoses only. The corpus is the primary diagnosis, the
+  // additional diagnoses (both entered as diagnoses of the injury), and the
+  // specialty-pack conditions whose relatedness is RELATED or AGGRAVATION.
+  // Pre-existing / unrelated / subsequent-unrelated conditions and the raw
+  // mechanism are deliberately excluded so future care is not driven by
+  // non-injury diagnoses (apportionment principle). Resolved BEFORE the
+  // chronology so the timeline can be tied to the anticipated care.
+  const injuryRelated = pack.conditions.filter((pc) => pc.relatedness === "RELATED" || pc.relatedness === "AGGRAVATION");
+  const corpus = [c.diagnosis, ...additionalDx.map((d) => d?.diagnosis), ...injuryRelated.map((pc) => pc.name)].filter(Boolean).join(" ; ");
+  const matchedKeys = resolveConditionKeys(corpus);
+  let care: CareTemplate[] = [];
+  if (matchedKeys.length > 0) {
+    for (const k of matchedKeys) care.push(...CONDITION_CARE[k]);
+    care.push(...BASELINE_CARE);
+  } else {
+    care = pack.care;
+  }
+  const seenService = new Set<string>();
+  const careItems = care.filter((t) => {
+    const k = t.service.trim().toLowerCase();
+    if (seenService.has(k)) return false;
+    seenService.add(k);
+    return true;
+  });
+
+  // Chronology — records are screened for relevance; only pivotal events and
+  // those bearing on a diagnosis or anticipated future-care item go on the
+  // timeline, each described specifically and tied to the causation map & care
+  // plan. Falls back to the specialty template only when no relevant records.
+  const chronoResult = await buildChronologyFromRecords(caseId, { conditions: conditionNames, careServices: careItems.map((t) => t.service) });
   let chronologyCount = chronoResult.kept;
   if (chronologyCount === 0) {
     for (const e of pack.chronology) {
@@ -123,31 +151,6 @@ export async function generatePlan(caseId: string): Promise<PlanResult> {
     }
     chronologyCount = pack.chronology.length;
   }
-
-  // Future care — comprehensive, DIAGNOSIS-DRIVEN, but restricted to
-  // INJURY-RELATED diagnoses only. The corpus is the primary diagnosis, the
-  // additional diagnoses (both entered as diagnoses of the injury), and the
-  // specialty-pack conditions whose relatedness is RELATED or AGGRAVATION.
-  // Pre-existing / unrelated / subsequent-unrelated conditions and the raw
-  // mechanism are deliberately excluded so future care is not driven by
-  // non-injury diagnoses (apportionment principle).
-  const injuryRelated = pack.conditions.filter((pc) => pc.relatedness === "RELATED" || pc.relatedness === "AGGRAVATION");
-  const corpus = [c.diagnosis, ...additionalDx.map((d) => d?.diagnosis), ...injuryRelated.map((pc) => pc.name)].filter(Boolean).join(" ; ");
-  const matchedKeys = resolveConditionKeys(corpus);
-  let care: CareTemplate[] = [];
-  if (matchedKeys.length > 0) {
-    for (const k of matchedKeys) care.push(...CONDITION_CARE[k]);
-    care.push(...BASELINE_CARE);
-  } else {
-    care = pack.care;
-  }
-  const seenService = new Set<string>();
-  const careItems = care.filter((t) => {
-    const k = t.service.trim().toLowerCase();
-    if (seenService.has(k)) return false;
-    seenService.add(k);
-    return true;
-  });
 
   let totalLifetime = 0;
   let totalPresentValue = 0;

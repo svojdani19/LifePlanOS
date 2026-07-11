@@ -491,7 +491,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
 
   // ══ 4. MEDICAL CHRONOLOGY ════════════════════════════════════════════════════
   body.push(h1("4. Medical Chronology", { pageBreak: true }));
-  body.push(p(`The records were screened for relevance to the complaint and organized into a chronology of ${c.chronologyEvents.length} clinical event${c.chronologyEvents.length === 1 ? "" : "s"}. Each entry carries its objective findings, assessment, treatment, imaging, functional impact, work restrictions, and a citation to the source record (collapsible in the interactive version).`, { size: 19 }));
+  body.push(p(`The records were screened for the clinically pivotal events and those bearing on a diagnosis or an anticipated future-care item — not every document — and organized into a chronology of ${c.chronologyEvents.length} clinical event${c.chronologyEvents.length === 1 ? "" : "s"}. Each entry carries its objective findings, assessment, treatment, imaging, functional impact, work restrictions, its clinical significance (the diagnosis it documents and the future care it grounds), and a citation to the source record (collapsible in the interactive version).`, { size: 19 }));
   if (!c.chronologyEvents.length) body.push(p("No clinical events were catalogued from the reviewed records.", { italics: true }));
   for (const e of c.chronologyEvents) {
     const src = e.sourceDocumentId ? docById.get(e.sourceDocumentId) : undefined;
@@ -502,6 +502,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
     if (e.imagingFindings) body.push(labeled("Imaging", e.imagingFindings));
     if (e.functionalStatus) body.push(labeled("Functional impact", e.functionalStatus));
     if (e.restrictions || e.workStatus) body.push(labeled("Work restrictions", [e.restrictions, e.workStatus].filter(Boolean).join("; ")));
+    if (e.clinicalSignificance) body.push(labeled("Clinical significance", e.clinicalSignificance));
     if (e.sourceQuote) body.push(new Paragraph({ spacing: { after: 40 }, border: { left: { style: BorderStyle.SINGLE, size: 12, color: "CBD5E1", space: 8 } }, indent: { left: 200 }, children: [new TextRun({ text: `"${e.sourceQuote}"`, italics: true, size: 17, color: MUTED })] }));
     body.push(new Paragraph({ spacing: { after: 40 }, children: [new TextRun({ text: `Source: ${src ? src.filename : "record on file"}${e.sourcePage ? `, p. ${e.sourcePage}` : ""}.`, size: 15, color: MUTED })] }));
   }

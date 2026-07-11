@@ -867,7 +867,7 @@ function ChronologyPanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
 
   const events: AnyRec[] = data.chronologyEvents;
   if (events.length === 0)
-    return <Empty>Upload records, then run the AI pipeline to build the medical chronology from every record.</Empty>;
+    return <Empty>Upload records, then run the AI pipeline to build the medical chronology of the events that bear on the diagnoses and future care.</Empty>;
 
   const docName: Record<string, string> = {};
   data.documents.forEach((d: AnyRec) => (docName[d.id] = d.filename));
@@ -882,9 +882,9 @@ function ChronologyPanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
   return (
     <div className="space-y-4">
       <p className="text-sm text-ink-500">
-        {events.length} relevant {events.length === 1 ? "event" : "events"} on the timeline, screened from {data.documents.length}{" "}
+        {events.length} pivotal {events.length === 1 ? "event" : "events"} — those bearing on the diagnoses and future care — screened from {data.documents.length}{" "}
         {data.documents.length === 1 ? "record" : "records"}
-        {excluded > 0 ? ` (${excluded} not relevant to the complaint were excluded)` : ""}.
+        {excluded > 0 ? ` (${excluded} without a bearing on the complaint were excluded)` : ""}.
       </p>
 
       {/* Type filter chips */}
@@ -926,6 +926,22 @@ function ChronologyPanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
                   </div>
                 ) : (
                   <p className="mt-1.5 text-sm text-ink-800">{e.summary}</p>
+                )}
+                {/* Clinical significance — ties the event to diagnoses & future care */}
+                {e.clinicalSignificance && (
+                  <p className="mt-2 rounded-md bg-brand-50 px-2.5 py-1.5 text-xs text-brand-800">
+                    <span className="font-semibold">Significance: </span>{e.clinicalSignificance}
+                  </p>
+                )}
+                {/* Extracted clinical detail */}
+                {(e.diagnosis || e.treatment || e.imagingFindings || e.functionalStatus || e.restrictions || e.workStatus) && (
+                  <dl className="mt-2 grid gap-x-4 gap-y-1 text-xs sm:grid-cols-2">
+                    {e.diagnosis && <div><dt className="inline font-medium text-ink-500">Assessment: </dt><dd className="inline text-ink-700">{e.diagnosis}</dd></div>}
+                    {e.treatment && <div><dt className="inline font-medium text-ink-500">Treatment: </dt><dd className="inline text-ink-700">{e.treatment}</dd></div>}
+                    {e.imagingFindings && <div><dt className="inline font-medium text-ink-500">Imaging: </dt><dd className="inline text-ink-700">{e.imagingFindings}</dd></div>}
+                    {e.functionalStatus && <div><dt className="inline font-medium text-ink-500">Functional: </dt><dd className="inline text-ink-700">{e.functionalStatus}</dd></div>}
+                    {(e.restrictions || e.workStatus) && <div><dt className="inline font-medium text-ink-500">Work/restrictions: </dt><dd className="inline text-ink-700">{[e.restrictions, e.workStatus].filter(Boolean).join("; ")}</dd></div>}
+                  </dl>
                 )}
                 {/* Link to the source document for this finding */}
                 {e.sourceDocumentId && (
