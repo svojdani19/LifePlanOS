@@ -554,6 +554,110 @@ function clinicalSentences(text: string, n = 2): string {
     .filter((s) => s.length > 12 && s.length < 240 && !/^[A-Z0-9 /()\-]+$/.test(s) && !METADATA_SENT.test(s));
   return cleanVal(sents.slice(0, n).join(" "));
 }
+
+// ── Per-date breakdown for a consolidated record ─────────────────────────────
+// A single uploaded file that contains several dated encounters (hospital chart,
+// multi-visit printout) is separated BY DATE so the summary isn't one jammed
+// paragraph — each date shows its own provider, facility, and finding.
+const MONTHS3 = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+function parseAnyDate(raw: string): Date | null {
+  let m: RegExpMatchArray | null;
+  if ((m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/))) {
+    let y = +m[3]; if (y < 100) y += y > 50 ? 1900 : 2000;
+    return new Date(Date.UTC(y, +m[1] - 1, +m[2]));
+  }
+  if ((m = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/))) return new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+  if ((m = raw.match(/^([A-Za-z]+)\.?\s+(\d{1,2}),?\s+(\d{4})$/))) {
+    const mo = MONTHS3.indexOf(m[1].toLowerCase().slice(0, 3));
+    if (mo >= 0) return new Date(Date.UTC(+m[3], mo, +m[2]));
+  }
+  return null;
+}
+const mmddyyyy = (d: Date) => `${String(d.getUTCMonth() + 1).padStart(2, "0")}/${String(d.getUTCDate()).padStart(2, "0")}/${d.getUTCFullYear()}`;
+const DATE_ANCHOR = /\b(?:date of (?:service|procedure|operation|exam(?:ination)?|evaluation|visit|admission|discharge|consult(?:ation)?)|(?:service|admission|admit|discharge|exam|visit|encounter|procedure|operation|consult(?:ation)?)\s+date|date)\s*(?:\/\s*time)?\s*[:\-]\s*(\d{1,2}\/\d{1,2}\/\d{2,4}|\d{4}-\d{1,2}-\d{1,2}|[A-Za-z]+\.?\s+\d{1,2},?\s+\d{4})/gi;
+const NON_CLINICAL_BEFORE = /(birth|dob|print(?:ed)?|report(?:ed)?|signed|expir|effective|policy|paid|statement|due|registration)\s*$/i;
+function segProvider(seg: string): string | null {
+  const m = seg.match(/(?:attending physician|treating physician|examining physician|surgeon|therapist|physician|examiner|provider|dictated by|reviewed by|attending dr)\s*:?\s*(?:dr\.?\s+)?([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]*){1,3}(?:,\s*[A-Za-z.]+(?:,\s*[A-Za-z.]+)?)?(?:\s*[—–-]\s*[A-Z][^\n.]{0,44})?)/);
+  const v = m?.[1]?.replace(/\s+/g, " ").trim();
+  return v && !/\b(date|time|name|number|note|complete|site|id|patient|mechanical|ventilator|weaning|\bsbt\b|anesthesia|orders|sanitizer|nasal|room|record)\b/i.test(v) ? v : null;
+}
+
+// Accept a facility value only if it reads like an organization, not a prose
+// fragment or a code; trim trailing metadata that ran into it.
+function cleanFacility(raw: string | null | undefined): string | null {
+  let v = (raw ?? "").replace(/\s+/g, " ").trim().replace(/[.\s]+$/, "");
+  v = v.replace(/\s+(?:location|facility|medical record|med rec|room-?bed|account|date taken|mrn|bed|page|run|reason)\b.*$/i, "").trim();
+  if (v.length < 4 || v.length > 70) return null;
+  if (/\b(if|you|your|do not|please|consent|copy|given|object|agree|guardrails|weaning|orders|latest|directory)\b/i.test(v)) return null;
+  const orgish = /\b(hospital|center|centre|clinic|medical|laborator|\blab\b|orthop(?:a)?edic|associates|institute|imaging|rehab(?:ilitation)?|health|services|group|\bccu\b|\bicu\b|\ber\b|emergency|surgery|pharmacy)\b/i.test(v);
+  const titleWords = (v.match(/\b[A-Z][a-z]+/g) ?? []).length;
+  return orgish || titleWords >= 2 ? v : null;
+}
+// Accept a finding only if it reads like clinical prose, not metadata/OCR noise.
+function cleanFinding(raw: string | null | undefined): string | null {
+  let s = (raw ?? "").replace(/\s+/g, " ").trim();
+  if (!s) return null;
+  // Strip leading chart metadata / section labels so the clinical content leads.
+  s = s
+    .replace(/^(?:assessment\s+(?:date|time)\s*:?\s*[\d:apm\s]+)/i, "")
+    .replace(/^(?:interval history|update visit note|progress note|subjective|objective|hpi|note|comment|reason|impression|assessment|plan|chief complaint)\s*:?\s*/i, "")
+    .trim();
+  if (!s) return null;
+  if (/^(right|left|latest|run|continued|none recorded|fac|loc|bed)\b/i.test(s)) return null;
+  // Metadata / audit / wrong-patient / OCR-bracket noise (but keep clinical
+  // "Patient seen…"). A colon after "Patient"/"RE" or a DOB marks a header line.
+  if (/patient name\s*:|patient'?s care team|patient\s*:\s*[A-Z]|account\s*:?\s*(?:number|no|[A-Z]{2}\d)|med(?:ical)? rec|registration|\bmr#|\bdob\s*:|\bre\s*:\s*[A-Z]{2,}|date\s*[&/]\s*time|device event|room-?bed|\bpage\s*:\s*\d|\*\*|\[|\]/i.test(s)) return null;
+  if (/^\d{1,2}:\d{2}\b/.test(s)) return null; // starts with a clock time
+  const words = s.match(/[A-Za-z]{2,}/g) ?? [];
+  const real = words.filter((w) => /[a-z]{3,}/.test(w) && /[aeiou]/i.test(w));
+  if (real.length < 2) return null;
+  const digits = (s.match(/\d/g) ?? []).length;
+  if (digits / s.length > 0.22) return null;
+  return s.length > 150 ? s.slice(0, 149).trim() + "…" : s;
+}
+
+export interface RecordEncounter { date: Date; label: string; facility: string | null; provider: string | null; summary: string }
+export function recordEncounters(d: AnyRec): RecordEncounter[] | null {
+  const text = String(d.extractedText || "");
+  if (text.length < 40) return null;
+  const anchors: { off: number; date: Date }[] = [];
+  const re = new RegExp(DATE_ANCHOR.source, "gi");
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    if (NON_CLINICAL_BEFORE.test(text.slice(Math.max(0, m.index - 14), m.index))) continue;
+    const dt = parseAnyDate(m[1].trim());
+    if (dt) anchors.push({ off: m.index, date: dt });
+  }
+  // Merge consecutive anchors on the same date into one encounter.
+  const distinct = [...new Set(anchors.map((a) => a.date.getTime()))];
+  if (distinct.length < 2) return null;
+
+  const byDate = new Map<number, { off: number; end: number }>();
+  for (let i = 0; i < anchors.length; i++) {
+    const key = anchors[i].date.getTime();
+    const end = i + 1 < anchors.length ? anchors[i + 1].off : text.length;
+    const e = byDate.get(key);
+    if (e) e.end = Math.max(e.end, end);
+    else byDate.set(key, { off: anchors[i].off, end });
+  }
+  const out: RecordEncounter[] = [];
+  for (const [t, span] of byDate) {
+    const seg = text.slice(span.off, span.end);
+    const clin = clinicalText(seg);
+    const facility = cleanFacility(seg.match(/\b(?:facility|location)\s*:?\s*([^\n]{3,80})/i)?.[1]);
+    const finding =
+      cleanFinding(section(clin, S("chief complaint"), S("procedure performed"), S("procedure"), S("impression"), S("assessment"), S("plan"), S("reason"), S("findings"))) ||
+      cleanFinding(clinicalSentences(clin, 1));
+    out.push({
+      date: new Date(t),
+      label: mmddyyyy(new Date(t)),
+      facility,
+      provider: segProvider(seg),
+      summary: finding ? `${capFirst(finding)}${/[.!?]$/.test(finding) ? "" : "."}` : "See the cited source page for this encounter.",
+    });
+  }
+  return out.sort((a, b) => a.date.getTime() - b.date.getTime());
+}
 export function narrativeFor(d: AnyRec): string {
   const text = String(d.extractedText || "").replace(/\s+/g, " ").trim();
   if (text.length < 30 || /\billegible\b|no extractable text/i.test(text)) return "Illegible or near-empty page; no findings could be extracted.";
@@ -881,7 +985,29 @@ function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: bo
                                 {d.flags ? ` · ${d.flags}` : ""}
                               </p>
                             )}
-                            <p className="text-xs leading-relaxed text-ink-600">{narrativeFor(d)}</p>
+                            {(() => {
+                              const enc = recordEncounters(d);
+                              if (enc && enc.length >= 2) {
+                                return (
+                                  <div className="space-y-1.5">
+                                    <p className="text-[11px] font-medium text-ink-500">Consolidated record — {enc.length} dated encounters:</p>
+                                    <ul className="space-y-2">
+                                      {enc.map((e, i) => (
+                                        <li key={i} className="border-l-2 border-ink-200 pl-2.5 text-xs">
+                                          <p className="font-semibold text-ink-900">
+                                            {e.label}
+                                            {e.provider ? <span className="font-normal text-ink-600"> — {e.provider}</span> : null}
+                                            {e.facility ? <span className="font-normal text-ink-400"> · {e.facility}</span> : null}
+                                          </p>
+                                          <p className="leading-relaxed text-ink-600">{e.summary}</p>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                );
+                              }
+                              return <p className="text-xs leading-relaxed text-ink-600">{narrativeFor(d)}</p>;
+                            })()}
                           </div>
                         )}
                       </div>
