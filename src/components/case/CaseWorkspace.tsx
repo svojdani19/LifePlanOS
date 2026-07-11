@@ -504,16 +504,23 @@ const GROUP_ICON: Record<string, LucideIcon> = {
 };
 const iconForType = (type: string): LucideIcon => GROUP_ICON[TYPE_GROUP[type] ?? "Other"] ?? FileIcon;
 
-// A brief, plain-language narrative of the FINDINGS in a record (the metadata —
-// date, author, location — is shown separately above it). Type-aware so it pulls
-// the clinically relevant content and phrases it naturally, rather than dumping
-// every labeled section. Deterministic; falls back to the first clinical
-// sentence when a record has no recognizable structure.
+// A plain-language PARAGRAPH narrative of the FINDINGS in a record (the
+// metadata — date, author, location — is shown separately above it). Type-aware
+// so it weaves the clinically relevant sections (presentation, findings,
+// treatment, plan, disposition) into flowing prose rather than dumping labeled
+// fields or stopping at one sentence. Deterministic; falls back to the first
+// clinical sentences when a record has no recognizable structure.
 const lcFirst = (s: string) => (/^[A-Z][a-z]/.test(s) ? s[0].toLowerCase() + s.slice(1) : s);
 const capFirst = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 const cleanVal = (s: string) => s.replace(/\s+/g, " ").replace(/\s+as above\b/i, "").trim().replace(/[.;,]+$/, "").trim();
 const oneSentence = (s: string) => s.split(/(?<=[.!?])\s+/)[0].replace(/[.;,]+$/, "").trim();
-const S = (label: string) => new RegExp(label + ":?\\s*(.+?)(?=\\b[A-Z]{2,}[A-Z /]*:|$)", "i");
+const S = (label: string) => new RegExp(label + ":?\\s*(.+?)(?=\\b[A-Z]{2,}[A-Z /-]*:|$)", "i");
+// Trim/terminate each part and join into one readable paragraph (null-safe).
+const asSentence = (s: string | null | undefined): string | null => {
+  const v = (s ?? "").replace(/\s+/g, " ").trim().replace(/[.;,]+$/, "");
+  return v ? `${capFirst(v)}.` : null;
+};
+const paragraph = (...parts: (string | null | undefined)[]): string => parts.map(asSentence).filter(Boolean).join(" ");
 function section(text: string, ...res: RegExp[]): string | null {
   for (const re of res) {
     const m = text.match(re);
@@ -543,83 +550,157 @@ function clinicalSentences(text: string, n = 2): string {
     .filter((s) => s.length > 12 && s.length < 240 && !/^[A-Z0-9 /()\-]+$/.test(s) && !METADATA_SENT.test(s));
   return cleanVal(sents.slice(0, n).join(" "));
 }
-function narrativeFor(d: AnyRec): string {
+export function narrativeFor(d: AnyRec): string {
   const text = String(d.extractedText || "").replace(/\s+/g, " ").trim();
   if (text.length < 30 || /\billegible\b|no extractable text/i.test(text)) return "Illegible or near-empty page; no findings could be extracted.";
+  // Section extraction runs on the signature-stripped text so header/sign-off
+  // boilerplate never leaks into the narrative.
+  const clin = clinicalText(text);
 
   // A consolidated multi-encounter record (spans dates / has several providers):
   // narrate the arc across encounters rather than a single section.
   const provs = Array.isArray(d.providers) ? d.providers : [];
   if (d.serviceDateEnd || provs.length > 1) {
-    const cc = section(text, S("chief complaint"));
-    const proc = section(text, S("procedure performed"), S("procedure"));
-    const imp = section(text, S("impression"), S("assessment"));
-    const parts = [
-      cc ? `presenting with ${lcFirst(oneSentence(cc))}` : null,
-      proc ? lcFirst(proc) : null,
-      imp ? `impression: ${lcFirst(imp)}` : null,
-    ].filter(Boolean);
-    return parts.length
-      ? `Consolidated multi-encounter record — ${parts.join("; ")}.`
-      : `Consolidated record spanning ${provs.length || "multiple"} providers and encounters.`;
+    const cc = section(clin, S("chief complaint"));
+    const proc = section(clin, S("procedure performed"), S("procedure"));
+    const imp = section(clin, S("impression"), S("assessment"));
+    return paragraph(
+      `This is a consolidated record spanning ${provs.length > 1 ? `${provs.length} providers` : "multiple encounters"}${d.serviceDateEnd ? " over a range of service dates" : ""}`,
+      cc ? `the patient initially presented with ${lcFirst(oneSentence(cc))}` : null,
+      proc ? `documented treatment includes ${lcFirst(proc)}` : null,
+      imp ? `the concluding impression is ${lcFirst(imp)}` : null,
+      !cc && !proc && !imp ? clinicalSentences(clin, 3) : null,
+    );
   }
 
   switch (d.type) {
     case "IMAGING_REPORT": {
       const modM = text.match(/\b(MRI|CT|X-?ray|ultrasound|radiograph)\b/i);
-      const mod = modM ? modM[1].toUpperCase().replace("X-RAY", "X-ray") : "Imaging";
+      const mod = modM ? modM[1].toUpperCase().replace("X-RAY", "X-ray") : null;
+      const art = mod && /^(MRI|X-ray|ULTRASOUND)/i.test(mod) ? "an" : "a";
       const regM = text.match(/of the\s+([a-z][a-z ]{2,30}?)(?:\s+(?:with|without)\b|,|\.)/i);
-      const reg = regM ? regM[1].trim().toLowerCase() : null;
-      const body = section(text, S("impression"), S("findings"));
-      const lead = `${mod} of the ${reg || "affected region"}`;
-      return body ? `${lead} demonstrating ${lcFirst(body)}.` : `${lead}; see report for detailed findings.`;
+      const reg = regM ? regM[1].trim().toLowerCase() : "affected region";
+      const technique = /without contrast/i.test(text) ? "performed without contrast" : /with contrast/i.test(text) ? "performed with contrast" : null;
+      const comparison = text.match(/comparison:?\s*([^.]+)\./i)?.[1]?.trim() ?? null;
+      const findings = section(clin, S("findings"));
+      const impression = section(clin, S("impression"));
+      return paragraph(
+        `This record is ${mod ? `${art} ${mod}` : "an imaging study"} of the ${reg}${technique ? `, ${technique}` : ""}${comparison ? (/^none/i.test(comparison) ? ", with no prior study available for comparison" : `, compared with ${lcFirst(comparison)}`) : ""}`,
+        findings ? `The study demonstrates ${lcFirst(findings)}` : null,
+        impression && impression !== findings ? `The radiologist's impression is ${lcFirst(impression)}` : null,
+        !findings && !impression ? "See the report body for detailed findings" : null,
+      );
     }
     case "OPERATIVE_NOTE": {
-      const proc = section(text, S("procedure performed"), S("procedure"));
-      const detail = section(text, /(the fracture[^.]+)\./i, /(closure[^.]*)\./i);
-      return proc ? `Documents ${lcFirst(proc)}${detail ? `; ${lcFirst(detail)}` : ""}.` : "Operative report; see body for the procedure performed.";
+      const preDx = section(clin, S("preoperative diagnosis"));
+      const proc = section(clin, S("procedure performed"), S("procedure"));
+      const anesthesia = section(clin, S("anesthesia"));
+      const ebl = clin.match(/estimated blood loss:?\s*([\d.,]+\s*(?:m?L|cc))/i)?.[1] ?? null;
+      const detail = section(clin, /(the fracture[^.]+)\./i, /(closure[^.]*)\./i);
+      return paragraph(
+        proc ? `The patient underwent ${lcFirst(proc)}${preDx ? ` for ${lcFirst(preDx)}` : ""}` : "This is an operative report; see the body for the procedure performed",
+        anesthesia || ebl ? `The procedure was carried out under ${anesthesia ? `${lcFirst(anesthesia)} anesthesia` : "anesthesia"}${ebl ? `, with an estimated blood loss of ${ebl}` : ""}` : null,
+        detail ? `Operative detail notes that ${lcFirst(detail)}` : null,
+      );
     }
     case "ER_RECORD": {
-      const cc = section(text, S("chief complaint"));
-      const disp = section(text, S("disposition"));
-      if (!cc) return "Emergency department encounter.";
-      return `Emergency presentation for ${lcFirst(oneSentence(cc))}${disp ? `; ${lcFirst(oneSentence(disp))}` : ""}.`;
+      const cc = section(clin, S("chief complaint"));
+      const exam = section(clin, S("physical exam(?:ination)?"), S("exam"));
+      const assess = section(clin, S("assessment"), S("findings"));
+      const disp = section(clin, S("disposition"));
+      return paragraph(
+        cc ? `The patient presented to the emergency department with ${lcFirst(oneSentence(cc))}` : "This is an emergency department encounter record",
+        exam ? `Examination documented ${lcFirst(oneSentence(exam))}` : null,
+        assess ? `The assessment was ${lcFirst(oneSentence(assess))}` : null,
+        disp ? `The patient's disposition was ${lcFirst(oneSentence(disp))}` : null,
+      );
     }
     case "PT_OT_RECORD": {
-      const s = clinicalSentences(clinicalText(text).replace(/^[^.]*\bnote\b\s*/i, ""), 2);
-      return s ? `Therapy progress note — ${lcFirst(s)}.` : "Rehabilitation therapy progress note documenting the patient's tolerance and functional progress.";
+      const pre = clin.split(/plan of care/i)[0];
+      const s = clinicalSentences(pre.replace(/^[^.]*\bnote\b\s*/i, ""), 3);
+      const plan = section(clin, S("plan of care"));
+      const goals = section(clin, S("short-?term goals"));
+      return paragraph(
+        "This therapy progress note documents the patient's response to treatment",
+        s,
+        plan ? `The plan of care is to ${lcFirst(plan)}` : null,
+        goals ? `Short-term goals include ${lcFirst(goals)}` : null,
+      );
+    }
+    case "HOSPITAL_RECORD":
+    case "DISCHARGE_SUMMARY": {
+      const dx = section(clin, S("discharge diagnosis"), S("admission diagnosis"), S("diagnosis"));
+      const course = section(clin, S("hospital course"));
+      const meds = section(clin, S("discharge medications"));
+      const disp = section(clin, S("discharge disposition"), S("disposition"));
+      return paragraph(
+        dx ? `This inpatient record documents a hospitalization for ${lcFirst(dx)}` : "This is an inpatient hospitalization record",
+        course ? `The hospital course notes ${lcFirst(course)}` : null,
+        meds ? `Discharge medications included ${lcFirst(meds)}` : null,
+        disp ? `The patient was discharged ${/^(to|home)\b/i.test(disp) ? lcFirst(disp) : `with a disposition of ${lcFirst(disp)}`}` : null,
+        !dx && !course && !meds && !disp ? clinicalSentences(clin, 3) : null,
+      );
     }
     case "LAB_REPORT": {
       const m = text.match(/([A-Za-z][A-Za-z ]{2,24}?)\s+([\d.]+).{0,60}?flag\s+(low|high)/i);
       const wbcNormal = /white blood cell[^.]*?(?:within|normal|reference interval)/i.test(text);
-      if (m) return `Laboratory report; ${m[1].trim().toLowerCase()} was flagged ${m[3].toLowerCase()} at ${m[2]}${wbcNormal ? ", with the white blood cell count within normal limits" : ""}.`;
-      return "Laboratory report; values reported against their reference ranges.";
+      return paragraph(
+        "This laboratory report presents values against their reference ranges",
+        m ? `${m[1].trim().toLowerCase()} was flagged ${m[3].toLowerCase()} at ${m[2]}` : "no critical flags were identified in the extracted text",
+        wbcNormal ? "the white blood cell count was within normal limits" : null,
+      );
     }
-    case "NEUROPSYCHOLOGICAL_EVALUATION":
-      return "Neuropsychological evaluation using a standardized test battery; cognitive and memory indices are reported with documented test validity.";
+    case "NEUROPSYCHOLOGICAL_EVALUATION": {
+      const imp = section(clin, S("impression"), S("summary"), S("conclusions?"));
+      return paragraph(
+        "This neuropsychological evaluation was administered using a standardized test battery, with cognitive and memory indices reported alongside documented test validity",
+        imp ? `The examiner's impression is ${lcFirst(imp)}` : null,
+      );
+    }
     case "IME_REPORT": {
       const mmi = /maximum medical improvement/i.test(text);
       const rating = /impairment rating/i.test(text);
-      return `Independent medical examination following record review${mmi ? ", opining the claimant has reached maximum medical improvement" : ""}${rating ? " and providing an impairment rating" : ""}.`;
+      const hx = /history of present injury/i.test(text);
+      return paragraph(
+        "This independent medical examination follows a review of the available records and an in-person examination",
+        hx ? `the report summarizes the history of the present injury` : null,
+        mmi ? "The examiner opines that the claimant has reached maximum medical improvement" : null,
+        rating ? "An impairment rating is provided within a reasonable degree of medical certainty" : null,
+      );
     }
     case "PHARMACY_RECORD": {
-      const rx = section(text, S("prescription"));
-      const sig = section(text, S("sig"));
-      return rx ? `Pharmacy record for ${lcFirst(rx)}${sig ? ` — ${lcFirst(sig)}` : ""}.` : "Pharmacy dispensing record.";
+      const rx = section(clin, S("prescription"), S("medication"), S("drug"));
+      const sig = section(clin, S("sig"));
+      const qty = section(clin, S("quantity"), S("qty"));
+      return paragraph(
+        rx ? `This pharmacy record documents dispensing of ${lcFirst(rx)}` : "This is a pharmacy dispensing record",
+        sig ? `The prescribed directions are ${lcFirst(sig)}` : null,
+        qty ? `Quantity dispensed: ${lcFirst(qty)}` : null,
+      );
     }
     case "BILLING_RECORD": {
       const cpt = text.match(/cpt\s*(\d{5})/i)?.[1];
       const tot = text.match(/total charges:?\s*(\$[\d,]+(?:\.\d{2})?)/i)?.[1];
-      const bal = /balance due/i.test(text);
-      return `Billing statement${cpt ? ` for CPT ${cpt}` : ""}${tot ? `, total charges ${tot}` : ""}${bal ? ", with a patient balance due" : ""}.`;
+      const adj = text.match(/adjustments?:?\s*(\$[\d,]+(?:\.\d{2})?)/i)?.[1];
+      const bal = text.match(/balance due:?\s*(\$[\d,]+(?:\.\d{2})?)/i)?.[1];
+      return paragraph(
+        `This billing statement covers${cpt ? ` CPT ${cpt}` : " the services rendered"}${tot ? `, with total charges of ${tot}` : ""}`,
+        adj ? `Adjustments of ${adj} were applied` : null,
+        bal ? `A patient balance of ${bal} remains due` : /balance due/i.test(text) ? "A patient balance remains due" : null,
+      );
     }
-    case "DEPOSITION":
-      return "Sworn deposition transcript of the witness's testimony.";
+    case "DEPOSITION": {
+      const who = text.match(/deposition of\s+([A-Z][A-Za-z .'-]+?)(?:\s*[—–-]|,|\.)/i)?.[1];
+      return paragraph(
+        `This is the sworn deposition transcript${who ? ` of ${who.trim()}` : ""}`,
+        "The witness testified under oath with counsel for the parties present, and the transcript preserves the examination verbatim",
+      );
+    }
     default: {
-      const body = section(text, S("impression"), S("assessment"), S("diagnosis"), S("findings"));
-      if (body) return `${capFirst(body)}.`;
-      const sent = clinicalSentences(clinicalText(text), 2);
-      return sent ? `${capFirst(sent)}.` : "Record on file; no structured clinical findings were extracted.";
+      const body = section(clin, S("impression"), S("assessment"), S("diagnosis"), S("findings"));
+      const sents = clinicalSentences(clin, 3);
+      const out = paragraph(body, sents && sents !== body ? sents : null);
+      return out || "Record on file; no structured clinical findings were extracted.";
     }
   }
 }
@@ -775,9 +856,12 @@ function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: bo
                       {/* Middle: filename toggles the expandable detail + summary. */}
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2">
-                          <button type="button" onClick={() => setExpandedId(open ? null : d.id)} className="flex min-w-0 items-center gap-1.5 text-left" aria-expanded={open}>
+                          <button type="button" onClick={() => setExpandedId(open ? null : d.id)} className="group flex min-w-0 items-center gap-1.5 text-left" aria-expanded={open}>
                             <span className="truncate text-sm font-medium text-ink-900">{d.filename}</span>
-                            <ChevronDown className={cn("h-4 w-4 shrink-0 text-ink-400 transition-transform", open && "rotate-180")} />
+                            <span className="flex shrink-0 items-center gap-0.5 text-xs font-medium text-brand-700 group-hover:underline">
+                              Details
+                              <ChevronDown className={cn("h-4 w-4 shrink-0 transition-transform", open && "rotate-180")} />
+                            </span>
                           </button>
                           {d.flags && <span title={d.flags} className="shrink-0 text-sm text-amber-500">⚠</span>}
                         </div>
