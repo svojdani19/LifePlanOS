@@ -1,6 +1,9 @@
 import { PrismaClient } from "../src/generated/prisma";
 import { hashPassword } from "../src/lib/auth/password";
 import { SAMPLE_PRECEDENTS } from "../src/lib/precedents/samples";
+import { SAMPLE_DOCS } from "../src/lib/documents/samples";
+import { ingestDocument } from "../src/lib/documents/ingest";
+import { generatePlan } from "../src/lib/engine/generate";
 
 const prisma = new PrismaClient();
 
@@ -63,6 +66,7 @@ async function main() {
   ] as const;
 
   let i = 0;
+  let davidId: string | null = null;
   for (const c of seedCases) {
     i++;
     const created = await prisma.case.create({
@@ -72,12 +76,25 @@ async function main() {
         ...c,
       },
     });
+    if (c.clientName === "David Chen") davidId = created.id;
     await prisma.usageRecord.create({
       data: { firmId: firm.id, userId: c.createdById, metric: "CASE_CREATED", period: period(), caseId: created.id },
     });
     await prisma.auditLog.create({
       data: { firmId: firm.id, userId: c.createdById, action: "case.create", targetType: "case", targetId: created.id, caseId: created.id },
     });
+  }
+
+  // Fully populate the showcase case: ingest the sample record set (which also
+  // extracts date/provider/location metadata) and run the deterministic AI
+  // pipeline (chronology, causation, future care, cost projection, reviews).
+  if (davidId) {
+    for (const doc of SAMPLE_DOCS) {
+      await ingestDocument({ caseId: davidId, firmId: firm.id, uploadedById: planner.id, filename: doc.filename, text: doc.text });
+    }
+    const plan = await generatePlan(davidId);
+    await prisma.case.update({ where: { id: davidId }, data: { status: "PHYSICIAN_REVIEW" } });
+    console.log(`  Populated David Chen: ${SAMPLE_DOCS.length} records, ${plan.futureCare} future-care items, ${plan.chronology} chronology events`);
   }
 
   // A little AI-generation usage so the dashboard shows a non-zero meter.
