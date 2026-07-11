@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { typeLabel } from "@/lib/documents/taxonomy";
+import { pageForOffset, pageMarks } from "@/lib/documents/meta";
 import type { Case } from "@/generated/prisma";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -124,6 +125,16 @@ function firstSentence(s: string): string {
   return sentence.length > 160 ? sentence.slice(0, 157).trim() + "…" : sentence.trim();
 }
 
+// A usable finding reads like prose — not an OCR fragment ("ning to airlift"),
+// a bare label ("Problems: for Time: 07:43"), or a null value ("None recorded").
+function looksLikeProse(s: string): boolean {
+  const words = (s.match(/[A-Za-z]{2,}/g) ?? []).length;
+  if (words < 4) return false;
+  if (!/^["'(]?[A-Z0-9]/.test(s.trim())) return false; // mid-word OCR fragment
+  if (/^(none\b|n\/?a\b|problems?:|date[\s/]?time|time:|page \d)/i.test(s.trim())) return false;
+  return true;
+}
+
 /** Pull a single-sentence relevant finding from a record, or null if none. */
 export function extractFinding(text: string, complaint: Set<string>): string | null {
   if (!text || text.trim().length < 15) return null;
@@ -132,7 +143,7 @@ export function extractFinding(text: string, complaint: Set<string>): string | n
     const m = text.match(re);
     if (m && m[1]) {
       const s = firstSentence(m[1]);
-      if (s.replace(/[^a-z]/gi, "").length > 4) return s;
+      if (s.replace(/[^a-z]/gi, "").length > 4 && looksLikeProse(s)) return s;
     }
   }
 
@@ -142,7 +153,7 @@ export function extractFinding(text: string, complaint: Set<string>): string | n
   const sentences = text
     .split(/(?<=[.!?])\s+|\n+/)
     .map((s) => s.replace(/\s+/g, " ").trim())
-    .filter((s) => s.length > 12 && !/^[A-Z0-9 :/,\-]+$/.test(s)); // drop ALL-CAPS/label-only header lines
+    .filter((s) => s.length > 12 && !/^[A-Z0-9 :/,\-]+$/.test(s) && looksLikeProse(s)); // prose only — no OCR fragments/labels
   let best: { s: string; score: number } | null = null;
   for (const s of sentences) {
     const lower = s.toLowerCase();
@@ -306,6 +317,100 @@ export function extractDates(text: string): string[] {
   });
 }
 
+// ── Encounter segmentation ────────────────────────────────────────────────────
+// A consolidated chart (hospital stay, multi-visit clinic printout, a
+// 1,000-page records production) is not ONE event. Clinical date labels anchor
+// ENCOUNTERS: each label starts a segment that runs to the next anchor, and
+// segments sharing a calendar date merge into one encounter, so the chronology
+// can yield as many events as the record actually documents.
+
+const ANCHOR_LABEL = /\b(?:date of (?:service|procedure|operation|exam(?:ination)?|evaluation|visit|admission|discharge|consult(?:ation)?)|(?:service|admission|admit|discharge|exam|visit|encounter|procedure|operation|consult(?:ation)?)\s+date|date)\s*(?:\/\s*time)?\s*[:\-]\s*/gi;
+const ANCHOR_VALUE = /^\s*(\d{1,2}\/\d{1,2}\/\d{2,4}|20\d{2}-\d{1,2}-\d{1,2}|[A-Z][a-z]+\.?\s+\d{1,2},?\s+20\d{2})/;
+// Labels that are ABOUT a date but not a clinical encounter (DOB, print/report
+// stamps, policy periods) — looked for just before the matched label.
+const NON_CLINICAL_DATE = /(birth|dob|print(?:ed)?|report(?:ed)?|signed|expir|effective|policy|paid|statement|due)\s*$/i;
+
+function anchorToIso(raw: string): string | null {
+  let y = 0, mo = 0, da = 0;
+  let m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/);
+  if (m) {
+    mo = +m[1]; da = +m[2]; y = +m[3];
+    if (y < 100) y += y > 50 ? 1900 : 2000;
+  } else if ((m = raw.match(/^(20\d{2})-(\d{1,2})-(\d{1,2})$/))) {
+    y = +m[1]; mo = +m[2]; da = +m[3];
+  } else if ((m = raw.match(/^([A-Za-z]+)\.?\s+(\d{1,2}),?\s+(20\d{2})$/))) {
+    mo = MONTHS.indexOf(m[1].toLowerCase()) + 1; da = +m[2]; y = +m[3];
+  }
+  if (!y || mo < 1 || mo > 12 || da < 1 || da > 31) return null;
+  const iso = `${y}-${pad(mo)}-${pad(da)}`;
+  const t = new Date(`${iso}T00:00:00Z`).getTime();
+  // Plausibility: a clinical encounter, not a DOB or a future policy date.
+  if (t < new Date("1990-01-01").getTime() || t > Date.now() + 60 * 24 * 3600 * 1000) return null;
+  return iso;
+}
+
+export interface Encounter {
+  dateIso: string;
+  date: Date;
+  /** page the encounter's first anchor appears on (from "Page N of M" marks) */
+  page: number | null;
+  /** the encounter's text (all same-date segments concatenated, capped) */
+  text: string;
+}
+
+const ENCOUNTER_TEXT_CAP = 8000; // enough for detail extraction, bounded for safety
+
+export function segmentEncounters(text: string, marks: { offset: number; page: number }[]): Encounter[] {
+  const anchors: { offset: number; iso: string }[] = [];
+  const re = new RegExp(ANCHOR_LABEL.source, "gi");
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    if (NON_CLINICAL_DATE.test(text.slice(Math.max(0, m.index - 14), m.index))) continue;
+    const v = text.slice(m.index + m[0].length, m.index + m[0].length + 40).match(ANCHOR_VALUE);
+    if (!v) continue;
+    const iso = anchorToIso(v[1].trim());
+    if (iso) anchors.push({ offset: m.index, iso });
+  }
+  const distinct = new Set(anchors.map((a) => a.iso));
+  if (distinct.size < 2) return []; // single-encounter document — no segmentation
+
+  const byDate = new Map<string, Encounter>();
+  for (let i = 0; i < anchors.length; i++) {
+    const a = anchors[i];
+    const end = i + 1 < anchors.length ? anchors[i + 1].offset : text.length;
+    const seg = text.slice(a.offset, end);
+    const e = byDate.get(a.iso);
+    if (e) {
+      if (e.text.length < ENCOUNTER_TEXT_CAP) e.text += "\n" + seg.slice(0, ENCOUNTER_TEXT_CAP - e.text.length);
+    } else {
+      byDate.set(a.iso, {
+        dateIso: a.iso,
+        date: new Date(`${a.iso}T00:00:00Z`),
+        page: pageForOffset(a.offset, marks),
+        text: seg.slice(0, ENCOUNTER_TEXT_CAP),
+      });
+    }
+  }
+  return [...byDate.values()].sort((x, y) => x.date.getTime() - y.date.getTime());
+}
+
+// Event type from the ENCOUNTER'S OWN content (a consolidated chart's document
+// type says nothing about what happened on a given day).
+const SEG_TYPES: { re: RegExp; eventType: EventType; specialty: string }[] = [
+  { re: /procedure performed|operative report|operation performed|surgeon:|anesthesia:|orif\b|arthroplasty performed|incision/i, eventType: "SURGERY", specialty: "Surgery" },
+  { re: /emergency (?:department|room)|\bed\b triage|triage|ambulance|ems\b/i, eventType: "ER_VISIT", specialty: "Emergency" },
+  { re: /discharge summary|hospital course|admitted|admission|inpatient|discharged to/i, eventType: "HOSPITALIZATION", specialty: "Inpatient" },
+  { re: /\b(mri|ct|x-?ray|radiograph|ultrasound|fluoroscop)\b[\s\S]{0,80}(impression|findings)|impression:[\s\S]{0,10}/i, eventType: "IMAGING", specialty: "Radiology" },
+  { re: /reference (?:range|interval)|specimen|\blab(?:oratory)? (?:report|results)\b/i, eventType: "LAB", specialty: "Laboratory" },
+  { re: /physical therapy|occupational therapy|therapeutic exercise|gait training|home exercise program|therapy progress/i, eventType: "THERAPY", specialty: "Rehabilitation" },
+];
+function classifySegment(text: string): { eventType: EventType; specialty: string } {
+  const lower = text.toLowerCase();
+  if (CONTENT_COMPLICATION.some((k) => lower.includes(k))) return { eventType: "COMPLICATION", specialty: "Provider" };
+  for (const s of SEG_TYPES) if (s.re.test(text)) return { eventType: s.eventType, specialty: s.specialty };
+  return { eventType: "CLINIC_VISIT", specialty: "Provider" };
+}
+
 export interface RelevanceResult {
   kept: number;
   screened: number; // total records reviewed
@@ -372,6 +477,7 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
     sourceQuote: string | null;
     relevanceScore: number;
     sourceDocumentId: string;
+    sourcePage: number | null;
     dateInferred: boolean;
   };
   const drafts: Draft[] = [];
@@ -380,53 +486,90 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
     if (EXCLUDED_TYPES.has(doc.type)) continue; // administrative / legal — not a clinical finding
 
     const text = doc.extractedText ?? "";
-    const finding = extractFinding(text, complaint);
-    if (!finding) continue; // no relevant finding could be pulled → not on the timeline
+    const marks = pageMarks(text);
 
-    const { eventType, specialty } = classifyEvent(doc.type, text);
-    const hay = `${finding}\n${text}`.toLowerCase();
-    const targetOverlap = overlapCount(text, targets);
-    const sig = significance(hay, condNames, careServices);
-    const isPivotal = PIVOTAL.has(eventType);
-    // Keep only events that establish the injury course (pivotal) OR concretely
-    // bear on a diagnosis / anticipated future-care item (have a significance). A
-    // note tied to neither is screened out — the chronology is not a document
-    // index. (targetOverlap still feeds the relevance score.)
-    if (!isPivotal && !sig) continue;
+    // Draft one candidate event from a body of text (a whole single-encounter
+    // record, or ONE encounter of a consolidated chart). Applies the relevance
+    // policy: keep only pivotal events or those bearing on a diagnosis /
+    // anticipated future-care item.
+    const draftFrom = (body: string, ev: { eventType: EventType; specialty: string }, eventDate: Date, dateInferred: boolean, page: number | null): Draft | null => {
+      const finding = extractFinding(body, complaint);
+      if (!finding) return null;
+      const hay = `${finding}\n${body}`.toLowerCase();
+      const targetOverlap = overlapCount(body, targets);
+      const sig = significance(hay, condNames, careServices);
+      const isPivotal = PIVOTAL.has(ev.eventType);
+      if (!isPivotal && !sig) return null;
+      const objectiveFindings = pickSection(body, SECTIONS.objectiveFindings);
+      const diagnosis = pickSection(body, SECTIONS.diagnosis);
+      const treatment = pickSection(body, SECTIONS.treatment);
+      const imaging = ev.eventType === "IMAGING" ? pickSection(body, SECTIONS.imaging) : null;
+      // The SUMMARY is composed only from values that read as prose — noisy OCR
+      // fragments stay out of the headline (the raw sections remain available
+      // in the detail fields, where the OCR-confidence flag warns the reviewer).
+      const prose = (v: string | null) => (v && looksLikeProse(v) ? v : null);
+      const summary = composeSummary(
+        { treatment: prose(treatment), diagnosis: prose(diagnosis), objectiveFindings: prose(objectiveFindings), imaging: prose(imaging) },
+        looksLikeProse(finding) ? finding : "Documented clinical encounter — see the cited page of the source record.",
+      );
+      return {
+        eventDate,
+        eventType: ev.eventType,
+        specialty: ev.specialty,
+        provider: pickSection(body, SECTIONS.provider, 80),
+        recordType: typeLabel(doc.type),
+        summary,
+        objectiveFindings,
+        diagnosis,
+        treatment,
+        imagingFindings: imaging,
+        functionalStatus: pickSection(body, SECTIONS.functional),
+        workStatus: pickSection(body, SECTIONS.work),
+        restrictions: pickSection(body, SECTIONS.restrictions),
+        clinicalSignificance: sig,
+        sourceQuote: finding !== summary ? finding : null,
+        relevanceScore: Math.min(100, 40 + targetOverlap * 10 + (isPivotal ? 25 : 0) + (sig ? 10 : 0)),
+        sourceDocumentId: doc.id,
+        sourcePage: page,
+        dateInferred,
+      };
+    };
 
-    const objectiveFindings = pickSection(text, SECTIONS.objectiveFindings);
-    const diagnosis = pickSection(text, SECTIONS.diagnosis);
-    const treatment = pickSection(text, SECTIONS.treatment);
-    const imaging = eventType === "IMAGING" ? pickSection(text, SECTIONS.imaging) : null;
-    const functionalStatus = pickSection(text, SECTIONS.functional);
-    const workStatus = pickSection(text, SECTIONS.work);
-    const restrictions = pickSection(text, SECTIONS.restrictions);
-    const provider = pickSection(text, SECTIONS.provider, 80);
-    const summary = composeSummary({ treatment, diagnosis, objectiveFindings, imaging }, finding);
-
-    const dates = extractDates(text);
-    const iso = dates[0];
-    drafts.push({
-      eventDate: iso ? new Date(`${iso}T00:00:00Z`) : (doc.serviceDate ?? anchor),
-      eventType,
-      specialty,
-      provider,
-      recordType: typeLabel(doc.type),
-      summary,
-      objectiveFindings,
-      diagnosis,
-      treatment,
-      imagingFindings: imaging,
-      functionalStatus,
-      workStatus,
-      restrictions,
-      clinicalSignificance: sig,
-      sourceQuote: finding !== summary ? finding : null,
-      relevanceScore: Math.min(100, 40 + targetOverlap * 10 + (isPivotal ? 25 : 0) + (sig ? 10 : 0)),
-      sourceDocumentId: doc.id,
-      dateInferred: !iso,
-    });
+    // A consolidated chart with multiple dated encounters yields ONE EVENT PER
+    // RELEVANT ENCOUNTER — however many the record documents; a single-encounter
+    // record yields at most one, as before.
+    const encounters = segmentEncounters(text, marks);
+    if (encounters.length >= 2) {
+      for (const enc of encounters) {
+        const d = draftFrom(enc.text, classifySegment(enc.text), enc.date, false, enc.page);
+        if (d) drafts.push(d);
+      }
+    } else {
+      const iso = extractDates(text)[0];
+      const d = draftFrom(
+        text,
+        classifyEvent(doc.type, text),
+        iso ? new Date(`${iso}T00:00:00Z`) : (doc.serviceDate ?? anchor),
+        !iso,
+        marks.length ? pageForOffset(0, marks) : null,
+      );
+      if (d) drafts.push(d);
+    }
   }
+
+  // De-duplicate: the same day's care can be documented in several overlapping
+  // records — keep the strongest event per (date, type, summary-prefix).
+  const seenKeys = new Set<string>();
+  const deduped = drafts
+    .sort((a, b) => b.relevanceScore - a.relevanceScore)
+    .filter((d) => {
+      const key = `${d.eventDate.toISOString().slice(0, 10)}|${d.eventType}|${d.summary.toLowerCase().slice(0, 40)}`;
+      if (seenKeys.has(key)) return false;
+      seenKeys.add(key);
+      return true;
+    });
+  drafts.length = 0;
+  drafts.push(...deduped);
 
   drafts.sort((a, b) => a.eventDate.getTime() - b.eventDate.getTime());
 
@@ -451,7 +594,7 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
         sourceQuote: d.sourceQuote,
         relevanceScore: d.relevanceScore,
         sourceDocumentId: d.sourceDocumentId,
-        sourcePage: 1,
+        sourcePage: d.sourcePage ?? 1,
         dateInferred: d.dateInferred,
         relatedness: "RELATED",
       })),
