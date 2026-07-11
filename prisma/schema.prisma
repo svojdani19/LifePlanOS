@@ -234,12 +234,25 @@ model Session {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   tokenHash String   @unique // sha-256 of the raw cookie token (raw token never stored)
   expiresAt DateTime
+  lastSeenAt DateTime @default(now()) // drives idle-timeout expiry
   createdAt DateTime @default(now())
   userAgent String?
   ip        String?
 
   @@index([userId])
   @@index([tokenHash])
+}
+
+// Throttling record for authentication attempts — powers login rate limiting
+// (serverless-safe, unlike in-memory counters). Rows are short-lived.
+model LoginAttempt {
+  id        String   @id @default(uuid())
+  ip        String?
+  email     String?
+  success   Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([ip, createdAt])
 }
 
 model Case {

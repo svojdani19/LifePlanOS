@@ -1,6 +1,15 @@
+import Stripe from "stripe";
 import { prisma } from "@/lib/db";
 import { PLANS } from "@/lib/subscription/plans";
 import type { PlanTier } from "@/generated/prisma";
+
+let _stripe: Stripe | null = null;
+export function getStripe(): Stripe {
+  if (!process.env.STRIPE_SECRET_KEY) throw new Error("STRIPE_SECRET_KEY is not set.");
+  if (!_stripe) _stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+  return _stripe;
+}
+const APP_URL = process.env.APP_URL ?? "http://localhost:3100";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Billing abstraction. Runs in one of two modes:
@@ -29,13 +38,30 @@ export async function changePlan(firmId: string, tier: PlanTier): Promise<Checko
   const plan = PLANS[tier];
 
   if (billingMode() === "live") {
-    // TODO(live billing): create/update the Stripe subscription here, e.g.
-    //   const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!);
-    //   const session = await stripe.checkout.sessions.create({ ... price: plan.stripePriceId });
-    //   return { mode: "live", url: session.url!, applied: false };
-    // The webhook (src/app/api/billing/webhook) then flips the subscription to
-    // ACTIVE once payment settles.
-    throw new Error("Live Stripe billing not configured. Provide STRIPE_SECRET_KEY and price ids.");
+    if (!plan.stripePriceId) throw new Error(`No Stripe price id configured for the ${tier} plan (set STRIPE_PRICE_${tier}).`);
+    const stripe = getStripe();
+    const sub = await prisma.subscription.findUnique({ where: { firmId }, include: { firm: true } });
+    if (!sub) throw new Error("Subscription not found for firm.");
+
+    // Ensure a Stripe customer exists for the firm.
+    let customerId = sub.stripeCustomerId;
+    if (!customerId) {
+      const customer = await stripe.customers.create({ name: sub.firm.name, metadata: { firmId } });
+      customerId = customer.id;
+      await prisma.subscription.update({ where: { firmId }, data: { stripeCustomerId: customerId } });
+    }
+
+    // Hosted Checkout for the subscription; the webhook activates on completion.
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      customer: customerId,
+      line_items: [{ price: plan.stripePriceId, quantity: 1 }],
+      success_url: `${APP_URL}/billing?status=success`,
+      cancel_url: `${APP_URL}/billing?status=cancel`,
+      metadata: { firmId, tier },
+      subscription_data: { metadata: { firmId, tier } },
+    });
+    return { mode: "live", url: session.url ?? undefined, applied: false };
   }
 
   const now = new Date();
@@ -57,6 +83,12 @@ export async function changePlan(firmId: string, tier: PlanTier): Promise<Checko
 }
 
 export async function cancelPlan(firmId: string): Promise<void> {
+  if (billingMode() === "live") {
+    const sub = await prisma.subscription.findUnique({ where: { firmId } });
+    if (sub?.stripeSubscriptionId) {
+      await getStripe().subscriptions.update(sub.stripeSubscriptionId, { cancel_at_period_end: true });
+    }
+  }
   await prisma.subscription.update({
     where: { firmId },
     data: { status: "CANCELED", canceledAt: new Date() },

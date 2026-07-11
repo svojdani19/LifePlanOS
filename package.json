@@ -13,13 +13,16 @@
     "lint": "next lint",
     "prisma:generate": "prisma generate",
     "prisma:push": "prisma db push",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
     "db:seed": "tsx prisma/seed.ts",
-    "setup": "prisma db push && tsx prisma/seed.ts"
+    "setup": "prisma migrate deploy && tsx prisma/seed.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1085.0",
     "@prisma/client": "^5.20.0",
     "clsx": "^2.1.1",
     "docx": "^9.7.1",
@@ -30,6 +33,7 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "recharts": "^3.9.2",
+    "stripe": "^22.3.1",
     "tailwind-merge": "^3.6.0",
     "zod": "^3.23.8"
   },

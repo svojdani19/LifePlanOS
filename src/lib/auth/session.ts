@@ -10,6 +10,12 @@ import { prisma } from "@/lib/db";
 
 export const SESSION_COOKIE = "lpos_session";
 const SESSION_TTL_DAYS = 14;
+// Idle timeout: a session is invalidated after this many minutes of inactivity,
+// independent of the absolute expiry above. lastSeenAt is refreshed at most once
+// per REFRESH window to avoid a DB write on every request.
+const IDLE_MINUTES = Number(process.env.SESSION_IDLE_MINUTES ?? 30);
+const IDLE_MS = IDLE_MINUTES * 60 * 1000;
+const REFRESH_MS = 5 * 60 * 1000;
 
 function hashToken(raw: string): string {
   return createHash("sha256").update(raw).digest("hex");
@@ -47,9 +53,15 @@ export async function readSession(): Promise<string | null> {
   if (!raw) return null;
   const session = await prisma.session.findUnique({ where: { tokenHash: hashToken(raw) } });
   if (!session) return null;
-  if (session.expiresAt.getTime() < Date.now()) {
+  const now = Date.now();
+  // Absolute expiry, or idle timeout since last activity.
+  if (session.expiresAt.getTime() < now || now - session.lastSeenAt.getTime() > IDLE_MS) {
     await prisma.session.delete({ where: { id: session.id } }).catch(() => {});
     return null;
+  }
+  // Refresh activity timestamp, throttled to avoid a write per request.
+  if (now - session.lastSeenAt.getTime() > REFRESH_MS) {
+    await prisma.session.update({ where: { id: session.id }, data: { lastSeenAt: new Date() } }).catch(() => {});
   }
   return session.userId;
 }
