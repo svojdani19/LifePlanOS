@@ -125,6 +125,25 @@ function firstSentence(s: string): string {
   return sentence.length > 160 ? sentence.slice(0, 157).trim() + "…" : sentence.trim();
 }
 
+// The sentence in a body that best speaks to the case's diagnoses — used as the
+// encounter headline for messy OCR segments, so the knee-relevant line wins over
+// incidental ICU/lab noise on the same page.
+function caseRelevantSentence(body: string, condNames: string[]): string | null {
+  const terms = [...new Set(condNames.flatMap((n) => sigTerms(n)).filter((t) => !DX_GENERIC.has(t)))];
+  if (!terms.length) return null;
+  const sents = body
+    .split(/(?<=[.!?])\s+|\n+/)
+    .map((s) => s.replace(/\s+/g, " ").trim())
+    .filter((s) => s.length > 15 && s.length < 220 && looksLikeProse(s));
+  let best: { s: string; score: number } | null = null;
+  for (const s of sents) {
+    const lower = s.toLowerCase();
+    const score = terms.filter((t) => hasTerm(lower, t)).length;
+    if (score > 0 && (!best || score > best.score)) best = { s, score };
+  }
+  return best ? firstSentence(best.s) : null;
+}
+
 // A usable finding reads like prose — not an OCR fragment ("ning to airlift"),
 // a bare label ("Problems: for Time: 07:43"), or a null value ("None recorded").
 function looksLikeProse(s: string): boolean {
@@ -402,21 +421,26 @@ export function segmentEncounters(text: string, marks: { offset: number; page: n
   return [...byDate.values()].sort((x, y) => x.date.getTime() - y.date.getTime());
 }
 
-// Event type from the ENCOUNTER'S OWN content (a consolidated chart's document
-// type says nothing about what happened on a given day).
-const SEG_TYPES: { re: RegExp; eventType: EventType; specialty: string }[] = [
-  { re: /procedure performed|operative report|operation performed|surgeon:|anesthesia:|orif\b|arthroplasty performed|incision/i, eventType: "SURGERY", specialty: "Surgery" },
-  { re: /emergency (?:department|room)|\bed\b triage|triage|ambulance|ems\b/i, eventType: "ER_VISIT", specialty: "Emergency" },
-  { re: /discharge summary|hospital course|admitted|admission|inpatient|discharged to/i, eventType: "HOSPITALIZATION", specialty: "Inpatient" },
-  { re: /\b(mri|ct|x-?ray|radiograph|ultrasound|fluoroscop)\b[\s\S]{0,80}(impression|findings)|impression:[\s\S]{0,10}/i, eventType: "IMAGING", specialty: "Radiology" },
-  { re: /reference (?:range|interval)|specimen|\blab(?:oratory)? (?:report|results)\b/i, eventType: "LAB", specialty: "Laboratory" },
-  { re: /physical therapy|occupational therapy|therapeutic exercise|gait training|home exercise program|therapy progress/i, eventType: "THERAPY", specialty: "Rehabilitation" },
+// Event type + a readable record type from the ENCOUNTER'S OWN content (a
+// consolidated chart's document type says nothing about what happened on a given
+// day). Order matters: the most specific/reliable signatures come first.
+type SegClass = { eventType: EventType; specialty: string; recordType: string };
+const SEG_TYPES: { re: RegExp; eventType: EventType; specialty: string; recordType: string }[] = [
+  { re: /surgical pathology|gross description|microscopic|specimen(?:s)?\s*(?:submitted|received)|final (?:pathologic )?diagnosis:|reference (?:range|interval)|\blab(?:oratory)? (?:report|results)\b|troponin|\bcbc\b|metabolic panel/i, eventType: "LAB", specialty: "Laboratory / Pathology", recordType: "Laboratory / Pathology Report" },
+  { re: /operative (?:report|note)|procedure performed|operation performed|surgeon\s*:|anesthesia\s*:|\borif\b|arthroplasty performed|manipulation under anesthesia|revision (?:total )?knee|\bincision\b/i, eventType: "SURGERY", specialty: "Surgery", recordType: "Operative / Procedure Note" },
+  { re: /emergency (?:department|room)|\bed\b triage|\btriage\b|chief complaint[\s\S]{0,120}(ambulance|ems\b)|patient care report/i, eventType: "ER_VISIT", specialty: "Emergency", recordType: "Emergency Department Report" },
+  { re: /discharge summary|hospital course|history and physical|\bh&p\b|admitted to|admission diagnosis|discharged to|inpatient/i, eventType: "HOSPITALIZATION", specialty: "Inpatient", recordType: "Hospital / Inpatient Record" },
+  { re: /\b(mri|ct|x-?ray|radiograph|ultrasound|fluoroscop)\b[\s\S]{0,80}(impression|findings)|technique:[\s\S]{0,40}(imaging|sequences)/i, eventType: "IMAGING", specialty: "Radiology", recordType: "Imaging Report" },
+  { re: /transforaminal|epidural steroid|injection performed|radiofrequency ablation|nerve block|arthrocentesis/i, eventType: "SURGERY", specialty: "Pain Management", recordType: "Injection / Procedure Note" },
+  { re: /physical therapy|occupational therapy|therapeutic exercise|gait training|home exercise program|therapy progress|plan of care/i, eventType: "THERAPY", specialty: "Rehabilitation", recordType: "Therapy Note" },
 ];
-function classifySegment(text: string): { eventType: EventType; specialty: string } {
+function classifySegment(text: string): SegClass {
+  let base: SegClass = { eventType: "CLINIC_VISIT", specialty: "Provider", recordType: "Clinical Encounter" };
+  for (const s of SEG_TYPES) if (s.re.test(text)) { base = { eventType: s.eventType, specialty: s.specialty, recordType: s.recordType }; break; }
+  // Complication is a modifier on the base encounter, not its own record type.
   const lower = text.toLowerCase();
-  if (CONTENT_COMPLICATION.some((k) => lower.includes(k))) return { eventType: "COMPLICATION", specialty: "Provider" };
-  for (const s of SEG_TYPES) if (s.re.test(text)) return { eventType: s.eventType, specialty: s.specialty };
-  return { eventType: "CLINIC_VISIT", specialty: "Provider" };
+  if (CONTENT_COMPLICATION.some((k) => lower.includes(k))) return { ...base, eventType: "COMPLICATION" };
+  return base;
 }
 
 export interface RelevanceResult {
@@ -464,8 +488,13 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
   for (const n of condNames) for (const t of sigTerms(n)) if (!DX_GENERIC.has(t)) targets.add(t);
   for (const s of careServices) for (const t of sigTerms(s)) if (!CARE_GENERIC.has(t) && !DX_GENERIC.has(t)) targets.add(t);
 
-  await prisma.chronologyEvent.deleteMany({ where: { caseId } });
-  if (docs.length === 0) return { kept: 0, screened: 0, excluded: 0 };
+  // No records → clear and return. (When records exist, the clear happens
+  // atomically with the insert at the end, so an interrupted build can never
+  // leave the case with an empty timeline.)
+  if (docs.length === 0) {
+    await prisma.chronologyEvent.deleteMany({ where: { caseId } });
+    return { kept: 0, screened: 0, excluded: 0 };
+  }
 
   type Draft = {
     eventDate: Date;
@@ -509,14 +538,20 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
     // record metadata, with a per-encounter fallback extracted from the segment.
     const docProvider = [doc.authorName, doc.authorCredentials].filter(Boolean).join(", ") + (doc.authorRole ? ` — ${doc.authorRole}` : "") || null;
 
-    const draftFrom = (body: string, ev: { eventType: EventType; specialty: string }, eventDate: Date, eventDateEnd: Date | null, dateInferred: boolean, page: number | null, encounter: boolean): Draft | null => {
+    const draftFrom = (body: string, ev: { eventType: EventType; specialty: string; recordType?: string }, eventDate: Date, eventDateEnd: Date | null, dateInferred: boolean, page: number | null, encounter: boolean): Draft | null => {
       const finding = extractFinding(body, complaint);
       if (!finding) return null;
       const hay = `${finding}\n${body}`.toLowerCase();
       const targetOverlap = overlapCount(body, targets);
       const sig = significance(hay, condNames, careServices);
       const isPivotal = PIVOTAL.has(ev.eventType);
-      if (!isPivotal && !sig) return null;
+      // A single focused record: keep pivotal events (they establish the injury
+      // course) or anything bearing on a diagnosis/future-care item. A giant
+      // consolidated chart (segmented into many encounters) is different — most
+      // of its "pivotal" ICU/lab encounters are incidental to the injury, so an
+      // encounter must ACTUALLY bear on the case (significance or ≥2 distinctive
+      // target terms) to make the timeline.
+      if (encounter ? !sig && targetOverlap < 2 : !isPivotal && !sig) return null;
       const subjective = pickSection(body, SECTIONS.subjective);
       // For imaging, the "Exam" line is the scanner technique — skip it; the
       // findings go under Diagnostic Studies instead.
@@ -531,13 +566,22 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
       // Trim trailing OCR labels that ran into the facility ("… Date Taken: …").
       const segFacility = segFacilityRaw?.replace(/\s+(?:date|time|dob|mrn|account|device|room|bed|unit|provider|taken)\b.*$/i, "").replace(/\s+[A-Z][a-z]+\s*:.*$/, "").trim() || null;
       const segProvider = pickSection(body, SECTIONS.provider, 90);
-      const provider = encounter ? (segProvider ?? docProvider) : (docProvider ?? segProvider);
+      // For a consolidated chart, each encounter must use ITS OWN provider — the
+      // document-level author would wrongly stamp every line. Single-encounter
+      // records use the parsed record author.
+      const provider = encounter ? segProvider : (docProvider ?? segProvider);
+      // Per-encounter record type from the segment's content; single-encounter
+      // records keep the document's classified type.
+      const recordType = encounter ? (ev.recordType ?? "Clinical Encounter") : typeLabel(doc.type);
       // The SUMMARY (list headline) is composed only from values that read as
       // prose — noisy OCR fragments stay out; raw sections remain in the fields.
       const prose = (v: string | null) => (v && looksLikeProse(v) ? v : null);
+      // For messy segments with no clean labeled sections, headline the sentence
+      // that actually speaks to the case rather than an incidental OCR line.
+      const caseSentence = !subjective && !objectiveFindings && !diagnosis && !treatment && !procedure ? caseRelevantSentence(body, condNames) : null;
       const summary = composeSummary(
         { treatment: prose(procedure ?? treatment), diagnosis: prose(diagnosis), objectiveFindings: prose(subjective ?? objectiveFindings), imaging: prose(imaging) },
-        looksLikeProse(finding) ? finding : "Documented clinical encounter — see the cited page of the source record.",
+        prose(caseSentence) ?? (looksLikeProse(finding) ? finding : "Documented clinical encounter — see the cited page of the source record."),
       );
       return {
         eventDate,
@@ -546,7 +590,7 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
         specialty: ev.specialty,
         provider,
         facility: segFacility ?? doc.facility ?? null,
-        recordType: typeLabel(doc.type),
+        recordType,
         summary,
         subjective,
         objectiveFindings,
@@ -607,38 +651,40 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
 
   drafts.sort((a, b) => a.eventDate.getTime() - b.eventDate.getTime());
 
-  if (drafts.length > 0) {
-    await prisma.chronologyEvent.createMany({
-      data: drafts.map((d) => ({
-        caseId,
-        eventDate: d.eventDate,
-        eventDateEnd: d.eventDateEnd,
-        eventType: d.eventType,
-        specialty: d.specialty,
-        provider: d.provider,
-        facility: d.facility,
-        recordType: d.recordType,
-        summary: d.summary,
-        subjective: d.subjective,
-        objectiveFindings: d.objectiveFindings,
-        diagnosis: d.diagnosis,
-        treatment: d.treatment,
-        procedure: d.procedure,
-        disposition: d.disposition,
-        imagingFindings: d.imagingFindings,
-        functionalStatus: d.functionalStatus,
-        workStatus: d.workStatus,
-        restrictions: d.restrictions,
-        clinicalSignificance: d.clinicalSignificance,
-        sourceQuote: d.sourceQuote,
-        relevanceScore: d.relevanceScore,
-        sourceDocumentId: d.sourceDocumentId,
-        sourcePage: d.sourcePage ?? 1,
-        dateInferred: d.dateInferred,
-        relatedness: "RELATED",
-      })),
-    });
-  }
+  // Atomic swap: clear the old timeline and insert the new one in one
+  // transaction, so a failure never leaves the case with zero events.
+  const rows = drafts.map((d) => ({
+    caseId,
+    eventDate: d.eventDate,
+    eventDateEnd: d.eventDateEnd,
+    eventType: d.eventType,
+    specialty: d.specialty,
+    provider: d.provider,
+    facility: d.facility,
+    recordType: d.recordType,
+    summary: d.summary,
+    subjective: d.subjective,
+    objectiveFindings: d.objectiveFindings,
+    diagnosis: d.diagnosis,
+    treatment: d.treatment,
+    procedure: d.procedure,
+    disposition: d.disposition,
+    imagingFindings: d.imagingFindings,
+    functionalStatus: d.functionalStatus,
+    workStatus: d.workStatus,
+    restrictions: d.restrictions,
+    clinicalSignificance: d.clinicalSignificance,
+    sourceQuote: d.sourceQuote,
+    relevanceScore: d.relevanceScore,
+    sourceDocumentId: d.sourceDocumentId,
+    sourcePage: d.sourcePage ?? 1,
+    dateInferred: d.dateInferred,
+    relatedness: "RELATED" as const,
+  }));
+  await prisma.$transaction([
+    prisma.chronologyEvent.deleteMany({ where: { caseId } }),
+    ...(rows.length ? [prisma.chronologyEvent.createMany({ data: rows })] : []),
+  ]);
 
   return { kept: drafts.length, screened: docs.length, excluded: docs.length - drafts.length };
 }
