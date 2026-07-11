@@ -1,6 +1,6 @@
 import { redirect } from "next/navigation";
 import Link from "next/link";
-import { Library, ChevronRight } from "lucide-react";
+import { Library, ChevronRight, ScrollText, Download } from "lucide-react";
 import { requireContext } from "@/lib/tenant";
 import { prisma } from "@/lib/db";
 import { can } from "@/lib/rbac";
@@ -33,6 +33,24 @@ export default async function SettingsPage() {
               <ChevronRight className="h-4 w-4 shrink-0 text-ink-400" />
             </Link>
           )}
+          {can(ctx.user.role, "audit.view") && (
+            <Link href="/settings/audit" className="card flex items-center gap-3 p-4 transition-colors hover:border-brand-300 hover:bg-brand-50/40">
+              <div className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-brand-50 text-brand-700"><ScrollText className="h-5 w-5" /></div>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm font-semibold text-ink-900">Audit Log</p>
+                <p className="text-xs text-ink-500">Review recent PHI access, exports, and edits across the firm.</p>
+              </div>
+              <ChevronRight className="h-4 w-4 shrink-0 text-ink-400" />
+            </Link>
+          )}
+          <a href="/api/account/export" className="card flex items-center gap-3 p-4 transition-colors hover:border-brand-300 hover:bg-brand-50/40">
+            <div className="grid h-10 w-10 shrink-0 place-items-center rounded-lg bg-brand-50 text-brand-700"><Download className="h-5 w-5" /></div>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold text-ink-900">Export Firm Data</p>
+              <p className="text-xs text-ink-500">Download a complete JSON export of your firm&apos;s cases and records.</p>
+            </div>
+            <ChevronRight className="h-4 w-4 shrink-0 text-ink-400" />
+          </a>
         </div>
       </div>
 

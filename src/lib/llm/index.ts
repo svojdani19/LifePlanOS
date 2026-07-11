@@ -36,16 +36,38 @@ const mockProvider: LlmProvider = {
   },
 };
 
+// Anthropic Messages API provider (HIPAA-eligible under a BAA). No SDK — just
+// fetch — so it adds no dependency. Set LLM_PROVIDER=anthropic and
+// ANTHROPIC_API_KEY (optionally ANTHROPIC_MODEL) to activate.
+function anthropicProvider(): LlmProvider {
+  return {
+    name: "anthropic",
+    async complete({ system, messages, maxTokens, temperature }) {
+      const key = process.env.ANTHROPIC_API_KEY;
+      if (!key) throw new Error("ANTHROPIC_API_KEY is not set.");
+      const model = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-5";
+      // Anthropic takes `system` separately; fold any system-role messages in.
+      const sys = [system, ...messages.filter((m) => m.role === "system").map((m) => m.content)].filter(Boolean).join("\n\n");
+      const convo = messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role, content: m.content }));
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+        body: JSON.stringify({ model, max_tokens: maxTokens ?? 1024, temperature, system: sys || undefined, messages: convo }),
+      });
+      if (!res.ok) throw new Error(`Anthropic API error ${res.status}: ${await res.text()}`);
+      const data = (await res.json()) as { content?: { type: string; text?: string }[] };
+      return (data.content ?? []).map((b) => b.text ?? "").join("");
+    },
+  };
+}
+
 export function getProvider(): LlmProvider {
   switch (process.env.LLM_PROVIDER) {
-    // TODO(providers): return an Anthropic- or OpenAI-backed provider that
-    // implements LlmProvider. Kept behind this switch so callers never change.
     case "anthropic":
+      return process.env.ANTHROPIC_API_KEY ? anthropicProvider() : mockProvider;
     case "openai":
-      if (process.env.NODE_ENV !== "production") {
-        // eslint-disable-next-line no-console
-        console.warn(`LLM_PROVIDER=${process.env.LLM_PROVIDER} not wired yet; using mock.`);
-      }
+      // OpenAI is not HIPAA-eligible by default; wire similarly behind a BAA if needed.
+      if (process.env.NODE_ENV !== "production") console.warn("LLM_PROVIDER=openai not wired; using mock.");
       return mockProvider;
     default:
       return mockProvider;
