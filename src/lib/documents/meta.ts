@@ -77,14 +77,14 @@ function toDate(raw: string): Date | null {
 }
 
 // "Page N" / "Page N of M" markers → the page each character offset falls on.
-function pageMarks(text: string): { offset: number; page: number }[] {
+export function pageMarks(text: string): { offset: number; page: number }[] {
   const marks: { offset: number; page: number }[] = [];
   const re = /\bpage\s+(\d+)\b(?:\s+of\s+\d+)?/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) marks.push({ offset: m.index, page: parseInt(m[1], 10) });
   return marks;
 }
-function pageForOffset(off: number, marks: { offset: number; page: number }[]): number | null {
+export function pageForOffset(off: number, marks: { offset: number; page: number }[]): number | null {
   if (!marks.length) return null;
   let pg = marks[0].page;
   for (const mk of marks) {

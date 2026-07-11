@@ -17,6 +17,7 @@ import { project } from "@/lib/engine/cost";
 import { typeLabel } from "@/lib/documents/taxonomy";
 import { pageRange } from "@/lib/documents/meta";
 import { parseConditions } from "@/lib/intake/preExisting";
+import { confidenceBand, confidenceDefinition } from "@/lib/engine/confidence";
 import type { CaseSide, CareCategory, FutureCareItem } from "@/generated/prisma";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -516,9 +517,12 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
     body.push(labeled("Relationship", "Primary diagnosis of record, attributed to the reported injury mechanism."));
   }
   for (const cond of c.conditions) {
-    body.push(new Paragraph({ spacing: { before: 160, after: 20 }, children: [new TextRun({ text: cond.name, bold: true, size: 20 }), new TextRun({ text: `  —  ICD-10 ${icdFor(cond.name)} · confidence ${cond.confidence}%`, size: 18, color: MUTED })] }));
+    const evSources = (Array.isArray(cond.evidenceSources) ? cond.evidenceSources : []) as { filename?: string; page?: number | null; quote?: string }[];
+    body.push(new Paragraph({ spacing: { before: 160, after: 20 }, children: [new TextRun({ text: cond.name, bold: true, size: 20 }), new TextRun({ text: `  —  ICD-10 ${icdFor(cond.name)} · confidence ${confidenceBand(cond.confidence)} (${cond.confidence}%)`, size: 18, color: MUTED })] }));
     body.push(labeled("Relationship to incident", `${cond.name} is ${relatednessText(cond.relatedness)} (confidence ${cond.confidence}%).`));
+    body.push(labeled("Confidence basis", confidenceDefinition({ confidence: cond.confidence, physicianConfirmed: cond.physicianConfirmed, missingInfo: cond.missingInfo, evidenceCount: evSources.length })));
     if (cond.objectiveEvidence) body.push(labeled("Objective evidence / examination", cond.objectiveEvidence));
+    if (evSources.length) body.push(labeled("Evidence sources (record · page)", evSources.map((s) => `${s.filename}${s.page ? `, p. ${s.page}` : ""}${s.quote ? ` — "${s.quote}"` : ""}`).join("  ·  ")));
     if (cond.supportingRecords) body.push(labeled("Supporting records / physician", cond.supportingRecords));
     if (cond.reasoning) body.push(labeled("Analysis", cond.reasoning));
     body.push(labeled("Pre-existing / aggravation", cond.relatedness === "AGGRAVATION" ? "Aggravation of a pre-existing condition — apportionment addressed in §10." : cond.relatedness === "PREEXISTING_UNRELATED" ? "Pre-existing and unrelated — excluded from causally-related damages." : "No pre-existing basis identified in the reviewed records for this diagnosis."));

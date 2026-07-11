@@ -640,8 +640,11 @@ model Condition {
   supportingRecords String?
   opposingRecords   String?
   objectiveEvidence String?
-  missingInfo       String?
-  reasoning         String?
+  // Where the objective evidence actually lives: array of
+  // { documentId, filename, page, quote } pointing into the source records.
+  evidenceSources Json?
+  missingInfo     String?
+  reasoning       String?
 
   physicianConfirmed Boolean @default(false)
 

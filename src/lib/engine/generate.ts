@@ -3,6 +3,7 @@ import { packFor, type CareTemplate } from "@/lib/engine/specialty";
 import { CONDITION_CARE, BASELINE_CARE, resolveConditionKeys } from "@/lib/engine/careLibrary";
 import { project, type CaseAssumptions } from "@/lib/engine/cost";
 import { buildChronologyFromRecords } from "@/lib/engine/chronology";
+import { locateConditionEvidence } from "@/lib/engine/evidence";
 import { findCandidates, literatureReachable, activeSources, type Article } from "@/lib/literature";
 import { Prisma } from "@/generated/prisma";
 import type { Case, CareCategory } from "@/generated/prisma";
@@ -81,6 +82,8 @@ export async function generatePlan(caseId: string): Promise<PlanResult> {
   // Every injury-related diagnosis: the intake primary + additional diagnoses
   // and the specialty-pack conditions, so the causation map is comprehensive.
   const additionalDx = (Array.isArray(c.additionalDiagnoses) ? c.additionalDiagnoses : []) as { diagnosis?: string; icd10Code?: string }[];
+  // Records once, for locating each condition's objective evidence (doc + page + quote).
+  const caseDocs = await prisma.document.findMany({ where: { caseId }, select: { id: true, filename: true, type: true, extractedText: true, pageCount: true } });
   const conditions: { id: string }[] = [];
   const conditionNames: string[] = [];
   const seenNames = new Set<string>();
@@ -88,7 +91,25 @@ export async function generatePlan(caseId: string): Promise<PlanResult> {
     const key = data.name.trim().toLowerCase();
     if (!key || seenNames.has(key)) return;
     seenNames.add(key);
-    const cond = await prisma.condition.create({ data: { caseId, supportingRecords: "Derived from ingested records (see chronology).", ...data } });
+    // Locate the actual evidence in the records: document, page, verbatim quote.
+    const sources = locateConditionEvidence(caseDocs, data.name);
+    // A generic placeholder gives way to the strongest located quote.
+    const objectiveEvidence =
+      /^see medical records/i.test(data.objectiveEvidence) && sources[0]
+        ? `"${sources[0].quote}" (${sources[0].filename}${sources[0].page ? `, p. ${sources[0].page}` : ""})`
+        : data.objectiveEvidence;
+    const supportingRecords = sources.length
+      ? sources.map((s) => `${s.filename}${s.page ? ` p. ${s.page}` : ""}`).join("; ")
+      : "Derived from ingested records (see chronology).";
+    const cond = await prisma.condition.create({
+      data: {
+        caseId,
+        supportingRecords,
+        ...data,
+        objectiveEvidence,
+        evidenceSources: sources.length ? (sources as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
+      },
+    });
     conditions.push(cond);
     conditionNames.push(data.name);
   }

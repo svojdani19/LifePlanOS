@@ -13,7 +13,7 @@ import type { Case } from "@/generated/prisma";
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Purely administrative / financial / legal records — never clinical findings.
-const EXCLUDED_TYPES = new Set([
+export const EXCLUDED_TYPES = new Set([
   "BILLING_RECORD",
   "INSURANCE_RECORDS",
   "TAX_RECORDS",
@@ -91,7 +91,7 @@ function complaintTerms(c: Case): Set<string> {
 
 // Whole-word match (with optional plural) so short terms like "cord" don't
 // falsely match inside "record", or "disc" inside "discharge".
-function hasTerm(lower: string, term: string): boolean {
+export function hasTerm(lower: string, term: string): boolean {
   const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`\\b${escaped}s?\\b`, "i").test(lower);
 }
@@ -184,7 +184,7 @@ const SECTIONS = {
 
 // Significant, non-generic terms — for matching an event to a diagnosis or a
 // future-care service. Anatomy/procedure words are kept; filler is dropped.
-const SIG_STOP = new Set([...STOP, "patient", "status", "note", "record", "records", "visit", "visits", "history", "clinical", "management", "care", "chronic", "severe", "acute", "initial", "residual", "incomplete", "follow", "followup", "ongoing", "maintenance", "general", "exam", "examination", "reached", "provided", "report", "review", "medical", "additional"]);
+const SIG_STOP = new Set([...STOP, "patient", "status", "note", "record", "records", "visit", "visits", "history", "clinical", "management", "care", "chronic", "severe", "acute", "initial", "residual", "incomplete", "follow", "followup", "ongoing", "maintenance", "general", "exam", "examination", "reached", "provided", "report", "review", "medical", "additional", "level", "unspecified", "encounter"]);
 // Words too generic to link an event to a specific future-care service — care
 // linkage must be driven by anatomy/pathology (knee, lumbar, arthroplasty…), not
 // by who wrote the note or a bare action word.
@@ -200,14 +200,14 @@ const CARE_GENERIC = new Set([
 // ("fracture" appears in many diagnoses); a real match needs a distinctive term.
 const DX_GENERIC = new Set(["fracture", "fractures", "injury", "injuries", "pain", "disorder", "syndrome", "disease", "deficit", "dysfunction", "residual"]);
 
-function sigTerms(s: string): string[] {
+export function sigTerms(s: string): string[] {
   return [...new Set((s.toLowerCase().match(/[a-z][a-z-]{3,}/g) ?? []).filter((w) => !SIG_STOP.has(w)))];
 }
 
 // Does the event text speak to this diagnosis? Requires a DISTINCTIVE shared term
 // (anatomy/pathology beyond the generic ones) so "fracture" alone can't make a
 // lumbar MRI "document" a tibial-plateau fracture.
-function documentsDiagnosis(hay: string, name: string): boolean {
+export function documentsDiagnosis(hay: string, name: string): boolean {
   const shared = sigTerms(name).filter((t) => hasTerm(hay, t));
   const distinctive = shared.filter((t) => !DX_GENERIC.has(t));
   return distinctive.length > 0 && (distinctive.some((t) => t.length >= 5) || shared.length >= 2);

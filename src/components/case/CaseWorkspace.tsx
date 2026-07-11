@@ -50,6 +50,7 @@ import { Icd10Search } from "@/components/Icd10Search";
 import { PreExistingConditionsModal } from "@/components/PreExistingConditionsModal";
 import { parseConditions, serializeConditions, findConditionsInRecords } from "@/lib/intake/preExisting";
 import { suggestDiagnoses } from "@/lib/intake/diagnosisSuggest";
+import { confidenceBand, confidenceDefinition } from "@/lib/engine/confidence";
 import { MEDICAL_SPECIALTIES } from "@/lib/intake/specialties";
 import { US_STATES } from "@/lib/intake/jurisdictions";
 
@@ -1055,23 +1056,49 @@ function CausationPanel({ data }: { data: AnyRec }) {
   if (data.conditions.length === 0) return <Empty>Run the AI pipeline to build the causation & apportionment map.</Empty>;
   return (
     <div className="grid gap-4 md:grid-cols-2">
-      {data.conditions.map((c: AnyRec) => (
-        <div key={c.id} className="card p-5">
-          <div className="flex items-start justify-between gap-2">
-            <h3 className="font-semibold text-ink-900">{c.name}</h3>
-            <Badge tone={REL_TONE[c.relatedness]}>{c.relatedness.replace(/_/g, " ").toLowerCase()}</Badge>
+      {data.conditions.map((c: AnyRec) => {
+        const sources: AnyRec[] = Array.isArray(c.evidenceSources) ? c.evidenceSources : [];
+        return (
+          <div key={c.id} className="card p-5">
+            <div className="flex items-start justify-between gap-2">
+              <h3 className="font-semibold text-ink-900">{c.name}</h3>
+              <Badge tone={REL_TONE[c.relatedness]}>{c.relatedness.replace(/_/g, " ").toLowerCase()}</Badge>
+            </div>
+            <div className="mt-2 flex items-center gap-2 text-xs text-ink-500">
+              <span>Confidence</span>
+              <div className="h-1.5 w-24 overflow-hidden rounded-full bg-ink-100"><div className="h-full bg-brand-500" style={{ width: `${c.confidence}%` }} /></div>
+              <span className="font-medium text-ink-700">{confidenceBand(c.confidence)} · {c.confidence}%</span>
+              {c.physicianConfirmed && <Badge tone="green">MD confirmed</Badge>}
+            </div>
+            {/* What the determined confidence level means and how it was set. */}
+            <p className="mt-1.5 text-[11px] leading-relaxed text-ink-400">
+              {confidenceDefinition({ confidence: c.confidence, physicianConfirmed: c.physicianConfirmed, missingInfo: c.missingInfo, evidenceCount: sources.length })}
+            </p>
+            <p className="mt-3 text-sm text-ink-700">{c.reasoning}</p>
+            {c.objectiveEvidence && <p className="mt-2 text-xs text-ink-500"><span className="font-medium">Objective evidence:</span> {c.objectiveEvidence}</p>}
+            {/* Links to the actual evidence: source record + page of the content. */}
+            {sources.length > 0 && (
+              <ul className="mt-1.5 space-y-1">
+                {sources.map((s, i) => (
+                  <li key={`${s.documentId}-${i}`} className="text-xs">
+                    <a
+                      href={`/api/cases/${data.id}/documents/${s.documentId}/view`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1 font-medium text-brand-700 hover:underline"
+                    >
+                      <FileText className="h-3 w-3 shrink-0" />
+                      {s.filename}{s.page ? ` — p. ${s.page}` : ""}
+                    </a>
+                    {s.quote && <span className="ml-1 italic text-ink-400">“{s.quote}”</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
+            {c.missingInfo && <p className="mt-1 text-xs text-amber-700"><span className="font-medium">Missing:</span> {c.missingInfo}</p>}
           </div>
-          <div className="mt-2 flex items-center gap-2 text-xs text-ink-500">
-            <span>Confidence</span>
-            <div className="h-1.5 w-24 overflow-hidden rounded-full bg-ink-100"><div className="h-full bg-brand-500" style={{ width: `${c.confidence}%` }} /></div>
-            <span>{c.confidence}%</span>
-            {c.physicianConfirmed && <Badge tone="green">MD confirmed</Badge>}
-          </div>
-          <p className="mt-3 text-sm text-ink-700">{c.reasoning}</p>
-          {c.objectiveEvidence && <p className="mt-2 text-xs text-ink-500"><span className="font-medium">Objective evidence:</span> {c.objectiveEvidence}</p>}
-          {c.missingInfo && <p className="mt-1 text-xs text-amber-700"><span className="font-medium">Missing:</span> {c.missingInfo}</p>}
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
