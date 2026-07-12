@@ -22,17 +22,24 @@ empty encounters.
   **"Administrative & consent bearing on care"** group; pure boilerplate collapses
   to a single count. No empty placeholder rows.
 - **Higher-quality clinical extraction**: findings are gated on a clinical
-  signal and are rejected when patient-facing (consent/education leaflets/rights
-  notices address "you/your" or "I agree") or OCR/table noise — a labeled op-note
-  / H&P section outranks a consent page that merely names the procedure, while a
-  real DME instruction keeps its specifics. On the Trice chart this turned 12 of
-  23 blank "encounters" into ~60 real clinical encounters (op notes, imaging
-  impressions, vitals, med orders, DME needs) plus a categorized administrative
-  group — zero placeholders.
+  signal and rejected as non-clinical when patient-facing (consent/education/
+  rights address "you/your" or "I agree"), report boilerplate (transcription
+  footers, routing/`cc:` lines, accession headers), medication-administration /
+  order-sheet grids, or garbled OCR — and near-duplicate encounters on a date are
+  de-duplicated. A labeled op-note / H&P section outranks a consent page that
+  merely names the procedure; a real DME instruction keeps its specifics; a
+  patient-education leaflet page routes to the administrative group even when it
+  mentions "home health." On the Trice chart this replaced 12-of-23 blank
+  "encounters" with ~27 clean, physician-usable one-liners (op-note changes,
+  radiology impressions, vitals, sepsis/respiratory-failure complications,
+  consult, DME needs, hospital course, discharge — each page-cited) plus a
+  categorized administrative group. Zero placeholders. Precision is high on clean
+  records and this large scan; unfamiliar EHR/vendor boilerplate may need its
+  patterns extended (all centralized in `segment.ts`).
 - **Full-chart indexing**: OCR `MAX_TEXT` raised 1.5M → 4M chars so charts beyond
   ~750 pages are no longer truncated; the scanned PSMC record is re-OCR'd end to
   end and re-segmented.
-- Schema: `Document.segments` JSON (migration `20260712160000`). Tests 205 → 213
+- Schema: `Document.segments` JSON (migration `20260712160000`). Tests 205 → 214
   (`segment.test.ts`); tsc clean.
 
 ## 2026-07-12 — Preparing physician: report credentials come only from the signer

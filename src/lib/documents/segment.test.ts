@@ -99,4 +99,30 @@ describe("segmentDocument", () => {
     expect(segmentDocument("Date of service: 06/12/2024\nChief complaint: knee pain. Assessment: arthritis.")).toBeNull();
     expect(segmentDocument("short")).toBeNull();
   });
+
+  it("rejects OCR/report noise — footers, MAR/order lines, and garbled tokens — from the clinical bucket", () => {
+    const noisy = [
+      "Page 1 of 4",
+      "Date of service: 07/01/2024",
+      "Discharge 1236 TD/TT: Transcriptionist: Andrew Cross, MD Department: Cardiology Report# 1016-2",
+      "",
+      "Page 2 of 4",
+      "Date of service: 07/02/2024",
+      "T | PERCOCET (cxyOCDORE BCL/ACETRMIN 10-325 1 EACH TABLET) 1 EACH FO Q4H/PRN PRN Reason: Pain",
+      "",
+      "Page 3 of 4",
+      "Date of service: 07/03/2024",
+      "The doctor may order drugs to: help with pain and swelling and prevent infection at home health.",
+      "",
+      "Page 4 of 4",
+      "Date of service: 07/04/2024",
+      "Assessment: acute osteomyelitis of the right tibia. Plan: IV antibiotics and orthopedic consult.",
+    ].join("\n");
+    const s = segmentDocument(noisy) as DocumentSegment[];
+    const clinical = s.filter((x) => x.kind === "clinical");
+    // Only the real assessment survives; the footer, MAR line, and education
+    // leaflet are not clinical encounters.
+    expect(clinical.some((x) => /osteomyelitis/i.test(x.summary))).toBe(true);
+    expect(clinical.some((x) => /transcriptionist|report#|percocet|cxyocdore|doctor may order/i.test(x.summary))).toBe(false);
+  });
 });

@@ -96,6 +96,7 @@ const ADMIN_PATTERNS: { category: string; bears: boolean; preempt: boolean; re: 
     preempt: false,
     re: /financial responsibilit|assignment of benefits|estimate of charges|advance beneficiary notice|\bABN\b|self-?pay agreement/i,
   },
+  { category: "Patient education / instructions", bears: false, preempt: true, re: /the doctor may order|how to care for (?:your|the)|call your (?:doctor|provider|nurse)|multiple dose vials|discard the (?:multiple|vial|unused)|when to call your|warning signs|home care instructions|medication guide|drug information sheet/i },
   { category: "Facesheet / demographics", bears: false, preempt: true, re: /face\s?sheet|account number.{0,40}med rec|guarantor|demographic|registration (?:form|record)/i },
   { category: "Patient rights & responsibilities", bears: false, preempt: true, re: /patient rights and responsibilit|rights and responsibilities/i },
   { category: "Privacy / HIPAA notice", bears: false, preempt: true, re: /notice of privacy practices|\bHIPAA\b|protected health information/i },
@@ -113,14 +114,36 @@ const CLINICAL_CUE =
 // Reject leads that mark boilerplate, patient-facing education, or table/scan
 // fragments rather than clinician documentation.
 const NOISE_LEAD =
-  /^(?:or\b|to be\b|to file|to participate|i (?:can|will|understand|have the right)|please\b|you (?:have|may|can|will)|we (?:will|are)|your\b|this (?:notice|form|document|information|medication)|the (?:above|following) (?:information|consent)|what if|during pregnancy|taking this|@|®|«|»|•|\*|▪|·|-\s|days hours|diagnosis code|accession number|route\b|code (?:name|set)|total doses|med rec|account (?:number|no))/i;
+  /^(?:or\b|to be\b|to file|to participate|i (?:can|will|understand|have the right)|please\b|you (?:have|may|can|will)|we (?:will|are)|your\b|this (?:notice|form|document|information|medication|will)|the (?:above|following) (?:information|consent)|what\b|do not\b|during pregnancy|taking this|@|®|«|»|•|\*|▪|·|-\s|days hours|diagnosis code|accession number|route\b|code (?:name|set)|total doses|med rec|account (?:number|no))/i;
 
 // Recognizable non-clinical boilerplate classes that recur verbatim across a
 // consolidated chart — privacy/rights notices, drug-information leaflets, OCR'd
 // report headers, arbitration/authorization language, and template instructions.
 // Matched anywhere in the candidate.
 const NOISE_PHRASE =
-  /to file a complaint|to participate in resolving|privacy officer|release of (?:necessary )?(?:medical )?information|authorize the release|agree arbitration|arbitration will|common brand name|this medication|medication discharge summary|\bUSER:|event acknowledged|order is entered and signed|for consistency in documentation|patient education|discharge instructions|about this topic|contact hicuity|office for civil rights|human services|this consent to receive|smallest effective dose|products that may interact|report pain and the results|check all (?:prescription|medicine)/i;
+  /to file a complaint|to participate in resolving|privacy officer|release of (?:necessary )?(?:medical )?information|authorize the release|agree arbitration|arbitration will|common brand name|this medication|medication discharge summary|\bUSER:|event acknowledged|order is entered and signed|for consistency in documentation|patient education|discharge instructions|about this topic|contact hicuity|office for civil rights|human services|this consent to receive|smallest effective dose|products that may interact|report pain and the results|check all (?:prescription|medicine)|undersigned understands|injection site may occur|properly stop the medication|different medication may be necessary|these include (?:a fever|swelling|redness|increased)|such reactions include|skin wheal may be injected|requires further clarification|will (?:verbalize|experience|demonstrate|maintain|tolerate|remain free|be able)|verbalize understanding|please specify|clinically undetermined|of critically ill patients|first day of icu|signs and symptoms of infection|medications work best|first signs of pain|this will help with|missed dose|next dose|skip the (?:missed|dose)|if it is near/i;
+
+// Report headers, footers, routing lines, and empty templates — structure a
+// chart repeats around real notes but that carry no clinical finding.
+const NOISE_HEADER =
+  /transcriptionist|\bTD\/TT\b|report\s*#|department\s*:|accession number|procedure\(s\)\s*:|\bcc\s*:\s*[A-Za-z]|meditech|attending dr\b|order source|discharge attending|dictated by|electronically signed|report status|\bMRN\b|highway \d+|order is entered|response\/?\s*assessment\.?\s*$|subj(?:ective)?\s+subjective|see also|teaching record|risk level|order\b.*\bsigned\b|surgical chart|chart page|\bPPHS\b/i;
+
+// Medication-administration / order-sheet fragments and I/O tables — dense,
+// abbreviation-heavy grids that OCR mangles into non-clinical noise.
+const NOISE_MAR =
+  /\.STK-MED|once\/prn|q\d+h\/prn|\bPRN\b.*\bPRN\b|as directed iv|high alert medication|not administered|cumulative (?:dose|intake)|container volume|infiltratn|dose ins|\bFSBS\b|sliding scale|\bNPO\b since|postop orders|level of consci|awake 2 alert/i;
+
+// Garbled OCR: a candidate with too many vowel-less, mid-word-capitalized, or
+// long all-caps tokens (e.g. "PERCOCET cxyOCDORE BCL/ACETRMIN") is unreadable.
+function tooGarbled(s: string): boolean {
+  const toks = s.match(/[A-Za-z][A-Za-z'-]+/g) ?? [];
+  if (toks.length < 3) return false;
+  let bad = 0;
+  for (const w of toks) {
+    if (!/[aeiou]/i.test(w) || /[a-z][A-Z]/.test(w) || /^[A-Z]{5,}$/.test(w)) bad++;
+  }
+  return bad / toks.length > 0.28;
+}
 
 // Patient-facing / legal-agreement voice: consent, education leaflets, rights
 // notices, and arbitration agreements address the reader ("you/your", "I
@@ -133,7 +156,8 @@ const PATIENT_FACING =
 // set covers nursing / therapy / case-management phrasing in addition to the
 // classic SOAP labels; a free-sentence fallback is accepted ONLY when it carries
 // a clinical cue and is not boilerplate/table noise.
-const okFinding = (s: string | null): s is string => !!s && !NOISE_LEAD.test(s) && !PATIENT_FACING.test(s) && !NOISE_PHRASE.test(s);
+const okFinding = (s: string | null): s is string =>
+  !!s && !NOISE_LEAD.test(s) && !PATIENT_FACING.test(s) && !NOISE_PHRASE.test(s) && !NOISE_HEADER.test(s) && !NOISE_MAR.test(s) && !tooGarbled(s);
 
 // The labeled clinical section — highest-precision signal, and the one that lets
 // a real op note / H&P outrank a consent page that merely names the procedure.
@@ -165,6 +189,12 @@ function labeledClinical(seg: string): string | null {
 // not boilerplate, not patient-facing) and substantive.
 function sentenceClinical(seg: string): string | null {
   for (const raw of clinicalText(seg).split(/(?<=[.!?])\s+/)) {
+    // A sentence whose RAW text begins lowercase (after leading punctuation) is
+    // a mid-sentence fragment (", or requires…", "). * the…") — skip it. This is
+    // checked before cleanFinding, which legitimately strips a leading label
+    // ("Progress note: patient advancing…" → "patient advancing…").
+    const rawTrim = raw.replace(/^[^A-Za-z0-9]+/, "");
+    if (/^[a-z]/.test(rawTrim) && !/^(?:s\/p\b|pt\b)/i.test(rawTrim)) continue;
     const cand = cleanFinding(raw);
     if (okFinding(cand) && cand.length >= 25 && CLINICAL_CUE.test(cand)) return cand;
   }
@@ -174,7 +204,11 @@ function sentenceClinical(seg: string): string | null {
 // Match a boilerplate signature; null when none applies (a catch-all is decided
 // separately, so a genuine clinical page is never forced into "administrative").
 function matchAdmin(seg: string): { category: string; bears: boolean; preempt: boolean; summary: string } | null {
-  for (const p of ADMIN_PATTERNS) {
+  // A pre-empting form (consent, education, rights, facesheet) outranks a
+  // non-pre-empting care-relevant match (DME/work/financial) even when the
+  // latter appears earlier — an education leaflet mentioning "home health" is
+  // still a leaflet, not a DME encounter.
+  for (const p of [...ADMIN_PATTERNS].sort((a, b) => Number(b.preempt) - Number(a.preempt))) {
     if (p.re.test(seg)) {
       let summary = p.category;
       if (p.capture) {
@@ -286,6 +320,17 @@ export function segmentDocument(text: string | null | undefined): DocumentSegmen
     out.push({ ...s });
   }
 
-  out.sort((a, b) => (a.date ?? "").localeCompare(b.date ?? "") || (a.pageStart ?? 0) - (b.pageStart ?? 0));
-  return out;
+  // Drop near-duplicate clinical encounters on the same date (the same note
+  // reprinted across pages), keyed by date + a normalized summary prefix.
+  const seen = new Set<string>();
+  const deduped = out.filter((s) => {
+    if (s.kind !== "clinical") return true;
+    const key = `${s.date}|${s.summary.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().slice(0, 45)}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  deduped.sort((a, b) => (a.date ?? "").localeCompare(b.date ?? "") || (a.pageStart ?? 0) - (b.pageStart ?? 0));
+  return deduped;
 }
