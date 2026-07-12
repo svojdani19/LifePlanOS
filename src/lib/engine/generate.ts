@@ -5,6 +5,7 @@ import { project, type CaseAssumptions } from "@/lib/engine/cost";
 import { buildChronologyFromRecords } from "@/lib/engine/chronology";
 import { locateConditionEvidence } from "@/lib/engine/evidence";
 import { generateStandardOfCare } from "@/lib/engine/standardOfCare";
+import { mapRecommendationToCondition, type CondInput } from "@/lib/engine/integrity";
 import { findCandidates, literatureReachable, activeSources, type Article } from "@/lib/literature";
 import { Prisma } from "@/generated/prisma";
 import type { Case, CareCategory } from "@/generated/prisma";
@@ -186,7 +187,10 @@ export async function generatePlan(caseId: string): Promise<PlanResult> {
     await prisma.futureCareItem.create({
       data: {
         caseId,
-        conditionId: primaryConditionId,
+        // Map each item to the diagnosis it actually belongs to (by body region),
+        // rather than defaulting every item to the primary condition. Falls back
+        // to the primary only for region-agnostic services.
+        conditionId: mapRecommendationToCondition({ service: t.service, specialty: t.specialty }, conditions as unknown as CondInput[]).conditionId ?? primaryConditionId,
         category: t.category,
         service: t.service,
         specialty: t.specialty,

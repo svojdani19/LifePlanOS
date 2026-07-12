@@ -18,6 +18,7 @@ import {
 } from "docx";
 import { prisma } from "@/lib/db";
 import { assumptionsFor } from "@/lib/engine/generate";
+import { runIntegrityCheck, reviewLabel, evaluateCitation, functionalFinding, type RecInput, type CondInput, type PerItem, type IntegrityFinding } from "@/lib/engine/integrity";
 import { project } from "@/lib/engine/cost";
 import { typeLabel } from "@/lib/documents/taxonomy";
 import { parseConditions } from "@/lib/intake/preExisting";
@@ -244,13 +245,26 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
 
   const a = assumptionsFor(c);
   const items = c.futureCareItems;
-  // Once physician review has begun, only endorsed care drives the damages
-  // figures; pending/declined items are disclosed but not totaled. Before any
-  // review, all items are provisional so the report is never empty.
   const accepted = items.filter((i) => i.physicianStatus === "APPROVED" || i.physicianStatus === "MODIFIED");
+  // ── Integrity / correction layer ───────────────────────────────────────────
+  // A deterministic check maps each recommendation to the correct diagnosis by
+  // body region, validates its coding/pricing, and decides — honestly — whether
+  // it may enter the damages total. An item is included only when it is
+  // region-matched, free of a critical coding defect, and either
+  // physician-approved or record-supported and medically probable. "Offered for
+  // confirmation" alone does NOT include an unsupported item.
+  const hasRecordSupport = (rec: RecInput, matched: CondInput | null): boolean => {
+    const cond = matched as unknown as (typeof c.conditions)[number] | null;
+    const evCount = cond && Array.isArray(cond.evidenceSources) ? (cond.evidenceSources as unknown[]).length : 0;
+    if (cond && (cond.supportingRecords || evCount > 0)) return true;
+    const it = rec as unknown as FutureCareItem;
+    return !it.missingSupport && it.confidence >= 60;
+  };
+  const integrity = runIntegrityCheck({ recommendations: items as unknown as RecInput[], conditions: c.conditions as unknown as CondInput[], hasRecordSupport });
+  const perItemOf = (it: FutureCareItem): PerItem => integrity.perItem.get(it as unknown as RecInput)!;
+  const reportItems = items.filter((i) => perItemOf(i).includedInTotal);
+  const excludedForReview = items.filter((i) => !perItemOf(i).includedInTotal);
   const reviewStarted = items.length > 0 && items.some((i) => i.physicianStatus !== "PENDING");
-  const reportItems = reviewStarted ? accepted : items;
-  const excludedForReview = reviewStarted ? items.filter((i) => i.physicianStatus === "REJECTED" || i.physicianStatus === "PENDING") : [];
   const totalLifetime = reportItems.reduce((s, i) => s + i.lifetimeCost, 0);
   const totalPresentValue = reportItems.reduce((s, i) => s + i.presentValue, 0);
   const totalLow = reportItems.reduce((s, i) => s + i.lowCost, 0);
@@ -280,53 +294,52 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
     return m?.icd10Code || "";
   };
 
-  // ── Per-recommendation: a narrative that reasons, then a compact spec table ──
+  // ── Per-recommendation: a patient-specific rationale, then a compact spec
+  //    table. The supporting diagnosis is taken from the integrity mapping (by
+  //    body region), NOT the stored primary-condition default. To keep the
+  //    section readable, the full "In my opinion…" narrative and the
+  //    natural-history sentence are reserved for high-cost / complex items;
+  //    routine items get a single specific sentence (§9). ──────────────────────
+  const MAJOR_ITEM_PV = 100_000;
+  const adultPatient = age == null ? true : age >= 18;
   function careRecommendation(it: FutureCareItem): (Paragraph | Table)[] {
-    const cond = it.conditionId ? condById.get(it.conditionId) : undefined;
+    const per = perItemOf(it);
+    const cond = per.mapping.condition as unknown as (typeof c.conditions)[number] | null;
     const dxName = cond?.name || c.diagnosis || "the injuries at issue";
+    const major = it.presentValue >= MAJOR_ITEM_PV;
+    const recordSupport = hasRecordSupport(it as unknown as RecInput, cond as unknown as CondInput | null);
     const out: (Paragraph | Table)[] = [];
     out.push(new Paragraph({ spacing: { before: 220, after: 60 }, keepNext: true, children: [new TextRun({ text: it.service, bold: true, size: 22, color: INK })] }));
 
-    // Opening opinion — necessity, tied to the diagnosis and the RDMP standard.
-    // Phrased so the service is the OBJECT of "will require", which avoids
-    // subject–verb agreement problems across singular/plural service names.
-    const opener =
-      `In my opinion, and to a reasonable degree of medical probability, ${subject} will require ${lc(it.service)} as reasonable and necessary future medical care arising from ${lc(dxName)}.` +
-      (it.rationale ? ` ${period(cap(it.rationale))}` : "");
-    out.push(p(opener));
+    // One patient-specific necessity sentence.
+    const necessity = major
+      ? `In my opinion, and to a reasonable degree of medical probability, ${subject} will require ${lc(it.service)} as reasonable and necessary future medical care arising from ${lc(dxName)}.`
+      : `${cap(lc(it.service))} is reasonable and necessary future care for ${lc(dxName)}.`;
+    out.push(p(`${necessity}${it.rationale ? ` ${period(cap(it.rationale))}` : ""}`));
+    if (major) {
+      out.push(
+        p(
+          it.isLifetime
+            ? `The natural history of this condition supports recurring care across the ${life.toFixed(1)}-year projection horizon.`
+            : `This care is anticipated over approximately ${it.durationYears ?? 1} year${(it.durationYears ?? 1) === 1 ? "" : "s"} from initiation.`,
+        ),
+      );
+    }
 
-    // Expected progression / natural history + supporting basis, in prose.
-    const horizon = it.isLifetime
-      ? `The natural history of this condition supports that ${pr.subj} will require this care on a recurring basis across the ${life.toFixed(1)}-year projection horizon`
-      : `This care is anticipated over approximately ${it.durationYears ?? 1} year${(it.durationYears ?? 1) === 1 ? "" : "s"} from initiation`;
-    const trigger = it.startTrigger ? `, beginning ${lc(it.startTrigger)}` : "";
-    const basisBits: string[] = [];
-    if (it.evidenceStrength) basisBits.push(`the ${lc(it.evidenceStrength).replace(/\.+$/, "")}`);
-    if (it.literatureSupport) basisBits.push(lc(it.literatureSupport).replace(/\.+$/, ""));
-    const basis = basisBits.length ? ` ${period(`This recommendation is grounded in ${basisBits.join(" and ")}`)}` : "";
-    // supportingRecords carries filenames — do not lowercase it.
-    const records = cond?.supportingRecords ? ` It is corroborated by ${period(cond.supportingRecords)}` : "";
-    out.push(p(`${period(`${horizon}${trigger}`)}${basis}${records}`));
+    // Citations, filtered for genuine relevance (diagnosis/region/intervention/
+    // population/evidence level) before they may appear (§3).
+    const region = per.mapping.region;
+    const relevantCites = citationList(it.citation).filter((cc) => evaluateCitation({ title: cc.title, journal: cc.journal, year: cc.year, pmid: cc.pmid, doi: cc.doi }, { diagnosis: dxName, region, service: it.service, adult: adultPatient }).relevant);
+    const cite = relevantCites.length ? relevantCites.map(oneCitation).join("  ") : null;
 
-    // Physician endorsement, stated without scores.
-    const endorsed = it.physicianStatus === "APPROVED" || it.physicianStatus === "MODIFIED";
-    out.push(
-      p(
-        endorsed
-          ? `This recommendation has been reviewed and endorsed by the reviewing physician${it.physicianNote ? `, who noted: ${period(it.physicianNote)}` : "."}`
-          : `This recommendation is offered for the treating physician's confirmation of medical necessity.`,
-        { size: BODY },
-      ),
-    );
-
-    // Compact parameter table.
-    const cite = citationSentence(it.citation);
     const specs: [string, string][] = [
       ["Supporting diagnosis", dxName],
       ["Specialty", it.specialty || "—"],
+      ["Recommendation status", per.classify.label],
+      ["Physician review", reviewLabel(it.physicianStatus, recordSupport)],
       ["Frequency", freqText(it)],
       ["Duration", durationText(it, life)],
-      ["CPT", it.cptCode || "—"],
+      ["CPT", it.cptCode || (per.code.status === "Missing code" ? "Pending coding review" : "—")],
       ["Unit cost", money(it.unitCost)],
       ["Projected lifetime cost", `${money(it.lifetimeCost)} (inflation-adjusted)`],
       ["Present value", money(it.presentValue)],
@@ -334,14 +347,18 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
       ["Alternative considered", it.lowerCostAlternative || "None clinically equivalent"],
     ];
     out.push(specGrid(specs));
-    if (cite) out.push(sourceLine(`Supporting literature: ${cite}`));
+    out.push(sourceLine(cite ? `Supporting literature: ${cite}` : `Direct published literature specific to this recommendation is limited; it rests on the applicable clinical guidance and the treating record.`));
     return out;
   }
 
   const body: (Paragraph | Table)[] = [];
 
   // ══ TITLE PAGE ═══════════════════════════════════════════════════════════════
-  body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 720, after: 40 }, children: [new TextRun({ text: c.firm.letterhead || c.firm.name, bold: true, size: 26, color: NAVY })] }));
+  // §10 — when a critical validation issue remains unresolved, the document is a
+  // DRAFT (visible banner on the title page and in the running header).
+  const isDraft = integrity.blocking;
+  if (isDraft) body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 200, after: 200 }, children: [new TextRun({ text: "DRAFT — CONTAINS UNRESOLVED CRITICAL VALIDATION ISSUES · NOT FOR SERVICE", bold: true, size: 24, color: "B91C1C" })] }));
+  body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: isDraft ? 200 : 720, after: 40 }, children: [new TextRun({ text: c.firm.letterhead || c.firm.name, bold: true, size: 26, color: NAVY })] }));
   body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 480 }, children: [new TextRun({ text: c.firm.letterhead ? "" : "Certified Life Care Planning", size: 20, color: GREY })] }));
   body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 360, after: 20 }, children: [new TextRun({ text: "LIFE CARE PLAN", bold: true, size: 40, color: INK })] }));
   body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 40 }, children: [new TextRun({ text: "& Future Medical Cost Analysis", size: 30, color: INK })] }));
@@ -394,6 +411,14 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
       ["Future medical cost — undiscounted", money(totalLifetime)],
       ["Future medical cost — present value", `${money(totalPresentValue)} (range ${money(totalLow)}–${money(totalHigh)})`],
     ]),
+  );
+  // §6 — an honest accounting of review status; does not imply universal sign-off.
+  const ic = integrity.counts;
+  body.push(
+    p(
+      `Of ${ic.proposed} recommendation${ic.proposed === 1 ? "" : "s"} proposed, ${ic.recordSupported} ${ic.recordSupported === 1 ? "is" : "are"} supported in the treating records and ${ic.physicianApproved} ${ic.physicianApproved === 1 ? "has" : "have"} been formally approved on physician review; ${ic.awaitingReview} ${ic.awaitingReview === 1 ? "remains" : "remain"} awaiting physician confirmation. ${ic.excluded === 0 ? "All proposed items met the threshold for inclusion in the total." : `${ic.excluded} item${ic.excluded === 1 ? " was" : "s were"} not included in the total pending further support, coding correction, or physician review, and ${ic.excluded === 1 ? "is" : "are"} disclosed in the Limitations.`}`,
+      { size: BODY },
+    ),
   );
 
   // ══ SYNOPSIS ═════════════════════════════════════════════════════════════════
@@ -526,7 +551,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
   if (preExisting.length) {
     body.push(
       p(
-        `The reviewed records reflect the following pre-existing condition${preExisting.length === 1 ? "" : "s"}: ${preExisting.join("; ")}. I have considered ${preExisting.length === 1 ? "this condition" : "these conditions"} in forming my opinions, and where a pre-existing condition bears on the care at issue, its baseline contribution has been apportioned out so that this plan reflects only the care attributable to the injuries in question.`,
+        `The reviewed records reflect the following pre-existing condition${preExisting.length === 1 ? "" : "s"}: ${preExisting.join("; ")}. I have considered ${preExisting.length === 1 ? "this condition" : "these conditions"} in forming my opinions. The available evidence does not permit a reliable quantitative apportionment; accordingly, the plan reflects only the care supportable from the record as attributable to the injuries at issue, and any formal apportionment is deferred to the trier of fact on a developed record.`,
       ),
     );
   } else {
@@ -580,24 +605,31 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
       `The functional consequences of ${subject}'s injuries are summarized below, drawn from the treating records and the chronology. Domains in which the records document impairment are identified; domains not separately quantified in the records are appropriate subjects for formal functional capacity evaluation, which would further objectify the basis for the corresponding care.`,
     ),
   );
-  const DOMAINS: [string, RegExp][] = [
-    ["Ambulation and gait", /walk|ambulat|gait/i], ["Stairs", /stair/i], ["Lifting and carrying", /lift|carry/i],
-    ["Sitting and standing tolerance", /\bsit|\bstand/i], ["Driving", /driv/i],
-    ["Self-care and activities of daily living", /self-care|\badl|dress|bath|groom|toilet/i], ["Employment", /work|employ|\bjob|occupation|sedentary|light duty/i],
-    ["Household activities", /household|chores|home ?maint|cook|clean|laundry/i], ["Recreation", /recreat|hobby|sport|leisure/i],
-    ["Cognition", /cognit|memory|concentrat|attention|executive/i], ["Psychological status", /depress|anxi|ptsd|mood|psych/i],
-    ["Sleep", /sleep|insomnia/i], ["Pain", /pain/i], ["Range of motion", /range of motion|\brom\b|flexion|extension|mobility/i],
-    ["Neurologic function", /numb|weak|neurolog|radicul|tingl|paresthes|sensor|reflex/i],
+  // Each domain carries the specific documented finding where present, and — for
+  // gaps — the assessment appropriate to THAT domain (not a generic FCE for all).
+  const DOMAINS: [string, RegExp, string][] = [
+    ["Ambulation and gait", /walk|ambulat|gait|walker|cane|crutch/i, "a PT gait and balance assessment"],
+    ["Stairs", /stair/i, "a PT functional-mobility assessment"],
+    ["Lifting and carrying", /lift|carry/i, "a functional capacity evaluation (FCE)"],
+    ["Sitting and standing tolerance", /\bsit|\bstand/i, "a functional capacity evaluation (FCE)"],
+    ["Driving", /driv/i, "a driving evaluation"],
+    ["Self-care and activities of daily living", /self-care|\badl|dress|bath|groom|toilet|transfer/i, "an OT / home ADL assessment"],
+    ["Employment", /work|employ|\bjob|occupation|sedentary|light duty/i, "a functional capacity evaluation with vocational input"],
+    ["Household activities", /household|chores|home ?maint|cook|clean|laundry|iadl/i, "an OT home-management assessment"],
+    ["Bladder / urinary function", /bladder|urinary|incontinen|catheter|voiding|neurogenic bladder/i, "a urology evaluation"],
+    ["Cognition", /cognit|memory|concentrat|attention|executive/i, "neuropsychological testing"],
+    ["Psychological status", /depress|anxi|ptsd|mood|psych/i, "a psychological evaluation"],
+    ["Pain", /pain/i, "a pain-management evaluation"],
+    ["Range of motion", /range of motion|\brom\b|flexion|extension|mobility/i, "PT range-of-motion measurement"],
+    ["Neurologic function", /numb|weak|neurolog|radicul|tingl|paresthes|sensor|reflex/i, "a neurologic / electrodiagnostic (EMG/NCS) evaluation"],
   ];
-  const fr: TableRow[] = [rowOf([td("Functional domain", { header: true, width: 36 }), td("Status on the reviewed record", { header: true, width: 64 })])];
-  DOMAINS.forEach(([dom, re], i) => {
-    const documented = re.test(funcText);
-    fr.push(
-      rowOf([
-        td(dom, { bold: true, fill: i % 2 ? ALT : "FFFFFF" }),
-        td(documented ? "Impairment documented in the treating records." : "Not separately quantified; formal evaluation recommended.", { fill: i % 2 ? ALT : "FFFFFF" }),
-      ]),
-    );
+  const fr: TableRow[] = [rowOf([td("Functional domain", { header: true, width: 30 }), td("Classification", { header: true, width: 24 }), td("Documented finding / recommended assessment", { header: true, width: 46 })])];
+  DOMAINS.forEach(([dom, re, evalRec], i) => {
+    const fill = i % 2 ? ALT : "FFFFFF";
+    const found = functionalFinding(funcText, re);
+    const cls = found ? (found.quantified ? "Documented & quantified" : "Documented, not quantified") : "Not documented";
+    const detail = found ? cap(found.snippet) : `Not addressed in the records; ${evalRec} would objectify this domain.`;
+    fr.push(rowOf([td(dom, { bold: true, fill }), td(cls, { fill }), td(detail, { fill })]));
   });
   body.push(table(fr));
 
@@ -605,7 +637,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
   body.push(h1("Treating Physician Diagnoses", { pageBreak: true }));
   body.push(
     p(
-      `The diagnoses at issue, established from the objective record, are set out below. For each, I state its objective basis, its relationship to the incident, and, where a governing clinical standard applies, my analysis of the care against that standard.`,
+      `The diagnoses at issue, established from the objective record, are set out below. For each, I state its objective basis, its relationship to the incident, and the clinical basis for the future care it supports.`,
     ),
   );
   for (const cond of c.conditions) {
@@ -617,34 +649,43 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
     if (evSources.length) body.push(sourceLine(`Evidence of record: ${evSources.map((s) => `${s.filename}${s.page ? `, p. ${s.page}` : ""}`).join("; ")}.`));
     if (cond.reasoning) body.push(p(period(cap(cond.reasoning))));
 
-    // Standard-of-care expert rationale — narrative prose.
+    // §4 — Clinical Basis and Future-Care Relevance. This ordinary Life Care
+    // Plan does NOT adjudicate whether prior care met or departed from the
+    // standard of care; that analysis is reserved to a separate medical-
+    // malpractice / standard-of-care module. Here we discuss only the clinical
+    // basis for the future care the diagnosis supports. Any guideline located
+    // for the condition is presented as supportive clinical guidance — never as
+    // a met/not-met verdict.
     const soc = cond.socAnalysis as unknown as {
-      documentation?: string;
-      assessment?: { opinion?: string[] };
       guidelines?: { title?: string; journal?: string; year?: string; pmid?: string; doi?: string; quote?: string; userProvided?: boolean }[];
     } | null;
-    if (soc?.assessment?.opinion?.length) {
-      body.push(h2("Standard of Care"));
-      for (const para of soc.assessment.opinion) body.push(p(para));
-      const gl = (soc.guidelines ?? []).filter((g) => g.quote);
-      if (gl.length) {
-        body.push(caption("Governing authority (quoted from the source):"));
-        for (const g of gl) {
-          body.push(
-            new Paragraph({
-              spacing: { after: 100, line: 288 },
-              indent: { left: 320 },
-              children: [
-                new TextRun({ text: `“${g.quote}” `, italics: true, size: 20, color: INK }),
-                new TextRun({ text: `— ${g.title}${g.year ? `, ${g.year}` : ""}${g.pmid ? ` (PMID ${g.pmid})` : g.doi ? ` (doi:${g.doi})` : ""}.`, size: 19, color: GREY }),
-              ],
-            }),
-          );
-        }
+    body.push(h2("Clinical Basis and Future-Care Relevance"));
+    const drivenBy = reportItems.filter((it) => perItemOf(it).mapping.condition?.id === cond.id).map((it) => lc(it.service));
+    body.push(
+      p(
+        drivenBy.length
+          ? `The objective findings establish the clinical basis for ${drivenBy.slice(0, 5).join("; ")}${drivenBy.length > 5 ? `, and ${drivenBy.length - 5} further item${drivenBy.length - 5 === 1 ? "" : "s"}` : ""}. In my opinion, and to a reasonable degree of medical probability, the natural history of this condition supports that these needs will persist over ${pr.poss} remaining lifetime and will require the care projected in this plan.`
+          : `The objective findings for this diagnosis inform the overall clinical picture; no separate future-care item is driven by this condition alone.`,
+      ),
+    );
+    const gl = (soc?.guidelines ?? []).filter((g) => g.quote);
+    if (gl.length) {
+      body.push(caption("Relevant clinical guidance (quoted from the source):"));
+      for (const g of gl) {
+        body.push(
+          new Paragraph({
+            spacing: { after: 100, line: 288 },
+            indent: { left: 320 },
+            children: [
+              new TextRun({ text: `“${g.quote}” `, italics: true, size: 20, color: INK }),
+              new TextRun({ text: `— ${g.title}${g.year ? `, ${g.year}` : ""}${g.pmid ? ` (PMID ${g.pmid})` : g.doi ? ` (doi:${g.doi})` : ""}.`, size: 19, color: GREY }),
+            ],
+          }),
+        );
       }
     }
     if (cond.opposingRecords) body.push(labeled("Contrary evidence", cond.opposingRecords));
-    if (cond.missingInfo) body.push(labeled("Outstanding records", cond.missingInfo));
+    if (cond.missingInfo) body.push(labeled("Outstanding records / specialist confirmation", cond.missingInfo));
   }
 
   // ══ FUTURE MEDICAL NEEDS & MEDICAL NECESSITY ═════════════════════════════════
@@ -755,7 +796,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
   if (aggravations.length) {
     body.push(
       p(
-        `Where a pre-existing condition was aggravated by the incident — namely ${aggravations.map((x) => lc(x.name)).join("; ")} — I have included only the incremental care attributable to the incident and have apportioned out the baseline pre-injury need, consistent with the reviewed history.`,
+        `Where a pre-existing condition was aggravated by the incident — namely ${aggravations.map((x) => lc(x.name)).join("; ")} — the plan reflects the care supportable from the record as attributable to the aggravation. The available evidence does not permit a reliable quantitative apportionment of the incremental need; that determination is reserved to the trier of fact on a developed record.`,
       ),
     );
   }
@@ -864,6 +905,39 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
   ];
   for (const [q, ans] of daubert) body.push(new Paragraph({ spacing: { after: 90, line: 288 }, alignment: AlignmentType.JUSTIFIED, children: [new TextRun({ text: `${q}.  `, bold: true, size: BODY, color: NAVY }), new TextRun({ text: ans, size: BODY, color: INK })] }));
 
+  // ══ APPENDIX F — LIFE CARE PLAN INTEGRITY CHECK ══════════════════════════════
+  body.push(h1("Appendix F — Life Care Plan Integrity Check", { pageBreak: true }));
+  body.push(p(`Before export, each recommendation is validated for diagnosis/region mapping, coding and pricing consistency, record and physician support, and inclusion in the total. Items with an unresolved critical issue are excluded from the total and, where noted, block final export until corrected.`));
+  if (!integrity.findings.length) {
+    body.push(p("No integrity issues were identified. Every recommendation is region-matched, consistently coded and priced, and supported for inclusion.", { italics: true }));
+  } else {
+    const RED = "B91C1C";
+    const sevColor: Record<string, string | undefined> = { Critical: RED, High: "B45309", Moderate: undefined, Low: undefined };
+    const icRows: TableRow[] = [
+      rowOf([
+        td("Recommendation", { header: true, width: 22 }),
+        td("Result", { header: true, width: 16 }),
+        td("Issue", { header: true, width: 30 }),
+        td("Severity", { header: true, width: 10 }),
+        td("Suggested correction", { header: true, width: 22 }),
+      ]),
+    ];
+    integrity.findings.forEach((f: IntegrityFinding, i) => {
+      const fill = i % 2 ? ALT : "FFFFFF";
+      icRows.push(
+        rowOf([
+          td(f.recommendation, { fill }),
+          td(`${f.result}${f.exportBlocking ? " (blocks export)" : ""}`, { fill }),
+          td(f.issue, { fill }),
+          td(f.severity, { fill, bold: f.severity === "Critical", color: sevColor[f.severity] }),
+          td(f.suggestedCorrection, { fill }),
+        ]),
+      );
+    });
+    body.push(table(icRows));
+    if (integrity.blocking) body.push(p("One or more critical issues remain unresolved. This document is a DRAFT and is not to be served or relied upon until the issues above are corrected.", { bold: true, color: "B91C1C" }));
+  }
+
   // ── Closing disclaimer ───────────────────────────────────────────────────────
   body.push(new Paragraph({ spacing: { before: 360, after: 80 }, border: { top: { style: BorderStyle.SINGLE, size: 6, color: RULE, space: 8 } }, children: [new TextRun({ text: "This Life Care Plan is based upon the past, present, and reasonably anticipated future medical needs of the patient, and upon the medical records available at the time of its preparation. Costs are stated at present-day values. Every recommendation is subject to the final professional judgment of the reviewing physician and the certified life care planner.", italics: true, size: 18, color: GREY })] }));
 
@@ -875,6 +949,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
         border: { bottom: { style: BorderStyle.SINGLE, size: 4, color: RULE, space: 4 } },
         spacing: { after: 120 },
         children: [
+          ...(isDraft ? [new TextRun({ text: "DRAFT — ", bold: true, size: 16, color: "B91C1C" })] : []),
           new TextRun({ text: `${c.clientName}    |    Life Care Plan    |    ${fmtDate(new Date())}`, size: 16, color: GREY }),
           new TextRun({ text: "\tPage ", size: 16, color: GREY }),
           new TextRun({ children: [PageNumber.CURRENT], size: 16, color: GREY }),
