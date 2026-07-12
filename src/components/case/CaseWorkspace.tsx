@@ -135,6 +135,7 @@ export function CaseWorkspace({
     { id: "records", label: `Records (${data.documents.length})`, icon: Upload },
     { id: "chronology", label: `Chronology (${data.chronologyEvents.length})`, icon: Activity },
     { id: "causation", label: "Causation", icon: GitBranch },
+    { id: "providers", label: "Treating Providers", icon: UserRound },
     { id: "evidence", label: "Evidence", icon: Microscope },
     { id: "futurecare", label: `Future Care (${data.futureCareItems.length})`, icon: Stethoscope },
     { id: "costs", label: "Costs", icon: Calculator },
@@ -228,6 +229,7 @@ export function CaseWorkspace({
         {tab === "records" && <RecordsPanel data={data} canEdit={can("records.upload")} call={call} busy={busy} />}
         {tab === "chronology" && <ChronologyPanel data={data} canEdit={can("chronology.edit")} call={call} />}
         {tab === "causation" && <CausationPanel data={data} />}
+        {tab === "providers" && <TreatingProvidersPanel data={data} canEdit={can("case.edit") || can("physician.review")} call={call} />}
         {tab === "evidence" && <EvidencePanel data={data} />}
         {tab === "futurecare" && <FutureCarePanel data={data} canEdit={can("futurecare.edit")} call={call} />}
         {tab === "costs" && <CostsPanel data={data} assumptions={assumptions} totals={totals} canEdit={can("case.edit")} call={call} />}
@@ -1309,7 +1311,9 @@ function dossierForItem(it: AnyRec, data: AnyRec): RecommendationDossier {
   const cond = (data.conditions ?? []).find((c: AnyRec) => c.id === it.conditionId) ?? null;
   const poss = data.sex === "FEMALE" ? "her" : data.sex === "MALE" ? "his" : "the patient's";
   const kase: DossierCase = { subject: data.clientName || "the patient", pronounPoss: poss, lifeExpectancyYears: data.lifeExpectancyYears ?? 40, adult: true };
-  return buildRecommendationDossier(it as never, cond as DossierCondition | null, (data.chronologyEvents ?? []) as DossierChronoEvent[], kase);
+  const provName = new Map((data.treatingProviders ?? []).map((p: AnyRec) => [p.id, `${p.name}${p.credentials ? `, ${p.credentials}` : ""}`]));
+  const interviews = ((data.interviewFindings ?? []) as AnyRec[]).map((f) => ({ subject: f.subject, category: f.category, text: f.text, quote: f.quote, conditionId: f.conditionId, futureCareItemId: f.futureCareItemId, providerName: f.providerId ? provName.get(f.providerId) ?? null : null }));
+  return buildRecommendationDossier(it as never, cond as DossierCondition | null, (data.chronologyEvents ?? []) as DossierChronoEvent[], kase, interviews as never);
 }
 
 function FutureCarePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; call: any }) {
@@ -1680,6 +1684,167 @@ function PrecedentsPanel({ precedents, data }: { precedents: AnyRec[]; data: Any
 }
 
 // ── Report ───────────────────────────────────────────────────────────────────
+// ── Treating Providers & Interviews (EPIC-011) ───────────────────────────────
+const INTERVIEW_CATEGORIES = ["Pain", "Headache", "Sleep", "Cognition", "Mood / Psychological", "Mobility / Gait", "ADLs / Self-care", "Vision", "Bladder / Bowel", "Medications", "Work / Vocational", "Sensory / Neurologic", "Other"];
+const PROVIDER_STATUS_TONE: Record<string, "green" | "amber" | "neutral"> = { CONFIRMED: "green", SUGGESTED: "amber", DISMISSED: "neutral" };
+
+// A small editor for one interview finding — categorized or free-text, with an
+// optional verbatim quote and date. Used for both patient and provider.
+function InterviewEditor({ onAdd }: { onAdd: (f: { category?: string; text: string; quote?: string; interviewDate?: string }) => void }) {
+  const [category, setCategory] = useState("");
+  const [text, setText] = useState("");
+  const [quote, setQuote] = useState("");
+  const [date, setDate] = useState("");
+  return (
+    <div className="mt-2 space-y-2 rounded-lg bg-ink-50/70 p-3">
+      <div className="flex flex-wrap gap-2">
+        <select className="input w-52 text-sm" value={category} onChange={(e) => setCategory(e.target.value)}>
+          <option value="">Free-text (no category)</option>
+          {INTERVIEW_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <input type="date" className="input w-40 text-sm" value={date} onChange={(e) => setDate(e.target.value)} />
+      </div>
+      <textarea className="input w-full text-sm" rows={2} placeholder="Finding (what the interview revealed)…" value={text} onChange={(e) => setText(e.target.value)} />
+      <input className="input w-full text-sm" placeholder="Verbatim quote (optional) — the patient's/provider's own words" value={quote} onChange={(e) => setQuote(e.target.value)} />
+      <button className="btn-primary py-1.5 text-xs" disabled={!text.trim()} onClick={() => { onAdd({ category: category || undefined, text: text.trim(), quote: quote.trim() || undefined, interviewDate: date || undefined }); setText(""); setQuote(""); setCategory(""); setDate(""); }}>Add finding</button>
+    </div>
+  );
+}
+function FindingList({ findings, onDelete, canEdit }: { findings: AnyRec[]; onDelete: (id: string) => void; canEdit: boolean }) {
+  if (!findings.length) return null;
+  return (
+    <ul className="mt-2 space-y-1.5">
+      {findings.map((f) => (
+        <li key={f.id} className="flex items-start gap-2 rounded-lg bg-white p-2 text-sm ring-1 ring-ink-100">
+          {f.category && <span className="mt-0.5 shrink-0 rounded bg-brand-50 px-1.5 py-0.5 text-[10px] font-medium text-brand-700">{f.category}</span>}
+          <span className="flex-1">
+            <span className="text-ink-800">{f.text}</span>
+            {f.quote && <span className="mt-0.5 block italic text-ink-500">“{f.quote}”</span>}
+            {f.interviewDate && <span className="text-[11px] text-ink-400"> — {formatDate(f.interviewDate)}</span>}
+          </span>
+          {canEdit && <button className="text-ink-300 hover:text-red-600" title="Remove" onClick={() => onDelete(f.id)}><X className="h-3.5 w-3.5" /></button>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function TreatingProvidersPanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; call: any }) {
+  const [providers, setProviders] = useState<AnyRec[] | null>(null);
+  const [patient, setPatient] = useState<AnyRec[]>([]);
+  const [openProvider, setOpenProvider] = useState<string | null>(null);
+
+  async function loadProviders(refresh = false) {
+    const res = await fetch(`/api/cases/${data.id}/providers${refresh ? "?refresh=1" : ""}`);
+    if (res.ok) setProviders((await res.json()).providers ?? []);
+  }
+  async function loadPatient() {
+    const res = await fetch(`/api/cases/${data.id}/interviews?subject=PATIENT`);
+    if (res.ok) setPatient((await res.json()).findings ?? []);
+  }
+  useEffect(() => { loadProviders(true); loadPatient(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [data.id]);
+
+  async function addFinding(body: AnyRec, after: () => void) {
+    const res = await fetch(`/api/cases/${data.id}/interviews`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    if (res.ok) after();
+  }
+  async function delFinding(id: string, after: () => void) {
+    const res = await fetch(`/api/cases/${data.id}/interviews/${id}`, { method: "DELETE" });
+    if (res.ok) after();
+  }
+  async function patchProvider(id: string, body: AnyRec) {
+    await fetch(`/api/cases/${data.id}/providers/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    loadProviders();
+  }
+
+  const active = (providers ?? []).filter((p) => p.status !== "DISMISSED");
+  const dismissed = (providers ?? []).filter((p) => p.status === "DISMISSED");
+
+  return (
+    <div className="space-y-5">
+      <p className="text-sm text-ink-500">
+        The providers affiliated with {data.clientName}&apos;s care, drawn from the reviewed records. Confirm the treating team, record what patient and provider interviews revealed (categorized or free text, with quotes), and it is woven into the generated report.
+      </p>
+
+      {/* Patient interview */}
+      <div className="card p-5">
+        <h3 className="text-sm font-semibold text-ink-900">Patient Interview</h3>
+        <p className="text-xs text-ink-500">Current complaints in the patient&apos;s own words. These populate the report&apos;s Current Complaints section and support the relevant recommendations.</p>
+        <FindingList findings={patient} canEdit={canEdit} onDelete={(id) => delFinding(id, loadPatient)} />
+        {canEdit && <InterviewEditor onAdd={(f) => addFinding({ subject: "PATIENT", ...f }, loadPatient)} />}
+      </div>
+
+      {/* Treating provider roster */}
+      <div className="card p-5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h3 className="text-sm font-semibold text-ink-900">Treating Providers {providers && <span className="text-xs font-normal text-ink-400">({active.length})</span>}</h3>
+          {canEdit && <button className="btn-outline px-3 py-1.5 text-xs" onClick={() => loadProviders(true)}>Refresh from records</button>}
+        </div>
+        {providers === null && <p className="mt-2 text-sm text-ink-400">Loading…</p>}
+        {providers && active.length === 0 && <p className="mt-2 text-sm text-ink-400">No providers extracted yet — run the pipeline or add one below.</p>}
+        <div className="mt-3 space-y-2">
+          {active.map((p) => {
+            const srcs = Array.isArray(p.sourceDocumentIds) ? p.sourceDocumentIds : [];
+            return (
+              <div key={p.id} className="rounded-lg ring-1 ring-ink-100">
+                <div className="flex flex-wrap items-center justify-between gap-2 p-3">
+                  <div className="min-w-0">
+                    <span className="font-medium text-ink-900">{p.name}</span>
+                    {p.credentials && <span className="ml-1 text-ink-500">, {p.credentials}</span>}
+                    <Badge tone={PROVIDER_STATUS_TONE[p.status]} className="ml-2">{p.status.toLowerCase()}</Badge>
+                    <p className="text-xs text-ink-500">{[p.specialty, p.facility].filter(Boolean).join(" · ") || "specialty/facility not parsed"}{srcs.length ? ` · ${srcs.length} source record${srcs.length === 1 ? "" : "s"}` : ""}</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    {canEdit && p.status !== "CONFIRMED" && <button className="btn-outline py-1 text-xs" onClick={() => patchProvider(p.id, { status: "CONFIRMED" })}>Confirm</button>}
+                    {canEdit && <button className="py-1 text-xs text-ink-400 hover:text-red-600" onClick={() => patchProvider(p.id, { status: "DISMISSED" })}>Dismiss</button>}
+                    <button className="text-xs font-medium text-brand-700 hover:underline" onClick={() => setOpenProvider(openProvider === p.id ? null : p.id)}>{openProvider === p.id ? "Hide" : `Interview (${(p.interviewFindings ?? []).length})`}</button>
+                  </div>
+                </div>
+                {openProvider === p.id && (
+                  <div className="border-t border-ink-100 p-3">
+                    <FindingList findings={p.interviewFindings ?? []} canEdit={canEdit} onDelete={(id) => delFinding(id, () => loadProviders())} />
+                    {canEdit && <InterviewEditor onAdd={(f) => addFinding({ subject: "PROVIDER", providerId: p.id, ...f }, () => loadProviders())} />}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        {canEdit && <AddProviderInline data={data} onAdded={() => loadProviders()} />}
+        {dismissed.length > 0 && (
+          <details className="mt-3">
+            <summary className="cursor-pointer text-xs text-ink-400">{dismissed.length} dismissed</summary>
+            <ul className="mt-1 space-y-1">
+              {dismissed.map((p) => (
+                <li key={p.id} className="flex items-center justify-between text-xs text-ink-500">
+                  <span>{p.name}{p.credentials ? `, ${p.credentials}` : ""}</span>
+                  {canEdit && <button className="text-brand-700 hover:underline" onClick={() => patchProvider(p.id, { status: "SUGGESTED" })}>Restore</button>}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </div>
+    </div>
+  );
+}
+function AddProviderInline({ data, onAdded }: { data: AnyRec; onAdded: () => void }) {
+  const [show, setShow] = useState(false);
+  const [name, setName] = useState("");
+  const [credentials, setCredentials] = useState("");
+  const [specialty, setSpecialty] = useState("");
+  if (!show) return <button className="mt-3 text-xs font-medium text-brand-700 hover:underline" onClick={() => setShow(true)}>+ Add provider</button>;
+  return (
+    <div className="mt-3 flex flex-wrap gap-2 rounded-lg bg-ink-50/70 p-3">
+      <input className="input w-48 text-sm" placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} />
+      <input className="input w-28 text-sm" placeholder="Credentials" value={credentials} onChange={(e) => setCredentials(e.target.value)} />
+      <input className="input w-40 text-sm" placeholder="Specialty" value={specialty} onChange={(e) => setSpecialty(e.target.value)} />
+      <button className="btn-primary py-1.5 text-xs" disabled={name.trim().length < 2} onClick={async () => { await fetch(`/api/cases/${data.id}/providers`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: name.trim(), credentials: credentials || undefined, specialty: specialty || undefined }) }); setShow(false); setName(""); setCredentials(""); setSpecialty(""); onAdded(); }}>Add</button>
+      <button className="py-1.5 text-xs text-ink-400" onClick={() => setShow(false)}>Cancel</button>
+    </div>
+  );
+}
+
 // ── Evidence Explorer (P2) ────────────────────────────────────────────────────
 // Source-backed provenance for any diagnosis or recommendation: why it exists,
 // what supports it, what weakens it, what remains unknown, and what approval is

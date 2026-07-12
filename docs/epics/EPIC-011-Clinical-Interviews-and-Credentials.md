@@ -1,6 +1,6 @@
 # EPIC-011 — Clinical Interviews & Reviewer Credentials
 
-**Status:** Specified (2026-07-12) — not yet implemented. Awaiting approval to build.
+**Status:** Shipped (2026-07-12). Credential upload available to any medical-personnel seat (ADMIN / PLANNER / PHYSICIAN_REVIEWER).
 
 Closes the two gaps identified when benchmarking a generated plan against a
 signed physician LCP (David Glazer MD, *F.J. Redacted LCP*): (1) that report was

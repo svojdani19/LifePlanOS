@@ -29,6 +29,22 @@ Assumptions → Discussion → Limitations → Conclusions → Appendix A Refere
 B Abbreviations → C Physician Review & Endorsement → D Evidence Traceability →
 E Methodological Basis → F Life Care Plan Integrity Check.
 
+## Interviews & credentials (EPIC-011)
+
+- **Current Complaints** — a subsection under *Current Medical Status* rendered
+  from the patient interview (by category, with the patient's verbatim quotes),
+  dated to the interview. Appears only when findings exist.
+- **Per-recommendation weaving** — interview findings linked to a diagnosis or a
+  specific recommendation flow into that recommendation's medical-necessity
+  narrative and its *Supporting functional limitations* (patient) /
+  *treating-physician documentation* (provider) evidence buckets.
+- **Methodology** notes the interviews relied upon (patient + named providers).
+- **Qualifications** — when the preparer's seat carries a credential summary
+  and/or uploaded documents, a real Glazer-style credentials paragraph plus a
+  referenced-documents list replaces the generic "CV under separate cover."
+- Nothing here is fabricated — only user-entered interview content and
+  uploaded credential documents.
+
 ## Content rules
 
 1. **Integrity-gated totals.** `runIntegrityCheck` decides inclusion; excluded

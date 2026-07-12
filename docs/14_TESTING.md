@@ -13,12 +13,13 @@ not done ([13_DEVELOPER_STANDARDS.md](13_DEVELOPER_STANDARDS.md)).
   network** (vitest.config.ts enforces the pure-logic boundary; Prisma is
   mocked where a guard must be exercised).
 - Run: `npm test` (all), `npx vitest run <file>` (one suite).
-- Current baseline: 21 suites / 187 tests, all green, plus `npx tsc --noEmit`.
+- Current baseline: 22 suites / 205 tests, all green, plus `npx tsc --noEmit`.
 
 ## What is pinned where
 
 | Domain | Suite | Invariants |
 |---|---|---|
+| Provider roster | `engine/providerRoster.test.ts` | extract people (not facilities/metadata) from parsed records; merge appearances; regeneration-safe new-suggestion filtering |
 | Medical necessity | `engine/medicalNecessity.test.ts` | per-recommendation dossier: necessity narrative (not a diagnosis restatement), organized traceable evidence, structured probability +%, contradictory evidence surfaced, unknowns, strongest-first literature, confidence; completeness validation |
 | Citation quality | `engine/citationQuality.test.ts` | region/procedure/population gate (knee≠lumbar, rotator-cuff≠THA, pediatric≠adult); recommendation-centric scope (office visits ≠ fusion/nerve-stimulation trials); explicit relevance scoring; 10-tier hierarchy + strongest-as-primary; evidence-quality validation (incompatible/weak-primary/cross-region reuse); structured confidence |
 | Clinical integrity | `engine/integrity.test.ts` | TKA→knee (never lumbar); spine revision ≠ 27487; EMG ≠ MRI pricing; transforaminal ≠ interlaminar codes; pediatric/congenital literature rejected for adult injury; case reports rejected for non-rare conditions; unsupported items excluded from totals; no "physician approved" without an approval event; rolling walker carried into the functional assessment; critical findings block export |

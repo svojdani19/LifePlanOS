@@ -95,6 +95,42 @@ describe("buildRecommendationDossier", () => {
   });
 });
 
+describe("interview weaving (EPIC-011)", () => {
+  const itemWithId = { ...tka, id: "item-1" };
+  const condWithId = { ...condition, id: "cond-1" };
+
+  it("weaves a patient complaint linked to the item into the narrative and functional evidence", () => {
+    const d = buildRecommendationDossier(itemWithId, condWithId, chronology, kase, [
+      { subject: "PATIENT", category: "Pain", text: "constant knee pain that limits standing to ten minutes", quote: "my knee gives out on stairs", futureCareItemId: "item-1" },
+    ]);
+    expect(d.medicalNecessity).toMatch(/on interview, ms\. trice reports/i);
+    expect(d.supportingEvidence.functionalLimitations.some((e) => /patient reports/i.test(e.text) && /gives out on stairs/i.test(e.text))).toBe(true);
+  });
+
+  it("weaves a treating-provider opinion into physician documentation", () => {
+    const d = buildRecommendationDossier(itemWithId, condWithId, chronology, kase, [
+      { subject: "PROVIDER", providerName: "Dr. Brandt", text: "expects the patient will require arthroplasty within two years", futureCareItemId: "item-1" },
+    ]);
+    expect(d.supportingEvidence.physicianDocumentation.some((e) => /Dr\. Brandt/.test(e.text))).toBe(true);
+    expect(d.medicalNecessity).toMatch(/consistent with the opinion of Dr\. Brandt/i);
+  });
+
+  it("an item-specific finding does NOT bleed onto a different item of the same diagnosis", () => {
+    const other = { ...tka, id: "item-2", service: "Knee injections" };
+    const d = buildRecommendationDossier(other, condWithId, chronology, kase, [
+      { subject: "PATIENT", text: "pain", futureCareItemId: "item-1", conditionId: "cond-1" },
+    ]);
+    expect(d.supportingEvidence.functionalLimitations.some((e) => /patient reports/i.test(e.text))).toBe(false);
+  });
+
+  it("a diagnosis-level finding (no item link) applies to every item of that diagnosis", () => {
+    const d = buildRecommendationDossier(itemWithId, condWithId, chronology, kase, [
+      { subject: "PATIENT", text: "diffuse knee pain", conditionId: "cond-1" },
+    ]);
+    expect(d.supportingEvidence.functionalLimitations.some((e) => /diffuse knee pain/i.test(e.text))).toBe(true);
+  });
+});
+
 describe("validateRecommendationCompleteness", () => {
   it("flags a recommendation with no supporting diagnosis as Critical/blocking", () => {
     const d = buildRecommendationDossier({ service: "Mystery item", frequencyPerYear: 1 }, null, [], kase);

@@ -2,6 +2,40 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-12 — EPIC-011: clinical interviews & reviewer credentials
+
+Closes the physician-authorship / patient-voice gap found benchmarking against
+a signed physician LCP. All user-authored; nothing fabricated.
+
+- **Treating Providers tab**: auto-lists providers parsed from the records
+  (`providerRoster.ts` — people only, facilities/metadata rejected, appearances
+  merged), with confirm/edit/dismiss/add; the roster is curated and survives
+  regeneration.
+- **Interviews**: patient and treating-provider findings — categorized or
+  free-text, with verbatim quotes and dates, optionally linked to a diagnosis or
+  a specific recommendation. Item-specific links appear only on that item;
+  diagnosis-level links apply across that diagnosis's items.
+- **Report incorporation**: a Glazer-style **Current Complaints** section under
+  Current Medical Status; interview findings woven into each recommendation's
+  medical-necessity narrative and evidence buckets (patient→functional,
+  provider→physician documentation); a Methodology note of the interviews
+  relied upon.
+- **Seat credentials**: any medical-personnel seat (ADMIN/PLANNER/
+  PHYSICIAN_REVIEWER) can upload board certification / CV / license documents
+  (stored via S3/local, streamed through an authed route, GC'd on delete) and
+  set a credential summary; the report **Qualifications** section renders a real
+  credentials paragraph + referenced-documents list in place of the generic
+  "CV under separate cover."
+- New APIs (all tenant-guarded + audited): `/api/cases/:id/providers[/:id]`,
+  `/api/cases/:id/interviews[/:id]`, `/api/team/:userId/credentials[/:id[/view]]`,
+  and `credentialSummary` on the team PATCH.
+- Schema: `TreatingProvider`, `InterviewFinding`, `UserCredential` + enums,
+  `User.credentialSummary` (migration `20260712140000`).
+- Tests 187 → 205 (providerRoster 7, interview weaving 4, +…); tsc clean.
+  E2E-verified: providers extracted from David Chen's records, patient/provider
+  interviews rendered in Current Complaints and woven into the pain-management
+  recommendation.
+
 ## 2026-07-12 — Refactor: Medical Necessity engine replaces the SoC module
 
 - **Retired the Standard-of-Care module as a user-facing workflow**: removed the

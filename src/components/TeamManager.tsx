@@ -1,9 +1,76 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { UserPlus, Copy, Check } from "lucide-react";
+import { UserPlus, Copy, Check, FileText, X } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
 import { formatDate, initials } from "@/lib/utils";
+
+// Seats that may carry reviewer credentials (EPIC-011).
+const MEDICAL_ROLES = new Set(["ADMIN", "PLANNER", "PHYSICIAN_REVIEWER"]);
+const CRED_TYPES = [
+  ["BOARD_CERTIFICATION", "Board certification"],
+  ["CV", "Curriculum vitae"],
+  ["LICENSE", "License"],
+  ["OTHER", "Other"],
+] as const;
+
+// Per-seat credential documents + a rendered "board certified in …" summary that
+// the report Qualifications section uses. Shown for medical-personnel seats.
+function CredentialsRow({ userId, initialSummary }: { userId: string; initialSummary: string | null }) {
+  const [creds, setCreds] = useState<{ id: string; type: string; label: string | null; filename: string }[] | null>(null);
+  const [type, setType] = useState("BOARD_CERTIFICATION");
+  const [label, setLabel] = useState("");
+  const [summary, setSummary] = useState(initialSummary ?? "");
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    const res = await fetch(`/api/team/${userId}/credentials`);
+    if (res.ok) setCreds((await res.json()).credentials ?? []);
+  }, [userId]);
+  useEffect(() => { load(); }, [load]);
+  async function upload(file: File) {
+    setBusy(true);
+    const fd = new FormData();
+    fd.append("file", file); fd.append("type", type); if (label) fd.append("label", label);
+    const res = await fetch(`/api/team/${userId}/credentials`, { method: "POST", body: fd });
+    setBusy(false);
+    if (res.ok) { setLabel(""); load(); }
+  }
+  return (
+    <div className="space-y-3 rounded-lg bg-ink-50/70 p-3 text-sm">
+      <div>
+        <label className="text-xs font-medium text-ink-500">Credential summary (rendered in report Qualifications)</label>
+        <div className="mt-1 flex gap-2">
+          <input className="input flex-1 text-sm" placeholder="e.g. Board certified in Physical Medicine & Rehabilitation and Brain Injury Medicine" value={summary} onChange={(e) => setSummary(e.target.value)} />
+          <button className="btn-outline px-3 py-1.5 text-xs" onClick={() => fetch(`/api/team/${userId}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ credentialSummary: summary || null }) })}>Save</button>
+        </div>
+      </div>
+      <div>
+        <label className="text-xs font-medium text-ink-500">Documents (board certification, CV, license)</label>
+        <ul className="mt-1 space-y-1">
+          {(creds ?? []).map((c) => (
+            <li key={c.id} className="flex items-center gap-2 text-ink-700">
+              <FileText className="h-3.5 w-3.5 text-ink-400" />
+              <a href={`/api/team/${userId}/credentials/${c.id}/view`} target="_blank" rel="noopener noreferrer" className="font-medium text-brand-700 hover:underline">{c.filename}</a>
+              <span className="text-xs text-ink-400">{(CRED_TYPES.find(([v]) => v === c.type)?.[1]) ?? c.type}{c.label ? ` · ${c.label}` : ""}</span>
+              <button className="ml-auto text-ink-300 hover:text-red-600" onClick={async () => { await fetch(`/api/team/${userId}/credentials/${c.id}`, { method: "DELETE" }); load(); }}><X className="h-3.5 w-3.5" /></button>
+            </li>
+          ))}
+          {creds && creds.length === 0 && <li className="text-xs text-ink-400">No credential documents uploaded.</li>}
+        </ul>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <select className="input w-44 text-sm" value={type} onChange={(e) => setType(e.target.value)}>
+            {CRED_TYPES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+          </select>
+          <input className="input w-52 text-sm" placeholder="Label (optional)" value={label} onChange={(e) => setLabel(e.target.value)} />
+          <label className="btn-outline cursor-pointer px-3 py-1.5 text-xs">
+            {busy ? "Uploading…" : "Upload"}
+            <input type="file" className="hidden" accept=".pdf,.png,.jpg,.jpeg" onChange={(e) => { const f = e.target.files?.[0]; if (f) upload(f); e.target.value = ""; }} />
+          </label>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 const ROLES = [
   ["ADMIN", "Administrator"],
@@ -25,6 +92,7 @@ interface Member {
   lastLoginAt: string | null;
   inviteToken: string | null;
   createdAt: string;
+  credentialSummary?: string | null;
 }
 
 export function TeamManager({ currentUserId }: { currentUserId: string }) {
@@ -33,6 +101,7 @@ export function TeamManager({ currentUserId }: { currentUserId: string }) {
   const [error, setError] = useState<string | null>(null);
   const [lastInviteLink, setLastInviteLink] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [credsFor, setCredsFor] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const res = await fetch("/api/team");
@@ -144,7 +213,7 @@ export function TeamManager({ currentUserId }: { currentUserId: string }) {
             </tr>
           </thead>
           <tbody className="divide-y divide-ink-100">
-            {members.map((m) => (
+            {members.map((m) => [
               <tr key={m.id} className="hover:bg-ink-50">
                 <td className="px-4 py-3">
                   <div className="flex items-center gap-3">
@@ -180,14 +249,28 @@ export function TeamManager({ currentUserId }: { currentUserId: string }) {
                   </Badge>
                 </td>
                 <td className="px-4 py-3 text-right">
-                  {m.id !== currentUserId && m.status !== "SUSPENDED" && (
-                    <button onClick={() => revoke(m.id)} className="text-xs font-medium text-red-600 hover:underline">
-                      Revoke
-                    </button>
-                  )}
+                  <div className="flex items-center justify-end gap-3">
+                    {MEDICAL_ROLES.has(m.role) && m.status !== "SUSPENDED" && (
+                      <button onClick={() => setCredsFor(credsFor === m.id ? null : m.id)} className="text-xs font-medium text-brand-700 hover:underline">
+                        {credsFor === m.id ? "Hide credentials" : "Credentials"}
+                      </button>
+                    )}
+                    {m.id !== currentUserId && m.status !== "SUSPENDED" && (
+                      <button onClick={() => revoke(m.id)} className="text-xs font-medium text-red-600 hover:underline">
+                        Revoke
+                      </button>
+                    )}
+                  </div>
                 </td>
-              </tr>
-            ))}
+              </tr>,
+              credsFor === m.id ? (
+                <tr key={m.id + "-creds"}>
+                  <td colSpan={4} className="bg-ink-50/40 px-4 pb-4">
+                    <CredentialsRow userId={m.id} initialSummary={m.credentialSummary ?? null} />
+                  </td>
+                </tr>
+              ) : null,
+            ]).flat().filter(Boolean)}
           </tbody>
         </table>
       </div>

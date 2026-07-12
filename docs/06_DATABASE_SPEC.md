@@ -57,6 +57,14 @@ connection's search_path targets `lifeplanos`) → `npx prisma migrate resolve
 
 ### Change log (schema)
 
+- **2026-07-12 (EPIC-011)** `TreatingProvider`, `InterviewFinding`,
+  `UserCredential` + enums (`ProviderStatus`, `InterviewSubject`,
+  `CredentialType`); `User.credentialSummary`
+  (migration `20260712140000_add_interviews_and_credentials`). Interview
+  findings and credentials are user-authored (never wiped/fabricated);
+  the treating-provider roster is curated (extraction-seeded, preserved on
+  regeneration).
+
 - **2026-07-12 (P2/P3)** `RecStatus` enum; `FutureCareItem` + `lineageId`,
   `version`, `supersededById/At`, `lifecycleStatus`;
   `RecommendationTransition`, `EvidenceLink`, `AssumptionChange`,

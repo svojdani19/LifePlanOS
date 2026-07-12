@@ -21,6 +21,8 @@ export default async function CaseDetailPage({ params }: { params: { caseId: str
       assumptionChanges: { orderBy: { createdAt: "desc" }, take: 20 },
       reviewFindings: { orderBy: { createdAt: "asc" } },
       reports: { orderBy: { createdAt: "desc" } },
+      treatingProviders: { orderBy: { createdAt: "asc" } },
+      interviewFindings: { orderBy: { createdAt: "asc" } },
     },
   });
   if (!c) notFound();

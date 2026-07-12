@@ -222,14 +222,18 @@ model User {
   inviteExpiresAt DateTime?
   invitedById     String?
 
+  // Cached "board certified in …" summary rendered in report Qualifications.
+  credentialSummary String?
+
   lastLoginAt DateTime?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
   sessions     Session[]
-  casesCreated Case[]        @relation("CaseCreatedBy")
+  casesCreated Case[]           @relation("CaseCreatedBy")
   auditLogs    AuditLog[]
   usageRecords UsageRecord[]
+  credentials  UserCredential[]
 
   @@index([firmId])
   @@index([inviteToken])
@@ -318,6 +322,8 @@ model Case {
   evidenceLinks             EvidenceLink[]
   assumptionChanges         AssumptionChange[]
   snapshots                 CaseSnapshot[]
+  treatingProviders         TreatingProvider[]
+  interviewFindings         InterviewFinding[]
 
   @@unique([firmId, caseNumber])
   @@index([firmId])
@@ -946,5 +952,107 @@ model ValidationFinding {
   createdAt DateTime @default(now())
 
   @@index([caseId])
+  @@index([firmId])
+}
+
+// ── EPIC-011: clinical interviews & reviewer credentials ─────────────────────
+
+enum ProviderStatus {
+  SUGGESTED // extracted from the records, not yet acted on
+  CONFIRMED // user-confirmed part of the treating team
+  DISMISSED // user judged incidental/not treating
+}
+
+// A provider affiliated with the case's care. Seeded as SUGGESTED from the
+// parsed records (Document authors/providers, chronology providers) and then
+// curated by the user. CONFIRMED providers and any provider carrying interview
+// findings are PRESERVED across plan regeneration (never auto-deleted).
+model TreatingProvider {
+  id     String @id @default(uuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  firmId String
+
+  name              String
+  credentials       String?
+  specialty         String?
+  facility          String?
+  contact           String?
+  isTreating        Boolean        @default(true)
+  status            ProviderStatus @default(SUGGESTED)
+  // Normalized name key for regeneration reconciliation & dedupe.
+  nameKey           String
+  sourceDocumentIds Json? // [{ documentId, filename, pages }] the provider appears in
+  addedById         String?
+
+  createdAt DateTime @default(now())
+
+  interviewFindings InterviewFinding[]
+
+  @@index([caseId])
+  @@index([firmId])
+  @@index([caseId, nameKey])
+}
+
+enum InterviewSubject {
+  PATIENT
+  PROVIDER
+}
+
+// A single interview finding — categorized or free-text — from the patient or a
+// treating provider. User-authored: NEVER wiped by regeneration, never
+// fabricated. May link to a diagnosis / recommendation so it feeds that item.
+model InterviewFinding {
+  id     String @id @default(uuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  firmId String
+
+  subject    InterviewSubject
+  providerId String? // TreatingProvider, when subject = PROVIDER
+  provider   TreatingProvider? @relation(fields: [providerId], references: [id], onDelete: Cascade)
+
+  category String? // clinical taxonomy label, or null for free-text
+  text     String
+  quote    String? // verbatim patient/provider words
+
+  interviewDate    DateTime?
+  interviewedById  String? // the user who conducted the interview
+  conditionId      String? // optional link → feeds that diagnosis
+  futureCareItemId String? // optional link → feeds that recommendation
+
+  createdById String?
+  createdAt   DateTime @default(now())
+
+  @@index([caseId])
+  @@index([firmId])
+  @@index([caseId, subject])
+}
+
+enum CredentialType {
+  BOARD_CERTIFICATION
+  CV
+  LICENSE
+  OTHER
+}
+
+// A credential document uploaded for a firm seat (board certification, CV,
+// license). Firm-scoped; streamed through an authenticated route; GC'd on
+// delete. Referenced in the report's Qualifications when the seat is on a case.
+model UserCredential {
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  firmId String
+
+  type       CredentialType
+  label      String? // e.g. "ABPMR — Brain Injury Medicine"
+  filename   String
+  storageKey String
+
+  createdById String?
+  createdAt   DateTime @default(now())
+
+  @@index([userId])
   @@index([firmId])
 }

@@ -235,14 +235,29 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
     where: { id: caseId },
     include: {
       firm: true,
-      createdBy: { select: { name: true } },
+      createdBy: { select: { name: true, role: true, credentialSummary: true, credentials: { select: { id: true, type: true, label: true, filename: true }, orderBy: { createdAt: "asc" } } } },
       chronologyEvents: { orderBy: { eventDate: "asc" } },
       conditions: { orderBy: { confidence: "desc" } },
       futureCareItems: { where: { supersededAt: null }, orderBy: { presentValue: "desc" } },
       reviewFindings: true,
       documents: { orderBy: { createdAt: "asc" } },
+      treatingProviders: { where: { status: "CONFIRMED" }, orderBy: { createdAt: "asc" } },
+      interviewFindings: { orderBy: { createdAt: "asc" } },
     },
   });
+
+  // EPIC-011 — interviews woven into each recommendation's dossier + a Current
+  // Complaints section. Provider names resolved for provider opinions.
+  const providerName = new Map(c.treatingProviders.map((p) => [p.id, `${p.name}${p.credentials ? `, ${p.credentials}` : ""}`]));
+  const dossierInterviews = c.interviewFindings.map((f) => ({
+    subject: f.subject as "PATIENT" | "PROVIDER",
+    category: f.category,
+    text: f.text,
+    quote: f.quote,
+    conditionId: f.conditionId,
+    futureCareItemId: f.futureCareItemId,
+    providerName: f.providerId ? providerName.get(f.providerId) ?? null : null,
+  }));
 
   const a = assumptionsFor(c);
   const items = c.futureCareItems;
@@ -313,7 +328,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
     const cond = per.mapping.condition as unknown as (typeof c.conditions)[number] | null;
     const dxName = cond?.name || c.diagnosis || "the injuries at issue";
     const recordSupport = hasRecordSupport(it as unknown as RecInput, cond as unknown as CondInput | null);
-    const dossier = buildRecommendationDossier(it as never, cond as unknown as DossierCondition | null, c.chronologyEvents as unknown as DossierChronoEvent[], dossierCase);
+    const dossier = buildRecommendationDossier(it as never, cond as unknown as DossierCondition | null, c.chronologyEvents as unknown as DossierChronoEvent[], dossierCase, dossierInterviews as never);
     const out: (Paragraph | Table)[] = [];
     out.push(new Paragraph({ spacing: { before: 260, after: 60 }, keepNext: true, children: [new TextRun({ text: it.service, bold: true, size: 22, color: NAVY })] }));
 
@@ -484,16 +499,28 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
 
   // ══ QUALIFICATIONS OF REVIEWER ═══════════════════════════════════════════════
   body.push(h1("Qualifications of Reviewer", { pageBreak: true }));
+  // EPIC-011 — when the preparer's seat carries a credential summary and/or
+  // uploaded documents, render a real Glazer-style Qualifications paragraph and
+  // reference the documents; otherwise the generic "under separate cover" text.
+  const preparerCreds = c.createdBy?.credentials ?? [];
+  const credSummary = c.createdBy?.credentialSummary?.trim();
   body.push(
     p(
-      `This Life Care Plan was prepared by ${preparer} of ${c.firm.name}. The opinions expressed herein are offered to a reasonable degree of medical probability and are based upon my professional training and experience, my review of the records identified in this report, and the published life-care-planning methodology and clinical guidelines described in the section that follows.`,
+      `This Life Care Plan was prepared by ${preparer} of ${c.firm.name}.${credSummary ? ` ${period(credSummary)}` : ""} The opinions expressed herein are offered to a reasonable degree of medical probability and are based upon my professional training and experience, my review of the records identified in this report, and the published life-care-planning methodology and clinical guidelines described in the section that follows.`,
     ),
   );
-  body.push(
-    p(
-      `A curriculum vitae setting out my professional qualifications, certifications, publications, and prior testimony is available under separate cover and is incorporated by reference. A statement of compensation and a list of matters in which I have testified are likewise available upon request.`,
-    ),
-  );
+  if (preparerCreds.length) {
+    const CRED_LABEL: Record<string, string> = { BOARD_CERTIFICATION: "Board certification", CV: "Curriculum vitae", LICENSE: "License", OTHER: "Credential" };
+    body.push(p(`My qualifications are documented in the following materials, appended to or produced with this report:`));
+    for (const cr of preparerCreds) body.push(bullet(`${CRED_LABEL[cr.type] ?? "Credential"}${cr.label ? ` — ${cr.label}` : ""} (${cr.filename}).`));
+    body.push(p(`A statement of compensation and a list of matters in which I have testified are available upon request.`));
+  } else {
+    body.push(
+      p(
+        `A curriculum vitae setting out my professional qualifications, certifications, publications, and prior testimony is available under separate cover and is incorporated by reference. A statement of compensation and a list of matters in which I have testified are likewise available upon request.`,
+      ),
+    );
+  }
 
   // ══ METHODOLOGY ══════════════════════════════════════════════════════════════
   body.push(h1("Methodology", { pageBreak: true }));
@@ -517,6 +544,18 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
       `Throughout, I have applied the standard of reasonable medical probability: a service is included in the plan, and its cost totaled, only where it is more likely than not to be required. Care that is foreseeable but not more likely than not is disclosed as a contingency and is not included in the totals.`,
     ),
   );
+  // EPIC-011 — record the interviews relied upon (Glazer-style), when present.
+  {
+    const hasPatient = c.interviewFindings.some((f) => f.subject === "PATIENT");
+    const interviewedProviders = c.treatingProviders.filter((pv) => c.interviewFindings.some((f) => f.providerId === pv.id));
+    if (hasPatient || interviewedProviders.length) {
+      body.push(
+        p(
+          `In addition to the records, I have relied upon ${[hasPatient ? `an interview of ${subject}` : null, interviewedProviders.length ? `interview${interviewedProviders.length === 1 ? "" : "s"} of the treating ${interviewedProviders.length === 1 ? "provider" : "providers"} (${interviewedProviders.map((pv) => `${pv.name}${pv.credentials ? `, ${pv.credentials}` : ""}`).join("; ")})` : null].filter(Boolean).join(" and ")}. The patient's account of current complaints appears under Current Medical Status; interview findings pertinent to a specific recommendation are set out with that recommendation.`,
+        ),
+      );
+    }
+  }
 
   // ══ MEDICAL RECORDS REVIEWED ═════════════════════════════════════════════════
   body.push(h1("Medical Records Reviewed", { pageBreak: true }));
@@ -628,6 +667,24 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
         `${cap(pr.subj)} remains under care for ${activeConds.map((x) => lc(x.name)).slice(0, 6).join("; ")}${activeConds.length > 6 ? "; and additional conditions set out below" : ""}. In my opinion, ${pr.poss} condition has reached a point at which the future course of care can be projected to a reasonable degree of medical probability.`,
       ),
     );
+  }
+
+  // EPIC-011 — Current Complaints, from the patient interview (only when present).
+  const patientFindings = c.interviewFindings.filter((f) => f.subject === "PATIENT");
+  if (patientFindings.length) {
+    body.push(h2("Current Complaints"));
+    const dates = [...new Set(patientFindings.map((f) => (f.interviewDate ? fmtDate(f.interviewDate) : null)).filter(Boolean))];
+    body.push(p(`On interview${dates.length ? ` (${dates.join("; ")})` : ""}, ${subject} reported the following, in ${pr.poss} own account:`));
+    // Group by category; free-text findings fall under "General".
+    const byCat = new Map<string, typeof patientFindings>();
+    for (const f of patientFindings) {
+      const k = f.category || "General";
+      byCat.set(k, [...(byCat.get(k) ?? []), f]);
+    }
+    for (const [catLabel, fs] of byCat) {
+      const text = fs.map((f) => `${period(cap(f.text))}${f.quote ? ` ${subject} states: “${f.quote}”` : ""}`).join(" ");
+      body.push(labeled(catLabel, text));
+    }
   }
 
   // ══ FUNCTIONAL ASSESSMENT ════════════════════════════════════════════════════

@@ -22,6 +22,7 @@ import { citationCompatible, evidenceTier, selectPrimary, structuredConfidence, 
 
 // ── Inputs (structurally satisfied by the Prisma rows; kept minimal) ─────────
 export interface DossierItem {
+  id?: string;
   service: string;
   category?: string | null;
   specialty?: string | null;
@@ -45,7 +46,19 @@ export interface DossierItem {
   startTrigger?: string | null;
   citation?: unknown;
 }
+// An interview finding (EPIC-011) linkable to a condition/recommendation. Only
+// user-entered content — never fabricated.
+export interface DossierInterview {
+  subject: "PATIENT" | "PROVIDER";
+  category?: string | null;
+  text: string;
+  quote?: string | null;
+  conditionId?: string | null;
+  futureCareItemId?: string | null;
+  providerName?: string | null;
+}
 export interface DossierCondition {
+  id?: string;
   name: string;
   relatedness?: string;
   objectiveEvidence?: string | null;
@@ -163,12 +176,22 @@ export function buildRecommendationDossier(
   condition: DossierCondition | null,
   chronology: DossierChronoEvent[],
   kase: DossierCase,
+  interviews: DossierInterview[] = [],
 ): RecommendationDossier {
   const dxName = condition?.name ?? "the injuries at issue";
   const region = bodyRegion(`${item.service} ${dxName}`);
   const sources = evidenceSourcesOf(condition);
   const guidelines = guidelinesOf(condition);
   const pertinent = chronology.filter((e) => eventPertains(e, region, dxName));
+  // Interview findings for THIS recommendation. An item-specific link (a
+  // futureCareItemId) is precise — it appears ONLY on that item; a
+  // diagnosis-level link (conditionId only) applies to every item of that
+  // diagnosis.
+  const linkedInterviews = interviews.filter((iv) =>
+    iv.futureCareItemId ? item.id === iv.futureCareItemId : iv.conditionId ? condition?.id === iv.conditionId : false,
+  );
+  const patientReports = linkedInterviews.filter((iv) => iv.subject === "PATIENT");
+  const providerOpinions = linkedInterviews.filter((iv) => iv.subject === "PROVIDER");
 
   // ── Organized, source-traceable supporting evidence ────────────────────────
   const objectiveFindings: EvidenceItem[] = [];
@@ -194,6 +217,10 @@ export function buildRecommendationDossier(
   } else if (item.physicianNote) {
     physicianDocumentation.push({ text: `“${item.physicianNote}”`, source: "physician review" });
   }
+  // Interview findings (EPIC-011): patient complaints → functional limitations;
+  // treating-provider opinions → physician documentation. Verbatim, user-entered.
+  for (const iv of patientReports) functionalLimitations.push({ text: `Patient reports ${lc(cleanClause(iv.text, 150))}${iv.quote ? ` — “${iv.quote}”` : ""}`, source: iv.category ? `patient interview · ${iv.category}` : "patient interview" });
+  for (const iv of providerOpinions) physicianDocumentation.push({ text: `${iv.providerName ? `${iv.providerName}` : "Treating provider"}: ${cleanClause(iv.text, 160)}${iv.quote ? ` — “${iv.quote}”` : ""}`, source: "provider interview" });
   const guidelineEvidence: EvidenceItem[] = guidelines.filter((g) => g.title).map((g) => ({ text: `${g.quote ? `“${g.quote}” — ` : ""}${g.title}${g.year ? ` (${g.year})` : ""}`, source: g.relevance?.evidenceLabel ?? "clinical guideline" }));
   const diagnoses: EvidenceItem[] = condition ? [{ text: `${condition.name}${condition.relatedness ? ` — ${condition.relatedness.replace(/_/g, " ").toLowerCase()}` : ""}`, source: condition.reasoning ? "causation analysis" : null }] : [];
 
@@ -282,7 +309,10 @@ export function buildRecommendationDossier(
   if (!objectiveFindings.length) potentialChallenges.push("Objective evidence tying this item to the diagnosis is thin on the present record.");
 
   // ── Medical-necessity narrative (physician voice; NOT a diagnosis restate) ─
-  const necessity = buildNecessityNarrative(item, condition, { objectiveFindings, imaging, examination, functionalLimitations, priorTreatment, guidelines: guidelineEvidence }, kase, dxName, percentage);
+  let necessity = buildNecessityNarrative(item, condition, { objectiveFindings, imaging, examination, functionalLimitations, priorTreatment, guidelines: guidelineEvidence }, kase, dxName, percentage);
+  // Weave the patient's own account and any treating-provider opinion.
+  if (patientReports.length) necessity += ` On interview, ${kase.subject} reports ${lc(cleanClause(patientReports[0].text, 140))}, which the recommendation directly addresses.`;
+  if (providerOpinions.length) necessity += ` This is consistent with the opinion of ${providerOpinions[0].providerName ?? "the treating provider"} on interview.`;
 
   return {
     medicalNecessity: necessity,

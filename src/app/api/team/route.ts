@@ -20,6 +20,7 @@ export async function GET() {
         lastLoginAt: true,
         inviteToken: true,
         createdAt: true,
+        credentialSummary: true,
       },
     });
     return ok({ users });

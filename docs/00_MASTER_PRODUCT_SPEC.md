@@ -71,6 +71,11 @@ check is authoritative.
 4. **Review** — planner curates; physician approves/rejects/modifies each item
    (medical-necessity note, probability/frequency adjustments); reviewer inputs
    feed back into the analysis.
+4b. **Interviews & credentials** — the Treating Providers tab lists providers
+   parsed from the records; the planner/physician records patient and
+   provider interview findings (categorized or free text, with quotes), and
+   medical-personnel seats upload board certifications / CV. All flow into the
+   report (Current Complaints, per-recommendation necessity, Qualifications).
 5. **Export** — physician-voice DOCX Life Care Plan + CSV cost schedule;
    versioned export history; integrity check gates finalization (critical
    findings ⇒ DRAFT watermark).
