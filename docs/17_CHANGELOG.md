@@ -2,6 +2,33 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-12 — Clinical Evidence Sprint: citation quality
+
+- **New `engine/citationQuality.ts`** (pure, 19 tests): hard compatibility gate
+  (region/procedure-family-intersection/population), explicit relevance score
+  (diagnosis, procedure, region, population, clinical question, outcome,
+  evidence level, publication quality, recency) with stored reason/claim/
+  limitations, 10-tier `EVIDENCE_HIERARCHY` + `selectPrimary` (strongest is
+  always primary), `structuredConfidence` (High/Moderate/Low/Indeterminate),
+  and `validateEvidenceQuality` (incompatible citation = Critical/blocking;
+  weak-primary and cross-region reuse = High).
+- **Enforced at selection time**: `enrichCitations` and the SoC guideline
+  selector now gate every candidate and store the relevance record; keyword-
+  only matches are rejected before storage, so no article is reused across
+  incompatible diagnoses.
+- **Honest SoC posture**: every conclusion carries strength / limitations /
+  unknowns / clinical confidence and states its own evidentiary weight —
+  weak evidence is called weak.
+- **Claim-based Evidence Explorer**: literature shown as "supports the claim …"
+  with why-relevant, evidence level, and limitations; new supporting sections
+  (objective findings, physician documentation, cost & coding) and a structured
+  confidence badge. SoC panel shows per-guideline relevance + evidence posture.
+- **Validation service** now also runs the evidence-quality checks.
+- Surfaced & fixed real seed-data mismatches (medication regex false-positives
+  on "non-pharmacological" / "medication-overuse headache"; combined
+  decompression/fusion service); added occipital-nerve/Botox CPTs. No schema
+  change (relevance rides in existing JSON). Tests 157 → 176.
+
 ## 2026-07-12 — Priorities 2–4: lifecycle, evidence graph, explorers, ops
 
 - **P2.R1 Recommendation versioning implemented** (`b92c7b7`): regeneration

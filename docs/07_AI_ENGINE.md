@@ -60,7 +60,11 @@ and must obey the fabrication rules below.
   key); merged and de-duplicated into one candidate pool; a failing source
   contributes nothing (best-effort). `literatureReachable()` probes
   connectivity so offline runs degrade honestly.
-- Relevance gates (in `integrity.ts`): `evaluateCitation` scores diagnosis/
+- **Citation quality (`citationQuality.ts`, Clinical Evidence Sprint)**: a hard
+  compatibility gate + explicit relevance score + 10-tier hierarchy + structured
+  confidence, enforced at selection time in `enrichCitations` and the SoC
+  selector, and re-checked by the validation service. See 09_CLINICAL_RULES §4.
+- Legacy relevance gate (in `integrity.ts`): `evaluateCitation` scores diagnosis/
   region match (required), intervention match, outcome signal, evidence tier
   (guideline > SR/MA > cohort/registry > RCT > review > case series > case
   report), population match (pediatric/congenital rejected for adult injury),

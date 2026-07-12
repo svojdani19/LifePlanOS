@@ -13,12 +13,13 @@ not done ([13_DEVELOPER_STANDARDS.md](13_DEVELOPER_STANDARDS.md)).
   network** (vitest.config.ts enforces the pure-logic boundary; Prisma is
   mocked where a guard must be exercised).
 - Run: `npm test` (all), `npx vitest run <file>` (one suite).
-- Current baseline: 19 suites / 157 tests, all green, plus `npx tsc --noEmit`.
+- Current baseline: 20 suites / 176 tests, all green, plus `npx tsc --noEmit`.
 
 ## What is pinned where
 
 | Domain | Suite | Invariants |
 |---|---|---|
+| Citation quality | `engine/citationQuality.test.ts` | region/procedure/population gate (knee≠lumbar, rotator-cuff≠THA, pediatric≠adult); explicit relevance scoring; 10-tier hierarchy + strongest-as-primary; evidence-quality validation (incompatible/weak-primary/cross-region reuse); structured confidence |
 | Clinical integrity | `engine/integrity.test.ts` | TKA→knee (never lumbar); spine revision ≠ 27487; EMG ≠ MRI pricing; transforaminal ≠ interlaminar codes; pediatric/congenital literature rejected for adult injury; case reports rejected for non-rare conditions; unsupported items excluded from totals; no "physician approved" without an approval event; rolling walker carried into the functional assessment; critical findings block export |
 | Financial | `engine/cost.test.ts` | determinism (identical inputs ⇒ identical output); hand-computed inflation/discount regression; fractional final year; zero-duration edge; low/high bands |
 | Tenancy | `security/tenantIsolation.test.ts` | cross-firm `requireCase` denial (mocked prisma); conformance scan — every `/api/cases/[caseId]/**` route must call `requireApiContext` + `requireCase` (PHI view/download included) |

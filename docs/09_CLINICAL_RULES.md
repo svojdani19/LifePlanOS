@@ -31,14 +31,42 @@ persistence: `engine/validation.ts` → `ValidationFinding`.
 - Bundled categories (attendant care, medications, supplies, home mods) must
   say "bundled estimate" in the pricing source.
 
-## 4. Literature relevance
-- A citation may support a recommendation only if it addresses the diagnosis/
-  region (required), matches the population (pediatric/congenital literature is
-  rejected for adult injury cases), and clears the relevance threshold.
-- Evidence hierarchy: guideline > systematic review/meta-analysis >
-  cohort/registry > RCT > specialty review > case series > case report (case
-  reports only for rare conditions).
-- No relevant literature ⇒ the report says support is limited; it never pads.
+## 4. Literature relevance (Clinical Evidence Sprint)
+Implemented in `src/lib/engine/citationQuality.ts` (pure, unit-tested); applied
+at citation SELECTION time in both `enrichCitations` and the Standard-of-Care
+guideline selector, and re-checked by the validation service.
+- **Hard compatibility gate** (`citationCompatible`) — before an article may be
+  stored or displayed it must match on: body region (a knee arthroplasty paper
+  can never appear under lumbar fusion; rotator cuff never under THA),
+  procedure family (families must intersect; a combined service like
+  "decompression / fusion" spans both), and population (pediatric/congenital
+  literature cannot support an adult recommendation). Keyword overlap alone
+  never qualifies an article.
+- **Explicit relevance score** (`evaluateArticle`, 0–100) from diagnosis,
+  procedure, region, population, clinical-question, and outcome relevance plus
+  evidence level, publication quality, and recency. Acceptance requires the
+  gate PLUS diagnosis-or-procedure anchoring PLUS a threshold — and stores the
+  reason selected, the claim supported, and limitations.
+- **Evidence hierarchy** (10 tiers, `EVIDENCE_HIERARCHY`): clinical guideline >
+  consensus statement > systematic review > meta-analysis > RCT > large
+  prospective > registry > cohort > case series > case report. `selectPrimary`
+  guarantees the strongest evidence held is the primary citation; a weak
+  primary while stronger exists is a validation finding.
+- **No automatic reuse**: an article appears under a second recommendation only
+  if it independently passes that recommendation's own gate. Cross-region reuse
+  is a validation finding.
+- No accepted literature ⇒ the analysis says support is limited; it never pads.
+
+## 4a. Evidence transparency & confidence
+- Every stored citation carries `relevance { score, evidenceLevel,
+  evidenceLabel, whyRelevant, supports, limitations }`; the Evidence Explorer
+  and SoC panel render these claim-first (what claim it supports, why, limits).
+- Every SoC conclusion carries an honest `evidence { strength, limitations,
+  unknowns, confidence, confidenceFactors }` and states its own weight in the
+  rationale — weak evidence is called weak; nothing is overstated.
+- Structured confidence (`structuredConfidence`) → High / Moderate / Low /
+  Indeterminate from record quality, objective findings, physician support,
+  guideline support, literature quality, contradictions, and missing info.
 
 ## 5. Inclusion in totals
 An item enters the damages total only when ALL hold:

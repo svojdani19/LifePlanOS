@@ -14,6 +14,7 @@ import { prisma } from "@/lib/db";
 import { findCandidates, literatureReachable, type Article } from "@/lib/literature";
 import { hasTerm, sigTerms } from "./chronology";
 import { Prisma } from "@/generated/prisma";
+import { citationCompatible, evaluateArticle, structuredConfidence, EVIDENCE_HIERARCHY, type ConfidenceResult } from "@/lib/engine/citationQuality";
 
 export interface SocGuideline {
   source: string; // "Europe PMC" | "Crossref" | "User-provided" | …
@@ -30,6 +31,16 @@ export interface SocGuideline {
   userProvided?: boolean;
   /** the SocUserInput id, so the UI can remove it */
   userInputId?: string;
+  /** Clinical Evidence Sprint — why this source was selected, what it supports,
+   *  and its limitations. Absent on user-provided sources and legacy rows. */
+  relevance?: {
+    score: number;
+    evidenceLevel: number;
+    evidenceLabel: string;
+    whyRelevant: string;
+    supports: string;
+    limitations: string | null;
+  };
 }
 
 export interface SocUserNote {
@@ -71,6 +82,14 @@ export interface SocAssessment {
    *  composed only from the cited guideline language and the documented record */
   opinion: string[];
   points: SocAlignmentPoint[];
+  /** honest evidence posture for this conclusion (never overstated) */
+  evidence?: {
+    strength: string; // e.g. "Clinical practice guideline", "Cohort study", "None located"
+    limitations: string[];
+    unknowns: string[];
+    confidence: "High" | "Moderate" | "Low" | "Indeterminate";
+    confidenceFactors: string[];
+  };
 }
 
 export interface SocAnalysis {
@@ -300,6 +319,9 @@ function rankGuidance(a: Article, conditionName: string, yearNow: number): numbe
 export async function generateStandardOfCare(caseId: string): Promise<number> {
   const conditions = await prisma.condition.findMany({ where: { caseId } });
   if (!conditions.length) return 0;
+  // Population gate: pediatric/congenital guidance never supports an adult case.
+  const kase = await prisma.case.findUnique({ where: { id: caseId }, select: { dateOfBirth: true } });
+  const adult = !kase?.dateOfBirth || (Date.now() - kase.dateOfBirth.getTime()) / (365.25 * 24 * 3600 * 1000) >= 18;
   const events = await prisma.chronologyEvent.findMany({ where: { caseId }, orderBy: { eventDate: "asc" } });
   // Planned future care counts toward the standard (e.g. a documented plan for
   // revision arthroplasty). Items are diagnosis-driven and linked to the primary
@@ -327,6 +349,9 @@ export async function generateStandardOfCare(caseId: string): Promise<number> {
       // stats sentence) with the title/recency rank as a secondary signal.
       const scored = pool
         .filter((a) => isGuidance(a) && (a.abstract?.length ?? 0) >= 120 && guidanceOnTopic(a, cond.name))
+        // HARD compatibility gate (region/procedure/population) — keyword
+        // overlap alone can never seat a guideline under this diagnosis.
+        .filter((a) => citationCompatible({ title: a.title, abstract: a.abstract, pubtype: a.pubtype }, { diagnosis: cond.name, service: cond.name, adult }).compatible)
         .map((a) => ({ a, q: extractGuidelineQuote(a.abstract!, cond.name) }))
         .filter((x): x is { a: Article; q: QuoteResult } => x.q !== null)
         .sort((x, y) => y.q.score * 10 + rankGuidance(y.a, cond.name, yearNow) - (x.q.score * 10 + rankGuidance(x.a, cond.name, yearNow)));
@@ -335,6 +360,7 @@ export async function generateStandardOfCare(caseId: string): Promise<number> {
         const tkey = a.title.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().slice(0, 45);
         if (titleSeen.has(tkey)) continue; // drop near-identical part I/II duplicates
         titleSeen.add(tkey);
+        const rel = evaluateArticle({ title: a.title, abstract: a.abstract, journal: a.journal, year: a.year, pubtype: a.pubtype, citationCount: a.citationCount }, { diagnosis: cond.name, service: cond.name, adult });
         located.push({
           source: SOURCE_LABEL[a.source] ?? a.source,
           title: a.title,
@@ -345,13 +371,27 @@ export async function generateStandardOfCare(caseId: string): Promise<number> {
           pmid: a.pmid,
           doi: a.doi,
           quote: q.quote,
+          relevance: {
+            score: rel.score,
+            evidenceLevel: rel.evidenceLevel,
+            evidenceLabel: rel.evidenceLabel,
+            whyRelevant: rel.whyRelevant,
+            supports: `the clinical basis and future-care relevance of ${cond.name}`,
+            limitations: rel.limitations,
+          },
         });
         if (located.length >= 3) break;
       }
     }
 
     const userInputs = await prisma.socUserInput.findMany({ where: { caseId, conditionName: cond.name }, orderBy: { createdAt: "asc" } });
-    const soc = assembleAnalysis(cond.name, cond.id === primaryConditionId, located, events, careServices, userInputs, online);
+    const soc = assembleAnalysis(cond.name, cond.id === primaryConditionId, located, events, careServices, userInputs, online, {
+      evidenceCount: Array.isArray(cond.evidenceSources) ? (cond.evidenceSources as unknown[]).length : 0,
+      hasObjective: !!cond.objectiveEvidence,
+      hasOpposing: !!cond.opposingRecords,
+      hasMissingInfo: !!cond.missingInfo,
+      physicianConfirmed: cond.physicianConfirmed,
+    });
     await prisma.condition.update({ where: { id: cond.id }, data: { socAnalysis: soc as unknown as Prisma.InputJsonValue } });
     n++;
   }
@@ -480,6 +520,7 @@ export function assembleAnalysis(
   careServices: string[],
   userInputs: UserInputRow[],
   online: boolean,
+  condMeta?: { evidenceCount: number; hasObjective: boolean; hasOpposing: boolean; hasMissingInfo: boolean; physicianConfirmed: boolean },
 ): SocAnalysis {
   // User-added sources become cited guidance; user notes join the corpus.
   const userSources: SocGuideline[] = userInputs
@@ -569,7 +610,47 @@ export function assembleAnalysis(
     narrative = `The reviewed records document ${recordSupport.length} encounter${recordSupport.length === 1 ? "" : "s"} for this diagnosis, but the specific interventions in the cited guidance could not be automatically matched to the record's language. Concordance with the cited standard requires physician review of the records against the quoted guidance below.${userNote}`;
   }
   const opinion = buildExpertRationale(condName, verdict, guidelines, points, recordSupport, documentation, plannedAddresses, online);
-  const assessment: SocAssessment = { verdict, narrative, opinion, points };
+
+  // ── Honest evidence posture (Clinical Evidence Sprint) ─────────────────────
+  // Strength = the best tier actually held; limitations and unknowns are stated,
+  // and confidence is structured — weak evidence is CALLED weak, never dressed up.
+  const levels = guidelines.map((g) => g.relevance?.evidenceLevel).filter((n): n is number => typeof n === "number");
+  const bestLevel = levels.length ? Math.min(...levels) : null;
+  const strength = bestLevel != null
+    ? EVIDENCE_HIERARCHY.find((t) => t.level === bestLevel)?.label ?? "Clinical study"
+    : guidelines.length
+      ? "Source on file (level not classified)"
+      : "None located";
+  const limitations = [
+    ...new Set(guidelines.map((g) => g.relevance?.limitations).filter((x): x is string => !!x)),
+    ...(bestLevel != null && bestLevel >= 8 ? ["the best available evidence for this conclusion is observational — a weak basis; treat the conclusion as provisional"] : []),
+    ...(documentation === "LIMITED" ? ["management is documented in only a single encounter"] : []),
+  ];
+  const unknowns = [
+    ...(documentation === "NOT_DOCUMENTED" ? ["whether the recommended care was rendered at all (records not produced)"] : []),
+    ...(condMeta?.hasMissingInfo ? ["outstanding records or specialist confirmation identified for this diagnosis"] : []),
+    ...points.filter((p) => !p.addressed).map((p) => `whether the care in "${p.guideline}" was undertaken`),
+  ];
+  const conf: ConfidenceResult = structuredConfidence({
+    recordEvidenceCount: condMeta?.evidenceCount ?? recordSupport.length,
+    hasObjectiveFindings: condMeta?.hasObjective ?? recordSupport.length > 0,
+    physicianSupport: condMeta?.physicianConfirmed ?? false,
+    guidelineSupport: bestLevel != null && bestLevel <= 2,
+    bestEvidenceLevel: bestLevel,
+    hasContradictoryEvidence: condMeta?.hasOpposing ?? false,
+    hasMissingInfo: condMeta?.hasMissingInfo ?? false,
+  });
+  // The conclusion states its own evidentiary weight — in the rationale itself.
+  opinion.push(
+    `The evidentiary basis for this conclusion is ${strength.toLowerCase()}${bestLevel != null && bestLevel >= 8 ? " — weak evidence, and I characterize it as such" : ""}. ` +
+      `${limitations.length ? `Limitations: ${limitations.join("; ")}. ` : ""}` +
+      `${unknowns.length ? `What remains unknown: ${unknowns.join("; ")}. ` : ""}` +
+      `My clinical confidence in this assessment is ${conf.level.toLowerCase()}${conf.level === "Indeterminate" ? " — there is not enough evidence to reason from" : ""}.`,
+  );
+  const assessment: SocAssessment = {
+    verdict, narrative, opinion, points,
+    evidence: { strength, limitations, unknowns, confidence: conf.level, confidenceFactors: conf.factors },
+  };
 
   const rationale =
     documentation === "DOCUMENTED"
@@ -611,7 +692,13 @@ export async function recomputeSocForCase(caseId: string): Promise<number> {
     // are re-derived from the current user inputs).
     const located = (prior?.guidelines ?? []).filter((g) => !g.userProvided);
     const userInputs = await prisma.socUserInput.findMany({ where: { caseId, conditionName: cond.name }, orderBy: { createdAt: "asc" } });
-    const soc = assembleAnalysis(cond.name, cond.id === primaryConditionId, located, events as EventRow[], careServices, userInputs, online);
+    const soc = assembleAnalysis(cond.name, cond.id === primaryConditionId, located, events as EventRow[], careServices, userInputs, online, {
+      evidenceCount: Array.isArray(cond.evidenceSources) ? (cond.evidenceSources as unknown[]).length : 0,
+      hasObjective: !!cond.objectiveEvidence,
+      hasOpposing: !!cond.opposingRecords,
+      hasMissingInfo: !!cond.missingInfo,
+      physicianConfirmed: cond.physicianConfirmed,
+    });
     await prisma.condition.update({ where: { id: cond.id }, data: { socAnalysis: soc as unknown as Prisma.InputJsonValue } });
     n++;
   }

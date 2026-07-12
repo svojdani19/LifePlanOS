@@ -46,10 +46,10 @@ export function buildLinks(conditions: CondIn[], items: ItemIn[]): LinkRow[] {
       out.push({ kind: "DIAGNOSIS_EVIDENCE", fromType: "condition", fromId: c.id, toType: "document", toId: s.documentId ?? null, documentId: s.documentId ?? null, page: s.page ?? null, quote: s.quote ?? null, meta: { filename: s.filename } });
     }
     // Diagnosis → guideline (verbatim-quoted clinical guidance from SoC).
-    const soc = c.socAnalysis as { guidelines?: { title?: string; year?: string; pmid?: string; doi?: string; url?: string; quote?: string }[] } | null;
+    const soc = c.socAnalysis as { guidelines?: { title?: string; year?: string; pmid?: string; doi?: string; url?: string; quote?: string; relevance?: { evidenceLabel?: string; whyRelevant?: string; supports?: string; limitations?: string | null } }[] } | null;
     for (const g of soc?.guidelines ?? []) {
       if (!g?.title) continue;
-      out.push({ kind: "DIAGNOSIS_GUIDELINE", fromType: "condition", fromId: c.id, toType: "guideline", toId: null, quote: g.quote ?? null, meta: { title: g.title, year: g.year, pmid: g.pmid, doi: g.doi, url: g.url } });
+      out.push({ kind: "DIAGNOSIS_GUIDELINE", fromType: "condition", fromId: c.id, toType: "guideline", toId: null, quote: g.quote ?? null, meta: { title: g.title, year: g.year, pmid: g.pmid, doi: g.doi, url: g.url, evidenceLabel: g.relevance?.evidenceLabel, whyRelevant: g.relevance?.whyRelevant, supports: g.relevance?.supports, limitations: g.relevance?.limitations } });
     }
     // Contradictory evidence, when the causation analysis recorded any.
     if (c.opposingRecords) {
@@ -61,10 +61,12 @@ export function buildLinks(conditions: CondIn[], items: ItemIn[]): LinkRow[] {
     if (it.conditionId) {
       out.push({ kind: "REC_DIAGNOSIS", fromType: "futureCareItem", fromId: it.id, toType: "condition", toId: it.conditionId });
     }
-    const cites = (Array.isArray(it.citation) ? it.citation : it.citation ? [it.citation] : []) as { title?: string; authors?: string; journal?: string; year?: string; pmid?: string; doi?: string; url?: string }[];
+    const cites = (Array.isArray(it.citation) ? it.citation : it.citation ? [it.citation] : []) as { title?: string; authors?: string; journal?: string; year?: string; pmid?: string; doi?: string; url?: string; relevance?: { evidenceLabel?: string; whyRelevant?: string; supports?: string; limitations?: string | null; score?: number } }[];
     for (const cc of cites) {
       if (!cc?.title) continue;
-      out.push({ kind: "REC_LITERATURE", fromType: "futureCareItem", fromId: it.id, toType: "citation", toId: null, meta: { title: cc.title, authors: cc.authors, journal: cc.journal, year: cc.year, pmid: cc.pmid, doi: cc.doi, url: cc.url } });
+      // Claim-based: every literature link carries WHAT CLAIM it supports, why
+      // it was selected, and its limitations — never a bare article listing.
+      out.push({ kind: "REC_LITERATURE", fromType: "futureCareItem", fromId: it.id, toType: "citation", toId: null, meta: { title: cc.title, authors: cc.authors, journal: cc.journal, year: cc.year, pmid: cc.pmid, doi: cc.doi, url: cc.url, evidenceLabel: cc.relevance?.evidenceLabel, whyRelevant: cc.relevance?.whyRelevant, supports: cc.relevance?.supports, limitations: cc.relevance?.limitations } });
     }
   }
   return out;

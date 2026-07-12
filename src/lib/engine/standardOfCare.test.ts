@@ -97,8 +97,10 @@ describe("assembleAnalysis — expert rationale", () => {
     // Identifies the appropriately-addressed decision point, grounded in the record.
     expect(op.join(" ")).toMatch(/appropriately addressed/i);
     expect(op.join(" ")).toContain("p. 3");
-    // Closes with the reserved-to-physician determination.
-    expect(op[op.length - 1]).toMatch(/reviewing physician/i);
+    // Carries the reserved-to-physician determination, and closes with the
+    // honest evidence posture (Clinical Evidence Sprint).
+    expect(op.join(" ")).toMatch(/reviewing physician/i);
+    expect(op[op.length - 1]).toMatch(/evidentiary basis|clinical confidence/i);
   });
 
   it("flags an undocumented recommendation as a potential departure", () => {
@@ -115,9 +117,13 @@ describe("assembleAnalysis — expert rationale", () => {
     expect(soc.assessment.opinion.join(" ")).toMatch(/departure from the standard/i);
   });
 
-  it("honestly reports when no guideline was located", () => {
+  it("honestly reports when no guideline was located, with an honest confidence", () => {
     const soc = assembleAnalysis("Some rare diagnosis", true, [], [], [], [], true);
-    expect(soc.assessment.opinion).toHaveLength(1);
     expect(soc.assessment.opinion[0]).toMatch(/no indexed clinical practice guideline/i);
+    // The evidence posture never overstates: no sources ⇒ strength "None
+    // located" and low/indeterminate confidence, stated in the rationale.
+    expect(soc.assessment.evidence?.strength).toBe("None located");
+    expect(["Low", "Indeterminate"]).toContain(soc.assessment.evidence?.confidence);
+    expect(soc.assessment.opinion[soc.assessment.opinion.length - 1]).toMatch(/confidence in this assessment is (low|indeterminate)/i);
   });
 });

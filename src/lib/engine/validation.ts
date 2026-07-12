@@ -17,6 +17,7 @@ import {
   type RecInput,
   type IntegrityReport,
 } from "./integrity";
+import { validateEvidenceQuality } from "./citationQuality";
 
 export interface CaseValidation {
   findings: {
@@ -33,10 +34,12 @@ export interface CaseValidation {
 
 /** Run the integrity check over a case's current data (no persistence). */
 export async function validateCase(caseId: string): Promise<CaseValidation> {
-  const [items, conditions] = await Promise.all([
-    prisma.futureCareItem.findMany({ where: { caseId, supersededAt: null } }),
+  const [items, conditions, kase] = await Promise.all([
+    prisma.futureCareItem.findMany({ where: { caseId, supersededAt: null }, include: { condition: { select: { name: true } } } }),
     prisma.condition.findMany({ where: { caseId } }),
+    prisma.case.findUnique({ where: { id: caseId }, select: { dateOfBirth: true } }),
   ]);
+  const adult = !kase?.dateOfBirth || (Date.now() - kase.dateOfBirth.getTime()) / (365.25 * 24 * 3600 * 1000) >= 18;
   const report = runIntegrityCheck({
     recommendations: items as unknown as RecInput[],
     conditions: conditions as unknown as CondInput[],
@@ -46,8 +49,11 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
         matched as (CondInput & { evidenceSources?: unknown }) | null,
       ),
   });
-  return {
-    findings: report.findings.map((f) => ({
+  // Clinical Evidence Sprint — validate the stored citations themselves:
+  // incompatible citations, weak primaries, cross-region article reuse.
+  const evidenceFindings = validateEvidenceQuality(items as never, adult);
+  const findings = [
+    ...report.findings.map((f) => ({
       service: f.recommendation,
       result: f.result,
       issue: f.issue,
@@ -55,7 +61,18 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
       suggestion: f.suggestedCorrection,
       exportBlocking: f.exportBlocking,
     })),
-    blocking: report.blocking,
+    ...evidenceFindings.map((f) => ({
+      service: f.recommendation,
+      result: f.result,
+      issue: f.issue,
+      severity: f.severity as string,
+      suggestion: f.suggestedCorrection,
+      exportBlocking: f.exportBlocking,
+    })),
+  ];
+  return {
+    findings,
+    blocking: findings.some((f) => f.exportBlocking),
     counts: report.counts,
   };
 }

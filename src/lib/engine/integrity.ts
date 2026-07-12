@@ -169,6 +169,8 @@ const CPT_TABLE: Record<string, CodeProfile> = {
   "95885": { region: "any", kind: "emg_ncs", desc: "Needle EMG, limited, with NCS" },
   "95907": { region: "any", kind: "emg_ncs", desc: "Nerve conduction studies" },
   "95908": { region: "any", kind: "emg_ncs", desc: "Nerve conduction studies" },
+  "64405": { region: "brain_head", kind: "other", desc: "Greater occipital nerve injection" },
+  "64615": { region: "brain_head", kind: "other", desc: "Chemodenervation for chronic migraine (Botox)" },
   "64633": { region: "spine", kind: "other", desc: "Facet joint denervation, cervical/thoracic" },
   "64635": { region: "spine", kind: "other", desc: "Facet joint denervation (RFA), lumbar/sacral" },
   "L5301": { region: "any", kind: "other", desc: "Below-knee prosthesis" },

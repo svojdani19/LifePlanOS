@@ -8,6 +8,7 @@ import { generateStandardOfCare } from "@/lib/engine/standardOfCare";
 import { mapRecommendationToCondition, type CondInput } from "@/lib/engine/integrity";
 import { planRegeneration } from "@/lib/engine/lifecycle";
 import { rebuildEvidenceGraph } from "@/lib/engine/evidenceGraph";
+import { citationCompatible, evaluateArticle, selectPrimary } from "@/lib/engine/citationQuality";
 import { findCandidates, literatureReachable, activeSources, type Article } from "@/lib/literature";
 import { Prisma } from "@/generated/prisma";
 import type { Case, CareCategory } from "@/generated/prisma";
@@ -518,6 +519,8 @@ export async function enrichCitations(caseId: string): Promise<number> {
   if (!(await literatureReachable())) return 0;
   const c = await prisma.case.findUnique({ where: { id: caseId } });
   const items = await prisma.futureCareItem.findMany({ where: { caseId, supersededAt: null }, include: { condition: true } });
+  // Population gate: pediatric literature never supports an adult case.
+  const adult = !c?.dateOfBirth || (Date.now() - c.dateOfBirth.getTime()) / (365.25 * 24 * 3600 * 1000) >= 18;
   const yearNow = new Date().getFullYear();
   console.log(`[citations] reviewing sources: ${activeSources().join(", ")}`);
   // Cache the merged candidate pool per query so repeated lookups cost one fan-out.
@@ -574,15 +577,27 @@ export async function enrichCitations(caseId: string): Promise<number> {
       if ([...best.values()].filter((s) => s.strong).length >= 2) break;
     }
 
-    // Rank by score, lightly demoting articles already cited on earlier items so
-    // a near-tie prefers a fresh source; then take the top two.
-    const chosen = [...best.values()]
-      .sort((x, y) => y.score - (used.get(y.art.key) ?? 0) * 6 - (x.score - (used.get(x.art.key) ?? 0) * 6))
-      .slice(0, 2);
+    // Clinical Evidence Sprint — the hard gate runs at SELECTION time, not just
+    // display: every candidate must be region/procedure/population compatible
+    // with THIS diagnosis + intervention and clear the explicit relevance
+    // threshold. An article that only shares keywords is rejected here. The
+    // same article may appear under another item only when it independently
+    // passes that item's own gate (no automatic reuse across diagnoses).
+    const clinicalCtx = { diagnosis: context || it.service, service: it.service, adult };
+    const gated = [...best.values()]
+      .map((s) => ({ ...s, relevance: evaluateArticle({ title: s.art.title, abstract: s.art.abstract, journal: s.art.journal, year: s.art.year, pubtype: s.art.pubtype, citationCount: s.art.citationCount }, clinicalCtx) }))
+      .filter((s) => s.relevance.accepted);
+    // Rank by relevance (variety-demoted), keep two, then order by the evidence
+    // hierarchy so the PRIMARY citation is always the strongest evidence held.
+    const chosen = selectPrimary(
+      gated
+        .sort((x, y) => y.relevance.score - (used.get(y.art.key) ?? 0) * 6 - (x.relevance.score - (used.get(x.art.key) ?? 0) * 6))
+        .slice(0, 2),
+    );
     for (const s of chosen) used.set(s.art.key, (used.get(s.art.key) ?? 0) + 1);
-    // Store only the compact display fields (not the abstract) — one entry per
-    // article, tagged with the source that provided it.
-    const picks = chosen.map(({ art }) => ({
+    // Store the display fields PLUS the transparent relevance record: why the
+    // article was selected, what claim it supports, and its limitations.
+    const picks = chosen.map(({ art, relevance }) => ({
         source: art.source,
         title: art.title,
         authors: art.authors,
@@ -591,6 +606,14 @@ export async function enrichCitations(caseId: string): Promise<number> {
         url: art.url,
         ...(art.pmid ? { pmid: art.pmid } : {}),
         ...(art.doi ? { doi: art.doi } : {}),
+        relevance: {
+          score: relevance.score,
+          evidenceLevel: relevance.evidenceLevel,
+          evidenceLabel: relevance.evidenceLabel,
+          whyRelevant: relevance.whyRelevant,
+          supports: relevance.supports,
+          limitations: relevance.limitations,
+        },
       }));
     await prisma.futureCareItem.update({
       where: { id: it.id },

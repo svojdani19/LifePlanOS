@@ -47,6 +47,7 @@ import type { Permission } from "@/lib/rbac";
 import { DOC_TYPE_GROUPS, TYPE_LABEL, TYPE_GROUP } from "@/lib/documents/taxonomy";
 import { pageRange } from "@/lib/documents/meta";
 import { recordEncounters, narrativeFor } from "@/lib/documents/recordSummary";
+import { structuredConfidence } from "@/lib/engine/citationQuality";
 import { Icd10Search } from "@/components/Icd10Search";
 import { PreExistingConditionsModal } from "@/components/PreExistingConditionsModal";
 import { parseConditions, serializeConditions, findConditionsInRecords } from "@/lib/intake/preExisting";
@@ -1066,6 +1067,17 @@ function StandardOfCarePanel({ data, canEdit, call }: { data: AnyRec; canEdit: b
                   <Badge tone={vmeta.tone}>{vmeta.label}</Badge>
                 </div>
                 <p className="mt-1.5 text-sm text-ink-800">{assessment.narrative}</p>
+                {assessment.evidence && (
+                  <div className="mt-2 border-t border-ink-200/70 pt-2 text-xs text-ink-600">
+                    <p>
+                      <span className="font-medium text-ink-800">Strength of evidence:</span> {assessment.evidence.strength}
+                      <span className="ml-3 font-medium text-ink-800">Clinical confidence:</span>{" "}
+                      <Badge tone={assessment.evidence.confidence === "High" ? "green" : assessment.evidence.confidence === "Moderate" ? "amber" : assessment.evidence.confidence === "Low" ? "red" : "neutral"}>{assessment.evidence.confidence.toLowerCase()}</Badge>
+                    </p>
+                    {assessment.evidence.limitations?.length > 0 && <p className="mt-1"><span className="font-medium text-ink-800">Limitations:</span> {assessment.evidence.limitations.join("; ")}</p>}
+                    {assessment.evidence.unknowns?.length > 0 && <p className="mt-0.5"><span className="font-medium text-ink-800">Unknowns:</span> {assessment.evidence.unknowns.join("; ")}</p>}
+                  </div>
+                )}
                 {Array.isArray(assessment.opinion) && assessment.opinion.length > 0 && (
                   <div className="mt-3 border-t border-ink-200/70 pt-2.5">
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">Expert rationale — standard of care as applied to this case</p>
@@ -1097,6 +1109,13 @@ function StandardOfCarePanel({ data, canEdit, call }: { data: AnyRec; canEdit: b
                           </p>
                         )}
                         <blockquote className="border-l-2 border-brand-300 pl-3 text-sm italic text-ink-800">“{g.quote}”</blockquote>
+                        {g.relevance && (
+                          <div className="mt-1.5 space-y-0.5 text-[11px]">
+                            <p className="text-ink-600"><span className="font-medium">Supports:</span> {g.relevance.supports} · <span className="font-medium">{g.relevance.evidenceLabel}</span> (relevance {g.relevance.score}/100)</p>
+                            <p className="text-ink-500"><span className="font-medium">Why relevant:</span> {g.relevance.whyRelevant}</p>
+                            {g.relevance.limitations && <p className="text-amber-700"><span className="font-medium">Limitations:</span> {g.relevance.limitations}</p>}
+                          </div>
+                        )}
                         <div className="mt-1.5 flex items-start justify-between gap-2">
                           <div>
                             <p className="text-xs text-ink-500">
@@ -1654,6 +1673,26 @@ function EvidencePanel({ data }: { data: AnyRec }) {
 
   const KIND_LABEL: Record<string, string> = { DIAGNOSIS_EVIDENCE: "Record evidence", REC_LITERATURE: "Literature", DIAGNOSIS_GUIDELINE: "Clinical guidance", CONTRADICTS: "Contrary evidence" };
 
+  // Structured confidence (Clinical Evidence Sprint) — derived from record
+  // quality, objective findings, physician support, guideline support,
+  // literature quality, consistency, and missing information.
+  const bestLit: number[] = supports
+    .filter((l) => l.kind === "REC_LITERATURE" || l.kind === "DIAGNOSIS_GUIDELINE")
+    .map((l): number | null => (l.meta?.evidenceLabel === "Clinical practice guideline" ? 1 : l.meta?.evidenceLabel === "Consensus statement" ? 2 : l.meta?.evidenceLabel ? 5 : l.kind === "DIAGNOSIS_GUIDELINE" ? 1 : null))
+    .filter((n): n is number => n !== null);
+  const confidence = entity
+    ? structuredConfidence({
+        recordEvidenceCount: [...own, ...inherited].filter((l) => l.kind === "DIAGNOSIS_EVIDENCE").length,
+        hasObjectiveFindings: !!(selType === "condition" ? entity.objectiveEvidence : mappedCond?.objectiveEvidence),
+        physicianSupport: selType === "futureCareItem" ? entity.physicianStatus === "APPROVED" || entity.physicianStatus === "MODIFIED" : !!entity.physicianConfirmed,
+        guidelineSupport: supports.some((l) => l.kind === "DIAGNOSIS_GUIDELINE"),
+        bestEvidenceLevel: bestLit.length ? Math.min(...bestLit) : null,
+        hasContradictoryEvidence: weakens.length > 0,
+        hasMissingInfo: !!unknown,
+      })
+    : null;
+  const CONF_TONE: Record<string, "green" | "amber" | "red" | "neutral"> = { High: "green", Moderate: "amber", Low: "red", Indeterminate: "neutral" };
+
   return (
     <div className="space-y-4">
       <div className="card p-5">
@@ -1680,6 +1719,13 @@ function EvidencePanel({ data }: { data: AnyRec }) {
 
       {entity && (
         <div className="card space-y-4 p-5">
+          {confidence && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">Confidence</span>
+              <Badge tone={CONF_TONE[confidence.level]}>{confidence.level.toLowerCase()}</Badge>
+              <span className="text-[11px] text-ink-400">{confidence.factors.join(" · ")}</span>
+            </div>
+          )}
           <div>
             <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-500">Why this item exists</h4>
             <p className="mt-1 text-sm text-ink-800">
@@ -1698,12 +1744,46 @@ function EvidencePanel({ data }: { data: AnyRec }) {
                   {l.quote && <span className="italic text-ink-800">“{l.quote}” </span>}
                   <span className="text-ink-500">
                     {l.kind === "DIAGNOSIS_EVIDENCE" && `— ${l.meta?.filename ?? "record"}${l.page ? `, p. ${l.page}` : ""}`}
-                    {(l.kind === "REC_LITERATURE" || l.kind === "DIAGNOSIS_GUIDELINE") && `— ${l.meta?.title ?? ""}${l.meta?.year ? ` (${l.meta.year})` : ""}${l.meta?.pmid ? ` · PMID ${l.meta.pmid}` : ""}`}
+                    {(l.kind === "REC_LITERATURE" || l.kind === "DIAGNOSIS_GUIDELINE") && `— ${l.meta?.title ?? ""}${l.meta?.year ? ` (${l.meta.year})` : ""}${l.meta?.pmid ? ` · PMID ${l.meta.pmid}` : ""}${l.meta?.evidenceLabel ? ` · ${l.meta.evidenceLabel}` : ""}`}
                   </span>
+                  {(l.kind === "REC_LITERATURE" || l.kind === "DIAGNOSIS_GUIDELINE") && l.meta?.supports && (
+                    <p className="mt-1 text-[11px] text-ink-600"><span className="font-medium">Supports the claim:</span> {l.meta.supports}.</p>
+                  )}
+                  {(l.kind === "REC_LITERATURE" || l.kind === "DIAGNOSIS_GUIDELINE") && l.meta?.whyRelevant && (
+                    <p className="text-[11px] text-ink-500"><span className="font-medium">Why relevant:</span> {l.meta.whyRelevant}.</p>
+                  )}
+                  {(l.kind === "REC_LITERATURE" || l.kind === "DIAGNOSIS_GUIDELINE") && l.meta?.limitations && (
+                    <p className="text-[11px] text-amber-700"><span className="font-medium">Limitations:</span> {l.meta.limitations}.</p>
+                  )}
                 </li>
               ))}
             </ul>
           </div>
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-500">Supporting objective findings</h4>
+            <p className="mt-1 text-sm text-ink-700">{(selType === "condition" ? entity.objectiveEvidence : mappedCond?.objectiveEvidence) || "No objective findings recorded for this item."}</p>
+          </div>
+          {selType === "futureCareItem" && (
+            <div>
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-500">Supporting physician documentation</h4>
+              <p className="mt-1 text-sm text-ink-700">
+                {entity.physicianNote
+                  ? `Physician note on file: “${entity.physicianNote}”`
+                  : entity.physicianStatus === "APPROVED" || entity.physicianStatus === "MODIFIED"
+                    ? "Physician review action on file (no note)."
+                    : "No physician documentation yet — awaiting review."}
+              </p>
+            </div>
+          )}
+          {selType === "futureCareItem" && (
+            <div>
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-500">Supporting cost &amp; coding</h4>
+              <p className="mt-1 text-sm text-ink-700">
+                {entity.cptCode ? `CPT ${entity.cptCode} · ` : "Non-code-specific (bundled) · "}
+                {formatMoney(entity.unitCost)} per unit · {entity.pricingSource || "UCR benchmark"} · PV {formatMoney(entity.presentValue)}
+              </p>
+            </div>
+          )}
           <div>
             <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-500">What weakens it</h4>
             {weakens.length ? (
