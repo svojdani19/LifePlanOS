@@ -74,5 +74,4 @@ OT/home, neuropsych, psych, driving, urology, PT gait) — not a blanket FCE.
 Findings grade Critical / High / Moderate / Low. Any unresolved Critical ⇒
 report exports with a visible DRAFT watermark and the finding table
 (Appendix F). Roadmap: frequency/duration plausibility rules (narrow,
-deterministic first — see decision ATD-4 in
-[13_DEVELOPER_STANDARDS.md](13_DEVELOPER_STANDARDS.md)).
+deterministic first — see decision ATD-4 in [16_DECISION_LOG.md](16_DECISION_LOG.md)).

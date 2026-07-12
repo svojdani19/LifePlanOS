@@ -20,7 +20,7 @@
    change.
 2. No design/branding/report drift.
 3. Schema changes: additive migration + [06_DATABASE_SPEC.md](06_DATABASE_SPEC.md)
-   + [CHANGELOG.md](CHANGELOG.md) updated.
+   + [17_CHANGELOG.md](17_CHANGELOG.md) updated.
 4. Deterministic engines stay deterministic (no clock/randomness in logic).
 5. Verified against seeded demo data where observable.
 
@@ -41,12 +41,7 @@
 - Prisma client via `@/generated/prisma`; queries always firm-scoped.
 - No PHI or secrets in logs, tests, fixtures, or docs.
 
-## Accepted Technical Decisions (ATD log)
+## Accepted Technical Decisions
 
-| # | Date | Decision |
-|---|---|---|
-| ATD-1 | 2026-07-12 | `ValidationFinding` rows are **persisted source-of-truth records** for integrity results (derived data, atomically replaced on recompute; not recomputed ad-hoc in UIs). |
-| ATD-2 | 2026-07-12 | The validation GET endpoint's **summary counts may be computed live** until production profiling shows a performance problem; the stored rows remain authoritative for findings. |
-| ATD-3 | 2026-07-12 | **Object-storage garbage collection on deletion and auth rate limiting are required before any paid production pilot** (release gate; see 12_DEPLOYMENT.md). |
-| ATD-4 | 2026-07-12 | **Frequency/duration plausibility checks** stay on the roadmap and must begin as **narrow deterministic rules** (per-category bounds) — not broad AI inference. |
-| ATD-5 | 2026-07-12 | **Regeneration supersedes rather than deletes** recommendations with review history (formal requirement P2.R1 in 14_ROADMAP.md). |
+The ATD log lives in [16_DECISION_LOG.md](16_DECISION_LOG.md) (canonical slot).
+Decisions are binding until explicitly revisited there.

@@ -53,7 +53,7 @@ Additive migrations via the established pattern:
 `npx prisma db push --skip-generate` → `npx prisma generate` → hand-author
 `prisma/migrations/<timestamp>_<name>/migration.sql` (no schema prefix; the
 connection's search_path targets `lifeplanos`) → `npx prisma migrate resolve
---applied <name>`. Document every schema change here and in CHANGELOG.md.
+--applied <name>`. Document every schema change here and in 17_CHANGELOG.md.
 
 ### Change log (schema)
 
@@ -66,7 +66,7 @@ connection's search_path targets `lifeplanos`) → `npx prisma migrate resolve
 ## Proposed schema — recommendation lineage (P2.R1, not yet implemented)
 
 Additive fields/models satisfying the formal requirement in
-[14_ROADMAP.md § P2.R1](14_ROADMAP.md). Nothing existing changes shape.
+[15_PRODUCT_ROADMAP.md § P2.R1](15_PRODUCT_ROADMAP.md). Nothing existing changes shape.
 
 ```prisma
 // FutureCareItem — additive columns

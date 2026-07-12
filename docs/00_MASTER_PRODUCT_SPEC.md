@@ -5,8 +5,8 @@
 > resolve the conflict explicitly before writing code. Companion documents:
 > [05_SYSTEM_ARCHITECTURE.md](05_SYSTEM_ARCHITECTURE.md) · [06_DATABASE_SPEC.md](06_DATABASE_SPEC.md) ·
 > [07_AI_ENGINE.md](07_AI_ENGINE.md) · [10_REPORT_ENGINE.md](10_REPORT_ENGINE.md) ·
-> [11_SECURITY.md](11_SECURITY.md) · [14_ROADMAP.md](14_ROADMAP.md) ·
-> [CHANGELOG.md](CHANGELOG.md)
+> [11_SECURITY.md](11_SECURITY.md) · [15_PRODUCT_ROADMAP.md](15_PRODUCT_ROADMAP.md) ·
+> [17_CHANGELOG.md](17_CHANGELOG.md)
 
 ---
 
@@ -158,7 +158,7 @@ Current statuses (`PhysicianStatus`): `PENDING → APPROVED | MODIFIED | REJECTE
 Presentation labels derive honestly from state (`reviewLabel()` in
 `integrity.ts`). A richer 12-state lifecycle (AI Draft → … → Locked for Export →
 Superseded) with a transition ledger is planned — see Phase 6 in
-[14_ROADMAP.md](14_ROADMAP.md). Regeneration must not destroy review history
+[15_PRODUCT_ROADMAP.md](15_PRODUCT_ROADMAP.md). Regeneration must not destroy review history
 (approved design decision: reviewed items are superseded, not deleted).
 
 ## 13. Evidence Requirements
@@ -258,13 +258,13 @@ finding is unresolved; no AI/score/internal-metric language ever.
 2. No design/branding/report-style drift unless explicitly approved.
 3. Tenant guard + audit on any new route; no PHI in logs.
 4. Deterministic engines stay deterministic (no clock/randomness in logic).
-5. CHANGELOG.md updated; schema changes documented in 06_DATABASE_SPEC.md with a
+5. 17_CHANGELOG.md updated; schema changes documented in 06_DATABASE_SPEC.md with a
    migration in `prisma/migrations/`.
 6. Verified against seeded demo data end-to-end where observable.
 
 ## 23. Feature Roadmap
 
-See [14_ROADMAP.md](14_ROADMAP.md) (priorities P1–P4 with status).
+See [15_PRODUCT_ROADMAP.md](15_PRODUCT_ROADMAP.md) (priorities P1–P4 with status).
 
 ## 24. Known Limitations
 

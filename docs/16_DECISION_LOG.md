@@ -1,1 +1,13 @@
+# 16 — Decision Log
 
+Accepted Technical Decisions (ATDs). Binding until explicitly revisited; new
+decisions append here (never edit history — strike through and supersede).
+
+| # | Date | Decision | Rationale |
+|---|---|---|---|
+| ATD-1 | 2026-07-12 | `ValidationFinding` rows are **persisted source-of-truth records** for integrity results. Derived data: atomically replaced on recompute (generate / physician review / export / on-demand POST); UIs read stored rows rather than recomputing ad-hoc. | One authoritative result set; auditable; cheap reads. |
+| ATD-2 | 2026-07-12 | The validation GET endpoint's **summary counts may be computed live** until production profiling shows a performance problem. Stored rows remain authoritative for findings themselves. | Counts are cheap today; premature caching adds staleness risk. |
+| ATD-3 | 2026-07-12 | **Object-storage garbage collection on deletion** and **auth rate limiting** are **required before any paid production pilot**. Release gate recorded in [12_DEPLOYMENT.md](12_DEPLOYMENT.md). | PHI retention and credential-stuffing exposure are unacceptable in paid production. |
+| ATD-4 | 2026-07-12 | **Frequency/duration plausibility checks** remain roadmap items and must begin as **narrow deterministic rules** (per-category bounds, e.g. office visits ≤ 52/yr, MRI surveillance ≤ 4/yr) — not broad AI inference. | Deterministic rules are testable and defensible at deposition; inference is neither, yet. |
+| ATD-5 | 2026-07-12 | **Regeneration supersedes rather than deletes** recommendations with review history. Formal requirement P2.R1 in [15_PRODUCT_ROADMAP.md](15_PRODUCT_ROADMAP.md). | Physician/attorney review actions are legal work product; destroying them is unacceptable. |
+| ATD-6 | 2026-07-12 | The **numbered docs/ skeleton (00–17 + epics/) is the canonical documentation structure**; unnumbered duplicates are removed after content migration. | One source of truth; the code implements the docs. |

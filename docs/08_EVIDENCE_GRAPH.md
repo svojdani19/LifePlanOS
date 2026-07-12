@@ -54,7 +54,7 @@ hidden chain-of-thought.
 
 ## Priority-2 formal requirement — Recommendation versioning
 
-See [14_ROADMAP.md](14_ROADMAP.md) § "P2.R1" for the binding requirement
+See [15_PRODUCT_ROADMAP.md](15_PRODUCT_ROADMAP.md) § "P2.R1" for the binding requirement
 (supersede-not-delete, lineage, material-change re-review) and
 [06_DATABASE_SPEC.md](06_DATABASE_SPEC.md) § "Proposed schema" for the lineage
 fields.

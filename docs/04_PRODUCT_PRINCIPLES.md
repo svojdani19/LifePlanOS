@@ -38,5 +38,4 @@ The primary principle, verbatim from the controlling spec:
 
 Explicit non-goals live in
 [00_MASTER_PRODUCT_SPEC.md §25](00_MASTER_PRODUCT_SPEC.md). Engineering
-decision records live in
-[13_DEVELOPER_STANDARDS.md](13_DEVELOPER_STANDARDS.md).
+decision records live in [16_DECISION_LOG.md](16_DECISION_LOG.md).

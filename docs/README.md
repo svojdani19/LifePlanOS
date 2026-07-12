@@ -26,14 +26,18 @@ writing code.
 | 10 | [10_REPORT_ENGINE.md](10_REPORT_ENGINE.md) | The DOCX report: locked design system, locked section flow, content rules, verification pattern. |
 | 11 | [11_SECURITY.md](11_SECURITY.md) | Tenancy, auth, PHI handling, storage, audit, logging rules, known gaps. |
 | 12 | [12_DEPLOYMENT.md](12_DEPLOYMENT.md) | Environment, migrations, seed, release checklist and gates. |
-| 13 | [13_DEVELOPER_STANDARDS.md](13_DEVELOPER_STANDARDS.md) | Change control, definition of done, testing standards, the Accepted Technical Decisions (ATD) log. |
-| 14 | [14_ROADMAP.md](14_ROADMAP.md) | Priorities P1–P4 with status, and formal requirements (P2.R1 recommendation versioning). |
-| — | [CHANGELOG.md](CHANGELOG.md) | Chronological record of shipped changes. |
+| 13 | [13_DEVELOPER_STANDARDS.md](13_DEVELOPER_STANDARDS.md) | Change control, definition of done, code conventions. |
+| 14 | [14_TESTING.md](14_TESTING.md) | Testing philosophy, what is pinned where, DOCX verification pattern, required additions per phase. |
+| 15 | [15_PRODUCT_ROADMAP.md](15_PRODUCT_ROADMAP.md) | Priorities P1–P4 with status, and formal requirements (P2.R1 recommendation versioning). |
+| 16 | [16_DECISION_LOG.md](16_DECISION_LOG.md) | Accepted Technical Decisions (ATD log) — binding engineering decisions with rationale. |
+| 17 | [17_CHANGELOG.md](17_CHANGELOG.md) | Chronological record of shipped changes. |
+| — | [epics/](epics/README.md) | One PRD per epic; implement one epic at a time. EPIC-001 partially shipped; others planned. |
 
 ## Conventions
 
 - Numbered files are the canonical set; propose new numbers rather than
-  creating unnumbered documents (CHANGELOG.md is the one deliberate exception).
+  creating unnumbered documents.
 - No secrets, API keys, PHI, or real patient information in documentation.
-- Schema changes require an entry in 06 **and** CHANGELOG.md; engineering
-  decisions go in the ATD log in 13.
+- Schema changes require an entry in 06 **and** 17_CHANGELOG.md; engineering
+  decisions go in the ATD log (16); feature-scale work gets an epic PRD before
+  implementation.
