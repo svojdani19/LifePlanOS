@@ -18,7 +18,7 @@ import {
 } from "docx";
 import { prisma } from "@/lib/db";
 import { assumptionsFor } from "@/lib/engine/generate";
-import { runIntegrityCheck, reviewLabel, evaluateCitation, functionalFinding, type RecInput, type CondInput, type PerItem, type IntegrityFinding } from "@/lib/engine/integrity";
+import { runIntegrityCheck, reviewLabel, evaluateCitation, functionalFinding, hasPatientRecordSupport, type RecInput, type CondInput, type PerItem, type IntegrityFinding } from "@/lib/engine/integrity";
 import { project } from "@/lib/engine/cost";
 import { typeLabel } from "@/lib/documents/taxonomy";
 import { parseConditions } from "@/lib/intake/preExisting";
@@ -253,13 +253,8 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
   // region-matched, free of a critical coding defect, and either
   // physician-approved or record-supported and medically probable. "Offered for
   // confirmation" alone does NOT include an unsupported item.
-  const hasRecordSupport = (rec: RecInput, matched: CondInput | null): boolean => {
-    const cond = matched as unknown as (typeof c.conditions)[number] | null;
-    const evCount = cond && Array.isArray(cond.evidenceSources) ? (cond.evidenceSources as unknown[]).length : 0;
-    if (cond && (cond.supportingRecords || evCount > 0)) return true;
-    const it = rec as unknown as FutureCareItem;
-    return !it.missingSupport && it.confidence >= 60;
-  };
+  const hasRecordSupport = (rec: RecInput, matched: CondInput | null): boolean =>
+    hasPatientRecordSupport(rec as unknown as FutureCareItem, matched as (CondInput & { evidenceSources?: unknown }) | null);
   const integrity = runIntegrityCheck({ recommendations: items as unknown as RecInput[], conditions: c.conditions as unknown as CondInput[], hasRecordSupport });
   const perItemOf = (it: FutureCareItem): PerItem => integrity.perItem.get(it as unknown as RecInput)!;
   const reportItems = items.filter((i) => perItemOf(i).includedInTotal);

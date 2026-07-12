@@ -34,4 +34,39 @@ describe("project", () => {
     expect(p.lowCost).toBe(Math.round(p.presentValue * 0.85));
     expect(p.highCost).toBe(Math.round(p.presentValue * 1.25));
   });
+
+  // ── Financial reproducibility (Priority-1 test additions) ──────────────────
+  it("is deterministic: identical inputs always produce identical projections", () => {
+    const input = { category: "PHYSICIAN_VISIT" as const, unitCost: 360, frequencyPerYear: 4, durationYears: null, isLifetime: true };
+    const a = { lifeExpectancyYears: 35.2, discountRate: 0.03, medicalInflation: 0.032, geographicFactor: 1.0 };
+    const p1 = project(input, a);
+    const p2 = project(input, a);
+    expect(p1).toEqual(p2);
+  });
+
+  it("applies inflation year over year and discounts each year back (hand-computed)", () => {
+    // unit 100, 1×/yr, 3 years, inflation 3%, discount 3%:
+    //   t=1: 100.00 → PV 100.00
+    //   t=2: 103.00 → PV 103.00/1.03   = 100.00
+    //   t=3: 106.09 → PV 106.09/1.0609 = 100.00
+    const p = project(
+      { category: "PHYSICIAN_VISIT", unitCost: 100, frequencyPerYear: 1, durationYears: 3, isLifetime: false },
+      { lifeExpectancyYears: 30, discountRate: 0.03, medicalInflation: 0.03, geographicFactor: 1 },
+    );
+    expect(p.lifetimeCost).toBe(309); // 100 + 103 + 106.09 = 309.09 → 309
+    expect(p.presentValue).toBe(300); // 3 × 100
+  });
+
+  it("handles a fractional final projection year proportionally", () => {
+    // 2.5 years at 100/yr, no inflation/discount → 250.
+    const p = project({ category: "MEDICATION", unitCost: 100, frequencyPerYear: 1, durationYears: 2.5, isLifetime: false }, flat);
+    expect(p.lifetimeCost).toBe(250);
+    expect(p.presentValue).toBe(250);
+  });
+
+  it("a one-time item (duration 0) contributes nothing beyond year zero", () => {
+    const p = project({ category: "DME", unitCost: 5000, frequencyPerYear: 1, durationYears: 0, isLifetime: false }, flat);
+    expect(p.lifetimeCost).toBe(0);
+    expect(p.presentValue).toBe(0);
+  });
 });

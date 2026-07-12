@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useRef, Fragment } from "react";
+import { useState, useMemo, useRef, useEffect, Fragment } from "react";
 import { useRouter } from "next/navigation";
 import {
   Sparkles,
@@ -1575,6 +1575,68 @@ function PrecedentsPanel({ precedents, data }: { precedents: AnyRec[]; data: Any
 }
 
 // ── Report ───────────────────────────────────────────────────────────────────
+// Persisted integrity findings for the case (diagnosis mapping, coding/pricing,
+// inclusion eligibility). Critical findings mean the DOCX exports as a DRAFT.
+function ValidationCard({ caseId }: { caseId: string }) {
+  const [state, setState] = useState<AnyRec | null>(null);
+  const [running, setRunning] = useState(false);
+  async function load(method: "GET" | "POST" = "GET") {
+    if (method === "POST") setRunning(true);
+    try {
+      const res = await fetch(`/api/cases/${caseId}/validation`, { method });
+      if (res.ok) setState(await res.json());
+    } finally {
+      setRunning(false);
+    }
+  }
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [caseId]);
+  const findings: AnyRec[] = state?.findings ?? [];
+  const SEV_TONE: Record<string, "red" | "amber" | "neutral"> = { Critical: "red", High: "amber", Moderate: "neutral", Low: "neutral" };
+  return (
+    <div className="card p-5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <h3 className="text-sm font-semibold text-ink-900">Plan Integrity Check</h3>
+          {state && (findings.length === 0
+            ? <Badge tone="green">clean</Badge>
+            : state.blocking
+              ? <Badge tone="red">{findings.filter((f) => f.exportBlocking).length} export-blocking</Badge>
+              : <Badge tone="amber">{findings.length} to review</Badge>)}
+        </div>
+        <button className="btn-outline px-3 py-1.5 text-xs" disabled={running} onClick={() => load("POST")}>
+          {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null} Re-run check
+        </button>
+      </div>
+      <p className="mt-1 text-xs text-ink-500">
+        Deterministic validation of every recommendation — diagnosis/region mapping, CPT &amp; pricing consistency, record support, and inclusion eligibility. Critical findings export the report as a DRAFT until resolved.
+      </p>
+      {state && state.counts && (
+        <p className="mt-2 text-xs text-ink-600">
+          {state.counts.included} of {state.counts.proposed} items eligible for the damages total · {state.counts.physicianApproved} physician-approved · {state.counts.awaitingReview} awaiting review
+        </p>
+      )}
+      {findings.length > 0 && (
+        <ul className="mt-3 space-y-2">
+          {findings.map((f) => (
+            <li key={f.id} className="rounded-lg bg-ink-50/70 p-3 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge tone={SEV_TONE[f.severity] ?? "neutral"}>{f.severity.toLowerCase()}</Badge>
+                <span className="font-semibold text-ink-900">{f.service}</span>
+                <span className="text-ink-500">— {f.result}{f.exportBlocking ? " (blocks final export)" : ""}</span>
+              </div>
+              <p className="mt-1 text-ink-700">{f.issue}</p>
+              <p className="mt-0.5 text-ink-500"><span className="font-medium">Correction:</span> {f.suggestion}</p>
+            </li>
+          ))}
+        </ul>
+      )}
+      {state && findings.length === 0 && (
+        <p className="mt-2 text-xs text-emerald-700">Every recommendation is region-matched, consistently coded and priced, and supported for inclusion.</p>
+      )}
+    </div>
+  );
+}
+
 function ReportPanel({ data, canExport, call, busy, totals }: { data: AnyRec; canExport: boolean; call: any; busy: string | null; totals: AnyRec }) {
   const [template, setTemplate] = useState(data.side ?? "PLAINTIFF");
   async function exportReport(format: string) {
@@ -1583,6 +1645,7 @@ function ReportPanel({ data, canExport, call, busy, totals }: { data: AnyRec; ca
   }
   return (
     <div className="space-y-4">
+      <ValidationCard caseId={data.id} />
       <div className="card p-5">
         <h3 className="text-sm font-semibold text-ink-900">Generate Report</h3>
         <p className="text-xs text-ink-500">Present value {formatMoney(totals.totalPresentValue)} across {data.futureCareItems.length} items.</p>

@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit, recordUsage } from "@/lib/tenant";
 import { generatePlan } from "@/lib/engine/generate";
+import { persistCaseValidation } from "@/lib/engine/validation";
 import { ok, handleError } from "@/lib/api";
 
 // Run the full AI pipeline: chronology → causation → future care → costs → reviews.
@@ -11,6 +12,9 @@ export async function POST(_req: Request, { params }: { params: { caseId: string
     await requireCase(ctx, params.caseId);
 
     const result = await generatePlan(params.caseId);
+    // Persist the integrity findings for the fresh plan so the review workflow
+    // can show them without building a report. Best-effort — never blocks.
+    await persistCaseValidation(params.caseId, ctx.firm.id).catch(() => {});
 
     await prisma.case.update({ where: { id: params.caseId }, data: { status: "FUTURE_CARE" } });
     await recordUsage(ctx, "AI_GENERATION", { caseId: params.caseId, meta: { module: "plan" } });

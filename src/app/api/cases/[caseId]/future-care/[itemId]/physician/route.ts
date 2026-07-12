@@ -2,6 +2,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit } from "@/lib/tenant";
 import { generateReviews, paraphraseSummary } from "@/lib/engine/generate";
+import { persistCaseValidation } from "@/lib/engine/validation";
 import { ok, handleError } from "@/lib/api";
 
 const schema = z.object({
@@ -50,6 +51,8 @@ export async function POST(req: Request, { params }: { params: { caseId: string;
     });
 
     await generateReviews(params.caseId);
+    // Review actions change inclusion eligibility — refresh persisted findings.
+    await persistCaseValidation(params.caseId, ctx.firm.id).catch(() => {});
     await audit(ctx, "physician.review", { type: "futureCareItem", id: item.id, caseId: params.caseId, meta: { status: input.status } });
     return ok({ item: updated });
   } catch (err) {

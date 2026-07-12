@@ -124,14 +124,15 @@ model Firm {
   primaryColor String? @default("#0891b2")
   letterhead   String? // free-text letterhead block for generated reports
 
-  subscription Subscription?
-  users        User[]
-  cases        Case[]
-  auditLogs    AuditLog[]
-  usageRecords UsageRecord[]
-  documents    Document[]
-  reports      ReportExport[]
-  precedents   PrecedentPlan[]
+  subscription       Subscription?
+  users              User[]
+  cases              Case[]
+  auditLogs          AuditLog[]
+  usageRecords       UsageRecord[]
+  documents          Document[]
+  reports            ReportExport[]
+  precedents         PrecedentPlan[]
+  validationFindings ValidationFinding[]
 
   @@index([slug])
 }
@@ -144,24 +145,24 @@ model PrecedentPlan {
   firmId String
   firm   Firm   @relation(fields: [firmId], references: [id], onDelete: Cascade)
 
-  title       String // de-identified label, e.g. "L1 burst fracture — CA (2023)"
-  clientRef   String? // optional de-identified matter/reference id
-  diagnosis   String?
-  icd10Code   String?
-  injurySpecialty String? // engine injury category label
-  jurisdiction String?
-  mechanism   String?
-  age         Int?
-  sex         String?
+  title               String // de-identified label, e.g. "L1 burst fracture — CA (2023)"
+  clientRef           String? // optional de-identified matter/reference id
+  diagnosis           String?
+  icd10Code           String?
+  injurySpecialty     String? // engine injury category label
+  jurisdiction        String?
+  mechanism           String?
+  age                 Int?
+  sex                 String?
   lifeExpectancyYears Float?
-  lifetimeCost Float?
-  presentValue Float?
-  careCategories Json? // string[] of CareCategory present (for overlap scoring)
-  outcome     String? // free-text note: settlement/verdict/status
+  lifetimeCost        Float?
+  presentValue        Float?
+  careCategories      Json? // string[] of CareCategory present (for overlap scoring)
+  outcome             String? // free-text note: settlement/verdict/status
 
-  source      String  @default("upload") // "upload" | "server"
-  filename    String?
-  storageKey  String?
+  source        String  @default("upload") // "upload" | "server"
+  filename      String?
+  storageKey    String?
   extractedText String?
 
   createdById String?
@@ -212,9 +213,9 @@ model User {
 
   // Two-factor authentication (TOTP). Secret is stored server-side; codes are
   // never persisted. Backup codes are stored as one-way hashes.
-  mfaEnabled      Boolean @default(false)
-  totpSecret      String? // base32 TOTP secret (set once enabled)
-  mfaBackupCodes  Json? // string[] of sha-256 hashes of unused recovery codes
+  mfaEnabled     Boolean @default(false)
+  totpSecret     String? // base32 TOTP secret (set once enabled)
+  mfaBackupCodes Json? // string[] of sha-256 hashes of unused recovery codes
 
   // Invitation flow.
   inviteToken     String?   @unique
@@ -235,15 +236,15 @@ model User {
 }
 
 model Session {
-  id        String   @id @default(uuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  tokenHash String   @unique // sha-256 of the raw cookie token (raw token never stored)
-  expiresAt DateTime
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash  String   @unique // sha-256 of the raw cookie token (raw token never stored)
+  expiresAt  DateTime
   lastSeenAt DateTime @default(now()) // drives idle-timeout expiry
-  createdAt DateTime @default(now())
-  userAgent String?
-  ip        String?
+  createdAt  DateTime @default(now())
+  userAgent  String?
+  ip         String?
 
   @@index([userId])
   @@index([tokenHash])
@@ -272,16 +273,16 @@ model Case {
   caseNumber String
 
   // Intake (Module 2).
-  clientName   String
-  dateOfBirth  DateTime?
-  sex          Sex        @default(UNKNOWN)
-  caseType     CaseType   @default(PERSONAL_INJURY)
-  side         CaseSide   @default(PLAINTIFF)
-  jurisdiction String?
-  dateOfInjury DateTime?
-  mechanism    String?
-  diagnosis    String? // primary/current diagnosis description
-  icd10Code    String? // ICD-10-CM code linked to the primary diagnosis
+  clientName          String
+  dateOfBirth         DateTime?
+  sex                 Sex       @default(UNKNOWN)
+  caseType            CaseType  @default(PERSONAL_INJURY)
+  side                CaseSide  @default(PLAINTIFF)
+  jurisdiction        String?
+  dateOfInjury        DateTime?
+  mechanism           String?
+  diagnosis           String? // primary/current diagnosis description
+  icd10Code           String? // ICD-10-CM code linked to the primary diagnosis
   additionalDiagnoses Json? // [{ diagnosis, icd10Code }] secondary diagnoses
 
   // Life-expectancy & economic assumptions (editable, drive the cost engine).
@@ -292,7 +293,7 @@ model Case {
 
   // Extended intake.
   preExistingConditions String? // comma-separated selected conditions
-  preExistingReviewed   Boolean @default(false) // true once saved in the picker (drives Complete/Incomplete)
+  preExistingReviewed   Boolean         @default(false) // true once saved in the picker (drives Complete/Incomplete)
   currentWorkStatus     String? // Employed | Unemployed | Disabled
   disabilityReason      String? // shown/used only when currentWorkStatus = Disabled
   functionalLimitations String?
@@ -304,14 +305,15 @@ model Case {
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
 
-  auditLogs        AuditLog[]
-  documents        Document[]
-  chronologyEvents ChronologyEvent[]
-  conditions       Condition[]
-  futureCareItems  FutureCareItem[]
-  reviewFindings   ReviewFinding[]
-  reports          ReportExport[]
-  socUserInputs    SocUserInput[]
+  auditLogs          AuditLog[]
+  documents          Document[]
+  chronologyEvents   ChronologyEvent[]
+  conditions         Condition[]
+  futureCareItems    FutureCareItem[]
+  reviewFindings     ReviewFinding[]
+  reports            ReportExport[]
+  socUserInputs      SocUserInput[]
+  validationFindings ValidationFinding[]
 
   @@unique([firmId, caseNumber])
   @@index([firmId])
@@ -328,10 +330,10 @@ model SocUserInput {
   case          Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
   conditionName String
 
-  kind  String // "note" | "source"
-  text  String // note body, or the pertinent quote extracted from the source
-  title String? // source title
-  url   String? // source URL / DOI, when provided
+  kind     String // "note" | "source"
+  text     String // note body, or the pertinent quote extracted from the source
+  title    String? // source title
+  url      String? // source URL / DOI, when provided
   filename String? // uploaded file name, when a file was the source
 
   addedById String?
@@ -343,17 +345,17 @@ model SocUserInput {
 // Append-only usage meter. Aggregated per billing period for plan-limit checks
 // and firm dashboards. `period` is a "YYYY-MM" bucket for cheap monthly rollups.
 model UsageRecord {
-  id       String      @id @default(uuid())
-  firmId   String
-  firm     Firm        @relation(fields: [firmId], references: [id], onDelete: Cascade)
-  userId   String?
-  user     User?       @relation(fields: [userId], references: [id])
-  metric   UsageMetric
-  quantity Int         @default(1)
-  period   String // "YYYY-MM"
-  caseId   String?
-  meta     Json?
-  createdAt DateTime   @default(now())
+  id        String      @id @default(uuid())
+  firmId    String
+  firm      Firm        @relation(fields: [firmId], references: [id], onDelete: Cascade)
+  userId    String?
+  user      User?       @relation(fields: [userId], references: [id])
+  metric    UsageMetric
+  quantity  Int         @default(1)
+  period    String // "YYYY-MM"
+  caseId    String?
+  meta      Json?
+  createdAt DateTime    @default(now())
 
   @@index([firmId, period])
   @@index([firmId, metric, period])
@@ -575,36 +577,36 @@ enum ExportFormat {
 }
 
 model Document {
-  id       String @id @default(uuid())
-  caseId   String
-  case     Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
-  firmId   String
-  firm     Firm   @relation(fields: [firmId], references: [id], onDelete: Cascade)
+  id     String @id @default(uuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  firmId String
+  firm   Firm   @relation(fields: [firmId], references: [id], onDelete: Cascade)
 
-  filename     String
-  type         DocumentType   @default(OTHER)
-  status       DocumentStatus @default(UPLOADED)
-  pageCount    Int            @default(0)
-  ocrConfidence Float? // 0–1; low values flag poor OCR
-  storageKey   String? // object-storage pointer (local path in dev)
-  extractedText String? // OCR/parsed text used for extraction + classification
-  provider     String? // provider/facility identified from the doc
-  serviceDate  DateTime? // documented date (earliest, or the single date)
-  serviceDateEnd DateTime? // latest date when the record spans a range (else null)
-  datePages    Json? // number[] — pages on which dated entries appear (range display)
+  filename          String
+  type              DocumentType   @default(OTHER)
+  status            DocumentStatus @default(UPLOADED)
+  pageCount         Int            @default(0)
+  ocrConfidence     Float? // 0–1; low values flag poor OCR
+  storageKey        String? // object-storage pointer (local path in dev)
+  extractedText     String? // OCR/parsed text used for extraction + classification
+  provider          String? // provider/facility identified from the doc
+  serviceDate       DateTime? // documented date (earliest, or the single date)
+  serviceDateEnd    DateTime? // latest date when the record spans a range (else null)
+  datePages         Json? // number[] — pages on which dated entries appear (range display)
   authorName        String? // primary documenting individual's name
   authorCredentials String? // e.g. "MD", "PT, DPT", "PharmD"
   authorRole        String? // role designation, e.g. "Orthopedic Surgeon"
   facility          String? // primary location/facility
   providers         Json? // [{ name, credentials, role, pages:number[] }] when >1 individual
   locations         Json? // [{ name, pages:number[] }] when >1 location
-  flags        String? // e.g. "missing pages", "low OCR confidence"
+  flags             String? // e.g. "missing pages", "low OCR confidence"
   // How `type` was assigned: "content" (read from the document body),
   // "filename" (fallback when no text could be extracted), "manual" (user
   // reassigned), or "default". Null for legacy rows.
-  classifiedBy String?
-  classifyScore Float? // strength of the winning content signal
-  uploadedById String?
+  classifiedBy      String?
+  classifyScore     Float? // strength of the winning content signal
+  uploadedById      String?
 
   createdAt DateTime @default(now())
 
@@ -617,27 +619,27 @@ model ChronologyEvent {
   caseId String
   case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
 
-  eventDate        DateTime
-  eventDateEnd     DateTime? // encounter range end, when the record spans dates
-  eventType        String? // SURGERY|IMAGING|LAB|CLINIC_VISIT|ER_VISIT|HOSPITALIZATION|THERAPY|COMPLICATION|LEGAL_EVENT|BILLING|OTHER
-  provider         String?
-  specialty        String?
-  facility         String? // location/facility for the encounter (LCP header)
-  recordType       String?
-  summary          String
+  eventDate            DateTime
+  eventDateEnd         DateTime? // encounter range end, when the record spans dates
+  eventType            String? // SURGERY|IMAGING|LAB|CLINIC_VISIT|ER_VISIT|HOSPITALIZATION|THERAPY|COMPLICATION|LEGAL_EVENT|BILLING|OTHER
+  provider             String?
+  specialty            String?
+  facility             String? // location/facility for the encounter (LCP header)
+  recordType           String?
+  summary              String
   // LCP-style encounter fields (Subjective / Exam / Diagnostic Studies /
   // Assessment / Plan / Procedure / Disposition).
-  subjective       String?
-  objectiveFindings String? // Exam
-  diagnosis        String? // Assessment
-  treatment        String? // Plan
-  procedure        String?
-  disposition      String?
-  imagingFindings  String? // Diagnostic Studies
-  medications      String?
-  restrictions     String?
-  workStatus       String?
-  functionalStatus String?
+  subjective           String?
+  objectiveFindings    String? // Exam
+  diagnosis            String? // Assessment
+  treatment            String? // Plan
+  procedure            String?
+  disposition          String?
+  imagingFindings      String? // Diagnostic Studies
+  medications          String?
+  restrictions         String?
+  workStatus           String?
+  functionalStatus     String?
   // Why this event matters: which diagnosis it documents and which future-care
   // items it grounds. Ties the timeline to the causation map & the care plan.
   clinicalSignificance String?
@@ -672,14 +674,14 @@ model Condition {
   objectiveEvidence String?
   // Where the objective evidence actually lives: array of
   // { documentId, filename, page, quote } pointing into the source records.
-  evidenceSources Json?
-  missingInfo     String?
-  reasoning       String?
+  evidenceSources   Json?
+  missingInfo       String?
+  reasoning         String?
   // Standard-of-care analysis for this causation item: located clinical
   // practice guidelines with VERBATIM quoted language (never fabricated — the
   // quote is lifted from the retrieved source), the documented care that
   // corresponds to the guidance, and a documentation status. See SocAnalysis.
-  socAnalysis Json?
+  socAnalysis       Json?
 
   physicianConfirmed Boolean @default(false)
 
@@ -700,8 +702,8 @@ model FutureCareItem {
   conditionId String?
   condition   Condition? @relation(fields: [conditionId], references: [id])
 
-  category CareCategory
-  service  String // specific service/item
+  category  CareCategory
+  service   String // specific service/item
   rationale String? // medical necessity rationale
   specialty String?
   cptCode   String?
@@ -716,22 +718,22 @@ model FutureCareItem {
   isLifetime       Boolean @default(false)
 
   // Cost projection (unit → lifetime → present value), low/expected/high.
-  unitCost       Float @default(0)
-  annualCost     Float @default(0)
-  lifetimeCost   Float @default(0) // undiscounted
-  presentValue   Float @default(0)
-  lowCost        Float @default(0)
-  highCost       Float @default(0)
-  pricingSource  String? // Medicare / UCR / cash-pay benchmark note
+  unitCost      Float   @default(0)
+  annualCost    Float   @default(0)
+  lifetimeCost  Float   @default(0) // undiscounted
+  presentValue  Float   @default(0)
+  lowCost       Float   @default(0)
+  highCost      Float   @default(0)
+  pricingSource String? // Medicare / UCR / cash-pay benchmark note
 
   // Evidence (Module 9) — never fabricated; states when support is limited.
-  evidenceStrength String? // e.g. "Guideline-supported", "Limited — physician confirmation required"
+  evidenceStrength  String? // e.g. "Guideline-supported", "Limited — physician confirmation required"
   literatureSupport String?
   // The two most relevant real supporting articles, ranked across multiple
   // literature sources (Europe PMC, Crossref, Semantic Scholar). Never invented.
   // Array of { source, title, authors, journal, year, url, pmid?, doi? }.
   // Null if none found/offline.
-  citation Json?
+  citation          Json?
 
   // Alternatives & adversarial framing.
   lowerCostAlternative String?
@@ -756,16 +758,16 @@ model ReviewFinding {
   caseId String
   case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
 
-  kind        ReviewKind
-  category    String // topic of the contested point
-  description String // the argument being made
+  kind          ReviewKind
+  category      String // topic of the contested point
+  description   String // the argument being made
   vulnerability Vulnerability @default(MODERATE) // severity for DEFENSE; priority for COMPLETENESS
   relatedItemId String? // FutureCareItem it refers to, when applicable
 
   // Contested-point structure: which side raises the argument, its source, and
   // the opposing side's counter-argument with its own supporting source.
-  side           String? // "DEFENSE" | "PLAINTIFF" — who raises the primary argument
-  sourceRef      String? // source backing the argument (record / plan basis)
+  side            String? // "DEFENSE" | "PLAINTIFF" — who raises the primary argument
+  sourceRef       String? // source backing the argument (record / plan basis)
   counterArgument String?
   counterSource   String? // narrative source / literature backing the counter-argument
   counterCitation String? // formal citation (authority/guideline/text) for the support
@@ -784,14 +786,39 @@ model ReportExport {
   firmId String
   firm   Firm   @relation(fields: [firmId], references: [id], onDelete: Cascade)
 
-  format       ExportFormat
-  template     CaseSide     @default(PLAINTIFF) // plaintiff/defense/neutral template
-  version      Int          @default(1)
-  storageKey   String?
-  generatedById String?
-  totalLifetimeCost Float   @default(0)
-  totalPresentValue Float   @default(0)
-  itemCount    Int          @default(0)
+  format            ExportFormat
+  template          CaseSide     @default(PLAINTIFF) // plaintiff/defense/neutral template
+  version           Int          @default(1)
+  storageKey        String?
+  generatedById     String?
+  totalLifetimeCost Float        @default(0)
+  totalPresentValue Float        @default(0)
+  itemCount         Int          @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@index([caseId])
+  @@index([firmId])
+}
+
+// A persisted result of the deterministic Life Care Plan integrity check
+// (src/lib/engine/integrity.ts). Findings are recomputed and REPLACED whenever
+// the plan is (re)generated or a report is exported — they are derived data,
+// never user-authored. Item linkage is by denormalized service name (not FK)
+// because future-care items are recreated on regeneration.
+model ValidationFinding {
+  id     String @id @default(uuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  firmId String
+  firm   Firm   @relation(fields: [firmId], references: [id], onDelete: Cascade)
+
+  service        String // recommendation (service) the finding concerns
+  result         String // e.g. "Code mismatch", "Diagnosis mismatch"
+  issue          String // human-readable description of the problem
+  severity       String // Critical | High | Moderate | Low
+  suggestion     String // suggested correction
+  exportBlocking Boolean @default(false)
 
   createdAt DateTime @default(now())
 

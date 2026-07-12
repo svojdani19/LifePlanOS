@@ -410,6 +410,20 @@ export function classifyRecommendation(rec: RecInput, ctx: ClassifyContext): Cla
   return { status: "POSSIBLE_CONTINGENCY", label: STATUS_LABEL.POSSIBLE_CONTINGENCY, includedInTotal: false, reason: "Record support is thin; additional evidence or physician confirmation required." };
 }
 
+// Whether a recommendation has patient-specific record support: its matched
+// diagnosis carries explicit supporting records / evidence sources, or —
+// fallback — the item itself has no open missing-support note and reasonable
+// extraction confidence. Shared by the report and the validation service so
+// the two can never disagree.
+export function hasPatientRecordSupport(
+  rec: { missingSupport?: string | null; confidence?: number },
+  matched: (CondInput & { evidenceSources?: unknown }) | null,
+): boolean {
+  const evCount = matched && Array.isArray(matched.evidenceSources) ? (matched.evidenceSources as unknown[]).length : 0;
+  if (matched && (matched.supportingRecords || evCount > 0)) return true;
+  return !rec.missingSupport && (rec.confidence ?? 0) >= 60;
+}
+
 // ── 10. Integrity check ──────────────────────────────────────────────────────
 export type Severity = "Critical" | "High" | "Moderate" | "Low";
 export interface IntegrityFinding {
@@ -467,7 +481,9 @@ export function runIntegrityCheck(input: IntegrityInput): IntegrityReport {
     // Findings.
     if (!mapping.matched) findings.push({ recommendation: rec.service, result: "Diagnosis mismatch", issue: mapping.reason, severity: "Critical", suggestedCorrection: `Link to a documented ${mapping.region.replace(/_/g, "/")} diagnosis, or remove the recommendation.`, exportBlocking: true });
     if (code.status === "Code mismatch") findings.push({ recommendation: rec.service, result: "Code mismatch", issue: code.detail, severity: "Critical", suggestedCorrection: code.expected ? `Assign an appropriate code (${code.expected}).` : "Assign a code matching the service and region.", exportBlocking: true });
-    else if (code.status === "Missing code") findings.push({ recommendation: rec.service, result: "Missing code", issue: code.detail, severity: "Moderate", suggestedCorrection: "Assign the applicable CPT/HCPCS code, or state the estimate is non-code-specific.", exportBlocking: false });
+    // "Missing code" is subsumed by "Unsupported bundled estimate" (same root
+    // cause: costed service, no code, no bundled disclosure) — emit only one.
+    else if (code.status === "Missing code" && pricing.status !== "Unsupported bundled estimate") findings.push({ recommendation: rec.service, result: "Missing code", issue: code.detail, severity: "Moderate", suggestedCorrection: "Assign the applicable CPT/HCPCS code, or state the estimate is non-code-specific.", exportBlocking: false });
     else if (code.status === "Requires review") findings.push({ recommendation: rec.service, result: "Requires review", issue: code.detail, severity: "Low", suggestedCorrection: "Confirm the code against the service description.", exportBlocking: false });
     if (pricing.status === "Pricing mismatch") findings.push({ recommendation: rec.service, result: "Pricing mismatch", issue: pricing.detail, severity: "Critical", suggestedCorrection: "Re-price the service against the correct modality/region.", exportBlocking: true });
     else if (pricing.status === "Unsupported bundled estimate") findings.push({ recommendation: rec.service, result: "Unsupported bundled estimate", issue: pricing.detail, severity: "High", suggestedCorrection: "Attach a code, or label the figure as a bundled/non-code-specific estimate.", exportBlocking: false });

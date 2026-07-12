@@ -2,6 +2,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit, recordUsage } from "@/lib/tenant";
 import { buildReportDocx, buildCostCsv } from "@/lib/export/report";
+import { persistCaseValidation } from "@/lib/engine/validation";
 import { putObject } from "@/lib/storage";
 import { ok, handleError } from "@/lib/api";
 
@@ -74,6 +75,10 @@ export async function POST(req: Request, { params }: { params: { caseId: string 
 
     await recordUsage(ctx, "REPORT_EXPORT", { caseId: params.caseId, meta: { format, template } });
     await audit(ctx, "export.report", { type: "reportExport", id: record.id, caseId: params.caseId, meta: { format, template, version: record.version } });
+
+    // Refresh the persisted integrity findings to match what this export
+    // reflected (the report ran the same deterministic check for its totals).
+    await persistCaseValidation(params.caseId, ctx.firm.id).catch(() => {});
 
     return ok({ export: record });
   } catch (err) {
