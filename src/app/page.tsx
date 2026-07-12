@@ -2,11 +2,11 @@ import Link from "next/link";
 import { ShieldCheck, Activity, FileText, Scale, Stethoscope } from "lucide-react";
 
 const MODULES = [
-  { icon: Activity, title: "Chronology Engine", body: "Sorted, cited, accessible." },
-  { icon: Stethoscope, title: "Future Care Engine", body: "Prognosis, probable and possible — backed by records." },
+  { icon: Activity, title: "Records & Timeline", body: "Sorted, cited, accessible." },
+  { icon: Stethoscope, title: "Future Care Engine", body: "Prognosis — backed by science." },
   { icon: Scale, title: "Cost Projection", body: "Every pathway, quantified." },
-  { icon: ShieldCheck, title: "Vulnerability Review", body: "Full prep and counter." },
-  { icon: FileText, title: "Report Generator", body: "Complete, ready-for-review, validated." },
+  { icon: ShieldCheck, title: "Deposition Analysis", body: "Dual-sided prep and counter." },
+  { icon: FileText, title: "Report Generator", body: "Evidence-based, physician validated, complete." },
 ];
 
 export default function LandingPage() {
