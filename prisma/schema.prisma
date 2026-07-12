@@ -617,6 +617,11 @@ model Document {
   facility          String? // primary location/facility
   providers         Json? // [{ name, credentials, role, pages:number[] }] when >1 individual
   locations         Json? // [{ name, pages:number[] }] when >1 location
+  // Sub-documents parsed from a consolidated chart at ingest: one entry per
+  // dated encounter/section, typed and classified clinical vs. administrative,
+  // with page range and a summary. Null for single-encounter records (rendered
+  // as a narrative) and legacy rows not yet segmented. See documents/segment.ts.
+  segments          Json? // DocumentSegment[]
   flags             String? // e.g. "missing pages", "low OCR confidence"
   // How `type` was assigned: "content" (read from the document body),
   // "filename" (fallback when no text could be extracted), "manual" (user

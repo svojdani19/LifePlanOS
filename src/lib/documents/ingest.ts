@@ -2,6 +2,7 @@ import { prisma } from "@/lib/db";
 import { extractText } from "@/lib/documents/extract";
 import { classifyDocument } from "@/lib/documents/classify";
 import { parseRecordMeta } from "@/lib/documents/meta";
+import { segmentDocument } from "@/lib/documents/segment";
 import { enqueueOcr, MAX_TEXT } from "@/lib/documents/ocrQueue";
 import { Prisma } from "@/generated/prisma";
 import type { Document, DocumentType } from "@/generated/prisma";
@@ -78,6 +79,10 @@ export async function ingestDocument(input: IngestInput): Promise<IngestResult> 
   //    documenting individual(s), and the location(s), each with page refs.
   const meta = parseRecordMeta(text, c.type);
 
+  // Segment a consolidated chart into typed sub-documents (null for single
+  // encounters). Persisted so the Records panel reads pre-computed segments.
+  const segments = segmentDocument(text);
+
   const document = await prisma.document.create({
     data: {
       caseId: input.caseId,
@@ -100,6 +105,7 @@ export async function ingestDocument(input: IngestInput): Promise<IngestResult> 
       facility: meta.facility,
       providers: meta.providers.length > 1 ? (meta.providers as unknown as Prisma.InputJsonValue) : undefined,
       locations: meta.locations.length > 1 ? (meta.locations as unknown as Prisma.InputJsonValue) : undefined,
+      segments: segments ? (segments as unknown as Prisma.InputJsonValue) : undefined,
       provider: meta.facility ?? meta.authorName ?? (c.type === "OPERATIVE_NOTE" ? "Surgical Facility" : "Treating Provider"),
       extractedText: text.slice(0, MAX_TEXT),
       flags: flags.join("; ") || null,

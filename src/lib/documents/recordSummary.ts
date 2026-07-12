@@ -18,14 +18,14 @@ const lcFirst = (s: string) => (/^[A-Z][a-z]/.test(s) ? s[0].toLowerCase() + s.s
 const capFirst = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
 const cleanVal = (s: string) => s.replace(/\s+/g, " ").replace(/\s+as above\b/i, "").trim().replace(/[.;,]+$/, "").trim();
 const oneSentence = (s: string) => s.split(/(?<=[.!?])\s+/)[0].replace(/[.;,]+$/, "").trim();
-const S = (label: string) => new RegExp(label + ":?\\s*(.+?)(?=\\b[A-Z]{2,}[A-Z /-]*:|$)", "i");
+export const S = (label: string) => new RegExp(label + ":?\\s*(.+?)(?=\\b[A-Z]{2,}[A-Z /-]*:|$)", "i");
 // Trim/terminate each part and join into one readable paragraph (null-safe).
 const asSentence = (s: string | null | undefined): string | null => {
   const v = (s ?? "").replace(/\s+/g, " ").trim().replace(/[.;,]+$/, "");
   return v ? `${capFirst(v)}.` : null;
 };
 const paragraph = (...parts: (string | null | undefined)[]): string => parts.map(asSentence).filter(Boolean).join(" ");
-function section(text: string, ...res: RegExp[]): string | null {
+export function section(text: string, ...res: RegExp[]): string | null {
   for (const re of res) {
     const m = text.match(re);
     const v = m?.[1] ? cleanVal(m[1]) : "";
@@ -35,7 +35,7 @@ function section(text: string, ...res: RegExp[]): string | null {
 }
 // Strip non-clinical metadata (facility/date/author-signature lines) so the
 // narrative reflects findings, not header boilerplate.
-function clinicalText(raw: string): string {
+export function clinicalText(raw: string): string {
   return raw
     .replace(/\bpage\s+\d+(?:\s+of\s+\d+)?\b/gi, " ")
     .replace(/\b(?:FACILITY|LOCATION|TECHNIQUE|COMPARISON)\s*:\s*[^.]*\.?/gi, "")
@@ -47,7 +47,7 @@ function clinicalText(raw: string): string {
 }
 const METADATA_SENT = /\b(facility|location|date of|collected|fill date|\bndc\b|appearances|dictated by|reviewed by|therapist|surgeon|radiologist|attending physician|examiner|pharmacist|evaluated by|reported by|prepared by)\b/i;
 // The first `n` genuine clinical sentences (skipping headers and metadata).
-function clinicalSentences(text: string, n = 2): string {
+export function clinicalSentences(text: string, n = 2): string {
   const sents = text
     .split(/(?<=[.!?])\s+/)
     .map((s) => s.trim())
@@ -60,7 +60,7 @@ function clinicalSentences(text: string, n = 2): string {
 // multi-visit printout) is separated BY DATE so the summary isn't one jammed
 // paragraph — each date shows its own provider, facility, and finding.
 const MONTHS3 = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
-function parseAnyDate(raw: string): Date | null {
+export function parseAnyDate(raw: string): Date | null {
   let m: RegExpMatchArray | null;
   if ((m = raw.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/))) {
     let y = +m[3]; if (y < 100) y += y > 50 ? 1900 : 2000;
@@ -73,10 +73,10 @@ function parseAnyDate(raw: string): Date | null {
   }
   return null;
 }
-const mmddyyyy = (d: Date) => `${String(d.getUTCMonth() + 1).padStart(2, "0")}/${String(d.getUTCDate()).padStart(2, "0")}/${d.getUTCFullYear()}`;
-const DATE_ANCHOR = /\b(?:date of (?:service|procedure|operation|exam(?:ination)?|evaluation|visit|admission|discharge|consult(?:ation)?)|(?:service|admission|admit|discharge|exam|visit|encounter|procedure|operation|consult(?:ation)?)\s+date|date)\s*(?:\/\s*time)?\s*[:\-]\s*(\d{1,2}\/\d{1,2}\/\d{2,4}|\d{4}-\d{1,2}-\d{1,2}|[A-Za-z]+\.?\s+\d{1,2},?\s+\d{4})/gi;
-const NON_CLINICAL_BEFORE = /(birth|dob|print(?:ed)?|report(?:ed)?|signed|expir|effective|policy|paid|statement|due|registration)\s*$/i;
-function segProvider(seg: string): string | null {
+export const mmddyyyy = (d: Date) => `${String(d.getUTCMonth() + 1).padStart(2, "0")}/${String(d.getUTCDate()).padStart(2, "0")}/${d.getUTCFullYear()}`;
+export const DATE_ANCHOR = /\b(?:date of (?:service|procedure|operation|exam(?:ination)?|evaluation|visit|admission|discharge|consult(?:ation)?)|(?:service|admission|admit|discharge|exam|visit|encounter|procedure|operation|consult(?:ation)?)\s+date|date)\s*(?:\/\s*time)?\s*[:\-]\s*(\d{1,2}\/\d{1,2}\/\d{2,4}|\d{4}-\d{1,2}-\d{1,2}|[A-Za-z]+\.?\s+\d{1,2},?\s+\d{4})/gi;
+export const NON_CLINICAL_BEFORE = /(birth|dob|print(?:ed)?|report(?:ed)?|signed|expir|effective|policy|paid|statement|due|registration)\s*$/i;
+export function segProvider(seg: string): string | null {
   // Two steps so the label is case-insensitive but the name is NOT: a single
   // /…/i regex would let the Title-Case name pattern match lowercase prose
   // ("physician: see notes below" → "see notes below"). Find the label in any
@@ -91,7 +91,7 @@ function segProvider(seg: string): string | null {
 
 // Accept a facility value only if it reads like an organization, not a prose
 // fragment or a code; trim trailing metadata that ran into it.
-function cleanFacility(raw: string | null | undefined): string | null {
+export function cleanFacility(raw: string | null | undefined): string | null {
   let v = (raw ?? "").replace(/\s+/g, " ").trim().replace(/[.\s]+$/, "");
   v = v.replace(/\s+(?:location|facility|medical record|med rec|room-?bed|account|date taken|mrn|bed|page|run|reason)\b.*$/i, "").trim();
   if (v.length < 4 || v.length > 70) return null;
@@ -101,7 +101,7 @@ function cleanFacility(raw: string | null | undefined): string | null {
   return orgish || titleWords >= 2 ? v : null;
 }
 // Accept a finding only if it reads like clinical prose, not metadata/OCR noise.
-function cleanFinding(raw: string | null | undefined): string | null {
+export function cleanFinding(raw: string | null | undefined): string | null {
   let s = (raw ?? "").replace(/\s+/g, " ").trim();
   if (!s) return null;
   // Strip leading chart metadata / section labels so the clinical content leads.

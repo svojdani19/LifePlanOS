@@ -680,8 +680,16 @@ function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: bo
                         </div>
 
                         {open && (() => {
-                          const enc = recordEncounters(d);
-                          const consolidated = !!enc && enc.length >= 2;
+                          // Prefer persisted sub-documents (segmented at ingest);
+                          // fall back to on-the-fly encounter splitting for legacy
+                          // rows not yet segmented.
+                          const segs: AnyRec[] | null = Array.isArray(d.segments) ? (d.segments as AnyRec[]) : null;
+                          const fallbackEnc = segs ? null : recordEncounters(d);
+                          const clinical: AnyRec[] = segs ? segs.filter((s) => s.kind === "clinical") : (fallbackEnc ?? []);
+                          const adminBearing: AnyRec[] = segs ? segs.filter((s) => s.kind === "administrative" && s.bearsOnCare) : [];
+                          const adminOther: AnyRec[] = segs ? segs.filter((s) => s.kind === "administrative" && !s.bearsOnCare) : [];
+                          const consolidated = segs ? clinical.length + adminBearing.length + adminOther.length > 0 : !!fallbackEnc && fallbackEnc.length >= 2;
+                          const segPages = (s: AnyRec) => (s.pageStart && s.pageEnd ? (s.pageStart === s.pageEnd ? `p. ${s.pageStart}` : `pp. ${s.pageStart}–${s.pageEnd}`) : "");
                           return (
                           <div className="mt-2 space-y-2 rounded-lg bg-ink-50/70 p-3">
                             {/* Consolidated records show a compact header (date range +
@@ -697,20 +705,68 @@ function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: bo
                               </p>
                             )}
                             {consolidated ? (
-                              <div className="space-y-1.5">
-                                <p className="text-[11px] font-medium text-ink-500">{enc!.length} dated encounters in this record:</p>
-                                <ul className="space-y-2">
-                                  {enc!.map((e, i) => (
-                                    <li key={i} className="border-l-2 border-ink-200 pl-2.5 text-xs">
-                                      <p className="font-semibold text-ink-900">
-                                        {e.label}
-                                        {e.provider ? <span className="font-normal text-ink-700"> — {e.provider}</span> : null}
-                                        {e.facility ? <span className="font-normal text-ink-400"> · {e.facility}</span> : null}
-                                      </p>
-                                      <p className="leading-relaxed text-ink-600">{e.summary}</p>
-                                    </li>
-                                  ))}
-                                </ul>
+                              <div className="space-y-2.5">
+                                {clinical.length > 0 && (
+                                  <div className="space-y-1.5">
+                                    <p className="text-[11px] font-medium text-ink-500">{clinical.length} clinical encounter{clinical.length === 1 ? "" : "s"} in this record:</p>
+                                    <ul className="space-y-2">
+                                      {clinical.map((e, i) => (
+                                        <li key={i} className="border-l-2 border-ink-200 pl-2.5 text-xs">
+                                          <p className="font-semibold text-ink-900">
+                                            {e.label}
+                                            {e.provider ? <span className="font-normal text-ink-700"> — {e.provider}</span> : null}
+                                            {e.facility ? <span className="font-normal text-ink-400"> · {e.facility}</span> : null}
+                                            {segPages(e) ? <span className="font-normal text-ink-300"> · {segPages(e)}</span> : null}
+                                          </p>
+                                          <p className="leading-relaxed text-ink-600">{e.summary}</p>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
+                                {adminBearing.length > 0 && (
+                                  <div className="space-y-1.5">
+                                    <p className="text-[11px] font-medium text-ink-500">Administrative &amp; consent bearing on care:</p>
+                                    <ul className="space-y-2">
+                                      {Object.entries(
+                                        adminBearing.reduce((acc: Record<string, AnyRec[]>, s) => {
+                                          (acc[s.category as string] ??= []).push(s);
+                                          return acc;
+                                        }, {}),
+                                      ).map(([cat, items], i) => {
+                                        const pages = items.map((x) => x.pageStart).filter((n): n is number => !!n);
+                                        const detail = items.map((x) => x.summary as string).find((s) => s && s.includes(":"));
+                                        const dates = [...new Set(items.map((x) => x.label))];
+                                        return (
+                                          <li key={i} className="border-l-2 border-amber-300 pl-2.5 text-xs">
+                                            <p className="font-semibold text-ink-900">
+                                              {cat}
+                                              <span className="font-normal text-ink-400">
+                                                {" "}
+                                                · {items.length} page{items.length === 1 ? "" : "s"}
+                                                {pages.length ? ` (pp. ${pageRange(pages)})` : ""}
+                                              </span>
+                                            </p>
+                                            <p className="leading-relaxed text-ink-600">{detail ?? dates.slice(0, 4).join(", ") + (dates.length > 4 ? "…" : "")}</p>
+                                          </li>
+                                        );
+                                      })}
+                                    </ul>
+                                  </div>
+                                )}
+                                {adminOther.length > 0 && (
+                                  <p className="text-[11px] text-ink-400">
+                                    + {adminOther.length} standard administrative page{adminOther.length === 1 ? "" : "s"}
+                                    {(() => {
+                                      const cats = [...new Set(adminOther.map((s) => s.category))].filter(Boolean) as string[];
+                                      return cats.length ? ` (${cats.join(", ").toLowerCase()})` : "";
+                                    })()}
+                                    .
+                                  </p>
+                                )}
+                                {clinical.length === 0 && adminBearing.length === 0 && (
+                                  <p className="text-xs leading-relaxed text-ink-600">{narrativeFor(d)}</p>
+                                )}
                               </div>
                             ) : (
                               <p className="text-xs leading-relaxed text-ink-600">{narrativeFor(d)}</p>

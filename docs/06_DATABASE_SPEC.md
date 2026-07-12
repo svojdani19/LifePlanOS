@@ -21,7 +21,7 @@ Source of truth: `prisma/schema.prisma`. All tables live in the isolated
 | Model | Purpose | Notes |
 |---|---|---|
 | `Case` | intake (demographics, incident, diagnoses, ICD-10, pre-existing, work status, specialties) + economic assumptions (life expectancy, discount, inflation, geographic factor) + `CaseStatus` stage | `additionalDiagnoses`/`additionalSpecialties` are JSON |
-| `Document` | uploaded record: type (60+ `DocumentType`s), OCR confidence, `storageKey`, `extractedText`, provider/date/facility metadata, `providers`/`locations` JSON, classification provenance | PHI-heavy; access via authed stream only |
+| `Document` | uploaded record: type (60+ `DocumentType`s), OCR confidence, `storageKey`, `extractedText`, provider/date/facility metadata, `providers`/`locations` JSON, `segments` JSON (typed sub-documents parsed from a consolidated chart — see below), classification provenance | PHI-heavy; access via authed stream only |
 | `ChronologyEvent` | dated clinical event: provider, facility, recordType, labeled sections (subjective, objectiveFindings, imagingFindings, diagnosis, treatment, procedure, disposition), functional status, clinicalSignificance, source doc + page, `eventDateEnd` for ranges | derived; rebuilt on generate |
 | `Condition` | causation item: relatedness, confidence, objectiveEvidence, `evidenceSources` JSON `[{documentId, filename, page, quote}]`, reasoning, `socAnalysis` JSON | derived; rebuilt on generate |
 | `SocUserInput` | reviewer notes/sources for the SoC analysis; **keyed by condition NAME** so it survives regeneration | user-authored; never wiped |
@@ -56,6 +56,21 @@ connection's search_path targets `lifeplanos`) → `npx prisma migrate resolve
 --applied <name>`. Document every schema change here and in 17_CHANGELOG.md.
 
 ### Change log (schema)
+
+- **2026-07-12 (Chart segmentation)** `Document.preparingPhysician` n/a —
+  `Document.segments` JSON (migration
+  `20260712160000_add_document_segments`). Persisted sub-documents parsed from a
+  consolidated chart at ingest: one entry per dated section — `{ date, label,
+  pageStart, pageEnd, kind: "clinical"|"administrative", type, category,
+  bearsOnCare, provider, facility, summary }` — computed by
+  `documents/segment.ts` in `ingestDocument` and recomputed after OCR. Null for
+  single-encounter records (rendered as a narrative) and legacy rows. Display-
+  shaped only. The OCR `MAX_TEXT` cap was also raised 1.5M → 4M chars so a full
+  hospital chart (~1,000+ pages) is indexed rather than truncated.
+
+- **2026-07-12 (Preparing physician)** `Case.preparingPhysician` → `User`
+  (`@relation("CasePreparingPhysician")`, `ON DELETE SET NULL`); migration
+  `20260712150000_add_preparing_physician`. Drives report authorship/credentials.
 
 - **2026-07-12 (EPIC-011)** `TreatingProvider`, `InterviewFinding`,
   `UserCredential` + enums (`ProviderStatus`, `InterviewSubject`,

@@ -13,10 +13,11 @@ import { getObject } from "@/lib/storage";
 import { readPdf } from "@/lib/documents/ocr";
 import { classifyDocument } from "@/lib/documents/classify";
 import { parseRecordMeta } from "@/lib/documents/meta";
+import { segmentDocument } from "@/lib/documents/segment";
 import { Prisma } from "@/generated/prisma";
 import type { DocumentType } from "@/generated/prisma";
 
-export const MAX_TEXT = 1_500_000; // chars persisted per document (~750 pages of dense text)
+export const MAX_TEXT = 4_000_000; // chars persisted per document (~2,000 pages of dense chart text)
 
 interface Job {
   documentId: string;
@@ -81,6 +82,7 @@ async function runJob(job: Job): Promise<void> {
     : classifyDocument({ text, filename: doc.filename, hasText: text.length > 40 });
   const type = (c && c.method === "content" ? c.type : doc.type) as DocumentType;
   const meta = parseRecordMeta(text, type);
+  const segments = segmentDocument(text);
 
   const flags: string[] = [];
   if (r.confidence < 0.8) flags.push(`OCR confidence ${(r.confidence * 100).toFixed(0)}% — verify against the source scan`);
@@ -106,6 +108,9 @@ async function runJob(job: Job): Promise<void> {
       facility: meta.facility,
       providers: meta.providers.length > 1 ? (meta.providers as unknown as Prisma.InputJsonValue) : undefined,
       locations: meta.locations.length > 1 ? (meta.locations as unknown as Prisma.InputJsonValue) : undefined,
+      // Re-OCR replaces the text, so recompute segments; clear stale ones when
+      // the fuller text no longer reads as consolidated.
+      segments: segments ? (segments as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
       provider: meta.facility ?? meta.authorName ?? doc.provider,
       flags: flags.join("; ") || null,
     },
