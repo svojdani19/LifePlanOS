@@ -102,12 +102,14 @@ export function CaseWorkspace({
   totals,
   permissions,
   precedents = [],
+  physicians = [],
 }: {
   data: AnyRec;
   assumptions: { lifeExpectancyYears: number; discountRate: number; medicalInflation: number; geographicFactor: number };
   totals: { totalLifetime: number; totalPresentValue: number };
   permissions: Permission[];
   precedents?: AnyRec[];
+  physicians?: AnyRec[];
 }) {
   const router = useRouter();
   const [tab, setTab] = useState("overview");
@@ -236,7 +238,7 @@ export function CaseWorkspace({
         {tab === "reviews" && <ReviewsPanel points={data.reviewFindings} hasPlan={hasPlan} />}
         {tab === "physician" && <PhysicianPanel data={data} canReview={can("physician.review")} call={call} />}
         {tab === "precedents" && <PrecedentsPanel precedents={precedents} data={data} />}
-        {tab === "report" && <ReportPanel data={data} canExport={can("report.export")} call={call} busy={busy} totals={totals} />}
+        {tab === "report" && <ReportPanel data={data} canExport={can("report.export")} canEdit={can("case.edit")} call={call} busy={busy} totals={totals} physicians={physicians} />}
       </div>
     </div>
   );
@@ -1684,6 +1686,8 @@ function PrecedentsPanel({ precedents, data }: { precedents: AnyRec[]; data: Any
 }
 
 // ── Report ───────────────────────────────────────────────────────────────────
+const ROLE_LABEL_SHORT: Record<string, string> = { ADMIN: "admin", PLANNER: "planner", PHYSICIAN_REVIEWER: "physician" };
+
 // ── Treating Providers & Interviews (EPIC-011) ───────────────────────────────
 const INTERVIEW_CATEGORIES = ["Pain", "Headache", "Sleep", "Cognition", "Mood / Psychological", "Mobility / Gait", "ADLs / Self-care", "Vision", "Bladder / Bowel", "Medications", "Work / Vocational", "Sensory / Neurologic", "Other"];
 const PROVIDER_STATUS_TONE: Record<string, "green" | "amber" | "neutral"> = { CONFIRMED: "green", SUGGESTED: "amber", DISMISSED: "neutral" };
@@ -2155,14 +2159,33 @@ function ValidationCard({ caseId }: { caseId: string }) {
   );
 }
 
-function ReportPanel({ data, canExport, call, busy, totals }: { data: AnyRec; canExport: boolean; call: any; busy: string | null; totals: AnyRec }) {
+function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians = [] }: { data: AnyRec; canExport: boolean; canEdit: boolean; call: any; busy: string | null; totals: AnyRec; physicians?: AnyRec[] }) {
   const [template, setTemplate] = useState(data.side ?? "PLAINTIFF");
+  const [preparing, setPreparing] = useState<string>(data.preparingPhysicianId ?? "");
   async function exportReport(format: string) {
     const r = await call(`/api/cases/${data.id}/export`, "POST", { format, template }, "export");
     if (r?.export) window.open(`/api/cases/${data.id}/export/${r.export.id}/download`, "_blank");
   }
+  const chosen = physicians.find((p: AnyRec) => p.id === preparing);
   return (
     <div className="space-y-4">
+      {/* Preparing physician — only this seat's name & credentials appear in the report. */}
+      <div className="card p-5">
+        <h3 className="text-sm font-semibold text-ink-900">Preparing Physician</h3>
+        <p className="text-xs text-ink-500">The physician deemed to be preparing this report. Their name, credentials, and signature appear in the report — and only theirs. Leave unset for a planner-prepared plan (no credentials rendered).</p>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <select
+            className="input w-72"
+            value={preparing}
+            disabled={!canEdit}
+            onChange={(e) => { setPreparing(e.target.value); call(`/api/cases/${data.id}`, "PATCH", { preparingPhysicianId: e.target.value || null }); }}
+          >
+            <option value="">— None (planner-prepared) —</option>
+            {physicians.map((p: AnyRec) => <option key={p.id} value={p.id}>{p.name} ({ROLE_LABEL_SHORT[p.role] ?? p.role.toLowerCase()})</option>)}
+          </select>
+          {chosen && !chosen.credentialSummary && <span className="text-xs text-amber-600">No credential summary on this seat — add one under Team &amp; Seats → Credentials.</span>}
+        </div>
+      </div>
       <ValidationCard caseId={data.id} />
       <VersionCompareCard caseId={data.id} />
       <div className="card p-5">

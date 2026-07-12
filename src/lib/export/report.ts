@@ -235,7 +235,9 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
     where: { id: caseId },
     include: {
       firm: true,
-      createdBy: { select: { name: true, role: true, credentialSummary: true, credentials: { select: { id: true, type: true, label: true, filename: true }, orderBy: { createdAt: "asc" } } } },
+      createdBy: { select: { name: true } },
+      // Only the designated preparing physician's identity & credentials appear.
+      preparingPhysician: { select: { name: true, role: true, credentialSummary: true, credentials: { select: { id: true, type: true, label: true, filename: true }, orderBy: { createdAt: "asc" } } } },
       chronologyEvents: { orderBy: { eventDate: "asc" } },
       conditions: { orderBy: { confidence: "desc" } },
       futureCareItems: { where: { supersededAt: null }, orderBy: { presentValue: "desc" } },
@@ -298,7 +300,13 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
   const docById = new Map(c.documents.map((d) => [d.id, d]));
   const condById = new Map(c.conditions.map((x) => [x.id, x]));
   const catCount = new Set(reportItems.map((i) => i.category)).size;
-  const preparer = c.createdBy?.name ?? "the undersigned";
+  // Authorship: the designated preparing physician when set (their name,
+  // credentials, and signature appear — and ONLY theirs); otherwise the case
+  // creator, with no credentials rendered.
+  const preparerName = c.preparingPhysician?.name ?? c.createdBy?.name ?? "the undersigned";
+  const preparerCredentials = c.preparingPhysician?.credentials ?? [];
+  const preparerCredSummary = c.preparingPhysician?.credentialSummary?.trim() ?? null;
+  const preparer = preparerName;
   const icdFor = (name: string): string => {
     if (c.diagnosis && name.toLowerCase() === c.diagnosis.toLowerCase()) return c.icd10Code || "";
     const m = addlDx.find((d) => d.diagnosis && d.diagnosis.toLowerCase() === name.toLowerCase());
@@ -502,8 +510,8 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
   // EPIC-011 — when the preparer's seat carries a credential summary and/or
   // uploaded documents, render a real Glazer-style Qualifications paragraph and
   // reference the documents; otherwise the generic "under separate cover" text.
-  const preparerCreds = c.createdBy?.credentials ?? [];
-  const credSummary = c.createdBy?.credentialSummary?.trim();
+  const preparerCreds = preparerCredentials;
+  const credSummary = preparerCredSummary;
   body.push(
     p(
       `This Life Care Plan was prepared by ${preparer} of ${c.firm.name}.${credSummary ? ` ${period(credSummary)}` : ""} The opinions expressed herein are offered to a reasonable degree of medical probability and are based upon my professional training and experience, my review of the records identified in this report, and the published life-care-planning methodology and clinical guidelines described in the section that follows.`,

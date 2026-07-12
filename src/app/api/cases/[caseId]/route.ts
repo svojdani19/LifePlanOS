@@ -33,6 +33,7 @@ const patchSchema = z.object({
   medicalInflation: z.number().min(0).max(0.2).optional(),
   geographicFactor: z.number().min(0.1).max(3).optional(),
   assumptionReason: z.string().max(400).optional(),
+  preparingPhysicianId: z.string().nullable().optional(),
 });
 
 const ASSUMPTION_KEYS = ["lifeExpectancyYears", "discountRate", "medicalInflation", "geographicFactor"] as const;
@@ -45,6 +46,10 @@ export async function PATCH(req: Request, { params }: { params: { caseId: string
     const input = patchSchema.parse(await req.json());
 
     const { assumptionReason: _reason, ...rest } = input;
+    if (rest.preparingPhysicianId) {
+      const member = await prisma.user.findFirst({ where: { id: rest.preparingPhysicianId, firmId: ctx.firm.id } });
+      if (!member) return ok({ error: "Preparing physician must be a member of your firm." }, 400);
+    }
     const data: Record<string, unknown> = { ...rest };
     if (input.dateOfBirth !== undefined) data.dateOfBirth = input.dateOfBirth ? new Date(input.dateOfBirth) : null;
     if (input.dateOfInjury !== undefined) data.dateOfInjury = input.dateOfInjury ? new Date(input.dateOfInjury) : null;

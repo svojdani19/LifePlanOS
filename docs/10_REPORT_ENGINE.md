@@ -39,9 +39,13 @@ E Methodological Basis → F Life Care Plan Integrity Check.
   narrative and its *Supporting functional limitations* (patient) /
   *treating-physician documentation* (provider) evidence buckets.
 - **Methodology** notes the interviews relied upon (patient + named providers).
-- **Qualifications** — when the preparer's seat carries a credential summary
-  and/or uploaded documents, a real Glazer-style credentials paragraph plus a
-  referenced-documents list replaces the generic "CV under separate cover."
+- **Qualifications & signature** — authorship derives from the case's designated
+  **preparing physician** (`Case.preparingPhysician`), not the creator (ATD-11).
+  When that physician carries a credential summary and/or uploaded documents, a
+  real Glazer-style credentials paragraph plus a referenced-documents list
+  replaces the generic "CV under separate cover," and the signature bears their
+  name. With no preparing physician designated, the report falls back to the
+  creator's name with the generic language and renders no credentials.
 - Nothing here is fabricated — only user-entered interview content and
   uploaded credential documents.
 

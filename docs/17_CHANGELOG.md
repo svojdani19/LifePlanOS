@@ -2,6 +2,27 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-12 — Preparing physician: report credentials come only from the signer
+
+Refines EPIC-011 P3. The report's authorship — Qualifications paragraph,
+credential documents list, and signature — now derives from a **per-case
+designated "preparing physician,"** not from the case creator (usually a
+planner). Only that physician's credentials appear; no other seat's do.
+
+- **Schema**: `Case.preparingPhysician` → `User` (`@relation("CasePreparingPhysician")`,
+  `ON DELETE SET NULL`); migration `20260712150000`.
+- **Report** (`export/report.ts`): Qualifications, referenced-documents list, and
+  signature read `preparingPhysician`; when none is designated it falls back to
+  the creator's name with the generic "under separate cover" text and renders
+  **no** credentials.
+- **API**: `PATCH /api/cases/:id` accepts `preparingPhysicianId`, validated to be
+  an active member of the firm.
+- **UI**: a "Preparing Physician" selector on the Report panel (populated with
+  the firm's admin/planner/physician seats).
+- E2E-verified on David Chen's case: with Dr. Sam Okafor, MD designated, the
+  Qualifications section and signature show **his** name + board certification +
+  CV, and the planner-creator's RN CLCP credentials do not appear anywhere.
+
 ## 2026-07-12 — EPIC-011: clinical interviews & reviewer credentials
 
 Closes the physician-authorship / patient-voice gap found benchmarking against

@@ -33,6 +33,12 @@ export default async function CaseDetailPage({ params }: { params: { caseId: str
 
   // Rank the firm's precedent library against this case by "likeness".
   const precedents = await prisma.precedentPlan.findMany({ where: { firmId: ctx.firm.id } });
+  // Medical-personnel seats eligible to be the designated preparing physician.
+  const physicians = await prisma.user.findMany({
+    where: { firmId: ctx.firm.id, status: "ACTIVE", role: { in: ["ADMIN", "PLANNER", "PHYSICIAN_REVIEWER"] } },
+    select: { id: true, name: true, role: true, credentialSummary: true },
+    orderBy: { name: "asc" },
+  });
   const age = c.dateOfBirth ? Math.floor((Date.now() - c.dateOfBirth.getTime()) / (365.25 * 24 * 3600 * 1000)) : null;
   const caseFeatures = {
     injurySpecialty: c.injurySpecialty,
@@ -57,6 +63,7 @@ export default async function CaseDetailPage({ params }: { params: { caseId: str
         totals={{ totalLifetime, totalPresentValue }}
         permissions={ROLE_PERMISSIONS[ctx.user.role]}
         precedents={JSON.parse(JSON.stringify(ranked))}
+        physicians={JSON.parse(JSON.stringify(physicians))}
       />
     </div>
   );

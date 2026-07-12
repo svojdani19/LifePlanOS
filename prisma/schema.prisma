@@ -229,11 +229,12 @@ model User {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
-  sessions     Session[]
-  casesCreated Case[]           @relation("CaseCreatedBy")
-  auditLogs    AuditLog[]
-  usageRecords UsageRecord[]
-  credentials  UserCredential[]
+  sessions       Session[]
+  casesCreated   Case[]           @relation("CaseCreatedBy")
+  casesPreparing Case[]           @relation("CasePreparingPhysician")
+  auditLogs      AuditLog[]
+  usageRecords   UsageRecord[]
+  credentials    UserCredential[]
 
   @@index([firmId])
   @@index([inviteToken])
@@ -272,6 +273,12 @@ model Case {
   firm        Firm   @relation(fields: [firmId], references: [id], onDelete: Cascade)
   createdById String
   createdBy   User   @relation("CaseCreatedBy", fields: [createdById], references: [id])
+
+  // EPIC-011 — the physician deemed to be preparing/authoring the report. When
+  // set, the report's authorship, Qualifications, and signature (and ONLY that
+  // physician's credentials) are drawn from this seat. Null = planner-prepared.
+  preparingPhysicianId String?
+  preparingPhysician   User?   @relation("CasePreparingPhysician", fields: [preparingPhysicianId], references: [id])
 
   // Human-friendly per-firm case number (e.g. "LCP-2026-0007").
   caseNumber String
