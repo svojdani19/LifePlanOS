@@ -32,6 +32,7 @@ const patchSchema = z.object({
   discountRate: z.number().min(0).max(0.2).optional(),
   medicalInflation: z.number().min(0).max(0.2).optional(),
   geographicFactor: z.number().min(0.1).max(3).optional(),
+  assumptionReason: z.string().max(400).optional(),
 });
 
 const ASSUMPTION_KEYS = ["lifeExpectancyYears", "discountRate", "medicalInflation", "geographicFactor"] as const;
@@ -40,18 +41,35 @@ export async function PATCH(req: Request, { params }: { params: { caseId: string
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.edit");
-    await requireCase(ctx, params.caseId);
+    const prior = await requireCase(ctx, params.caseId);
     const input = patchSchema.parse(await req.json());
 
-    const data: Record<string, unknown> = { ...input };
+    const { assumptionReason: _reason, ...rest } = input;
+    const data: Record<string, unknown> = { ...rest };
     if (input.dateOfBirth !== undefined) data.dateOfBirth = input.dateOfBirth ? new Date(input.dateOfBirth) : null;
     if (input.dateOfInjury !== undefined) data.dateOfInjury = input.dateOfInjury ? new Date(input.dateOfInjury) : null;
 
     const updated = await prisma.case.update({ where: { id: params.caseId }, data });
 
-    // If an economic assumption changed, recompute all cost projections.
+    // If an economic assumption changed, recompute all cost projections and
+    // ledger the change (P3): original vs revised, who, when, why — so every
+    // report version's numbers stay explainable.
     let totals: { totalLifetime: number; totalPresentValue: number } | undefined;
-    if (ASSUMPTION_KEYS.some((k) => k in input)) {
+    const changedAssumptions = ASSUMPTION_KEYS.filter((k) => k in input && (input as Record<string, unknown>)[k] !== undefined && (input as Record<string, unknown>)[k] !== (prior as Record<string, unknown>)[k]);
+    if (changedAssumptions.length) {
+      await prisma.assumptionChange.createMany({
+        data: changedAssumptions.map((k) => ({
+          caseId: params.caseId,
+          firmId: ctx.firm.id,
+          field: k,
+          originalValue: (prior as Record<string, unknown>)[k] as number | null,
+          revisedValue: (input as Record<string, unknown>)[k] as number | null,
+          reason: (input as { assumptionReason?: string }).assumptionReason ?? null,
+          userId: ctx.user.id,
+        })),
+      });
+      totals = await recomputeCosts(params.caseId);
+    } else if (ASSUMPTION_KEYS.some((k) => k in input)) {
       totals = await recomputeCosts(params.caseId);
     }
 

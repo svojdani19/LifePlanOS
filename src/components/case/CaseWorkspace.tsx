@@ -1338,7 +1338,30 @@ function CostsPanel({ data, assumptions, totals, canEdit, call }: { data: AnyRec
           <NumField label="Medical Inflation" value={a.medicalInflation} step={0.005} disabled={!canEdit} onChange={(v) => setA({ ...a, medicalInflation: v })} pct />
           <NumField label="Geographic Factor" value={a.geographicFactor} step={0.05} disabled={!canEdit} onChange={(v) => setA({ ...a, geographicFactor: v })} />
         </div>
-        {canEdit && <button className="btn-primary mt-4" onClick={() => call(`/api/cases/${data.id}`, "PATCH", a, "recompute")}>Recompute Costs</button>}
+        {canEdit && (
+          <button
+            className="btn-primary mt-4"
+            onClick={() => {
+              // P3 — assumption changes are ledgered with an optional reason.
+              const reason = prompt("Reason for the assumption change (optional — recorded in the audit ledger):") ?? undefined;
+              call(`/api/cases/${data.id}`, "PATCH", { ...a, assumptionReason: reason || undefined }, "recompute");
+            }}
+          >
+            Recompute Costs
+          </button>
+        )}
+        {Array.isArray(data.assumptionChanges) && data.assumptionChanges.length > 0 && (
+          <div className="mt-4 border-t border-ink-100 pt-3">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">Assumption history</p>
+            <ul className="mt-1 space-y-0.5">
+              {data.assumptionChanges.map((ch: AnyRec) => (
+                <li key={ch.id} className="text-xs text-ink-600">
+                  {formatDate(ch.createdAt)} — {ch.field}: {ch.originalValue ?? "—"} → {ch.revisedValue ?? "—"}{ch.reason ? ` (${ch.reason})` : ""}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
       </div>
       <div className="card overflow-hidden">
         <table className="w-full text-sm">
@@ -1365,6 +1388,10 @@ function CostsPanel({ data, assumptions, totals, canEdit, call }: { data: AnyRec
                         <p><span className="font-medium text-ink-500">Pricing basis / source:</span> {it.pricingSource || "UCR benchmark"}</p>
                         <p><span className="font-medium text-ink-500">Cost range (low–high):</span> {formatMoney(it.lowCost)} – {formatMoney(it.highCost)}</p>
                         <p className="sm:col-span-2"><span className="font-medium text-ink-500">Evidence basis:</span> {it.evidenceStrength || "—"}{it.literatureSupport ? ` — ${it.literatureSupport}` : ""}</p>
+                        <p><span className="font-medium text-ink-500">Start / trigger:</span> {it.startTrigger || "From date of report"}</p>
+                        <p><span className="font-medium text-ink-500">Physician review:</span> {it.physicianStatus === "APPROVED" ? "Physician approved" : it.physicianStatus === "MODIFIED" ? "Physician approved with modification" : it.physicianStatus === "REJECTED" ? "Physician rejected — excluded from totals" : "Awaiting physician review"}</p>
+                        <p><span className="font-medium text-ink-500">Probability:</span> {String(it.probability).toLowerCase()}{it.probability === "SPECULATIVE" || it.probability === "NOT_SUPPORTED" ? " — disclosed, not totaled" : ""}</p>
+                        <p><span className="font-medium text-ink-500">Category:</span> {String(it.category).replace(/_/g, " ").toLowerCase()}</p>
                         <p className="sm:col-span-2"><span className="font-medium text-ink-500">Economic assumptions:</span> discount {(a.discountRate * 100).toFixed(1)}%, medical inflation {(a.medicalInflation * 100).toFixed(1)}%, geographic factor {a.geographicFactor.toFixed(2)} → present value {formatMoney(it.presentValue)}.</p>
                       </div>
                     </td>
@@ -1699,6 +1726,71 @@ function EvidencePanel({ data }: { data: AnyRec }) {
   );
 }
 
+// ── Version comparison (P3) ───────────────────────────────────────────────────
+// Compare any two exported report versions: records, chronology, diagnoses,
+// recommendations, frequencies/durations/codes/pricing, literature, physician
+// review, totals, and assumptions.
+function VersionCompareCard({ caseId }: { caseId: string }) {
+  const [snapshots, setSnapshots] = useState<AnyRec[]>([]);
+  const [a, setA] = useState("");
+  const [b, setB] = useState("");
+  const [diff, setDiff] = useState<AnyRec | null>(null);
+  useEffect(() => {
+    fetch(`/api/cases/${caseId}/snapshots`).then(async (r) => { if (r.ok) setSnapshots((await r.json()).snapshots ?? []); });
+  }, [caseId]);
+  useEffect(() => {
+    if (!a || !b || a === b) { setDiff(null); return; }
+    fetch(`/api/cases/${caseId}/snapshots?a=${a}&b=${b}`).then(async (r) => { if (r.ok) setDiff((await r.json()).diff); });
+  }, [a, b, caseId]);
+  if (snapshots.length < 2) return null; // nothing to compare yet
+  const money = (n: number) => "$" + Math.round(n).toLocaleString();
+  const line = (label: string, items: string[]) => items.length > 0 && (
+    <p className="text-xs text-ink-700"><span className="font-medium text-ink-900">{label}:</span> {items.join("; ")}</p>
+  );
+  return (
+    <div className="card p-5">
+      <h3 className="text-sm font-semibold text-ink-900">Compare Versions</h3>
+      <div className="mt-2 flex items-center gap-2 text-sm">
+        <select className="input w-36" value={a} onChange={(e) => setA(e.target.value)}>
+          <option value="">From…</option>
+          {snapshots.map((s) => <option key={s.id} value={s.version}>v{s.version} — {formatDate(s.createdAt)}</option>)}
+        </select>
+        <span className="text-ink-400">→</span>
+        <select className="input w-36" value={b} onChange={(e) => setB(e.target.value)}>
+          <option value="">To…</option>
+          {snapshots.map((s) => <option key={s.id} value={s.version}>v{s.version} — {formatDate(s.createdAt)}</option>)}
+        </select>
+      </div>
+      {diff && (
+        <div className="mt-3 space-y-1.5 rounded-lg bg-ink-50/70 p-3">
+          {line("Records added", diff.recordsAdded)}
+          {line("Records removed", diff.recordsRemoved)}
+          {(diff.chronologyAdded > 0 || diff.chronologyRemoved > 0) && <p className="text-xs text-ink-700"><span className="font-medium text-ink-900">Chronology:</span> {diff.chronologyAdded} added, {diff.chronologyRemoved} removed</p>}
+          {line("Diagnoses added", diff.diagnosesAdded)}
+          {line("Diagnoses removed", diff.diagnosesRemoved)}
+          {line("Recommendations added", diff.itemsAdded)}
+          {line("Recommendations removed", diff.itemsRemoved)}
+          {diff.fieldChanges.map((f: AnyRec, i: number) => (
+            <p key={i} className="text-xs text-ink-700"><span className="font-medium text-ink-900">{f.service}</span> — {f.field}: {String(f.from ?? "—")} → {String(f.to ?? "—")}</p>
+          ))}
+          {diff.reviewChanges.map((r: AnyRec, i: number) => (
+            <p key={i} className="text-xs text-ink-700"><span className="font-medium text-ink-900">{r.service}</span> — physician review: {r.from.toLowerCase()} → {r.to.toLowerCase()}</p>
+          ))}
+          {diff.literatureChanges.map((l: AnyRec, i: number) => (
+            <p key={i} className="text-xs text-ink-700"><span className="font-medium text-ink-900">{l.service}</span> — literature{l.added.length ? ` +${l.added.length}` : ""}{l.removed.length ? ` −${l.removed.length}` : ""}</p>
+          ))}
+          {diff.assumptionChanges.map((c: AnyRec, i: number) => (
+            <p key={i} className="text-xs text-ink-700"><span className="font-medium text-ink-900">Assumption</span> — {c.field}: {c.from} → {c.to}</p>
+          ))}
+          <p className="border-t border-ink-200/70 pt-1.5 text-xs font-medium text-ink-900">
+            Present value: {money(diff.totalChange.pvFrom)} → {money(diff.totalChange.pvTo)} · Lifetime: {money(diff.totalChange.lifetimeFrom)} → {money(diff.totalChange.lifetimeTo)}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Persisted integrity findings for the case (diagnosis mapping, coding/pricing,
 // inclusion eligibility). Critical findings mean the DOCX exports as a DRAFT.
 function ValidationCard({ caseId }: { caseId: string }) {
@@ -1770,6 +1862,7 @@ function ReportPanel({ data, canExport, call, busy, totals }: { data: AnyRec; ca
   return (
     <div className="space-y-4">
       <ValidationCard caseId={data.id} />
+      <VersionCompareCard caseId={data.id} />
       <div className="card p-5">
         <h3 className="text-sm font-semibold text-ink-900">Generate Report</h3>
         <p className="text-xs text-ink-500">Present value {formatMoney(totals.totalPresentValue)} across {data.futureCareItems.length} items.</p>

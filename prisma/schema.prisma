@@ -305,19 +305,19 @@ model Case {
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
 
-  auditLogs                AuditLog[]
-  documents                Document[]
-  chronologyEvents         ChronologyEvent[]
-  conditions               Condition[]
-  futureCareItems          FutureCareItem[]
-  reviewFindings           ReviewFinding[]
-  reports                  ReportExport[]
-  socUserInputs            SocUserInput[]
-  validationFindings       ValidationFinding[]
-  RecommendationTransition RecommendationTransition[]
-  EvidenceLink             EvidenceLink[]
-  AssumptionChange         AssumptionChange[]
-  CaseSnapshot             CaseSnapshot[]
+  auditLogs                 AuditLog[]
+  documents                 Document[]
+  chronologyEvents          ChronologyEvent[]
+  conditions                Condition[]
+  futureCareItems           FutureCareItem[]
+  reviewFindings            ReviewFinding[]
+  reports                   ReportExport[]
+  socUserInputs             SocUserInput[]
+  validationFindings        ValidationFinding[]
+  recommendationTransitions RecommendationTransition[]
+  evidenceLinks             EvidenceLink[]
+  assumptionChanges         AssumptionChange[]
+  snapshots                 CaseSnapshot[]
 
   @@unique([firmId, caseNumber])
   @@index([firmId])

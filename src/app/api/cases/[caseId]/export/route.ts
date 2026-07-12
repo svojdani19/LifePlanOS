@@ -3,6 +3,8 @@ import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit, recordUsage } from "@/lib/tenant";
 import { buildReportDocx, buildCostCsv } from "@/lib/export/report";
 import { persistCaseValidation } from "@/lib/engine/validation";
+import { buildSnapshotPayload } from "@/lib/engine/snapshot";
+import { assumptionsFor } from "@/lib/engine/generate";
 import { putObject } from "@/lib/storage";
 import { ok, handleError } from "@/lib/api";
 
@@ -79,6 +81,28 @@ export async function POST(req: Request, { params }: { params: { caseId: string 
     // Refresh the persisted integrity findings to match what this export
     // reflected (the report ran the same deterministic check for its totals).
     await persistCaseValidation(params.caseId, ctx.firm.id).catch(() => {});
+
+    // P3 — capture a point-in-time digest so any two report versions can be
+    // compared (records, chronology, diagnoses, items, review status, totals,
+    // assumptions). Best-effort; never blocks the export.
+    try {
+      const full = await prisma.case.findUniqueOrThrow({
+        where: { id: params.caseId },
+        include: {
+          documents: { select: { id: true, filename: true, type: true } },
+          chronologyEvents: { select: { eventDate: true, provider: true, summary: true } },
+          conditions: { select: { name: true, relatedness: true } },
+          futureCareItems: { where: { supersededAt: null } },
+        },
+      });
+      const a = assumptionsFor(full);
+      const payload = buildSnapshotPayload(full as never, a, { lifetime: totalLifetime, presentValue: totalPresentValue });
+      await prisma.caseSnapshot.create({
+        data: { caseId: params.caseId, firmId: ctx.firm.id, version: record.version, reportExportId: record.id, payload: payload as never, createdById: ctx.user.id },
+      });
+    } catch {
+      /* snapshot is best-effort */
+    }
 
     return ok({ export: record });
   } catch (err) {

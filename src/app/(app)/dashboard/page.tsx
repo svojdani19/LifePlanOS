@@ -41,6 +41,90 @@ export default async function DashboardPage() {
   const physicianReview = stageMap.get("PHYSICIAN_REVIEW") ?? 0;
   const aiUsed = aiThisPeriod._sum.quantity ?? 0;
 
+  // ── Role-specific work queue (P3) ──────────────────────────────────────────
+  // Each role sees the queue that matters to it, scoped to the firm; nothing
+  // beyond the role's permissions is exposed.
+  const role = ctx.user.role;
+  const caseName = async (ids: string[]) => {
+    const rows = await prisma.case.findMany({ where: { id: { in: ids }, firmId }, select: { id: true, clientName: true, caseNumber: true } });
+    return new Map(rows.map((r) => [r.id, r]));
+  };
+  const roleCards: { title: string; empty: string; rows: { href: string; label: string; meta: string }[] }[] = [];
+
+  if (role === "PHYSICIAN_REVIEWER" || role === "ADMIN") {
+    // Recommendations awaiting physician review, grouped by case.
+    const pendingByCase = await prisma.futureCareItem.groupBy({
+      by: ["caseId"],
+      where: { physicianStatus: "PENDING", supersededAt: null, case: { firmId, status: { notIn: ["CLOSED", "ARCHIVED"] } } },
+      _count: true,
+      orderBy: { _count: { caseId: "desc" } },
+      take: 6,
+    });
+    const names = await caseName(pendingByCase.map((p) => p.caseId));
+    roleCards.push({
+      title: "Awaiting Physician Review",
+      empty: "No recommendations are awaiting physician review.",
+      rows: pendingByCase.map((p) => ({
+        href: `/cases/${p.caseId}`,
+        label: names.get(p.caseId)?.clientName ?? "Case",
+        meta: `${p._count} item${p._count === 1 ? "" : "s"} pending`,
+      })),
+    });
+  }
+  if (role === "PLANNER" || role === "PARALEGAL" || role === "ADMIN") {
+    // Unresolved integrity findings (export-blocking first), grouped by case.
+    const findingsByCase = await prisma.validationFinding.groupBy({
+      by: ["caseId"],
+      where: { firmId },
+      _count: true,
+      orderBy: { _count: { caseId: "desc" } },
+      take: 6,
+    });
+    const blockingByCase = await prisma.validationFinding.groupBy({
+      by: ["caseId"],
+      where: { firmId, exportBlocking: true },
+      _count: true,
+    });
+    const blocking = new Map(blockingByCase.map((b) => [b.caseId, b._count]));
+    const names = await caseName(findingsByCase.map((f) => f.caseId));
+    roleCards.push({
+      title: "Plan Integrity — Open Findings",
+      empty: "No open integrity findings across your cases.",
+      rows: findingsByCase.map((f) => ({
+        href: `/cases/${f.caseId}`,
+        label: names.get(f.caseId)?.clientName ?? "Case",
+        meta: `${f._count} finding${f._count === 1 ? "" : "s"}${blocking.get(f.caseId) ? ` · ${blocking.get(f.caseId)} blocks export` : ""}`,
+      })),
+    });
+  }
+  if (role === "ATTORNEY_REVIEWER" || role === "ADMIN") {
+    // Damages posture: latest export totals per case + approved vs pending.
+    const latestExports = await prisma.reportExport.findMany({
+      where: { firmId, format: "DOCX" },
+      orderBy: { createdAt: "desc" },
+      take: 12,
+      select: { caseId: true, totalPresentValue: true, version: true },
+    });
+    const seen = new Set<string>();
+    const latest = latestExports.filter((e) => (seen.has(e.caseId) ? false : (seen.add(e.caseId), true))).slice(0, 6);
+    const approvedByCase = await prisma.futureCareItem.groupBy({
+      by: ["caseId", "physicianStatus"],
+      where: { supersededAt: null, caseId: { in: latest.map((l) => l.caseId) } },
+      _count: true,
+    });
+    const names = await caseName(latest.map((l) => l.caseId));
+    const statusCount = (caseId: string, statuses: string[]) => approvedByCase.filter((a) => a.caseId === caseId && statuses.includes(a.physicianStatus)).reduce((s, a) => s + a._count, 0);
+    roleCards.push({
+      title: "Damages Posture (latest exports)",
+      empty: "No reports have been exported yet.",
+      rows: latest.map((l) => ({
+        href: `/cases/${l.caseId}`,
+        label: names.get(l.caseId)?.clientName ?? "Case",
+        meta: `PV $${Math.round(l.totalPresentValue).toLocaleString()} (v${l.version}) · ${statusCount(l.caseId, ["APPROVED", "MODIFIED"])} approved / ${statusCount(l.caseId, ["PENDING"])} pending`,
+      })),
+    });
+  }
+
   const kpis = [
     { label: "Active Cases", value: active, sub: limits.caseLimit === null ? "unlimited" : `of ${limits.caseLimit}`, icon: FolderKanban },
     { label: "Awaiting Physician Sign-off", value: physicianReview, sub: "cases", icon: Sparkles },
@@ -77,6 +161,26 @@ export default async function DashboardPage() {
           </div>
         ))}
       </div>
+
+      {/* Role-specific work queues (P3) */}
+      {roleCards.length > 0 && (
+        <div className="mt-6 grid gap-6 lg:grid-cols-2">
+          {roleCards.map((card) => (
+            <div key={card.title} className="card p-6">
+              <h2 className="text-sm font-semibold text-ink-900">{card.title}</h2>
+              <ul className="mt-4 space-y-2">
+                {card.rows.length === 0 && <li className="text-sm text-ink-500">{card.empty}</li>}
+                {card.rows.map((r) => (
+                  <li key={r.href + r.label} className="flex items-center justify-between gap-2 text-sm">
+                    <Link href={r.href} className="min-w-0 truncate font-medium text-brand-700 hover:underline">{r.label}</Link>
+                    <span className="shrink-0 text-xs text-ink-500">{r.meta}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="mt-6 grid gap-6 lg:grid-cols-2">
         {/* Cases by stage */}
