@@ -19,6 +19,7 @@ import {
 import { prisma } from "@/lib/db";
 import { assumptionsFor } from "@/lib/engine/generate";
 import { runIntegrityCheck, reviewLabel, evaluateCitation, functionalFinding, hasPatientRecordSupport, type RecInput, type CondInput, type PerItem, type IntegrityFinding } from "@/lib/engine/integrity";
+import { buildRecommendationDossier, type DossierCondition, type DossierChronoEvent, type DossierCase, type EvidenceItem } from "@/lib/engine/medicalNecessity";
 import { project } from "@/lib/engine/cost";
 import { typeLabel } from "@/lib/documents/taxonomy";
 import { parseConditions } from "@/lib/intake/preExisting";
@@ -297,52 +298,89 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
   //    routine items get a single specific sentence (§9). ──────────────────────
   const MAJOR_ITEM_PV = 100_000;
   const adultPatient = age == null ? true : age >= 18;
+  // Each recommendation is a complete, physician-quality dossier that can stand
+  // on its own: medical necessity, structured probability, potential challenges,
+  // organized & traceable supporting evidence, contradictory evidence, unknowns,
+  // literature, and a clinical-confidence score. (Design unchanged — this is
+  // content logic; the DOCX styling helpers are the same.)
+  const dossierCase: DossierCase = { subject, pronounPoss: pr.poss, lifeExpectancyYears: life, adult: adultPatient };
+  const evLines = (label: string, items: EvidenceItem[], cap2 = 3) => {
+    if (!items.length) return null;
+    return labeled(label, items.slice(0, cap2).map((e) => `${e.text.replace(/\s+/g, " ").trim()}${e.source ? ` (${e.source})` : ""}`).join("; "));
+  };
   function careRecommendation(it: FutureCareItem): (Paragraph | Table)[] {
     const per = perItemOf(it);
     const cond = per.mapping.condition as unknown as (typeof c.conditions)[number] | null;
     const dxName = cond?.name || c.diagnosis || "the injuries at issue";
-    const major = it.presentValue >= MAJOR_ITEM_PV;
     const recordSupport = hasRecordSupport(it as unknown as RecInput, cond as unknown as CondInput | null);
+    const dossier = buildRecommendationDossier(it as never, cond as unknown as DossierCondition | null, c.chronologyEvents as unknown as DossierChronoEvent[], dossierCase);
     const out: (Paragraph | Table)[] = [];
-    out.push(new Paragraph({ spacing: { before: 220, after: 60 }, keepNext: true, children: [new TextRun({ text: it.service, bold: true, size: 22, color: INK })] }));
+    out.push(new Paragraph({ spacing: { before: 260, after: 60 }, keepNext: true, children: [new TextRun({ text: it.service, bold: true, size: 22, color: NAVY })] }));
 
-    // One patient-specific necessity sentence.
-    const necessity = major
-      ? `In my opinion, and to a reasonable degree of medical probability, ${subject} will require ${lc(it.service)} as reasonable and necessary future medical care arising from ${lc(dxName)}.`
-      : `${cap(lc(it.service))} is reasonable and necessary future care for ${lc(dxName)}.`;
-    out.push(p(`${necessity}${it.rationale ? ` ${period(cap(it.rationale))}` : ""}`));
-    if (major) {
-      out.push(
-        p(
-          it.isLifetime
-            ? `The natural history of this condition supports recurring care across the ${life.toFixed(1)}-year projection horizon.`
-            : `This care is anticipated over approximately ${it.durationYears ?? 1} year${(it.durationYears ?? 1) === 1 ? "" : "s"} from initiation.`,
-        ),
-      );
+    // Spec table — frequency, duration, lifetime quantity, cost, coding, status.
+    const years = it.isLifetime ? life : it.durationYears ?? 0;
+    const lifetimeQty = Math.round(it.frequencyPerYear * Math.max(0, years)) || (years === 0 ? 1 : 0);
+    out.push(
+      specGrid([
+        ["Supporting diagnosis", dxName],
+        ["Specialty", it.specialty || "—"],
+        ["Frequency", freqText(it)],
+        ["Duration", durationText(it, life)],
+        ["Lifetime quantity", lifetimeQty > 0 ? `${lifetimeQty}` : "one-time"],
+        ["CPT", it.cptCode || (per.code.status === "Missing code" ? "Pending coding review" : "—")],
+        ["Unit cost", money(it.unitCost)],
+        ["Projected lifetime cost", `${money(it.lifetimeCost)} (inflation-adjusted)`],
+        ["Present value", money(it.presentValue)],
+        ["Physician review", reviewLabel(it.physicianStatus, recordSupport)],
+      ]),
+    );
+
+    // Medical necessity — the physician narrative (why, patient-specific).
+    out.push(new Paragraph({ spacing: { before: 120, after: 40 }, children: [new TextRun({ text: "Medical necessity.", bold: true, size: 21, color: NAVY })] }));
+    out.push(p(dossier.medicalNecessity));
+
+    // Probability assessment (structured + percentage).
+    const probPresent = dossier.probability.factors.filter((f) => f.present).map((f) => lc(f.label));
+    out.push(labeled("Probability", `${dossier.probability.statement}${probPresent.length ? ` This assessment is supported by ${probPresent.join(", ")}.` : ""}`));
+
+    // Supporting clinical evidence — organized and source-traceable.
+    const se = dossier.supportingEvidence;
+    const evBlock = [
+      evLines("Supporting objective findings", se.objectiveFindings),
+      evLines("Supporting imaging", se.imaging),
+      evLines("Supporting examination findings", se.examination),
+      evLines("Supporting functional limitations", se.functionalLimitations),
+      evLines("Supporting prior treatment", se.priorTreatment),
+      evLines("Supporting treating-physician documentation", se.physicianDocumentation),
+      evLines("Supporting clinical guidelines", se.guidelines),
+    ].filter(Boolean) as Paragraph[];
+    out.push(...evBlock);
+
+    // Literature — each article stating exactly what it supports + limitations.
+    if (dossier.literature.length) {
+      for (const l of dossier.literature) {
+        out.push(
+          new Paragraph({
+            spacing: { after: 60, line: 288 },
+            indent: { left: 240 },
+            children: [
+              new TextRun({ text: `${l.authors ? `${l.authors}. ` : ""}${l.title}. ${l.journal ?? ""}${l.year ? ` ${l.year}` : ""}${l.pmid ? ` (PMID ${l.pmid})` : l.doi ? ` (doi:${l.doi})` : ""}. `, size: 19, color: INK }),
+              new TextRun({ text: `${l.studyType}. Supports ${lc(l.supports)}.${l.limitations ? ` Limitation: ${lc(l.limitations)}.` : ""}`, size: 18, italics: true, color: GREY }),
+            ],
+          }),
+        );
+      }
+    } else {
+      out.push(sourceLine("Direct published literature specific to this recommendation is limited; it rests on the applicable clinical guidance and the treating record."));
     }
 
-    // Citations, filtered for genuine relevance (diagnosis/region/intervention/
-    // population/evidence level) before they may appear (§3).
-    const region = per.mapping.region;
-    const relevantCites = citationList(it.citation).filter((cc) => evaluateCitation({ title: cc.title, journal: cc.journal, year: cc.year, pmid: cc.pmid, doi: cc.doi }, { diagnosis: dxName, region, service: it.service, adult: adultPatient }).relevant);
-    const cite = relevantCites.length ? relevantCites.map(oneCitation).join("  ") : null;
+    // Contradictory evidence, unknowns, potential challenges — never hidden.
+    if (dossier.contradictoryEvidence.length) out.push(labeled("Contradictory evidence", dossier.contradictoryEvidence.slice(0, 3).join(" ")));
+    if (dossier.unknowns.length) out.push(labeled("Unknowns", dossier.unknowns.slice(0, 3).join(" ")));
+    out.push(labeled("Potential challenges", dossier.potentialChallenges.slice(0, 4).join(" ")));
 
-    const specs: [string, string][] = [
-      ["Supporting diagnosis", dxName],
-      ["Specialty", it.specialty || "—"],
-      ["Recommendation status", per.classify.label],
-      ["Physician review", reviewLabel(it.physicianStatus, recordSupport)],
-      ["Frequency", freqText(it)],
-      ["Duration", durationText(it, life)],
-      ["CPT", it.cptCode || (per.code.status === "Missing code" ? "Pending coding review" : "—")],
-      ["Unit cost", money(it.unitCost)],
-      ["Projected lifetime cost", `${money(it.lifetimeCost)} (inflation-adjusted)`],
-      ["Present value", money(it.presentValue)],
-      ["Pricing basis", it.pricingSource || "UCR benchmark"],
-      ["Alternative considered", it.lowerCostAlternative || "None clinically equivalent"],
-    ];
-    out.push(specGrid(specs));
-    out.push(sourceLine(cite ? `Supporting literature: ${cite}` : `Direct published literature specific to this recommendation is limited; it rests on the applicable clinical guidance and the treating record.`));
+    // Clinical confidence.
+    out.push(labeled("Clinical confidence", `${dossier.confidence.level}. ${dossier.confidence.explanation}`));
     return out;
   }
 
@@ -632,7 +670,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
   body.push(h1("Treating Physician Diagnoses", { pageBreak: true }));
   body.push(
     p(
-      `The diagnoses at issue, established from the objective record, are set out below. For each, I state its objective basis, its relationship to the incident, and the clinical basis for the future care it supports.`,
+      `The diagnoses at issue, established from the objective record, are set out below. For each, I state its objective basis and its relationship to the incident. The clinical necessity of the care each diagnosis supports — with its supporting and contradictory evidence, guidelines, and literature — is developed per recommendation in the Future Medical Needs section, which is the clinical centerpiece of this plan.`,
     ),
   );
   for (const cond of c.conditions) {
@@ -643,42 +681,6 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
     if (cond.objectiveEvidence) body.push(labeled("Objective basis", cond.objectiveEvidence));
     if (evSources.length) body.push(sourceLine(`Evidence of record: ${evSources.map((s) => `${s.filename}${s.page ? `, p. ${s.page}` : ""}`).join("; ")}.`));
     if (cond.reasoning) body.push(p(period(cap(cond.reasoning))));
-
-    // §4 — Clinical Basis and Future-Care Relevance. This ordinary Life Care
-    // Plan does NOT adjudicate whether prior care met or departed from the
-    // standard of care; that analysis is reserved to a separate medical-
-    // malpractice / standard-of-care module. Here we discuss only the clinical
-    // basis for the future care the diagnosis supports. Any guideline located
-    // for the condition is presented as supportive clinical guidance — never as
-    // a met/not-met verdict.
-    const soc = cond.socAnalysis as unknown as {
-      guidelines?: { title?: string; journal?: string; year?: string; pmid?: string; doi?: string; quote?: string; userProvided?: boolean }[];
-    } | null;
-    body.push(h2("Clinical Basis and Future-Care Relevance"));
-    const drivenBy = reportItems.filter((it) => perItemOf(it).mapping.condition?.id === cond.id).map((it) => lc(it.service));
-    body.push(
-      p(
-        drivenBy.length
-          ? `The objective findings establish the clinical basis for ${drivenBy.slice(0, 5).join("; ")}${drivenBy.length > 5 ? `, and ${drivenBy.length - 5} further item${drivenBy.length - 5 === 1 ? "" : "s"}` : ""}. In my opinion, and to a reasonable degree of medical probability, the natural history of this condition supports that these needs will persist over ${pr.poss} remaining lifetime and will require the care projected in this plan.`
-          : `The objective findings for this diagnosis inform the overall clinical picture; no separate future-care item is driven by this condition alone.`,
-      ),
-    );
-    const gl = (soc?.guidelines ?? []).filter((g) => g.quote);
-    if (gl.length) {
-      body.push(caption("Relevant clinical guidance (quoted from the source):"));
-      for (const g of gl) {
-        body.push(
-          new Paragraph({
-            spacing: { after: 100, line: 288 },
-            indent: { left: 320 },
-            children: [
-              new TextRun({ text: `“${g.quote}” `, italics: true, size: 20, color: INK }),
-              new TextRun({ text: `— ${g.title}${g.year ? `, ${g.year}` : ""}${g.pmid ? ` (PMID ${g.pmid})` : g.doi ? ` (doi:${g.doi})` : ""}.`, size: 19, color: GREY }),
-            ],
-          }),
-        );
-      }
-    }
     if (cond.opposingRecords) body.push(labeled("Contrary evidence", cond.opposingRecords));
     if (cond.missingInfo) body.push(labeled("Outstanding records / specialist confirmation", cond.missingInfo));
   }

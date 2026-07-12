@@ -6,6 +6,7 @@ import {
   selectPrimary,
   structuredConfidence,
   validateEvidenceQuality,
+  isManagementService,
   claimFor,
 } from "./citationQuality";
 
@@ -62,6 +63,38 @@ describe("citationCompatible — hard display gate", () => {
       { diagnosis: "Post-traumatic knee osteoarthritis", service: "Total knee arthroplasty" },
     );
     expect(r.compatible).toBe(true);
+  });
+});
+
+describe("recommendation-centric literature (Refactor Sprint)", () => {
+  const officeVisits = { diagnosis: "Lumbar burst fracture", service: "Pain management office visits", adult: true };
+
+  it("recognizes a management / office-visit recommendation", () => {
+    expect(isManagementService("Pain management office visits")).toBe(true);
+    expect(isManagementService("Physiatry (PM&R) management visits")).toBe(true);
+    expect(isManagementService("Total knee arthroplasty")).toBe(false);
+    expect(isManagementService("Lumbar transforaminal epidural steroid injection")).toBe(false);
+  });
+
+  it("pain management office visits cannot cite a lumbar fusion trial", () => {
+    const r = citationCompatible({ title: "Lumbar interbody fusion for degenerative stenosis: a randomized controlled trial" }, officeVisits);
+    expect(r.compatible).toBe(false);
+    expect(r.reason).toMatch(/scope mismatch/);
+  });
+
+  it("pain management office visits cannot cite a peripheral nerve stimulation trial", () => {
+    const r = citationCompatible({ title: "Percutaneous 60-day peripheral nerve stimulation of the lumbar medial branches: RCT" }, officeVisits);
+    expect(r.compatible).toBe(false);
+  });
+
+  it("pain management office visits CAN cite management / follow-up literature", () => {
+    expect(citationCompatible({ title: "Longitudinal management and follow-up frequency in chronic low back pain: a guideline" }, officeVisits).compatible).toBe(true);
+    expect(citationCompatible({ title: "Conservative management of osteoporotic vertebral fracture: a prospective cohort" }, officeVisits).compatible).toBe(true);
+  });
+
+  it("a procedural recommendation still draws its own procedural literature", () => {
+    const inj = { diagnosis: "Lumbar radiculopathy", service: "Lumbar transforaminal epidural steroid injection", adult: true };
+    expect(citationCompatible({ title: "Transforaminal epidural steroid injection efficacy: a randomized trial" }, inj).compatible).toBe(true);
   });
 });
 

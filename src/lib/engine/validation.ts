@@ -18,6 +18,7 @@ import {
   type IntegrityReport,
 } from "./integrity";
 import { validateEvidenceQuality } from "./citationQuality";
+import { buildRecommendationDossier, validateRecommendationCompleteness, type DossierChronoEvent, type DossierCondition } from "./medicalNecessity";
 
 export interface CaseValidation {
   findings: {
@@ -34,12 +35,14 @@ export interface CaseValidation {
 
 /** Run the integrity check over a case's current data (no persistence). */
 export async function validateCase(caseId: string): Promise<CaseValidation> {
-  const [items, conditions, kase] = await Promise.all([
-    prisma.futureCareItem.findMany({ where: { caseId, supersededAt: null }, include: { condition: { select: { name: true } } } }),
+  const [items, conditions, kase, chronology] = await Promise.all([
+    prisma.futureCareItem.findMany({ where: { caseId, supersededAt: null }, include: { condition: true } }),
     prisma.condition.findMany({ where: { caseId } }),
     prisma.case.findUnique({ where: { id: caseId }, select: { dateOfBirth: true } }),
+    prisma.chronologyEvent.findMany({ where: { caseId } }),
   ]);
   const adult = !kase?.dateOfBirth || (Date.now() - kase.dateOfBirth.getTime()) / (365.25 * 24 * 3600 * 1000) >= 18;
+  const dossierCase = { subject: "the patient", pronounPoss: "the patient's", lifeExpectancyYears: 40, adult };
   const report = runIntegrityCheck({
     recommendations: items as unknown as RecInput[],
     conditions: conditions as unknown as CondInput[],
@@ -52,6 +55,13 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
   // Clinical Evidence Sprint — validate the stored citations themselves:
   // incompatible citations, weak primaries, cross-region article reuse.
   const evidenceFindings = validateEvidenceQuality(items as never, adult);
+  // Refactor Sprint — each recommendation must be complete (supporting
+  // diagnosis, objective evidence, medical-necessity rationale).
+  const completenessFindings = items.flatMap((it) => {
+    const cond = (it as { condition?: unknown }).condition as DossierCondition | null;
+    const dossier = buildRecommendationDossier(it as never, cond, chronology as unknown as DossierChronoEvent[], dossierCase);
+    return validateRecommendationCompleteness(it as never, dossier, !!cond);
+  });
   const findings = [
     ...report.findings.map((f) => ({
       service: f.recommendation,
@@ -62,6 +72,14 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
       exportBlocking: f.exportBlocking,
     })),
     ...evidenceFindings.map((f) => ({
+      service: f.recommendation,
+      result: f.result,
+      issue: f.issue,
+      severity: f.severity as string,
+      suggestion: f.suggestedCorrection,
+      exportBlocking: f.exportBlocking,
+    })),
+    ...completenessFindings.map((f) => ({
       service: f.recommendation,
       result: f.result,
       issue: f.issue,

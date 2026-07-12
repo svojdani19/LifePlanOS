@@ -8,7 +8,7 @@ import { generateStandardOfCare } from "@/lib/engine/standardOfCare";
 import { mapRecommendationToCondition, type CondInput } from "@/lib/engine/integrity";
 import { planRegeneration } from "@/lib/engine/lifecycle";
 import { rebuildEvidenceGraph } from "@/lib/engine/evidenceGraph";
-import { citationCompatible, evaluateArticle, selectPrimary } from "@/lib/engine/citationQuality";
+import { citationCompatible, evaluateArticle, selectPrimary, isManagementService } from "@/lib/engine/citationQuality";
 import { findCandidates, literatureReachable, activeSources, type Article } from "@/lib/literature";
 import { Prisma } from "@/generated/prisma";
 import type { Case, CareCategory } from "@/generated/prisma";
@@ -556,7 +556,18 @@ export async function enrichCitations(caseId: string): Promise<number> {
     // Specificity-ordered query chain; each query fans out to every source. The
     // diagnosis-anchored tiers keep the pool on the patient's clinical axis.
     const svcHasRegion = region ? new RegExp(`\\b${escapeRe(region)}\\b`, "i").test(svc) : true;
+    // Management / office-visit / monitoring recommendations are about frequency,
+    // follow-up, and medical necessity — query the clinical question, not the
+    // region+procedure (which pulls surgical trials the gate then rejects).
+    const mgmt = isManagementService(it.service);
     const chain: { q: string; bonus: number }[] = [
+      ...(mgmt
+        ? [
+            { q: `${context} longitudinal management follow-up`.trim(), bonus: 7 },
+            { q: `${catTopic} frequency medical necessity`.trim(), bonus: 6 },
+            { q: `${context} outpatient management`.trim(), bonus: 5 },
+          ]
+        : []),
       { q: svcHasRegion ? svc : `${svc} ${region}`.trim(), bonus: 6 },
       { q: hint ? `${svc} ${hint}` : svc, bonus: 6 },
       { q: svc, bonus: 5 },

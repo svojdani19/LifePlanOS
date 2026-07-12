@@ -2,6 +2,39 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-12 — Refactor: Medical Necessity engine replaces the SoC module
+
+- **Retired the Standard-of-Care module as a user-facing workflow**: removed the
+  SoC tab/nav, its report section, and its export path. The guideline-retrieval
+  backend (`standardOfCare.ts`) is RETAINED as an internal service that
+  populates `Condition.socAnalysis`; the `/soc` reviewer-input APIs and data are
+  preserved. No standard-of-care/negligence opinions are generated anywhere.
+- **New `engine/medicalNecessity.ts`** (pure, 11 tests): `buildRecommendationDossier`
+  synthesizes, per recommendation, a complete physician-quality dossier —
+  medical-necessity narrative (physician voice, never a diagnosis restatement),
+  structured probability with a percentage, potential challenges, organized and
+  source-traceable supporting evidence (diagnoses / objective findings / imaging
+  / examination / functional / physician documentation / prior treatment /
+  guidelines), gated literature (each stating exactly what it supports + its
+  applicability + limitations), actively-searched contradictory evidence,
+  honest unknowns, and a structured clinical-confidence score.
+  `validateRecommendationCompleteness` rejects incomplete recommendations.
+- **Future Care is now the clinical centerpiece**: the case panel's per-item
+  detail renders the full dossier (existing design system); the DOCX report
+  renders each recommendation as a standalone dossier and no longer carries a
+  separate SoC/Clinical-Basis section — the Diagnoses section keeps only
+  objective basis + relatedness.
+- **Recommendation-centric literature** (`citationQuality.ts`): a management /
+  office-visit recommendation can no longer cite a specific surgical or
+  interventional trial (`isManagementService` + scope gate); the query chain
+  now targets follow-up/frequency/necessity for such items, and
+  neuromodulation/nerve-stimulation is captured as an interventional family.
+  The sprint's flagship case is fixed: "pain management office visits" no longer
+  retrieves lumbar fusion or peripheral-nerve-stimulation studies.
+- Tests 176 → 187; tsc clean. Verified on seed data (report has zero
+  "Standard of Care"/"Clinical Basis" sections; every recommendation renders a
+  full dossier).
+
 ## 2026-07-12 — Clinical Evidence Sprint: citation quality
 
 - **New `engine/citationQuality.ts`** (pure, 19 tests): hard compatibility gate

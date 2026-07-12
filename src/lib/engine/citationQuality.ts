@@ -45,7 +45,7 @@ const PROCEDURE_FAMILIES: { key: string; re: RegExp }[] = [
   { key: "fusion", re: /\b(fusion|arthrodesis|interbody|instrument(?:ed|ation))\b/i },
   { key: "decompression", re: /\b(discectom|laminectom|decompress|foraminotom)\w*/i },
   { key: "soft_tissue_repair", re: /\b(rotator cuff|tendon repair|ligament reconstruction|\bacl reconstruction|meniscus repair|labral repair)\b/i },
-  { key: "injection", re: /\b(injection|epidural|nerve block|radiofrequency|ablation|viscosupplement)\w*/i },
+  { key: "injection", re: /\b(injection|epidural|nerve block|radiofrequency|ablation|viscosupplement|neuromodulat|nerve stimulat|spinal cord stimulat|\bscs\b)\w*/i },
   { key: "electrodiagnostics", re: /\b(\bemg\b|nerve conduction|electrodiagnos)\w*/i },
   { key: "imaging", re: /\b(\bmri\b|magnetic resonance|\bct\b|computed tomography|radiograph|x-?ray|ultrasound)\b/i },
   { key: "therapy", re: /\b(physical therapy|physiotherapy|occupational therapy|rehabilitation|exercise therapy|gait training)\b/i },
@@ -54,6 +54,12 @@ const PROCEDURE_FAMILIES: { key: string; re: RegExp }[] = [
   { key: "medication", re: /\b(?:(?<!non-)pharmacolog\w*|medication(?!-overuse)|analgesi\w*|opioid\w*|gabapentin|nsaid\w*)/i },
   { key: "attendant_care", re: /\b(attendant care|home care|caregiver|nursing care)\b/i },
 ];
+/** True for a longitudinal-management / office-visit / monitoring recommendation
+ *  that has no procedure of its own — its literature is about frequency,
+ *  follow-up, and medical necessity, not an operation. */
+export function isManagementService(service: string): boolean {
+  return MANAGEMENT_SERVICE.test(service) && procedureFamilies(service).length === 0;
+}
 export function procedureFamily(text: string): string | null {
   for (const f of PROCEDURE_FAMILIES) if (f.re.test(text)) return f.key;
   return null;
@@ -63,6 +69,14 @@ export function procedureFamily(text: string): string | null {
 export function procedureFamilies(text: string): string[] {
   return PROCEDURE_FAMILIES.filter((f) => f.re.test(text)).map((f) => f.key);
 }
+
+// A recommendation that is longitudinal management / office visits / monitoring
+// rather than a discrete procedure — its literature is about frequency, follow-
+// up, and medical necessity, not about performing an operation.
+const MANAGEMENT_SERVICE = /\b(office visit|follow-?up|management visit|management|monitoring|surveillance|evaluation|consultation|clinic visit|\bvisits?\b|case management|coordination)\b/i;
+// Discrete surgical/interventional families that a pure management rec cannot
+// borrow (imaging, therapy, medication, attendant care are fine).
+const PROCEDURAL_FAMILIES = new Set(["arthroplasty", "revision_arthroplasty", "fusion", "decompression", "soft_tissue_repair", "injection", "fracture_fixation"]);
 
 // ── Population ───────────────────────────────────────────────────────────────
 const PEDIATRIC = /\b(pediatric|paediatric|congenital|neonat\w*|infant|adolescen\w*|in children|childhood|\bchild\b|juvenile)\b/i;
@@ -104,9 +118,18 @@ export function citationCompatible(article: ArticleLike, ctx: ClinicalContext): 
   // combined service like "decompression / fusion" spans two families and is
   // compatible with an article in either).
   const artProcs = procedureFamilies(hay);
-  const ctxProcs = procedureFamilies(`${ctx.service} ${ctx.diagnosis}`);
+  const ctxProcs = procedureFamilies(ctx.service); // the RECOMMENDATION's own families
   if (artProcs.length && ctxProcs.length && !artProcs.some((f) => ctxProcs.includes(f))) {
     return { compatible: false, reason: `procedure mismatch (article: ${artProcs.join("/").replace(/_/g, " ")}, recommendation: ${ctxProcs.join("/").replace(/_/g, " ")})` };
+  }
+  // 2b — scope: a pure management / office-visit / monitoring recommendation
+  // (no procedure of its own) is NOT supported by a study of a specific
+  // surgical or interventional procedure. Pain-management office visits must
+  // draw on management/follow-up literature — never a lumbar fusion or nerve-
+  // stimulation trial. Imaging/therapy/medication studies remain compatible.
+  const isManagement = MANAGEMENT_SERVICE.test(ctx.service) && ctxProcs.length === 0;
+  if (isManagement && artProcs.some((f) => PROCEDURAL_FAMILIES.has(f))) {
+    return { compatible: false, reason: `scope mismatch (a ${artProcs.find((f) => PROCEDURAL_FAMILIES.has(f))!.replace(/_/g, " ")} procedure study for a management/office-visit recommendation)` };
   }
   // 3 — population: pediatric literature cannot support an adult recommendation.
   const adult = ctx.adult !== false;

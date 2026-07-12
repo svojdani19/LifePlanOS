@@ -43,7 +43,8 @@ and must obey the fabrication rules below.
    discounted PV; low/expected/high bands; category pricing references with
    bundled-estimate disclosure for non-coded categories.
 6. **Reviews** — defense/completeness critique points (`ReviewFinding`).
-7. **Standard-of-care guidance** (`standardOfCare.ts`) — locates real clinical
+7. **Guideline retrieval** (`standardOfCare.ts`, formerly the Standard-of-Care
+   module) — now an INTERNAL service that locates real clinical
    practice guidelines (concept-mapped queries widen ICD phrasing), quotes
    pertinent language **verbatim**, maps documented care against it, and builds
    a deposition-style rationale. *Report note:* the ordinary LCP renders this as
@@ -60,6 +61,15 @@ and must obey the fabrication rules below.
   key); merged and de-duplicated into one candidate pool; a failing source
   contributes nothing (best-effort). `literatureReachable()` probes
   connectivity so offline runs degrade honestly.
+- **Medical Necessity & Clinical Evidence engine (`medicalNecessity.ts`, Refactor
+  Sprint)**: synthesizes, per future-care recommendation, one physician-quality
+  dossier — medical-necessity narrative, structured probability (+%), potential
+  challenges, organized & source-traceable supporting evidence, contradictory
+  evidence, unknowns, gated literature, and structured confidence. Pure; shared
+  by the report (server) and the Future Care panel (client). REPLACES the
+  standalone Standard-of-Care view; the former SoC engine
+  (`standardOfCare.ts`) is retained as an internal guideline-retrieval service
+  that populates `Condition.socAnalysis`, which the dossier consumes.
 - **Citation quality (`citationQuality.ts`, Clinical Evidence Sprint)**: a hard
   compatibility gate + explicit relevance score + 10-tier hierarchy + structured
   confidence, enforced at selection time in `enrichCitations` and the SoC

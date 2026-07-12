@@ -48,6 +48,7 @@ import { DOC_TYPE_GROUPS, TYPE_LABEL, TYPE_GROUP } from "@/lib/documents/taxonom
 import { pageRange } from "@/lib/documents/meta";
 import { recordEncounters, narrativeFor } from "@/lib/documents/recordSummary";
 import { structuredConfidence } from "@/lib/engine/citationQuality";
+import { buildRecommendationDossier, type DossierCondition, type DossierChronoEvent, type DossierCase, type EvidenceItem, type RecommendationDossier } from "@/lib/engine/medicalNecessity";
 import { Icd10Search } from "@/components/Icd10Search";
 import { PreExistingConditionsModal } from "@/components/PreExistingConditionsModal";
 import { parseConditions, serializeConditions, findConditionsInRecords } from "@/lib/intake/preExisting";
@@ -134,7 +135,6 @@ export function CaseWorkspace({
     { id: "records", label: `Records (${data.documents.length})`, icon: Upload },
     { id: "chronology", label: `Chronology (${data.chronologyEvents.length})`, icon: Activity },
     { id: "causation", label: "Causation", icon: GitBranch },
-    { id: "soc", label: "Standard of Care", icon: BookOpenCheck },
     { id: "evidence", label: "Evidence", icon: Microscope },
     { id: "futurecare", label: `Future Care (${data.futureCareItems.length})`, icon: Stethoscope },
     { id: "costs", label: "Costs", icon: Calculator },
@@ -228,7 +228,6 @@ export function CaseWorkspace({
         {tab === "records" && <RecordsPanel data={data} canEdit={can("records.upload")} call={call} busy={busy} />}
         {tab === "chronology" && <ChronologyPanel data={data} canEdit={can("chronology.edit")} call={call} />}
         {tab === "causation" && <CausationPanel data={data} />}
-        {tab === "soc" && <StandardOfCarePanel data={data} canEdit={can("case.edit")} call={call} />}
         {tab === "evidence" && <EvidencePanel data={data} />}
         {tab === "futurecare" && <FutureCarePanel data={data} canEdit={can("futurecare.edit")} call={call} />}
         {tab === "costs" && <CostsPanel data={data} assumptions={assumptions} totals={totals} canEdit={can("case.edit")} call={call} />}
@@ -1234,6 +1233,85 @@ function mostAgreeableReference(it: AnyRec): string {
   return it.literatureSupport || "Accepted standard-of-care practice for the condition.";
 }
 
+// The complete physician-quality dossier for one recommendation (Refactor
+// Sprint) — Future Care is now the clinical centerpiece; this replaces the
+// separate Standard-of-Care view. Everything is synthesized by the shared pure
+// engine from the case data already loaded (no extra fetch).
+const CONF_TONE_D: Record<string, "green" | "amber" | "red" | "neutral"> = { High: "green", Moderate: "amber", Low: "red", Indeterminate: "neutral" };
+function EvidenceBucket({ label, items }: { label: string; items: EvidenceItem[] }) {
+  if (!items.length) return null;
+  return (
+    <div>
+      <p className="text-xs font-medium text-ink-500">{label}</p>
+      <ul className="mt-0.5 space-y-0.5">
+        {items.slice(0, 4).map((e, i) => (
+          <li key={i} className="text-ink-700">{e.text}{e.source ? <span className="text-ink-400"> ({e.source})</span> : null}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+function RecommendationDossierView({ dossier }: { dossier: RecommendationDossier }) {
+  const se = dossier.supportingEvidence;
+  return (
+    <div className="space-y-3 text-sm">
+      <div>
+        <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Medical necessity</p>
+        <p className="mt-1 leading-relaxed text-ink-800">{dossier.medicalNecessity}</p>
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">Probability</span>
+        <Badge tone={dossier.probability.percentage >= 51 ? "green" : "amber"}>{dossier.probability.percentage}%</Badge>
+        <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">Clinical confidence</span>
+        <Badge tone={CONF_TONE_D[dossier.confidence.level]}>{dossier.confidence.level.toLowerCase()}</Badge>
+      </div>
+      <p className="text-ink-700">{dossier.probability.statement}</p>
+      <div>
+        <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Supporting clinical evidence</p>
+        <div className="mt-1 grid gap-2 md:grid-cols-2">
+          <EvidenceBucket label="Supporting diagnoses" items={se.diagnoses} />
+          <EvidenceBucket label="Objective findings" items={se.objectiveFindings} />
+          <EvidenceBucket label="Imaging" items={se.imaging} />
+          <EvidenceBucket label="Examination findings" items={se.examination} />
+          <EvidenceBucket label="Functional limitations" items={se.functionalLimitations} />
+          <EvidenceBucket label="Prior treatment" items={se.priorTreatment} />
+          <EvidenceBucket label="Treating-physician documentation" items={se.physicianDocumentation} />
+          <EvidenceBucket label="Clinical guidelines" items={se.guidelines} />
+        </div>
+      </div>
+      <div>
+        <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Supporting literature</p>
+        {dossier.literature.length ? (
+          <ol className="mt-1 space-y-1.5">
+            {dossier.literature.map((l, i) => (
+              <li key={i} className="text-ink-700">
+                <span className="font-medium">{l.title}</span>{l.year ? ` (${l.year})` : ""} <span className="text-ink-400">· {l.studyType}</span>
+                <p className="text-xs text-ink-500">Supports {l.supports}. {l.applicability}.{l.limitations ? ` Limitation: ${l.limitations}.` : ""}</p>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className="mt-1 text-ink-400">Direct published literature specific to this recommendation is limited; it rests on the applicable clinical guidance and the treating record.</p>
+        )}
+      </div>
+      {dossier.contradictoryEvidence.length > 0 && (
+        <div><p className="text-xs font-semibold uppercase tracking-wide text-amber-700">Contradictory evidence</p><ul className="mt-0.5 space-y-0.5">{dossier.contradictoryEvidence.slice(0, 4).map((t, i) => <li key={i} className="text-amber-800">{t}</li>)}</ul></div>
+      )}
+      {dossier.unknowns.length > 0 && (
+        <div><p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Unknowns</p><ul className="mt-0.5 space-y-0.5">{dossier.unknowns.slice(0, 4).map((t, i) => <li key={i} className="text-ink-700">{t}</li>)}</ul></div>
+      )}
+      <div><p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Potential challenges</p><ul className="mt-0.5 space-y-0.5">{dossier.potentialChallenges.slice(0, 5).map((t, i) => <li key={i} className="text-ink-700">{t}</li>)}</ul></div>
+      <p className="text-xs text-ink-500">{dossier.confidence.explanation}</p>
+    </div>
+  );
+}
+function dossierForItem(it: AnyRec, data: AnyRec): RecommendationDossier {
+  const cond = (data.conditions ?? []).find((c: AnyRec) => c.id === it.conditionId) ?? null;
+  const poss = data.sex === "FEMALE" ? "her" : data.sex === "MALE" ? "his" : "the patient's";
+  const kase: DossierCase = { subject: data.clientName || "the patient", pronounPoss: poss, lifeExpectancyYears: data.lifeExpectancyYears ?? 40, adult: true };
+  return buildRecommendationDossier(it as never, cond as DossierCondition | null, (data.chronologyEvents ?? []) as DossierChronoEvent[], kase);
+}
+
 function FutureCarePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; call: any }) {
   const [open, setOpen] = useState<string | null>(null);
   const [filter, setFilter] = useState<string>("All");
@@ -1283,35 +1361,14 @@ function FutureCarePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
             </div>
           </div>
           {open === it.id && (
-            <div className="mt-3 grid gap-3 border-t border-ink-100 pt-3 text-sm md:grid-cols-2">
-              <div><p className="text-xs font-medium text-ink-500">Medical necessity</p><p className="text-ink-700">{it.rationale}</p></div>
-              <div><p className="text-xs font-medium text-ink-500">Why {it.probability.toLowerCase()}</p><p className="text-ink-700">{probabilityReasoning(it)}</p></div>
-              <div><p className="text-xs font-medium text-ink-500">Vulnerability ({it.defenseVulnerability.toLowerCase()})</p><p className="text-ink-700">{vulnerabilityReasoning(it)}</p></div>
-              <div><p className="text-xs font-medium text-ink-500">Evidence</p><p className="text-ink-700">{it.evidenceStrength} — {it.literatureSupport}</p><p className="mt-1 text-ink-700"><span className="font-medium text-ink-500">Most agreeable reference: </span>{mostAgreeableReference(it)}</p></div>
-              <div className="md:col-span-2">
-                <p className="text-xs font-medium text-ink-500">Most relevant supporting articles <span className="font-normal text-ink-400">(auto-sourced &amp; ranked across literature databases — verify relevance)</span></p>
-                {citationList(it.citation).length ? (
-                  <ol className="mt-1 space-y-1.5">
-                    {citationList(it.citation).map((cit, i) => (
-                      <li key={cit.pmid ?? cit.doi ?? i} className="flex gap-2">
-                        <span className="text-xs font-semibold text-ink-400">{i + 1}.</span>
-                        <span>
-                          <a href={cit.url} target="_blank" rel="noopener noreferrer" className="font-medium text-brand-700 hover:underline">{cit.title}</a>
-                          <p className="text-xs text-ink-500">{citeMeta(cit)}</p>
-                        </span>
-                      </li>
-                    ))}
-                  </ol>
-                ) : (
-                  <p className="text-ink-400">No indexed article located — see the guideline reference above. (Re-run the pipeline with network access to fetch one.)</p>
-                )}
+            <div className="mt-3 border-t border-ink-100 pt-3">
+              <RecommendationDossierView dossier={dossierForItem(it, data)} />
+              <div className="mt-3 border-t border-ink-100 pt-2 text-sm text-ink-600">
+                <span className="text-xs font-medium text-ink-500">Cost basis: </span>{formatMoney(it.unitCost)}/unit · {it.pricingSource} · range {formatMoney(it.lowCost)}–{formatMoney(it.highCost)}
+                {it.lowerCostAlternative ? <> · <span className="text-xs font-medium text-ink-500">Alternative: </span>{it.lowerCostAlternative}</> : null}
               </div>
-              {it.lowerCostAlternative && <div><p className="text-xs font-medium text-ink-500">Lower-cost alternative</p><p className="text-ink-700">{it.lowerCostAlternative}</p></div>}
-              {it.missingSupport && <div><p className="text-xs font-medium text-amber-700">Missing support</p><p className="text-amber-700">{it.missingSupport}</p></div>}
-              <div><p className="text-xs font-medium text-ink-500">Cost basis</p><p className="text-ink-700">{formatMoney(it.unitCost)}/unit · {it.pricingSource} · range {formatMoney(it.lowCost)}–{formatMoney(it.highCost)}</p></div>
-              {it.physicianNote && <div><p className="text-xs font-medium text-ink-500">Physician note</p><p className="text-ink-700">{it.physicianNote}</p></div>}
               {canEdit && (
-                <div className="md:col-span-2 flex flex-wrap gap-2 pt-1">
+                <div className="mt-2 flex flex-wrap gap-2 pt-1">
                   <InlineProbability item={it} caseId={data.id} call={call} />
                   <button className="btn-outline py-1 text-xs" onClick={async () => { const v = prompt("Frequency per year", String(it.frequencyPerYear)); if (v != null) await call(`/api/cases/${data.id}/future-care/${it.id}`, "PATCH", { frequencyPerYear: Number(v) }); }}>Edit Frequency</button>
                   <button className="btn-outline py-1 text-xs" onClick={async () => { const v = prompt("Unit cost (USD)", String(it.unitCost)); if (v != null) await call(`/api/cases/${data.id}/future-care/${it.id}`, "PATCH", { unitCost: Number(v) }); }}>Edit Unit Cost</button>

@@ -81,11 +81,31 @@ An item enters the damages total only when ALL hold:
 only after a recorded action; otherwise "Supported in treating record; awaiting
 physician review" / "Proposed by planner; awaiting physician review."
 
-## 7. Standard-of-care boundary
-The ordinary LCP discusses **Clinical Basis and Future-Care Relevance** only —
-documented diagnosis, objective findings, natural history, guideline support
-for future care. Met/departed/negligence language is prohibited outside the
-separate, explicitly enabled malpractice module.
+## 7. No Standard-of-Care module (Refactor Sprint)
+LifePlanOS is an evidence-based life-care-planning platform, NOT a malpractice
+platform. There is no user-facing Standard-of-Care workflow, tab, report
+section, or export. The engine's guideline retrieval is retained as an internal
+service feeding each recommendation's dossier. Every future-care recommendation
+instead stands alone via the Medical Necessity & Clinical Evidence engine
+(`medicalNecessity.ts`): medical-necessity narrative (physician voice; never a
+diagnosis restatement), structured probability with a percentage, potential
+challenges (what opposing experts could question), organized source-traceable
+supporting evidence, actively-searched contradictory evidence, honest unknowns,
+gated literature, and a structured clinical-confidence score. Met/departed/
+negligence language is never generated.
+
+## 7a. Recommendation-centric literature
+Literature must support the RECOMMENDATION, not merely share a diagnosis. A
+management / office-visit / monitoring recommendation (no procedure of its own)
+cannot cite a study of a specific surgical or interventional procedure — pain-
+management office visits draw on follow-up/frequency/necessity literature, never
+a lumbar fusion or nerve-stimulation trial (`isManagementService` +
+`citationCompatible` scope gate).
+
+## 7b. Recommendation completeness
+`validateRecommendationCompleteness` rejects a recommendation lacking a
+supporting diagnosis (Critical/blocking), objective evidence (Moderate), or a
+medical-necessity rationale (Moderate).
 
 ## 8. Apportionment
 No blanket "apportioned out" claims. Either a quantitative method is shown
