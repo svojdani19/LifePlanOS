@@ -1064,6 +1064,16 @@ function StandardOfCarePanel({ data, canEdit, call }: { data: AnyRec; canEdit: b
                   <Badge tone={vmeta.tone}>{vmeta.label}</Badge>
                 </div>
                 <p className="mt-1.5 text-sm text-ink-800">{assessment.narrative}</p>
+                {Array.isArray(assessment.opinion) && assessment.opinion.length > 0 && (
+                  <div className="mt-3 border-t border-ink-200/70 pt-2.5">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">Expert rationale — standard of care as applied to this case</p>
+                    <div className="mt-1.5 space-y-2">
+                      {assessment.opinion.map((para: string, i: number) => (
+                        <p key={i} className="text-sm leading-relaxed text-ink-700">{para}</p>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 

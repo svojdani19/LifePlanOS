@@ -63,8 +63,13 @@ export interface SocAlignmentPoint {
 
 export interface SocAssessment {
   verdict: SocVerdict;
-  /** the actual standard-of-care analysis narrative */
+  /** the actual standard-of-care analysis narrative (one-paragraph summary) */
   narrative: string;
+  /** a deposition-style, case-specific expert rationale (one string per
+   *  paragraph): what the standard requires for this diagnosis, which decision
+   *  points the record evidences vs. does not, and the reasoned conclusion —
+   *  composed only from the cited guideline language and the documented record */
+  opinion: string[];
   points: SocAlignmentPoint[];
 }
 
@@ -145,6 +150,10 @@ const SOC_GENERIC = new Set([
   "internal", "external", "primary", "secondary", "unspecified", "initial", "encounter", "status", "post", "residual",
   "deficit", "complication", "complications", "surgical", "surgery", "procedure", "clinical", "medical", "patient", "adult",
   "traumatic", "posttraumatic", "sequela", "sequelae", "displaced", "closed", "open", "affected", "level", "due",
+  // "spine"/"spinal" appear in cervical, thoracic, lumbar AND pediatric guidance
+  // alike — too broad to establish that a guideline is about THIS diagnosis; the
+  // anatomically specific term ("thoracolumbar", "lumbar", "cord") carries it.
+  "spine", "spinal",
 ]);
 // Distinctive (anatomy/procedure/pathology) terms of a diagnosis — the words a
 // truly on-point guideline must speak to. Generic clinical nouns removed.
@@ -355,6 +364,114 @@ export async function generateStandardOfCare(caseId: string): Promise<number> {
 //    guideline addressed). Pure — no network — so it can recompute on demand.
 type EventRow = { eventDate: Date; summary: string; sourcePage: number | null; eventType: string | null; treatment: string | null; diagnosis: string | null; clinicalSignificance: string | null };
 
+// ── Deposition-style expert rationale ────────────────────────────────────────
+// Scope / methods / title-fragment sentences that describe a guideline rather
+// than state a recommendation — never surfaced as a "decision point".
+const SNIPPET_SKIP = /^(?:article\s*\d+\b|results?\b|conclusions?\b|background\b|methods?\b|findings\b|this (?:study|research|review|narrative|guideline|paper|article|consensus|document)\b|we (?:aim|sought|present|develop|conduct|report)|recommendations? (?:were|are) (?:generated|developed|made|presented|formulated)|(?:the )?(?:aim|objective|purpose)\b|this (?:guideline|document) contains|the introduced algorithm)/i;
+function cleanFragment(s: string): string {
+  return s
+    .replace(/^\s*article\s*\d+\s*[:.]\s*/i, "")
+    .replace(/^(?:results?|conclusions?|background|methods?|findings|interpretation)\s*[:.]\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+// The concrete recommendation ("decision point") a guideline quote states, or
+// null when the quote is only scope/methods/boilerplate. Prefers a genuine
+// normative sentence, else the first non-boilerplate sentence.
+function recSnippet(quote: string, maxLen = 150): string | null {
+  const sents = quote.split(/(?<=[.!?])\s+/).map(cleanFragment).filter(Boolean);
+  const pick = sents.find((s) => NORMATIVE.test(s) && !SNIPPET_SKIP.test(s)) ?? sents.find((s) => !SNIPPET_SKIP.test(s)) ?? null;
+  if (!pick) return null;
+  const t = pick.replace(/[.;,]+$/, "");
+  return t.length > maxLen ? t.slice(0, maxLen - 1).trimEnd() + "…" : t;
+}
+const lc0 = (s: string) => (/^[A-Z][a-z]/.test(s) ? s[0].toLowerCase() + s.slice(1) : s);
+const shortTitle = (t: string) => (t.length > 84 ? t.slice(0, 83).trimEnd() + "…" : t);
+
+// Build the case-specific expert rationale as an ordered set of paragraphs. It
+// is composed strictly from the cited guideline language and the documented
+// record — the "expert voice" is a framing of the deterministic mapping, not an
+// invented clinical opinion; the final determination stays the physician's.
+function buildExpertRationale(
+  condName: string,
+  verdict: SocVerdict,
+  guidelines: SocGuideline[],
+  points: SocAlignmentPoint[],
+  recordSupport: SocRecordSupport[],
+  documentation: SocDocumentation,
+  plannedAddresses: boolean,
+  online: boolean,
+): string[] {
+  if (!guidelines.length) {
+    return [
+      online
+        ? `The diagnosis at issue is ${condName}. No indexed clinical practice guideline with quotable recommendations was located for this specific diagnosis, so the governing standard of care cannot be stated from the literature on the present record. The reviewing physician should identify the controlling specialty standard — or the reviewer may add the governing source below — before an opinion on whether the standard was met can be offered.`
+        : `The diagnosis at issue is ${condName}. Guideline lookup was unavailable, so the governing standard of care could not be retrieved. The analysis should be re-run with literature access, or the controlling source added below, before an opinion can be offered.`,
+    ];
+  }
+
+  const paras: string[] = [];
+  const zipped = guidelines.map((g, i) => ({ g, p: points[i] })).filter((x) => x.p);
+  const addressed = zipped.filter((x) => x.p.addressed);
+  const missing = zipped.filter((x) => !x.p.addressed);
+  const lead = guidelines[0];
+  // "per [Guideline], [recommendation]" — leads with the source, falls back to
+  // naming the guideline when its quote states no crisp recommendation.
+  const decisionPoint = (g: SocGuideline, withRec = true): string => {
+    const rec = withRec ? recSnippet(g.quote, 120) : null;
+    return rec ? `per ${shortTitle(g.title)}, ${lc0(rec)}` : `the guidance in ${shortTitle(g.title)}`;
+  };
+
+  // 1 — the standard of care for this diagnosis, as it applies to this case.
+  const leadRec = recSnippet(lead.quote);
+  paras.push(
+    `The diagnosis at issue is ${condName}. The recognized standard of care is drawn from ${guidelines.length} cited clinical practice ${guidelines.length === 1 ? "guideline" : "guidelines"}. Principally, ${shortTitle(lead.title)}${lead.year ? ` (${lead.year})` : ""}${leadRec ? ` provides that ${lc0(leadRec)}` : ` addresses the management of this diagnosis`}. Read together, these sources establish the decision points a treating provider was expected to address for this diagnosis.`,
+  );
+
+  // 2 — decision points that were appropriately addressed.
+  if (addressed.length) {
+    const items = addressed.slice(0, 4).map((x) => `${decisionPoint(x.g)} (${x.p.support ?? "documented in the record"})`);
+    paras.push(
+      `The following decision points were appropriately addressed on the reviewed record: ${items.join("; ")}. Each is consistent with the cited standard as applied to this patient.`,
+    );
+  } else {
+    paras.push(
+      `None of the decision points the cited standard requires are affirmatively documented on the reviewed record — the specific interventions the guidance calls for cannot be matched to any entry in the records produced.`,
+    );
+  }
+
+  // 3 — what should have been done but is not documented (potential departures).
+  if (missing.length) {
+    const items = missing.slice(0, 4).map((x) => decisionPoint(x.g));
+    paras.push(
+      `Conversely, the reviewed records do not evidence the following element${missing.length === 1 ? "" : "s"} the standard calls for: ${items.join("; ")}. If ${missing.length === 1 ? "this measure was" : "these measures were"} not undertaken, that would represent a departure from the standard of care for this diagnosis. It may alternatively reflect treating records not yet produced; those records should be obtained before any element is treated as a confirmed departure.`,
+    );
+  } else if (plannedAddresses) {
+    paras.push(
+      `The elements the standard calls for are accounted for by the documented care together with the projected care plan; none is left unaddressed on the present record.`,
+    );
+  } else {
+    paras.push(`No recommended element of the cited standard is missing from the documented care on this record.`);
+  }
+
+  // 4 — the reasoned conclusion, tied to the verdict.
+  const docPhrase =
+    documentation === "DOCUMENTED"
+      ? `across ${recordSupport.length} dated encounter${recordSupport.length === 1 ? "" : "s"}`
+      : documentation === "LIMITED"
+        ? `in a single encounter (thin documentation)`
+        : `in no encounter in the reviewed records`;
+  const concl: Record<SocVerdict, string> = {
+    CONSISTENT: `Weighing the documented care ${docPhrase} against the cited standard, the care reflected in the present record is consistent with the standard of care for this diagnosis.`,
+    PARTIAL: `Weighing the documented care ${docPhrase} against the cited standard, the care is partially consistent: some decision points are met while others cannot be confirmed from the records produced.`,
+    POTENTIAL_GAP: `Weighing the cited standard against a record that documents management ${docPhrase}, there is a potential gap — the diagnosis-specific care the standard requires is not evidenced. The care may have been rendered and simply not produced, so the complete treating records should be obtained.`,
+    INDETERMINATE: `The documentation is insufficient to assess concordance with the cited standard for this diagnosis on the present record.`,
+  };
+  paras.push(`${concl[verdict]} The ultimate determination of whether the standard of care was met is reserved to the reviewing physician.`);
+
+  return paras;
+}
+
 export function assembleAnalysis(
   condName: string,
   isPrimary: boolean,
@@ -451,7 +568,8 @@ export function assembleAnalysis(
     verdict = "PARTIAL";
     narrative = `The reviewed records document ${recordSupport.length} encounter${recordSupport.length === 1 ? "" : "s"} for this diagnosis, but the specific interventions in the cited guidance could not be automatically matched to the record's language. Concordance with the cited standard requires physician review of the records against the quoted guidance below.${userNote}`;
   }
-  const assessment: SocAssessment = { verdict, narrative, points };
+  const opinion = buildExpertRationale(condName, verdict, guidelines, points, recordSupport, documentation, plannedAddresses, online);
+  const assessment: SocAssessment = { verdict, narrative, opinion, points };
 
   const rationale =
     documentation === "DOCUMENTED"

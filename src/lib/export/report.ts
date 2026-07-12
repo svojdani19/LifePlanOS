@@ -535,7 +535,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
     // Standard-of-care analysis: cited guidance quoted verbatim + documentation status.
     const soc = cond.socAnalysis as unknown as {
       standard?: string; documentation?: string; rationale?: string; gaps?: string | null;
-      assessment?: { verdict?: string; narrative?: string; points?: { guideline?: string; addressed?: boolean; support?: string | null }[] };
+      assessment?: { verdict?: string; narrative?: string; opinion?: string[]; points?: { guideline?: string; addressed?: boolean; support?: string | null }[] };
       guidelines?: { title?: string; journal?: string; year?: string; pmid?: string; doi?: string; quote?: string; userProvided?: boolean }[];
       userNotes?: { text?: string }[];
     } | null;
@@ -543,6 +543,11 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
       const VLABEL: Record<string, string> = { CONSISTENT: "Consistent with cited guidance", PARTIAL: "Partially consistent — gaps noted", POTENTIAL_GAP: "Potential gap — recommended care not documented", INDETERMINATE: "Indeterminate — insufficient documentation" };
       if (soc.assessment) {
         body.push(labeled("Standard-of-care assessment", `${VLABEL[soc.assessment.verdict ?? ""] ?? soc.assessment.verdict ?? ""} — ${soc.assessment.narrative ?? ""}`));
+        const opinion = Array.isArray(soc.assessment.opinion) ? soc.assessment.opinion : [];
+        if (opinion.length) {
+          body.push(labeled("Expert rationale (standard of care as applied to this case)", opinion[0]));
+          for (const para of opinion.slice(1)) body.push(p(para, { size: 19 }));
+        }
       }
       body.push(labeled("Documentation", `${String(soc.documentation ?? "").replace(/_/g, " ")} — ${soc.rationale ?? ""}`));
       for (const g of soc.guidelines ?? []) {
