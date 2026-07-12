@@ -237,7 +237,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
       createdBy: { select: { name: true } },
       chronologyEvents: { orderBy: { eventDate: "asc" } },
       conditions: { orderBy: { confidence: "desc" } },
-      futureCareItems: { orderBy: { presentValue: "desc" } },
+      futureCareItems: { where: { supersededAt: null }, orderBy: { presentValue: "desc" } },
       reviewFindings: true,
       documents: { orderBy: { createdAt: "asc" } },
     },
@@ -984,7 +984,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
 }
 
 export async function buildCostCsv(caseId: string): Promise<string> {
-  const items = await prisma.futureCareItem.findMany({ where: { caseId }, orderBy: { presentValue: "desc" } });
+  const items = await prisma.futureCareItem.findMany({ where: { caseId, supersededAt: null }, orderBy: { presentValue: "desc" } });
   const header = ["Category", "Service", "Specialty", "CPT", "Probability", "Confidence", "Freq/yr", "Duration(yrs)", "UnitCost", "AnnualCost", "LifetimeCost", "PresentValue", "Low", "High", "PricingSource", "EvidenceStrength", "DefenseVulnerability", "PhysicianStatus"];
   const rows = items.map((i) =>
     [i.category, i.service, i.specialty ?? "", i.cptCode ?? "", i.probability, i.confidence, i.frequencyPerYear, i.isLifetime ? "lifetime" : i.durationYears ?? "", i.unitCost, i.annualCost, i.lifetimeCost, i.presentValue, i.lowCost, i.highCost, i.pricingSource ?? "", i.evidenceStrength ?? "", i.defenseVulnerability, i.physicianStatus]

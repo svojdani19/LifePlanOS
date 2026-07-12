@@ -13,7 +13,7 @@ export async function POST(_req: Request, { params }: { params: { caseId: string
     await requireCase(ctx, params.caseId);
 
     const res = await prisma.futureCareItem.updateMany({
-      where: { caseId: params.caseId, physicianStatus: "PENDING" },
+      where: { caseId: params.caseId, physicianStatus: "PENDING", supersededAt: null },
       data: { physicianStatus: "APPROVED" },
     });
 

@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit } from "@/lib/tenant";
 import { generateReviews, paraphraseSummary } from "@/lib/engine/generate";
 import { persistCaseValidation } from "@/lib/engine/validation";
+import { lifecycleFor } from "@/lib/engine/lifecycle";
 import { ok, handleError } from "@/lib/api";
 
 const schema = z.object({
@@ -21,7 +22,7 @@ export async function POST(req: Request, { params }: { params: { caseId: string;
     const ctx = await requireApiContext();
     requirePermission(ctx, "physician.review");
     await requireCase(ctx, params.caseId);
-    const item = await prisma.futureCareItem.findFirst({ where: { id: params.itemId, caseId: params.caseId } });
+    const item = await prisma.futureCareItem.findFirst({ where: { id: params.itemId, caseId: params.caseId, supersededAt: null } });
     if (!item) return ok({ error: "Item not found" }, 404);
 
     const input = schema.parse(await req.json());
@@ -38,15 +39,37 @@ export async function POST(req: Request, { params }: { params: { caseId: string;
     // Auto-regenerate the paraphrased summary, folding in the physician's note
     // when the item is modified (or when a note is provided on approve/reject).
     const summary = paraphraseSummary(merged, input.status === "MODIFIED" || input.note ? note : null);
+    const newLifecycle = lifecycleFor(input.status);
     const updated = await prisma.futureCareItem.update({
       where: { id: item.id },
       data: {
         physicianStatus: input.status,
+        lifecycleStatus: newLifecycle as never,
         physicianNote: note,
         probability: merged.probability,
         frequencyPerYear: merged.frequencyPerYear,
         durationYears: merged.durationYears,
         physicianSummary: summary,
+      },
+    });
+
+    // Ledger the review action (P2.R1 §4).
+    await prisma.recommendationTransition.create({
+      data: {
+        caseId: params.caseId,
+        firmId: ctx.firm.id,
+        lineageId: item.lineageId,
+        itemId: item.id,
+        userId: ctx.user.id,
+        role: ctx.user.role,
+        priorStatus: item.lifecycleStatus,
+        newStatus: newLifecycle,
+        comment: input.note ?? null,
+        modifiedFields: [
+          ...(input.probability !== undefined && input.probability !== item.probability ? ["probability"] : []),
+          ...(input.frequencyPerYear !== undefined && input.frequencyPerYear !== item.frequencyPerYear ? ["frequencyPerYear"] : []),
+          ...(input.durationYears !== undefined && input.durationYears !== item.durationYears ? ["durationYears"] : []),
+        ],
       },
     });
 

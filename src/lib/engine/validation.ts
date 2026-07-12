@@ -34,7 +34,7 @@ export interface CaseValidation {
 /** Run the integrity check over a case's current data (no persistence). */
 export async function validateCase(caseId: string): Promise<CaseValidation> {
   const [items, conditions] = await Promise.all([
-    prisma.futureCareItem.findMany({ where: { caseId } }),
+    prisma.futureCareItem.findMany({ where: { caseId, supersededAt: null } }),
     prisma.condition.findMany({ where: { caseId } }),
   ]);
   const report = runIntegrityCheck({

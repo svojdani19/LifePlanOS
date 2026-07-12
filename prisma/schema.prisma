@@ -305,15 +305,19 @@ model Case {
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
 
-  auditLogs          AuditLog[]
-  documents          Document[]
-  chronologyEvents   ChronologyEvent[]
-  conditions         Condition[]
-  futureCareItems    FutureCareItem[]
-  reviewFindings     ReviewFinding[]
-  reports            ReportExport[]
-  socUserInputs      SocUserInput[]
-  validationFindings ValidationFinding[]
+  auditLogs                AuditLog[]
+  documents                Document[]
+  chronologyEvents         ChronologyEvent[]
+  conditions               Condition[]
+  futureCareItems          FutureCareItem[]
+  reviewFindings           ReviewFinding[]
+  reports                  ReportExport[]
+  socUserInputs            SocUserInput[]
+  validationFindings       ValidationFinding[]
+  RecommendationTransition RecommendationTransition[]
+  EvidenceLink             EvidenceLink[]
+  AssumptionChange         AssumptionChange[]
+  CaseSnapshot             CaseSnapshot[]
 
   @@unique([firmId, caseNumber])
   @@index([firmId])
@@ -746,9 +750,128 @@ model FutureCareItem {
   physicianNote    String?
   physicianSummary String? // paraphrased summary of the medical-necessity point (auto-updated on modify)
 
+  // Recommendation versioning (P2.R1). lineageId is constant across versions;
+  // a superseded version keeps its review history and points forward to its
+  // replacement. Only rows with supersededAt = null are current/totals-eligible.
+  lineageId       String    @default(dbgenerated("(gen_random_uuid())::text"))
+  version         Int       @default(1)
+  supersededById  String?
+  supersededAt    DateTime?
+  lifecycleStatus RecStatus @default(AI_DRAFT)
+
   edited    Boolean  @default(false)
   createdAt DateTime @default(now())
 
+  @@index([caseId])
+  @@index([caseId, supersededAt])
+  @@index([lineageId])
+}
+
+// Recommendation lifecycle states (P2.R1 / spec §12). The legacy 4-state
+// physicianStatus is retained and kept in sync; lifecycleStatus is the richer
+// presentation/workflow state.
+enum RecStatus {
+  AI_DRAFT
+  PLANNER_PROPOSED
+  PLANNER_APPROVED
+  RECORD_SUPPORTED
+  SENT_FOR_PHYSICIAN_REVIEW
+  PHYSICIAN_CLARIFICATION
+  PHYSICIAN_APPROVED
+  PHYSICIAN_MODIFIED
+  PHYSICIAN_REJECTED
+  ATTORNEY_REVIEWED
+  LOCKED_FOR_EXPORT
+  SUPERSEDED
+}
+
+// Ledger of every recommendation status transition (P2.R1 §4): who, in what
+// role, when, from what to what, with the changed fields and materiality.
+// Linked by lineageId (stable) + itemId (the specific version acted on).
+model RecommendationTransition {
+  id     String @id @default(uuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  firmId String
+
+  lineageId      String
+  itemId         String
+  userId         String?
+  role           String? // actor role, or "system" for pipeline actions
+  priorStatus    String
+  newStatus      String
+  comment        String?
+  modifiedFields Json? // string[] of changed field names
+  materialChange Boolean @default(false)
+  caseVersion    Int? // populated from CaseSnapshot once available
+
+  createdAt DateTime @default(now())
+
+  @@index([caseId])
+  @@index([lineageId])
+}
+
+// Evidence graph (P2): materialized relationships between clinical artifacts.
+// Derived data — rebuilt at generation; never user-authored.
+model EvidenceLink {
+  id     String @id @default(uuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  firmId String
+
+  kind     String // DIAGNOSIS_EVIDENCE | REC_DIAGNOSIS | REC_LITERATURE | REC_GUIDELINE | CONTRADICTS
+  fromType String // "condition" | "futureCareItem"
+  fromId   String
+  toType   String // "document" | "condition" | "citation" | "guideline"
+  toId     String? // null for external targets carried in meta (citations)
+
+  documentId String?
+  page       Int?
+  quote      String?
+  meta       Json? // e.g. { title, pmid, doi, url } for literature targets
+
+  createdAt DateTime @default(now())
+
+  @@index([caseId])
+  @@index([caseId, fromType, fromId])
+}
+
+// Ledger of case economic-assumption changes (P3): original vs revised, who,
+// when, why — so a report's numbers are always explainable across versions.
+model AssumptionChange {
+  id     String @id @default(uuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  firmId String
+
+  field         String // lifeExpectancyYears | discountRate | medicalInflation | geographicFactor
+  originalValue Float?
+  revisedValue  Float?
+  reason        String?
+  userId        String?
+
+  createdAt DateTime @default(now())
+
+  @@index([caseId])
+}
+
+// Point-in-time digest of a case's clinical/economic state (P3), captured on
+// each report export so any two versions can be compared. Payload is a compact
+// JSON digest (ids + display fields), not a full data dump.
+model CaseSnapshot {
+  id     String @id @default(uuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  firmId String
+
+  version        Int // matches ReportExport.version when export-triggered
+  reportExportId String?
+  payload        Json
+  createdById    String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([caseId, version])
   @@index([caseId])
 }
 

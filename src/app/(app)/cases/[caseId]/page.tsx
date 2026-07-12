@@ -17,7 +17,7 @@ export default async function CaseDetailPage({ params }: { params: { caseId: str
       documents: { orderBy: { createdAt: "desc" } },
       chronologyEvents: { orderBy: { eventDate: "asc" } },
       conditions: { orderBy: { confidence: "desc" } },
-      futureCareItems: { orderBy: { presentValue: "desc" } },
+      futureCareItems: { where: { supersededAt: null }, orderBy: { presentValue: "desc" } },
       reviewFindings: { orderBy: { createdAt: "asc" } },
       reports: { orderBy: { createdAt: "desc" } },
     },

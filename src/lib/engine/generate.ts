@@ -6,6 +6,8 @@ import { buildChronologyFromRecords } from "@/lib/engine/chronology";
 import { locateConditionEvidence } from "@/lib/engine/evidence";
 import { generateStandardOfCare } from "@/lib/engine/standardOfCare";
 import { mapRecommendationToCondition, type CondInput } from "@/lib/engine/integrity";
+import { planRegeneration } from "@/lib/engine/lifecycle";
+import { rebuildEvidenceGraph } from "@/lib/engine/evidenceGraph";
 import { findCandidates, literatureReachable, activeSources, type Article } from "@/lib/literature";
 import { Prisma } from "@/generated/prisma";
 import type { Case, CareCategory } from "@/generated/prisma";
@@ -65,21 +67,50 @@ export interface PlanResult {
   futureCare: number;
   totalLifetime: number;
   totalPresentValue: number;
+  /** reviewed items preserved as superseded versions (P2.R1) */
+  superseded: number;
 }
 
-export async function generatePlan(caseId: string): Promise<PlanResult> {
+export async function generatePlan(caseId: string, actor?: { userId?: string; role?: string }): Promise<PlanResult> {
   const c = await prisma.case.findUniqueOrThrow({ where: { id: caseId } });
   const a = assumptionsFor(c);
   const pack = packFor(c.injurySpecialty, c.diagnosis);
   const anchor = c.dateOfInjury ?? c.createdAt;
 
-  // Regenerate: clear prior AI output (human edits are re-run explicitly).
+  // Regenerate: clear prior AI output — but NEVER delete a recommendation with
+  // review history (P2.R1). Reviewed items are marked superseded (their review
+  // actions preserved verbatim); only untouched AI drafts are replaced.
+  const priorItems = await prisma.futureCareItem.findMany({
+    where: { caseId, supersededAt: null },
+    select: { id: true, service: true, lineageId: true, version: true, physicianStatus: true, physicianNote: true, edited: true, lifecycleStatus: true },
+  });
+  const regen = planRegeneration(priorItems);
+  const now = new Date();
   await prisma.$transaction([
     prisma.reviewFinding.deleteMany({ where: { caseId } }),
-    prisma.futureCareItem.deleteMany({ where: { caseId } }),
+    ...(regen.deleteIds.length ? [prisma.futureCareItem.deleteMany({ where: { caseId, id: { in: regen.deleteIds } } })] : []),
+    ...(regen.supersede.length
+      ? [prisma.futureCareItem.updateMany({ where: { caseId, id: { in: regen.supersede.map((i) => i.id) } }, data: { supersededAt: now, lifecycleStatus: "SUPERSEDED" } })]
+      : []),
     prisma.condition.deleteMany({ where: { caseId } }),
     prisma.chronologyEvent.deleteMany({ where: { caseId } }),
   ]);
+  // Ledger: one supersession transition per preserved item (P2.R1 §4).
+  if (regen.supersede.length) {
+    await prisma.recommendationTransition.createMany({
+      data: regen.supersede.map((it) => ({
+        caseId,
+        firmId: c.firmId,
+        lineageId: it.lineageId,
+        itemId: it.id,
+        userId: actor?.userId ?? null,
+        role: actor?.role ?? "system",
+        priorStatus: it.lifecycleStatus,
+        newStatus: "SUPERSEDED",
+        comment: "Plan regeneration — review history preserved on this version.",
+      })),
+    });
+  }
 
   // Every injury-related diagnosis: the intake primary + additional diagnoses
   // and the specialty-pack conditions, so the causation map is comprehensive.
@@ -184,7 +215,10 @@ export async function generatePlan(caseId: string): Promise<PlanResult> {
     );
     totalLifetime += p.lifetimeCost;
     totalPresentValue += p.presentValue;
-    await prisma.futureCareItem.create({
+    // Continue the lineage when a reviewed prior version of this service was
+    // superseded above: same lineageId, version+1, forward pointer (P2.R1 §2).
+    const lineage = regen.lineageForService.get(t.service.trim().toLowerCase());
+    const created = await prisma.futureCareItem.create({
       data: {
         caseId,
         // Map each item to the diagnosis it actually belongs to (by body region),
@@ -215,8 +249,12 @@ export async function generatePlan(caseId: string): Promise<PlanResult> {
         missingSupport: t.probability === "SPECULATIVE" || t.confidence < 60 ? "Physician confirmation of medical necessity required." : null,
         plaintiffValue: t.probability === "PROBABLE" ? "Well-supported; core plan item." : "Supports comprehensive future care.",
         physicianSummary: paraphraseSummary(t),
+        ...(lineage ? { lineageId: lineage.lineageId, version: lineage.version + 1 } : {}),
       },
     });
+    if (lineage) {
+      await prisma.futureCareItem.update({ where: { id: lineage.priorId }, data: { supersededById: created.id } });
+    }
   }
 
   await generateReviews(caseId);
@@ -230,10 +268,14 @@ export async function generatePlan(caseId: string): Promise<PlanResult> {
   // Best-effort — never blocks or fabricates; skipped when PubMed is unreachable.
   await enrichCitations(caseId).catch(() => {});
 
+  // Materialize the evidence graph from the structured output above (P2).
+  await rebuildEvidenceGraph(caseId, c.firmId).catch(() => {});
+
   return {
     conditions: conditions.length,
     chronology: chronologyCount,
     futureCare: careItems.length,
+    superseded: regen.supersede.length,
     totalLifetime: Math.round(totalLifetime),
     totalPresentValue: Math.round(totalPresentValue),
   };
@@ -475,7 +517,7 @@ function scoreCandidate(a: Article, ctx: ScoreCtx, tierBonus: number, yearNow: n
 export async function enrichCitations(caseId: string): Promise<number> {
   if (!(await literatureReachable())) return 0;
   const c = await prisma.case.findUnique({ where: { id: caseId } });
-  const items = await prisma.futureCareItem.findMany({ where: { caseId }, include: { condition: true } });
+  const items = await prisma.futureCareItem.findMany({ where: { caseId, supersededAt: null }, include: { condition: true } });
   const yearNow = new Date().getFullYear();
   console.log(`[citations] reviewing sources: ${activeSources().join(", ")}`);
   // Cache the merged candidate pool per query so repeated lookups cost one fan-out.
@@ -563,7 +605,7 @@ export async function enrichCitations(caseId: string): Promise<number> {
 
 export async function generateReviews(caseId: string): Promise<void> {
   await prisma.reviewFinding.deleteMany({ where: { caseId } });
-  const items = await prisma.futureCareItem.findMany({ where: { caseId } });
+  const items = await prisma.futureCareItem.findMany({ where: { caseId, supersededAt: null } });
   const conditions = await prisma.condition.findMany({ where: { caseId } });
   const docCount = await prisma.document.count({ where: { caseId } });
   const objEvidence = conditions.map((x) => x.objectiveEvidence).filter(Boolean)[0] ?? "the ingested medical records and imaging";
@@ -676,7 +718,7 @@ export async function generateReviews(caseId: string): Promise<void> {
 export async function recomputeCosts(caseId: string): Promise<{ totalLifetime: number; totalPresentValue: number }> {
   const c = await prisma.case.findUniqueOrThrow({ where: { id: caseId } });
   const a = assumptionsFor(c);
-  const items = await prisma.futureCareItem.findMany({ where: { caseId } });
+  const items = await prisma.futureCareItem.findMany({ where: { caseId, supersededAt: null } });
   let totalLifetime = 0;
   let totalPresentValue = 0;
   for (const it of items) {

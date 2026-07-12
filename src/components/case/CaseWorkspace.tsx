@@ -134,6 +134,7 @@ export function CaseWorkspace({
     { id: "chronology", label: `Chronology (${data.chronologyEvents.length})`, icon: Activity },
     { id: "causation", label: "Causation", icon: GitBranch },
     { id: "soc", label: "Standard of Care", icon: BookOpenCheck },
+    { id: "evidence", label: "Evidence", icon: Microscope },
     { id: "futurecare", label: `Future Care (${data.futureCareItems.length})`, icon: Stethoscope },
     { id: "costs", label: "Costs", icon: Calculator },
     { id: "reviews", label: `Reviews (${data.reviewFindings.length})`, icon: ShieldAlert },
@@ -227,6 +228,7 @@ export function CaseWorkspace({
         {tab === "chronology" && <ChronologyPanel data={data} canEdit={can("chronology.edit")} call={call} />}
         {tab === "causation" && <CausationPanel data={data} />}
         {tab === "soc" && <StandardOfCarePanel data={data} canEdit={can("case.edit")} call={call} />}
+        {tab === "evidence" && <EvidencePanel data={data} />}
         {tab === "futurecare" && <FutureCarePanel data={data} canEdit={can("futurecare.edit")} call={call} />}
         {tab === "costs" && <CostsPanel data={data} assumptions={assumptions} totals={totals} canEdit={can("case.edit")} call={call} />}
         {tab === "reviews" && <ReviewsPanel points={data.reviewFindings} hasPlan={hasPlan} />}
@@ -1575,6 +1577,128 @@ function PrecedentsPanel({ precedents, data }: { precedents: AnyRec[]; data: Any
 }
 
 // ── Report ───────────────────────────────────────────────────────────────────
+// ── Evidence Explorer (P2) ────────────────────────────────────────────────────
+// Source-backed provenance for any diagnosis or recommendation: why it exists,
+// what supports it, what weakens it, what remains unknown, and what approval is
+// still required. Everything shown is lifted from the materialized evidence
+// graph and the case data — never hidden reasoning.
+function EvidencePanel({ data }: { data: AnyRec }) {
+  const [links, setLinks] = useState<AnyRec[] | null>(null);
+  const [sel, setSel] = useState<string>("");
+  const [rebuilding, setRebuilding] = useState(false);
+  async function load(method: "GET" | "POST" = "GET") {
+    if (method === "POST") setRebuilding(true);
+    try {
+      const res = await fetch(`/api/cases/${data.id}/evidence`, { method });
+      if (res.ok) setLinks((await res.json()).links ?? []);
+    } finally {
+      setRebuilding(false);
+    }
+  }
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [data.id]);
+
+  const conditions: AnyRec[] = data.conditions ?? [];
+  const items: AnyRec[] = data.futureCareItems ?? [];
+  const condById = useMemo(() => new Map(conditions.map((c: AnyRec) => [c.id, c])), [conditions]);
+  const itemById = useMemo(() => new Map(items.map((i: AnyRec) => [i.id, i])), [items]);
+  const [selType, selId] = sel ? sel.split(":") : [null, null];
+  const linksFor = (type: string, id: string) => (links ?? []).filter((l) => l.fromType === type && l.fromId === id);
+
+  // Assemble the five-part, source-backed explanation for the selection.
+  const entity = selType === "condition" ? condById.get(selId!) : selType === "futureCareItem" ? itemById.get(selId!) : null;
+  const own = entity ? linksFor(selType!, selId!) : [];
+  // A recommendation inherits its mapped diagnosis's evidence for display.
+  const mappedCondId = selType === "futureCareItem" ? own.find((l) => l.kind === "REC_DIAGNOSIS")?.toId : null;
+  const mappedCond = mappedCondId ? condById.get(mappedCondId) : null;
+  const inherited = mappedCondId ? linksFor("condition", mappedCondId) : [];
+  const supports = [...own, ...inherited].filter((l) => l.kind === "DIAGNOSIS_EVIDENCE" || l.kind === "REC_LITERATURE" || l.kind === "DIAGNOSIS_GUIDELINE");
+  const weakens = [...own, ...inherited].filter((l) => l.kind === "CONTRADICTS");
+  const unknown = selType === "condition" ? entity?.missingInfo : entity?.missingSupport;
+  const approvalNote =
+    selType === "futureCareItem"
+      ? entity?.physicianStatus === "APPROVED" || entity?.physicianStatus === "MODIFIED"
+        ? `Physician ${entity.physicianStatus === "MODIFIED" ? "approved with modification" : "approved"}${entity.physicianNote ? ` — “${entity.physicianNote}”` : ""}.`
+        : entity?.physicianStatus === "REJECTED"
+          ? "Physician rejected — excluded from the plan totals."
+          : "Awaiting physician review; not represented as approved."
+      : entity?.physicianConfirmed
+        ? "Diagnosis confirmed on physician review."
+        : "Diagnosis pending physician confirmation.";
+
+  const KIND_LABEL: Record<string, string> = { DIAGNOSIS_EVIDENCE: "Record evidence", REC_LITERATURE: "Literature", DIAGNOSIS_GUIDELINE: "Clinical guidance", CONTRADICTS: "Contrary evidence" };
+
+  return (
+    <div className="space-y-4">
+      <div className="card p-5">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 className="text-sm font-semibold text-ink-900">Evidence Explorer</h3>
+            <p className="text-xs text-ink-500">Select a diagnosis or recommendation to see its source-backed provenance: why it exists, what supports it, what weakens it, what remains unknown, and what approval is still required.</p>
+          </div>
+          <button className="btn-outline px-3 py-1.5 text-xs" disabled={rebuilding} onClick={() => load("POST")}>
+            {rebuilding ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null} Rebuild graph
+          </button>
+        </div>
+        <select className="input mt-3 w-full max-w-xl" value={sel} onChange={(e) => setSel(e.target.value)}>
+          <option value="">Select an item…</option>
+          <optgroup label="Diagnoses">
+            {conditions.map((c: AnyRec) => <option key={c.id} value={`condition:${c.id}`}>{c.name}</option>)}
+          </optgroup>
+          <optgroup label="Future-care recommendations">
+            {items.map((i: AnyRec) => <option key={i.id} value={`futureCareItem:${i.id}`}>{i.service}</option>)}
+          </optgroup>
+        </select>
+        {links !== null && links.length === 0 && <p className="mt-2 text-xs text-amber-700">No evidence graph is stored for this case yet — run “Rebuild graph” (or regenerate the plan).</p>}
+      </div>
+
+      {entity && (
+        <div className="card space-y-4 p-5">
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-500">Why this item exists</h4>
+            <p className="mt-1 text-sm text-ink-800">
+              {selType === "condition"
+                ? `${entity.name} is on the causation map as ${String(entity.relatedness).replace(/_/g, " ").toLowerCase()}. ${entity.reasoning ?? ""}`
+                : `${entity.service} is recommended${mappedCond ? ` for ${mappedCond.name}` : ""}. ${entity.rationale ?? ""}`}
+            </p>
+          </div>
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-500">What supports it</h4>
+            {supports.length === 0 && <p className="mt-1 text-sm text-ink-500">No structured support links; see the record chronology.</p>}
+            <ul className="mt-1 space-y-2">
+              {supports.map((l) => (
+                <li key={l.id} className="rounded-lg bg-ink-50/70 p-3 text-xs">
+                  <span className="mr-2 rounded bg-ink-100 px-1.5 py-0.5 text-[10px] font-medium text-ink-600">{KIND_LABEL[l.kind]}</span>
+                  {l.quote && <span className="italic text-ink-800">“{l.quote}” </span>}
+                  <span className="text-ink-500">
+                    {l.kind === "DIAGNOSIS_EVIDENCE" && `— ${l.meta?.filename ?? "record"}${l.page ? `, p. ${l.page}` : ""}`}
+                    {(l.kind === "REC_LITERATURE" || l.kind === "DIAGNOSIS_GUIDELINE") && `— ${l.meta?.title ?? ""}${l.meta?.year ? ` (${l.meta.year})` : ""}${l.meta?.pmid ? ` · PMID ${l.meta.pmid}` : ""}`}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-500">What weakens it</h4>
+            {weakens.length ? (
+              weakens.map((l) => <p key={l.id} className="mt-1 text-sm text-amber-800">{l.quote}</p>)
+            ) : (
+              <p className="mt-1 text-sm text-ink-500">No contradictory evidence identified in the reviewed records.</p>
+            )}
+          </div>
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-500">What remains unknown</h4>
+            <p className="mt-1 text-sm text-ink-700">{unknown || "No outstanding evidence gaps recorded for this item."}</p>
+          </div>
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-500">What approval is still required</h4>
+            <p className="mt-1 text-sm text-ink-700">{approvalNote}</p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Persisted integrity findings for the case (diagnosis mapping, coding/pricing,
 // inclusion eligibility). Critical findings mean the DOCX exports as a DRAFT.
 function ValidationCard({ caseId }: { caseId: string }) {

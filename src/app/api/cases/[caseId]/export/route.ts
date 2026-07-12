@@ -46,7 +46,7 @@ export async function POST(req: Request, { params }: { params: { caseId: string 
     } else {
       const csv = await buildCostCsv(params.caseId);
       key = await putObject(Buffer.from(csv, "utf8"), ".csv");
-      const agg = await prisma.futureCareItem.aggregate({ where: { caseId: params.caseId }, _sum: { lifetimeCost: true, presentValue: true }, _count: true });
+      const agg = await prisma.futureCareItem.aggregate({ where: { caseId: params.caseId, supersededAt: null }, _sum: { lifetimeCost: true, presentValue: true }, _count: true });
       totalLifetime = Math.round(agg._sum.lifetimeCost ?? 0);
       totalPresentValue = Math.round(agg._sum.presentValue ?? 0);
       itemCount = agg._count;
