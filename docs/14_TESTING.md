@@ -13,7 +13,7 @@ not done ([13_DEVELOPER_STANDARDS.md](13_DEVELOPER_STANDARDS.md)).
   network** (vitest.config.ts enforces the pure-logic boundary; Prisma is
   mocked where a guard must be exercised).
 - Run: `npm test` (all), `npx vitest run <file>` (one suite).
-- Current baseline: 15 suites / 128 tests, all green, plus `npx tsc --noEmit`.
+- Current baseline: 19 suites / 157 tests, all green, plus `npx tsc --noEmit`.
 
 ## What is pinned where
 
@@ -37,11 +37,11 @@ consistency. See [10_REPORT_ENGINE.md](10_REPORT_ENGINE.md).
 
 ## Required additions per roadmap phase
 
-- **P2.R1 (recommendation versioning):** regeneration preserves review history
-  (supersede, not delete); approval survives nonmaterial change; material
-  change invalidates approval + records the transition; lineage integrity.
-- **P3:** snapshot/diff correctness; assumption-change recalculation.
-- **Pilot gate (ATD-3):** storage-GC and rate-limiting tests.
+- ~~P2.R1~~ shipped: `engine/lifecycle.test.ts` (12) pins supersede-not-delete,
+  material vs nonmaterial invalidation, lineage integrity; plus a DB E2E.
+- ~~P3~~ shipped: `engine/snapshot.test.ts` (5) pins the version differ.
+- ~~Pilot gate~~ shipped: `auth/rateLimit.test.ts` (4); storage GC is
+  best-effort I/O (verified manually, not unit-tested).
 
 ## Rules
 

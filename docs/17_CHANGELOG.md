@@ -2,6 +2,35 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-12 — Priorities 2–4: lifecycle, evidence graph, explorers, ops
+
+- **P2.R1 Recommendation versioning implemented** (`b92c7b7`): regeneration
+  supersedes (never deletes) recommendations with review history — stable
+  lineage (`lineageId`, version, forward pointer), review actions preserved
+  verbatim; material changes (code-defined field list) invalidate approval and
+  return the item to review with the approved version frozen; nonmaterial
+  wording edits carry approval; every action ledgered in
+  `RecommendationTransition`; `recommendation.supersede` /
+  `recommendation.approval_invalidated` audit events; 12-state
+  `lifecycleStatus` alongside the legacy physicianStatus. E2E-verified.
+- **Evidence graph + Evidence Explorer** (`b92c7b7`): `EvidenceLink` rows
+  lifted strictly from structured engine output (diagnosis→record evidence
+  with page+quote, diagnosis→guideline, recommendation→diagnosis/literature,
+  contradictions); Evidence tab renders the five-part source-backed
+  explanation for any diagnosis or recommendation.
+- **P3 explorers** (`a9eb969`): Cost Explorer drill-down (code, pricing basis,
+  frequency/duration, review status, assumptions) with a reason-captured
+  `AssumptionChange` ledger; `CaseSnapshot` digest on every export with a
+  structured version diff (records/diagnoses/items/codes/pricing/review/
+  literature/assumptions/totals) and a Compare Versions card; role-scoped
+  dashboard queues (physician review queue, integrity findings, attorney
+  damages posture).
+- **P4 operations**: per-email login throttling added to the per-IP limiter
+  (tested); document deletion now garbage-collects the stored object (PHI
+  hygiene); PDF decision recorded (ATD-7 — DOCX canonical). Firm analytics
+  live on the dashboard.
+- Tests 128 → 157 across 19 suites; tsc clean throughout.
+
 ## 2026-07-12 — Documentation consolidation + P2.R1 formal requirement
 
 - **Consolidated documentation into the canonical numbered structure**

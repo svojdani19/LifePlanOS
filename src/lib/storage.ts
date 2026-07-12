@@ -1,4 +1,4 @@
-import { mkdir, writeFile, readFile } from "fs/promises";
+import { mkdir, writeFile, readFile, unlink } from "fs/promises";
 import { join } from "path";
 import { randomUUID } from "crypto";
 
@@ -60,4 +60,22 @@ export async function getObject(key: string): Promise<Buffer> {
     return Buffer.from(bytes);
   }
   return readFile(join(ROOT, localName(key)));
+}
+
+/**
+ * Delete a stored object (PHI hygiene — called when its owning row is removed).
+ * Best-effort: a missing object is not an error.
+ */
+export async function deleteObject(key: string): Promise<void> {
+  try {
+    if (BUCKET) {
+      const { DeleteObjectCommand } = await import("@aws-sdk/client-s3");
+      const client = await s3Client();
+      await client.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: key }));
+      return;
+    }
+    await unlink(join(ROOT, localName(key)));
+  } catch {
+    /* already gone or transient — the row deletion is the source of truth */
+  }
 }

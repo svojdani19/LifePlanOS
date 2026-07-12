@@ -57,15 +57,20 @@ connection's search_path targets `lifeplanos`) → `npx prisma migrate resolve
 
 ### Change log (schema)
 
+- **2026-07-12 (P2/P3)** `RecStatus` enum; `FutureCareItem` + `lineageId`,
+  `version`, `supersededById/At`, `lifecycleStatus`;
+  `RecommendationTransition`, `EvidenceLink`, `AssumptionChange`,
+  `CaseSnapshot` (migration `20260712120000_add_lifecycle_evidence_snapshots`).
+
 - **2026-07-12** `ValidationFinding` added (+ back-relations on Firm/Case) —
   persisted integrity findings.
 - **2026-07-11** `ChronologyEvent` + `eventDateEnd`, `facility`, `subjective`,
   `procedure`, `disposition`; `Condition` + `evidenceSources`, `socAnalysis`;
   `SocUserInput` added.
 
-## Proposed schema — recommendation lineage (P2.R1, not yet implemented)
+## Recommendation lineage (P2.R1 — IMPLEMENTED 2026-07-12)
 
-Additive fields/models satisfying the formal requirement in
+Additive fields/models satisfying the formal requirement in (shipped as designed; `lineageId` is DB-generated `gen_random_uuid()::text` so existing rows backfilled):
 [15_PRODUCT_ROADMAP.md § P2.R1](15_PRODUCT_ROADMAP.md). Nothing existing changes shape.
 
 ```prisma

@@ -9,12 +9,21 @@ import { prisma } from "@/lib/db";
 const WINDOW_MS = 15 * 60 * 1000;
 const MAX_FAILURES = Number(process.env.LOGIN_MAX_FAILURES ?? 10);
 
-/** Returns true when the request may proceed (not rate-limited). */
-export async function loginAllowed(ip: string | null | undefined): Promise<boolean> {
-  if (!ip) return true; // cannot identify the caller → do not lock everyone out
+/**
+ * Returns true when the request may proceed (not rate-limited). Limits by IP
+ * AND by target email, so rotating IPs against one account is also throttled.
+ */
+export async function loginAllowed(ip: string | null | undefined, email?: string | null): Promise<boolean> {
   const since = new Date(Date.now() - WINDOW_MS);
-  const failures = await prisma.loginAttempt.count({ where: { ip, success: false, createdAt: { gte: since } } });
-  return failures < MAX_FAILURES;
+  if (ip) {
+    const byIp = await prisma.loginAttempt.count({ where: { ip, success: false, createdAt: { gte: since } } });
+    if (byIp >= MAX_FAILURES) return false;
+  }
+  if (email) {
+    const byEmail = await prisma.loginAttempt.count({ where: { email, success: false, createdAt: { gte: since } } });
+    if (byEmail >= MAX_FAILURES) return false;
+  }
+  return true;
 }
 
 export async function recordLoginAttempt(ip: string | null | undefined, email: string | null | undefined, success: boolean): Promise<void> {

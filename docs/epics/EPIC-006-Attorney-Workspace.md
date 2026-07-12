@@ -1,7 +1,6 @@
 # EPIC-006 — Attorney Workspace
 
-**Status:** Planned — full PRD to be authored per [README.md](README.md) before
-implementation.
+**Status:** Partially shipped (2026-07-12) — dashboard damages-posture card (PV, approved vs pending). Full PRD still required for the dedicated workspace.
 
 ## Scope pointer
 Role-scoped view: totals, major cost drivers, approved vs pending, weak items, missing records, version changes, export status. Roadmap P3.

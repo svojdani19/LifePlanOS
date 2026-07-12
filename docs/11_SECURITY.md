@@ -64,8 +64,11 @@ passwords, or unnecessary PHI. `AuditLog.meta` must stay small and structural
 
 ## Known gaps / follow-ups
 
-1. Object-storage GC on case/firm deletion (above).
-2. Rate limiting on auth endpoints beyond `LoginAttempt` bookkeeping.
+1. ~~Object-storage GC~~ — documents now GC their stored object on deletion
+   (2026-07-12). Case/firm deletion endpoints do not exist yet; when added,
+   they must GC documents + exports.
+2. ~~Auth rate limiting~~ — per-IP AND per-email failure throttling enforced at
+   login (2026-07-12; `lib/auth/rateLimit.ts`, tested).
 3. Signed, expiring URLs are not used (streaming-only today) — acceptable, but
    revisit if a CDN is introduced.
 4. Retention policy configuration (per-firm) not yet implemented.

@@ -17,19 +17,21 @@ unresolved issues, and **stop for approval**.
 - [x] Financial reproducibility tests (deterministic PV, hand-computed
       inflation/discount regression, fractional years)
 
-## Priority 2 — Evidence graph & lifecycle (approved design notes)
+## Priority 2 — Evidence graph & lifecycle ✅ (2026-07-12)
 
-- [ ] `EvidenceLink` join model populated at generation from existing
+- [x] `EvidenceLink` join model populated at generation from existing
       evidenceSources/citations/mappings (no new extraction)
-- [ ] Evidence Explorer panel inside the existing case workspace (existing
+- [x] Evidence Explorer panel inside the existing case workspace (existing
       design system; source-backed explanations only — why the item exists,
       supporting/weakening evidence, unknowns, approvals still required)
-- [ ] Recommendation lifecycle: additive `lifecycleStatus` (12 states) +
+- [x] Recommendation lifecycle: additive `lifecycleStatus` (12 states) +
       `RecommendationTransition` ledger (user, role, timestamps, prior/new,
       comment, modified fields, case version)
-- [ ] **P2.R1 Recommendation versioning** — formal requirement below (approved
-      2026-07-12; supersedes the earlier one-line note)
-- [ ] Functional-evidence refinements
+- [x] **P2.R1 Recommendation versioning** — implemented per the formal
+      requirement below (supersede-not-delete, lineage, material-change
+      invalidation, audit events, preservation tests)
+- [~] Functional-evidence refinements (baseline shipped in P1; further
+      refinement folds into EPIC-005)
 
 ### P2.R1 — Recommendation versioning (FORMAL REQUIREMENT, binding)
 
@@ -68,24 +70,30 @@ Proposed schema for this requirement lives in
 [06_DATABASE_SPEC.md](06_DATABASE_SPEC.md) § "Proposed schema — recommendation
 lineage (P2.R1)".
 
-## Priority 3 — Explanation & comparison
+## Priority 3 — Explanation & comparison ✅ (2026-07-12)
 
-- [ ] Cost Explorer (per-item assumption breakdown; `AssumptionChange` ledger
+- [x] Cost Explorer (per-item assumption breakdown; `AssumptionChange` ledger
       with original/revised/user/timestamp/reason)
-- [ ] `CaseSnapshot` on export + version-comparison view (records, chronology,
+- [x] `CaseSnapshot` on export + version-comparison view (records, chronology,
       diagnoses, recommendations, codes, pricing, literature, review status,
       totals, assumptions)
-- [ ] Physician review view (queue, evidence, attestation)
-- [ ] Attorney review view (damages, drivers, approved vs pending, weaknesses,
-      version changes)
+- [x] Physician review view (dashboard queue + existing Physician tab; full
+      workspace = EPIC-005)
+- [x] Attorney review view (dashboard damages posture; full workspace =
+      EPIC-006)
 
-## Priority 4 — Firm operations
+## Priority 4 — Firm operations ✅ core items (2026-07-12)
 
-- [ ] Firm-admin analytics (cases by stage, productivity, turnaround, seats,
-      usage, pending approvals, audit)
-- [ ] Performance work (large-case pagination, OCR throughput)
-- [ ] Enterprise integrations; PDF export decision (DOCX→PDF converter)
-- [ ] Object-storage GC on deletion; retention policies; auth rate limiting
+- [x] Firm-admin analytics (cases by stage, seats, usage, pending approvals,
+      audit — dashboard; productivity/turnaround metrics = EPIC-010)
+- [ ] Performance work (large-case pagination, OCR throughput) — deferred
+      until profiling shows need (ATD-2 spirit)
+- [ ] Enterprise integrations — deferred (EPIC-007, needs full PRD)
+- [x] PDF export decision recorded (ATD-7: DOCX remains canonical; PDF via
+      converter when a customer requires it)
+- [x] Object-storage GC on document deletion; auth rate limiting (per-IP +
+      per-email)
+- [ ] Retention policies (per-firm) — open
 
 ## Standing constraints
 

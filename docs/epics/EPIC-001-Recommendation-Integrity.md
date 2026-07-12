@@ -1,7 +1,6 @@
 # EPIC-001 — Recommendation Integrity Engine
 
-**Status:** Partially shipped (Priority 1) · versioning portion formalized as
-P2.R1
+**Status:** Shipped (P1 engine + P2.R1 versioning, 2026-07-12). Remaining: frequency/duration plausibility rules (ATD-4), CPT reference growth under coder review.
 
 ## Problem
 A polished report must never contain medically mismatched, miscoded,

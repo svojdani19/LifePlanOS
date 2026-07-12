@@ -16,7 +16,7 @@ export async function POST(req: Request) {
     const h = headers();
     const ip = h.get("x-forwarded-for");
 
-    if (!(await loginAllowed(ip))) {
+    if (!(await loginAllowed(ip, email))) {
       return ok({ error: "Too many failed attempts. Please wait a few minutes and try again." }, 429);
     }
 
