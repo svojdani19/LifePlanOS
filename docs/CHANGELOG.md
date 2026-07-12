@@ -2,6 +2,31 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-12 — Documentation consolidation + P2.R1 formal requirement
+
+- **Consolidated documentation into the canonical numbered structure**
+  (`docs/00_…14_*.md`, the skeleton created on the remote as source of truth).
+  Filled documents migrated with all content preserved: MASTER_PRODUCT_SPEC→00,
+  ARCHITECTURE→05, DATA_MODEL→06, AI_PIPELINE→07, REPORT_ENGINE→10,
+  SECURITY_AND_PHI→11, ROADMAP→14; duplicates removed; all cross-references
+  rewritten. Previously empty stubs authored: 01 Product Vision, 02 Market
+  Analysis (qualitative, no invented statistics), 03 User Personas, 04 Product
+  Principles, 08 Evidence Graph, 09 Clinical Rules, 12 Deployment, 13 Developer
+  Standards. `docs/README.md` now carries the canonical reading order.
+- **P2.R1 Recommendation versioning** recorded as a formal, binding Priority-2
+  requirement (14_ROADMAP): supersede-not-delete for reviewed recommendations,
+  stable lineage (`lineageId`/`supersededById`), material changes invalidate
+  approval and require re-review, nonmaterial formatting changes do not,
+  supersession/invalidation audit events, and required review-history
+  preservation tests. Proposed lineage schema documented in 06_DATABASE_SPEC.
+- **Accepted Technical Decisions logged** (13_DEVELOPER_STANDARDS ATD log):
+  ValidationFinding rows persisted source of truth (ATD-1); live GET summary
+  counts until profiling says otherwise (ATD-2); storage GC + auth rate
+  limiting gate any paid production pilot (ATD-3); frequency/duration
+  plausibility starts as narrow deterministic rules (ATD-4); supersede-not-
+  delete (ATD-5).
+- Documentation-only change: no application behavior altered.
+
 ## 2026-07-12 — Priority 1: validation persistence, security tests, docs
 
 - **Persisted integrity findings.** New `ValidationFinding` model (+ migration
