@@ -176,8 +176,9 @@ const GUIDELINE_CONCEPTS: { re: RegExp; query: string }[] = [
   { re: /(knee|hip).*(osteoarthritis|arthritis)|osteoarthritis.*(knee|hip)/i, query: "osteoarthritis of the knee" },
   { re: /total knee arthroplasty|knee replacement|\btka\b/i, query: "total knee arthroplasty osteoarthritis" },
   { re: /total hip arthroplasty|hip replacement|\btha\b/i, query: "total hip arthroplasty osteoarthritis" },
-  { re: /(burst|compression|wedge).*(lumbar|thoracic|vertebra|spine)|(lumbar|thoracic).*(burst|compression) fracture/i, query: "thoracolumbar spine fracture" },
+  { re: /(?:burst|compression|wedge)\s+fracture|\bfractur[a-z]*\b[^.]{0,28}\b(?:lumbar|thoracic|thoracolumbar|vertebra)\b|\b(?:lumbar|thoracic|thoracolumbar|vertebra)\b[^.]{0,28}\bfractur/i, query: "thoracolumbar spine fracture" },
   { re: /spinal cord injur|\bsci\b|\btsci\b|tetraplegia|paraplegia|quadripar/i, query: "acute traumatic spinal cord injury" },
+  { re: /spastic|spasticity|tetrapar|hemipar|hemipleg|paraparesis|diplegia|hypertonia/i, query: "spasticity management" },
   { re: /neurogenic bladder|neuromuscular dysfunction of bladder/i, query: "neurogenic bladder" },
   { re: /tibial plateau/i, query: "tibial plateau fracture" },
   { re: /rotator cuff/i, query: "rotator cuff tear" },
@@ -196,7 +197,26 @@ function guidelineQueries(name: string): string[] {
   if (distinctive) qs.push(distinctive);
   const hint = condHint(name);
   if (hint) qs.push(hint);
-  return [...new Set(qs)].slice(0, 2);
+  // Up to 3 queries: a condition can legitimately map to more than one concept
+  // (e.g. "TBI with spastic quadriparesis" → brain injury + spasticity), and
+  // capping at 2 silently dropped a pertinent one. Concept queries lead, so the
+  // distinctive/hint fallbacks are only used when few concepts matched.
+  return [...new Set(qs)].slice(0, 3);
+}
+// The canonical clinical vocabulary of a condition's mapped concept(s). An
+// ICD-verbatim name ("Severe TBI with spastic quadriparesis") yields idiosyncratic
+// terms; a real guideline speaks in standard terms ("traumatic brain injury").
+// Folding the concept's own distinctive terms into the on-topic vocabulary lets
+// the located guidance be recognized as pertinent instead of rejected.
+function conceptTerms(name: string): string[] {
+  const out: string[] = [];
+  for (const g of GUIDELINE_CONCEPTS) if (g.re.test(name)) out.push(...distinctiveTerms(g.query));
+  return out;
+}
+// Terms a guideline must speak to for THIS condition: its own distinctive terms
+// plus its mapped concept's canonical terms.
+function guidanceTerms(name: string): string[] {
+  return [...new Set([...distinctiveTerms(name), ...conceptTerms(name)])];
 }
 
 /**
@@ -216,7 +236,7 @@ const SCOPE = /\b(guideline|recommendations?|consensus|guidance|clinical practic
 export interface QuoteResult { quote: string; score: number }
 
 export function extractGuidelineQuote(abstract: string, conditionName: string, maxLen = 360): QuoteResult | null {
-  const terms = distinctiveTerms(conditionName);
+  const terms = guidanceTerms(conditionName);
   if (!terms.length) return null;
   const sentences = splitSentences(abstract).filter((s) => s.length >= 40 && s.length <= 420);
   let best: { i: number; score: number } | null = null;
@@ -244,7 +264,7 @@ export function extractGuidelineQuote(abstract: string, conditionName: string, m
 // distinctive term, or its abstract names ≥2 — so "infection" alone can't attach
 // an H. pylori guideline to a knee-prosthesis infection.
 function guidanceOnTopic(a: Article, conditionName: string): boolean {
-  const terms = distinctiveTerms(conditionName);
+  const terms = guidanceTerms(conditionName);
   if (!terms.length) return false;
   const title = a.title.toLowerCase();
   if (terms.some((t) => hasTerm(title, t))) return true;
@@ -255,7 +275,7 @@ function guidanceOnTopic(a: Article, conditionName: string): boolean {
 /** Rank guidance candidates for a condition: title term match, recency, reach. */
 function rankGuidance(a: Article, conditionName: string, yearNow: number): number {
   const title = a.title.toLowerCase();
-  const termHits = distinctiveTerms(conditionName).filter((t) => hasTerm(title, t)).length;
+  const termHits = guidanceTerms(conditionName).filter((t) => hasTerm(title, t)).length;
   const year = parseInt(a.year, 10) || 0;
   const recency = year >= yearNow - 5 ? 3 : year >= yearNow - 12 ? 2 : year >= 2000 ? 1 : 0;
   const cc = a.citationCount ?? 0;

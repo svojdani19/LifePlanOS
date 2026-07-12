@@ -30,6 +30,20 @@ describe("extractGuidelineQuote", () => {
     expect(extractGuidelineQuote(abstract, "chronic pain")).toBeNull();
   });
 
+  it("recognizes concept-vocabulary guidance for an ICD-phrased condition", () => {
+    // The guideline speaks in standard terms ("traumatic brain injury") while the
+    // condition is ICD-phrased ("Severe TBI with spastic quadriparesis"). Folding
+    // the mapped concept's vocabulary into the term set must let the quote attach
+    // (previously returned null because neither "TBI" nor "quadriparesis" appears).
+    const abstract =
+      "This consensus statement addresses rehabilitation after neurologic injury. " +
+      "For traumatic brain injury, early multidisciplinary rehabilitation is recommended to improve functional outcomes.";
+    const r = extractGuidelineQuote(abstract, "Severe TBI with spastic quadriparesis");
+    expect(r).not.toBeNull();
+    expect(r!.quote.toLowerCase()).toContain("brain");
+    expect(r!.quote.toLowerCase()).toMatch(/recommended/);
+  });
+
   it("ungluess structured-abstract headers so the quote is clean", () => {
     const glued =
       "Objective To summarize guidance.ResultsArticle 1: For tibial plateau fracture, primary definitive fixation is recommended in stable patients.";
