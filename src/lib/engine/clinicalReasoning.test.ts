@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildReasoningAssessment, type ReasoningItem } from "./clinicalReasoning";
+import { buildReasoningAssessment, detectSetConflicts, type ReasoningItem } from "./clinicalReasoning";
 import type { DossierCase, DossierChronoEvent, DossierCondition } from "./medicalNecessity";
 import type { CondInput } from "./integrity";
 
@@ -134,5 +134,52 @@ describe("buildReasoningAssessment — evidence strength vs. recommendation conf
     expect(a.evidenceStrength).toBe("STRONG");
     expect(a.recommendationConfidence).toBe("HIGH");
     expect(a.materialHash).toMatch(/^[0-9a-f]+$/);
+  });
+});
+
+describe("Phase B — clinical pathway (§8)", () => {
+  it("places a surgery on the definitive-surgical pathway and a therapy on conservative management", () => {
+    const surg = buildReasoningAssessment(tka(), [kneeStrong], chronology, kase);
+    expect(surg.clinicalPathway).toBe("definitive surgical");
+    const pt = buildReasoningAssessment(tka({ service: "Physical therapy", category: "PHYSICAL_THERAPY" }), [kneeStrong], chronology, kase);
+    expect(pt.clinicalPathway).toBe("conservative management");
+  });
+
+  it("prefixes a staged recommendation's pathway with 'contingent'", () => {
+    const a = buildReasoningAssessment(tka({ startTrigger: "failure of conservative care" }), [kneeStrong], chronology, kase);
+    expect(a.clinicalPathway).toMatch(/^contingent /);
+  });
+});
+
+describe("Phase B — cross-recommendation conflicts (§9)", () => {
+  const A = tka({ id: "a", service: "Total knee arthroplasty" });
+  it("flags two active lines for the same service as duplicates", () => {
+    const B = tka({ id: "b", service: "Total knee arthroplasty" });
+    const { flags } = detectSetConflicts([A, B]);
+    expect(flags.get("a")?.some((f) => f.type === "DUPLICATE")).toBe(true);
+    expect(flags.get("b")?.some((f) => f.type === "DUPLICATE")).toBe(true);
+  });
+
+  it("marks a replaced line and excludes it from totals when the replacement is active", () => {
+    const revision = tka({ id: "rev", service: "Revision arthroplasty", category: "REVISION_SURGERY", replacesService: "Total knee arthroplasty" });
+    const { flags, replacedByActive } = detectSetConflicts([A, revision]);
+    expect(flags.get("a")?.some((f) => f.type === "REPLACED_BY")).toBe(true);
+    expect(replacedByActive.has("a")).toBe(true);
+    const assessed = buildReasoningAssessment(A, [kneeStrong], chronology, kase, [], { conflicts: flags.get("a") ?? [], replacedByActive: true });
+    expect(assessed.inclusionInTotalsStatus).toBe("excluded");
+    expect(assessed.inclusionRationale).toMatch(/replaces|double/i);
+  });
+
+  it("flags a recommendation included alongside its own lower-cost alternative", () => {
+    const primary = tka({ id: "p", service: "Total knee arthroplasty", lowerCostAlternative: "Unicompartmental knee replacement" });
+    const alt = tka({ id: "alt", service: "Unicompartmental knee replacement" });
+    const { flags } = detectSetConflicts([primary, alt]);
+    expect(flags.get("p")?.some((f) => f.type === "ALTERNATIVE_BOTH_INCLUDED")).toBe(true);
+  });
+
+  it("surfaces a lower-cost alternative in the assessment's alternativesConsidered", () => {
+    const a = buildReasoningAssessment(tka({ lowerCostAlternative: "Unicompartmental knee replacement" }), [kneeStrong], chronology, kase);
+    expect(a.alternativesConsidered[0].alternative).toMatch(/unicompartmental/i);
+    expect(a.alternativesConsidered[0].rationale).toMatch(/only one belongs in totals/i);
   });
 });

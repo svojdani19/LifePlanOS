@@ -28,6 +28,14 @@ export type DurationClass = "ONE_TIME" | "SHORT_TERM" | "FIXED_COURSE" | "EPISOD
 // A future-care row carries staged/conditional metadata beyond the dossier's view.
 export type ReasoningItem = DossierItem & { contingencyOnly?: boolean | null; replacesService?: string | null };
 
+export type ConflictType = "DUPLICATE" | "REPLACED_BY" | "REPLACES" | "ALTERNATIVE_BOTH_INCLUDED" | "OVERLAP";
+export interface ConflictFlag { type: ConflictType; otherService: string; note: string }
+
+// Set-level context computed across ALL of a case's recommendations, injected
+// into the per-item builder so one assessment can reason about its neighbours
+// (duplicates, staged replacements, alternatives) without a second model.
+export interface SetContext { conflicts: ConflictFlag[]; replacedByActive: boolean }
+
 export interface LiteratureAssessment { title: string; pmid?: string; supports: string; applicability: string; evidenceLevel: number; limitations: string | null }
 
 export interface ReasoningAssessment {
@@ -48,6 +56,10 @@ export interface ReasoningAssessment {
   noTreatmentRisk: string;
   probabilityClassification: ProbabilityClassification;
   clinicalPathwayStage: string | null;
+  clinicalPathway: string;
+  conflictFlags: ConflictFlag[];
+  alternativesConsidered: { alternative: string; rationale: string }[];
+  inclusionRationale: string;
   frequencyRationale: string;
   frequencySupported: boolean;
   durationClass: DurationClass;
@@ -90,6 +102,67 @@ function purposeFor(category: string | null | undefined, isLifetime: boolean): s
 }
 
 const CAUSAL: Record<string, string> = { RELATED: "incident-related", AGGRAVATION: "aggravated pre-existing condition", PREEXISTING_UNRELATED: "unrelated (pre-existing)", SUBSEQUENT_UNRELATED: "unrelated (subsequent)", UNCLEAR: "unclear" };
+
+// §8 — where a recommendation sits on the treatment continuum.
+const PATHWAY: Partial<Record<string, string>> = {
+  PHYSICAL_THERAPY: "conservative management", OCCUPATIONAL_THERAPY: "conservative management", SPEECH_THERAPY: "conservative management", PMR: "conservative management", COGNITIVE_THERAPY: "conservative management",
+  PAIN_MANAGEMENT: "interventional pain management", INJECTION: "interventional pain management", MEDICATION: "conservative management",
+  IMAGING: "surveillance", LABS: "surveillance", PHYSICIAN_VISIT: "surveillance", SPECIALIST_VISIT: "surveillance", PRIMARY_CARE: "surveillance", NEUROLOGY: "surveillance",
+  ORTHOPEDIC_SURGERY: "definitive surgical", NEUROSURGERY: "definitive surgical", FUTURE_SURGERY: "definitive surgical",
+  REVISION_SURGERY: "revision / post-surgical",
+  DME: "functional support", MOBILITY_AID: "functional support", HOME_MODIFICATION: "functional support", ORTHOTICS_PROSTHETICS: "functional support",
+  ATTENDANT_CARE: "supportive care", SKILLED_NURSING: "supportive care", COMPLICATION_MANAGEMENT: "complication management", PSYCH: "behavioral health",
+};
+function pathwayOf(item: ReasoningItem): string {
+  const base = PATHWAY[(item.category ?? "").toUpperCase()] ?? "individualized plan";
+  return item.startTrigger || item.contingencyOnly ? `contingent ${base}` : base;
+}
+
+const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+/**
+ * Cross-recommendation coherence (§9, Phase B). Detects duplicates, staged
+ * replacement chains (A `replacesService` B), and a recommendation included in
+ * totals alongside its own lower-cost alternative. Returns flags per item id
+ * (or index when unsaved) plus which items are replaced by an active sibling.
+ */
+export function detectSetConflicts(items: ReasoningItem[]): { flags: Map<string, ConflictFlag[]>; replacedByActive: Set<string> } {
+  const key = (it: ReasoningItem, i: number) => it.id ?? `#${i}`;
+  const flags = new Map<string, ConflictFlag[]>();
+  const replacedByActive = new Set<string>();
+  const push = (k: string, f: ConflictFlag) => { const a = flags.get(k) ?? []; a.push(f); flags.set(k, a); };
+  const active = (it: ReasoningItem) => !it.startTrigger && !it.contingencyOnly;
+
+  items.forEach((a, i) => {
+    const ka = key(a, i);
+    items.forEach((b, j) => {
+      if (i === j) return;
+      const kb = key(b, j);
+      // Duplicate: same service, both in the active plan.
+      if (norm(a.service) === norm(b.service) && active(a) && active(b) && i < j) {
+        push(ka, { type: "DUPLICATE", otherService: b.service, note: `Duplicated by another active line for "${b.service}"; only one should enter totals.` });
+        push(kb, { type: "DUPLICATE", otherService: a.service, note: `Duplicates "${a.service}"; only one should enter totals.` });
+      }
+      // Staged replacement: A replaces B (A triggers, B becomes inactive).
+      if (a.replacesService && norm(a.replacesService) === norm(b.service)) {
+        push(ka, { type: "REPLACES", otherService: b.service, note: `If triggered, replaces "${b.service}" — hold as a staged alternative, not additive.` });
+        push(kb, { type: "REPLACED_BY", otherService: a.service, note: `Superseded by "${a.service}" if its trigger is met.` });
+        if (active(a)) replacedByActive.add(kb);
+      }
+      // Recommended option and its own lower-cost alternative both included.
+      if (a.lowerCostAlternative && norm(a.lowerCostAlternative) === norm(b.service) && active(a) && active(b) && i < j) {
+        push(ka, { type: "ALTERNATIVE_BOTH_INCLUDED", otherService: b.service, note: `Its lower-cost alternative "${b.service}" is also in totals — do not count both.` });
+        push(kb, { type: "ALTERNATIVE_BOTH_INCLUDED", otherService: a.service, note: `Listed as the lower-cost alternative to "${a.service}"; counting both double-counts the need.` });
+      }
+    });
+  });
+  return { flags, replacedByActive };
+}
+
+function alternativesFor(item: ReasoningItem): { alternative: string; rationale: string }[] {
+  if (!item.lowerCostAlternative) return [];
+  return [{ alternative: item.lowerCostAlternative, rationale: `A lower-cost alternative (${item.lowerCostAlternative}) is on record. ${item.service} is recommended on the documented clinical basis; if the alternative is clinically acceptable for this patient it should be substituted, and only one belongs in totals.` }];
+}
 
 function evidenceStrengthFrom(bestLevel: number | null, hasGuideline: boolean): EvidenceStrength {
   if (bestLevel != null && bestLevel <= 2) return "EXPERT_CONSENSUS"; // guideline / consensus statement
@@ -134,6 +207,7 @@ export function buildReasoningAssessment(
   chronology: DossierChronoEvent[],
   kase: DossierCase,
   interviews: DossierInterview[] = [],
+  setContext: SetContext = { conflicts: [], replacedByActive: false },
 ): ReasoningAssessment {
   const rec = item as unknown as RecInput;
   const mapping = mapRecommendationToCondition(rec, conditions);
@@ -178,15 +252,23 @@ export function buildReasoningAssessment(
   const evidenceStrength = evidenceStrengthFrom(bestLevel, se.guidelines.length > 0);
   const recommendationConfidence = mapConfidence(dossier.confidence.level);
 
-  // A staged/contingent item is disclosed but never entered into totals (§10), regardless of how well supported.
-  const inclusionInTotalsStatus: "included" | "excluded" | "contingency" = staged ? "contingency" : classify.includedInTotal ? "included" : "excluded";
+  // §9/§10 inclusion. Precedence: replaced-by-an-active-sibling → staged/contingent
+  // → supported-and-included → excluded. A staged item is disclosed but never
+  // entered into totals regardless of how well supported.
+  const alternativeDoubleCount = setContext.conflicts.some((c) => c.type === "ALTERNATIVE_BOTH_INCLUDED");
+  let inclusionInTotalsStatus: "included" | "excluded" | "contingency";
+  let inclusionRationale: string;
+  if (setContext.replacedByActive) { inclusionInTotalsStatus = "excluded"; inclusionRationale = "Excluded from totals: an active recommendation replaces this line, so counting it would double the cost."; }
+  else if (staged) { inclusionInTotalsStatus = "contingency"; inclusionRationale = "Disclosed as a contingency, not entered into totals: it applies only if its trigger is met."; }
+  else if (classify.includedInTotal) { inclusionInTotalsStatus = "included"; inclusionRationale = alternativeDoubleCount ? "Included, but a lower-cost alternative is also listed — only one belongs in totals; reconcile before finalizing." : "Included in totals: probable, supported, and cost-coherent."; }
+  else { inclusionInTotalsStatus = "excluded"; inclusionRationale = "Excluded from totals: support is insufficient for a probable, defensible cost line at this time."; }
   const costEligibilityStatus = codeCritical ? "Coding/pricing inconsistency must be resolved before inclusion." : pricing.status === "Unsupported bundled estimate" ? "Bundled estimate — attach a code or disclose the bundled basis." : "Cost basis is coherent for inclusion.";
   const validationStatus: "ok" | "blocking" | "pending" = !mapping.matched || codeCritical ? "blocking" : physicianApproved || frequencySupported ? "ok" : "pending";
 
   const trajectory = condition?.opposingRecords && /improv/i.test(condition.opposingRecords) ? "improving" : item.isLifetime ? "chronic, stable-to-worsening" : "uncertain";
   const missing = [condition?.missingInfo ?? "", item.missingSupport ?? "", ...dossier.unknowns].map((s) => String(s).trim()).filter(Boolean).slice(0, 4);
 
-  const materialHash = hashStr([item.service, item.category ?? "", mapping.conditionId ?? "", region, purposeFor(item.category, !!item.isLifetime), freqN, durationClass, probabilityClassification, inclusionInTotalsStatus, item.startTrigger ?? "", item.replacesService ?? "", item.physicianStatus ?? ""].join("|"));
+  const materialHash = hashStr([item.service, item.category ?? "", mapping.conditionId ?? "", region, purposeFor(item.category, !!item.isLifetime), freqN, durationClass, probabilityClassification, inclusionInTotalsStatus, item.startTrigger ?? "", item.replacesService ?? "", item.physicianStatus ?? "", setContext.conflicts.map((c) => c.type + c.otherService).sort().join(",")].join("|"));
 
   return {
     recommendationService: item.service,
@@ -206,6 +288,10 @@ export function buildReasoningAssessment(
     noTreatmentRisk: `Without ${lc(item.service)}, ${lens.concern} would go unaddressed for ${kase.subject}.`,
     probabilityClassification,
     clinicalPathwayStage: staged ? "contingent / staged" : classify.includedInTotal ? "active plan" : "proposed",
+    clinicalPathway: pathwayOf(item),
+    conflictFlags: setContext.conflicts,
+    alternativesConsidered: alternativesFor(item),
+    inclusionRationale,
     frequencyRationale,
     frequencySupported,
     durationClass,
@@ -247,6 +333,10 @@ const toRow = (a: ReasoningAssessment) => ({
   noTreatmentRisk: a.noTreatmentRisk,
   probabilityClassification: a.probabilityClassification,
   clinicalPathwayStage: a.clinicalPathwayStage,
+  clinicalPathway: a.clinicalPathway,
+  conflictFlags: a.conflictFlags as unknown as Prisma.InputJsonValue,
+  alternativesConsidered: a.alternativesConsidered as unknown as Prisma.InputJsonValue,
+  inclusionRationale: a.inclusionRationale,
   frequencyRationale: a.frequencyRationale,
   frequencySupported: a.frequencySupported,
   durationClass: a.durationClass,
@@ -291,9 +381,12 @@ export async function persistCaseReasoning(caseId: string, firmId: string) {
   const seenRec = new Set<string>();
   const ops: Prisma.PrismaPromise<unknown>[] = [];
 
+  // Phase B — cross-recommendation coherence, computed once across the set.
+  const { flags: conflictFlags, replacedByActive } = detectSetConflicts(items as unknown as ReasoningItem[]);
+
   for (const it of items) {
     seenRec.add(it.id);
-    const a = buildReasoningAssessment(it as unknown as ReasoningItem, conds, chronology as unknown as DossierChronoEvent[], dossierCase, interviews as unknown as DossierInterview[]);
+    const a = buildReasoningAssessment(it as unknown as ReasoningItem, conds, chronology as unknown as DossierChronoEvent[], dossierCase, interviews as unknown as DossierInterview[], { conflicts: conflictFlags.get(it.id) ?? [], replacedByActive: replacedByActive.has(it.id) });
     const prior = byRec.get(it.id);
     if (!prior) ops.push(prisma.clinicalReasoningAssessment.create({ data: { ...toRow(a), caseId, firmId, recommendationId: it.id } }));
     else if (prior.materialHash !== a.materialHash || prior.status !== "ASSESSED") ops.push(prisma.clinicalReasoningAssessment.update({ where: { id: prior.id }, data: toRow(a) }));

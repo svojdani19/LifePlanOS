@@ -1073,11 +1073,17 @@ model ClinicalReasoningAssessment {
   noTreatmentRisk           String?
   probabilityClassification ProbabilityClassification @default(INSUFFICIENTLY_SUPPORTED) // §7
 
-  clinicalPathwayStage String? // §8 (expanded in Phase B)
+  clinicalPathwayStage String? // §8
+  clinicalPathway      String? // Phase B — conservative | surveillance | interventional | definitive surgical | revision | supportive
   frequencyRationale   String? // §10
   frequencySupported   Boolean @default(false)
   durationClass        String? // §11
   durationRationale    String?
+
+  // Phase B — cross-recommendation coherence and alternatives.
+  conflictFlags          Json? // {type, otherService, note}[]
+  alternativesConsidered Json? // {alternative, rationale}[]
+  inclusionRationale     String?
 
   weakeningEvidence       Json? // §13
   unknowns                Json? // §14
