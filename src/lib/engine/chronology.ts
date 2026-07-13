@@ -14,6 +14,18 @@ import type { Case } from "@/generated/prisma";
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Purely administrative / financial / legal records — never clinical findings.
+// Single, deliberately-uploaded records that carry LCP data points even when
+// not "pivotal" — current medications, impairment/MMI, cognitive testing, labs,
+// or capacity — so their unique data points reach the timeline.
+export const SUPPORTING_INCLUDE = new Set([
+  "PHARMACY_RECORD",
+  "LAB_REPORT",
+  "IME_REPORT",
+  "NEUROPSYCHOLOGICAL_EVALUATION",
+  "FUNCTIONAL_CAPACITY_EVALUATION",
+  "EMG_NCS_REPORT",
+]);
+
 export const EXCLUDED_TYPES = new Set([
   "BILLING_RECORD",
   "INSURANCE_RECORDS",
@@ -204,7 +216,7 @@ function pickSection(text: string, labels: RegExp[], max = 500): string | null {
 // LCP-style encounter sections. Line-scoped capture (records put each labeled
 // field on its own line), stopping at the next labeled field on the same line
 // so a value never bleeds into the following section or a signature.
-const NEXT_LABEL = "(?=\\s+(?:subjective|objective|exam(?:ination)?|assessment|impression|diagnos[ie]s|plan(?:\\s+of\\s+care)?|procedure|disposition|condition|diagnostic studies|technique|comparison|anesthesia|estimated blood loss|surgeon|dictated by|reviewed by|reported by|prepared by|electronically signed|attending|treating|examining|therapist|provider|history|past medical|social history|family history|allergies|medications?|triage|mode of arrival|time of arrival|date of|page\\s+\\d)\\b\\s*:|$)";
+const NEXT_LABEL = "(?=\\s+(?:subjective|objective|exam(?:ination)?|assessment|impression|pre-?operative diagnosis|post-?operative diagnosis|discharge diagnosis|diagnos[ie]s|plan(?:\\s+of\\s+care)?|procedure(?:\\s+performed)?|disposition|condition|diagnostic studies|technique|comparison|anesthesia|estimated blood loss|surgeon|dictated by|reviewed by|reported by|prepared by|electronically signed|attending|treating|examining|therapist|provider|history|past medical|social history|family history|allergies|medications?|triage|mode of arrival|time of arrival|date of|page\\s+\\d)\\b\\s*:|$)";
 const L = (label: string) => new RegExp(label + "\\s*:\\s*(.+?)" + NEXT_LABEL, "i");
 const SECTIONS = {
   subjective: [L("chief complaint"), L("history of present illness"), L("\\bhpi"), L("subjective"), /\b((?:the )?patient (?:presents?|presented)[^\n]{6,300})/i],
@@ -213,10 +225,14 @@ const SECTIONS = {
   treatment: [L("plan of care"), L("\\bplan"), L("\\btreatment"), L("recommendation")],
   procedure: [L("procedure performed"), L("\\bprocedure"), L("\\boperation")],
   disposition: [L("discharge disposition"), L("disposition"), L("\\bcondition")],
-  imaging: [L("diagnostic studies"), L("\\bimpression"), L("\\bfindings"), L("\\bimaging")],
+  imaging: [L("diagnostic studies"), L("\\bfindings"), L("\\bimpression"), L("\\bimaging")],
   functional: [/(?:functional status|ambulation|gait|range of motion|\badls?\b|transfers?)[^:\n]{0,26}:?\s*([^\n]+)/i, /(gait training[^\n]+)/i, /(range of motion[^\n]+)/i],
-  work: [/(?:work status|return to work|disability status)[^:\n]{0,20}:?\s*([^\n]+)/i, /(maximum medical improvement[^\n]*)/i],
+  work: [/(?:work status|return to work|disability status)[^:\n]{0,20}:?\s*([^\n]+)/i],
   restrictions: [/(?:restrictions?|limitations?|precautions?|weight[- ]bearing)[^:\n]{0,20}:?\s*([^\n]+)/i],
+  pastMedicalHistory: [L("past medical history"), L("\\bpmh"), L("comorbidities"), L("past history")],
+  medications: [L("prescription"), L("medications?"), L("\\bmeds"), L("current medications"), /\b((?:gabapentin|pregabalin|oxycodone|hydrocodone|acetaminophen|ibuprofen|naproxen|tramadol|morphine|lidocaine|duloxetine|cyclobenzaprine|baclofen|meloxicam|celecoxib)\b[^\n]{0,90})/i],
+  impairment: [/((?:whole[- ]person )?impairment rating[^\n]{0,120})/i, /(reached\s+maximum medical improvement[^\n]{0,60})/i, /(maximum medical improvement[^\n]{0,60})/i, /(\bmmi\b[^\n]{0,60})/i],
+  labs: [/\b([A-Z][A-Za-z ]{2,26}?\s+[\d.]+\s*\(?\s*(?:reference (?:range|interval)|ref\.?)[^)\n]{0,40}\)?[^\n]{0,40})/i, /(hemoglobin[^\n]{0,70})/i, /(white blood cell[^\n]{0,70})/i, /([A-Za-z][A-Za-z ]{2,24}\s+[\d.]+\b[^\n]{0,30}\bflag\s+(?:low|high|critical)[^\n]{0,20})/i],
   provider: [/(?:attending physician|treating physician|examining physician|dictated by|reported by|reviewed by|surgeon|therapist|examiner|provider|physician)\s*:\s*(?:dr\.?\s+)?([A-Z][a-z][A-Za-z.'-]*(?:\s+[A-Z][a-z][A-Za-z.'-]*){0,3}(?:,\s*[A-Za-z.]+)*(?:\s*[—–-]\s*[A-Z][a-z][^\n.]{0,40})?)/],
 };
 
@@ -527,6 +543,67 @@ export interface ChronologyContext {
   careServices?: string[];
 }
 
+// The full set of LCP data points captured for one medical-record event
+// (a single-encounter record, or one encounter of a consolidated chart).
+export interface EncounterData {
+  subjective: string | null; // chief complaint / HPI / mechanism
+  pastMedicalHistory: string | null; // comorbidities documented at the encounter
+  objectiveFindings: string | null; // exam
+  diagnosis: string | null; // assessment (post-op "Same." resolves to the pre-op dx)
+  treatment: string | null; // plan / goals
+  procedure: string | null; // procedure performed (+ anesthesia, EBL)
+  disposition: string | null; // admitted / discharged / condition
+  imagingFindings: string | null; // diagnostic studies — imaging findings or a lab result
+  medications: string | null; // drug, dose, SIG, days supply, refills
+  functionalStatus: string | null; // gait / ROM / ADLs / assistive device
+  workStatus: string | null; // work / disability status
+  restrictions: string | null; // restrictions / precautions / weight-bearing
+  impairmentRating: string | null; // MMI status / impairment rating (medicolegal)
+}
+
+/**
+ * Extract every LCP data point from one encounter's text. Pure and deterministic
+ * (label-scoped section capture) — the single source of truth for what a
+ * medical-record event carries, used by the chronology builder and unit-tested
+ * directly.
+ */
+export function extractEncounterData(body: string, opts: { isImaging?: boolean } = {}): EncounterData {
+  const isImaging = !!opts.isImaging;
+  const objectiveFindings = isImaging ? null : pickSection(body, SECTIONS.objectiveFindings);
+  // Assessment: a post-op "Same." (or a blank value) resolves to the pre-op dx.
+  const diagnosisRaw = pickSection(body, SECTIONS.diagnosis);
+  const preopDx = pickSection(body, [L("pre-?operative diagnosis")]);
+  const diagnosis = diagnosisRaw && !/^same\b/i.test(diagnosisRaw) ? diagnosisRaw : preopDx ?? diagnosisRaw;
+  // Procedure, with anesthesia and estimated blood loss appended when present.
+  const procedureRaw = pickSection(body, SECTIONS.procedure);
+  const anesthesia = pickSection(body, [/\banesthesia\s*:?\s*([A-Za-z][^\n.]{1,34})/i], 40);
+  const ebl = body.match(/estimated blood loss\s*:?\s*([\d.,]+\s*(?:m?l|cc))/i)?.[1] ?? null;
+  const procedure = procedureRaw
+    ? `${procedureRaw}${anesthesia || ebl ? ` (${[anesthesia ? `${anesthesia.replace(/\.$/, "")} anesthesia` : null, ebl ? `EBL ${ebl}` : null].filter(Boolean).join("; ")})` : ""}`
+    : procedureRaw;
+  // Diagnostic Studies covers imaging AND labs; a non-imaging record falls back
+  // to a lab result line (value + reference range + flag).
+  const imagingRaw = isImaging ? pickSection(body, SECTIONS.imaging) : pickSection(body, [SECTIONS.imaging[0]]);
+  const imagingSection = imagingRaw && imagingRaw !== diagnosis ? imagingRaw : null; // avoid Assessment == Diagnostic Studies
+  const labResult = isImaging ? null : pickSection(body, SECTIONS.labs, 140);
+  const imagingFindings = imagingSection ?? (labResult && labResult !== diagnosis ? labResult : null);
+  return {
+    subjective: pickSection(body, SECTIONS.subjective),
+    pastMedicalHistory: pickSection(body, SECTIONS.pastMedicalHistory, 220),
+    objectiveFindings,
+    diagnosis,
+    treatment: pickSection(body, SECTIONS.treatment),
+    procedure,
+    disposition: pickSection(body, SECTIONS.disposition),
+    imagingFindings,
+    medications: pickSection(body, SECTIONS.medications, 160),
+    functionalStatus: pickSection(body, SECTIONS.functional),
+    workStatus: pickSection(body, SECTIONS.work),
+    restrictions: pickSection(body, SECTIONS.restrictions),
+    impairmentRating: pickSection(body, SECTIONS.impairment, 160),
+  };
+}
+
 /**
  * Rebuild a case's chronology from the records. Keeps the clinically pivotal
  * events and those bearing on a diagnosis or an anticipated future-care item —
@@ -573,15 +650,18 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
     recordType: string;
     summary: string;
     subjective: string | null;
+    pastMedicalHistory: string | null;
     objectiveFindings: string | null;
     diagnosis: string | null;
     treatment: string | null;
     procedure: string | null;
     disposition: string | null;
     imagingFindings: string | null;
+    medications: string | null;
     functionalStatus: string | null;
     workStatus: string | null;
     restrictions: string | null;
+    impairmentRating: string | null;
     clinicalSignificance: string | null;
     sourceQuote: string | null;
     relevanceScore: number;
@@ -605,7 +685,7 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
     // record metadata, with a per-encounter fallback extracted from the segment.
     const docProvider = [doc.authorName, doc.authorCredentials].filter(Boolean).join(", ") + (doc.authorRole ? ` — ${doc.authorRole}` : "") || null;
 
-    const draftFrom = (body: string, ev: { eventType: EventType; specialty: string; recordType?: string }, eventDate: Date, eventDateEnd: Date | null, dateInferred: boolean, page: number | null, encounter: boolean): Draft | null => {
+    const draftFrom = (body: string, ev: { eventType: EventType; specialty: string; recordType?: string }, eventDate: Date, eventDateEnd: Date | null, dateInferred: boolean, page: number | null, encounter: boolean, keepAnyway = false): Draft | null => {
       const finding = extractFinding(body, complaint);
       if (!finding) return null;
       const hay = `${finding}\n${body}`.toLowerCase();
@@ -618,17 +698,12 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
       // of its "pivotal" ICU/lab encounters are incidental to the injury, so an
       // encounter must ACTUALLY bear on the case (significance or ≥2 distinctive
       // target terms) to make the timeline.
-      if (encounter ? !sig && targetOverlap < 2 : !isPivotal && !sig) return null;
-      const subjective = pickSection(body, SECTIONS.subjective);
-      // For imaging, the "Exam" line is the scanner technique — skip it; the
-      // findings go under Diagnostic Studies instead.
-      const objectiveFindings = ev.eventType === "IMAGING" ? null : pickSection(body, SECTIONS.objectiveFindings);
-      const diagnosis = pickSection(body, SECTIONS.diagnosis);
-      const treatment = pickSection(body, SECTIONS.treatment);
-      const procedure = pickSection(body, SECTIONS.procedure);
-      const disposition = pickSection(body, SECTIONS.disposition);
-      const imagingRaw = ev.eventType === "IMAGING" ? pickSection(body, SECTIONS.imaging) : pickSection(body, [SECTIONS.imaging[0]]);
-      const imaging = imagingRaw && imagingRaw !== diagnosis ? imagingRaw : null; // avoid Assessment == Diagnostic Studies
+      if (encounter ? !sig && targetOverlap < 2 : !isPivotal && !sig && !keepAnyway) return null;
+      // Every LCP data point for this encounter, from the single extractor.
+      const {
+        subjective, pastMedicalHistory, objectiveFindings, diagnosis, treatment, procedure,
+        disposition, imagingFindings: imaging, medications, functionalStatus, workStatus, restrictions, impairmentRating,
+      } = extractEncounterData(body, { isImaging: ev.eventType === "IMAGING" });
       const segFacilityRaw = pickSection(body, [/\bfacility\s*:?\s*([^\n]{3,90})/i, /\blocation\s*:?\s*([^\n]{3,90})/i], 90);
       // Trim trailing OCR labels that ran into the facility ("… Date Taken: …").
       const segFacility = segFacilityRaw?.replace(/\s+(?:date|time|dob|mrn|account|device|room|bed|unit|provider|taken)\b.*$/i, "").replace(/\s+[A-Z][a-z]+\s*:.*$/, "").trim() || null;
@@ -669,15 +744,18 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
         recordType,
         summary,
         subjective,
+        pastMedicalHistory,
         objectiveFindings,
         diagnosis,
         treatment,
         procedure,
         disposition,
         imagingFindings: imaging,
-        functionalStatus: pickSection(body, SECTIONS.functional),
-        workStatus: pickSection(body, SECTIONS.work),
-        restrictions: pickSection(body, SECTIONS.restrictions),
+        medications,
+        functionalStatus,
+        workStatus,
+        restrictions,
+        impairmentRating,
         clinicalSignificance: sig,
         sourceQuote: finding !== summary ? finding : null,
         relevanceScore: Math.min(100, 40 + targetOverlap * 10 + (isPivotal ? 25 : 0) + (sig ? 10 : 0)),
@@ -706,6 +784,7 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
         !iso,
         marks.length ? pageForOffset(0, marks) : null,
         false,
+        SUPPORTING_INCLUDE.has(doc.type),
       );
       if (d) drafts.push(d);
     }
@@ -740,15 +819,18 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
     recordType: d.recordType,
     summary: d.summary,
     subjective: d.subjective,
+    pastMedicalHistory: d.pastMedicalHistory,
     objectiveFindings: d.objectiveFindings,
     diagnosis: d.diagnosis,
     treatment: d.treatment,
     procedure: d.procedure,
     disposition: d.disposition,
     imagingFindings: d.imagingFindings,
+    medications: d.medications,
     functionalStatus: d.functionalStatus,
     workStatus: d.workStatus,
     restrictions: d.restrictions,
+    impairmentRating: d.impairmentRating,
     clinicalSignificance: d.clinicalSignificance,
     sourceQuote: d.sourceQuote,
     relevanceScore: d.relevanceScore,

@@ -649,19 +649,21 @@ model ChronologyEvent {
   facility             String? // location/facility for the encounter (LCP header)
   recordType           String?
   summary              String
-  // LCP-style encounter fields (Subjective / Exam / Diagnostic Studies /
-  // Assessment / Plan / Procedure / Disposition).
+  // LCP-style encounter fields (Subjective / PMH / Exam / Diagnostic Studies /
+  // Assessment / Plan / Procedure / Meds / Disposition / Functional / Work).
   subjective           String?
+  pastMedicalHistory   String? // PMH / comorbidities documented at the encounter
   objectiveFindings    String? // Exam
   diagnosis            String? // Assessment
   treatment            String? // Plan
   procedure            String?
   disposition          String?
-  imagingFindings      String? // Diagnostic Studies
+  imagingFindings      String? // Diagnostic Studies (imaging + labs)
   medications          String?
   restrictions         String?
   workStatus           String?
   functionalStatus     String?
+  impairmentRating     String? // MMI status / impairment rating (IME, medicolegal)
   // Why this event matters: which diagnosis it documents and which future-care
   // items it grounds. Ties the timeline to the causation map & the care plan.
   clinicalSignificance String?

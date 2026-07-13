@@ -611,13 +611,16 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
     const src = e.sourceDocumentId ? docById.get(e.sourceDocumentId) : undefined;
     const header = `${mdY(e.eventDate)}${e.eventDateEnd ? ` – ${mdY(e.eventDateEnd)}` : ""}    ·    ${e.provider || "Treating provider"}${e.facility ? `, ${String(e.facility).replace(/[.\s]+$/, "")}` : ""}`;
     body.push(new Paragraph({ spacing: { before: 220, after: 40 }, keepNext: true, children: [new TextRun({ text: header, bold: true, size: 21, color: NAVY }), ...(e.recordType ? [new TextRun({ text: `    (${e.recordType})`, size: 18, italics: true, color: GREY })] : [])] }));
-    const anySection = e.subjective || e.objectiveFindings || e.imagingFindings || e.diagnosis || e.treatment || e.procedure || e.disposition;
+    const anySection = e.subjective || e.pastMedicalHistory || e.objectiveFindings || e.imagingFindings || e.diagnosis || e.treatment || e.procedure || e.medications || e.impairmentRating || e.disposition;
     if (e.subjective) body.push(labeled("Chief complaint", e.subjective));
+    if (e.pastMedicalHistory) body.push(labeled("Past medical history", e.pastMedicalHistory));
     if (e.objectiveFindings) body.push(labeled("Objective findings", e.objectiveFindings));
     if (e.imagingFindings) body.push(labeled("Diagnostic studies", e.imagingFindings));
     if (e.diagnosis) body.push(labeled("Assessment", e.diagnosis));
     if (e.procedure) body.push(labeled("Procedure", e.procedure));
     if (e.treatment) body.push(labeled("Treatment / plan", e.treatment));
+    if (e.medications) body.push(labeled("Medications", e.medications));
+    if (e.impairmentRating) body.push(labeled("Impairment / MMI", e.impairmentRating));
     if (e.disposition) body.push(labeled("Disposition", e.disposition));
     if (!anySection) body.push(labeled("Summary", e.summary));
     if (e.functionalStatus) body.push(labeled("Functional impact", e.functionalStatus));

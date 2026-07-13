@@ -57,6 +57,16 @@ connection's search_path targets `lifeplanos`) → `npx prisma migrate resolve
 
 ### Change log (schema)
 
+- **2026-07-12 (Encounter data points)** `ChronologyEvent.pastMedicalHistory`,
+  `ChronologyEvent.impairmentRating` (migration
+  `20260712170000_add_encounter_datapoints`). Complete the LCP data-point set
+  captured per medical-record event; populated by the pure `extractEncounterData`
+  in `engine/chronology.ts` (PMH, medications, diagnostic-studies/labs,
+  impairment/MMI, procedure incl. anesthesia/EBL, etc.). `PHARMACY_RECORD`,
+  `LAB_REPORT`, `IME_REPORT`, `NEUROPSYCHOLOGICAL_EVALUATION`,
+  `FUNCTIONAL_CAPACITY_EVALUATION`, and `EMG_NCS_REPORT` single records are now
+  included on the timeline so their unique data points surface.
+
 - **2026-07-12 (Chart segmentation)** `Document.preparingPhysician` n/a —
   `Document.segments` JSON (migration
   `20260712160000_add_document_segments`). Persisted sub-documents parsed from a

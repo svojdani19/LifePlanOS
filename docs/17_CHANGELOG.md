@@ -2,6 +2,31 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-12 — Full LCP data points per medical-record event
+
+Each timeline event was essentially a one-line summary (on David Chen's case,
+`objectiveFindings`/`disposition` 0/8, `subjective`/`diagnosis`/`treatment`
+1–2/8). Now every medical-record event carries its complete LCP data-point set.
+
+- **One canonical extractor** — `extractEncounterData(body, {isImaging})` in
+  `engine/chronology.ts` (pure, unit-tested): Subjective · Past medical history ·
+  Exam · Diagnostic studies (imaging **and** labs) · Assessment · Plan ·
+  Procedure (with anesthesia + EBL) · Medications (drug/dose/SIG/supply/refills) ·
+  Functional status · Work status · Restrictions · Impairment/MMI · Disposition.
+- **Fixes**: an MRI now yields both the *findings* line and the *impression*
+  (assessment); a post-op "Same." resolves to the pre-op diagnosis; a section
+  value that ends at a line break before its next label no longer drops (added
+  pre-/post-op-diagnosis terminators).
+- **Coverage**: single `PHARMACY_RECORD` / `LAB_REPORT` / `IME_REPORT` /
+  `NEUROPSYCHOLOGICAL_EVALUATION` / `FUNCTIONAL_CAPACITY_EVALUATION` / `EMG_NCS`
+  records are included on the timeline so their unique data points (current meds,
+  labs, impairment/MMI, cognitive testing) reach the plan.
+- **Surfaces**: the timeline UI and the DOCX report render the new fields (PMH,
+  Medications, Functional status, Work/Restrictions, Impairment/MMI).
+- Schema: `ChronologyEvent.pastMedicalHistory`, `impairmentRating` (migration
+  `20260712170000`). On Chen's case: ~5 → 13 populated data points across 11
+  events. Tests 214 → 219; tsc clean.
+
 ## 2026-07-12 — Chart segmentation: consolidated records split into typed sub-documents
 
 Fixes the Records panel showing "See the cited source page for this encounter"

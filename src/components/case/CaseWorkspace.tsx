@@ -916,16 +916,22 @@ function ChronologyPanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
                   <div className="mt-2 space-y-1 text-sm">
                     {[
                       ["Subjective", e.subjective],
+                      ["Past medical history", e.pastMedicalHistory],
                       ["Exam", e.objectiveFindings],
                       ["Diagnostic Studies", e.imagingFindings],
                       ["Assessment", e.diagnosis],
                       ["Plan", e.treatment],
                       ["Procedure", e.procedure],
+                      ["Medications", e.medications],
+                      ["Functional status", e.functionalStatus],
+                      ["Work status", e.workStatus],
+                      ["Restrictions", e.restrictions],
+                      ["Impairment / MMI", e.impairmentRating],
                       ["Disposition", e.disposition],
                     ].filter(([, v]) => v).map(([label, v]) => (
                       <p key={label as string} className="text-ink-800"><span className="font-semibold text-ink-600">{label}: </span>{v as string}</p>
                     ))}
-                    {!e.subjective && !e.objectiveFindings && !e.imagingFindings && !e.diagnosis && !e.treatment && !e.procedure && !e.disposition && (
+                    {!e.subjective && !e.pastMedicalHistory && !e.objectiveFindings && !e.imagingFindings && !e.diagnosis && !e.treatment && !e.procedure && !e.medications && !e.functionalStatus && !e.workStatus && !e.restrictions && !e.impairmentRating && !e.disposition && (
                       <p className="text-ink-800">{e.summary}</p>
                     )}
                   </div>
