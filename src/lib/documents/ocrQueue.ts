@@ -10,7 +10,7 @@
 
 import { prisma } from "@/lib/db";
 import { getObject } from "@/lib/storage";
-import { readPdf } from "@/lib/documents/ocr";
+import { getOcrProvider } from "@/lib/documents/ocrProvider";
 import { classifyDocument } from "@/lib/documents/classify";
 import { parseRecordMeta } from "@/lib/documents/meta";
 import { segmentDocument } from "@/lib/documents/segment";
@@ -63,10 +63,11 @@ async function runJob(job: Job): Promise<void> {
   const buffer = await getObject(doc.storageKey);
   if (!buffer?.length) throw new Error("stored file not found");
 
-  console.log(`[ocr] start ${doc.filename} (${doc.pageCount ?? "?"} pages)`);
+  const provider = getOcrProvider();
+  console.log(`[ocr] start ${doc.filename} (${doc.pageCount ?? "?"} pages) via ${provider.name}`);
   const started = Date.now();
   let lastFlagged = 0;
-  const r = await readPdf(buffer, async ({ ocred, totalPages }) => {
+  const r = await provider.readPdf(buffer, async ({ ocred, totalPages }) => {
     // Throttled progress into flags so the UI can show it without a new table.
     if (Date.now() - lastFlagged < 5000) return;
     lastFlagged = Date.now();

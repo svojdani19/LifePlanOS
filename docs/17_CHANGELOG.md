@@ -2,6 +2,28 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-12 — OCR: evidence-based DPI bump + cloud-provider seam
+
+Improves the local OCR that reads scanned charts, and lays in a ready-to-switch
+seam for medical-grade cloud OCR (the remaining big lever, gated on a customer
+BAA + credentials).
+
+- **Local pipeline** (`ocr.ts`): render DPI 200 → **300**. An A/B over Trice's
+  scanned pages showed 300 DPI *without* preprocessing consistently equals or
+  beats 200 (higher Tesseract confidence, less garbage, more text), while hard
+  binarization tanked confidence (82→61) and a contrast-stretch destroyed faint
+  text (one page 1634→357 chars) — so preprocessing stays **off by default**.
+  `OCR_DPI` (150–400) and `OCR_PREP` (`none`/`enhance`/`binarize`) are env knobs.
+- **`documents/imagePrep.ts`** (pure, tested): grayscale, Otsu threshold
+  (plateau-midpoint), contrast-stretch, and hard binarize — available for
+  document types where they're proven to help, but not enabled.
+- **`documents/ocrProvider.ts`** — provider seam. Default **local** Tesseract
+  (no PHI leaves the device). A cloud provider runs only when `OCR_PROVIDER` +
+  `OCR_BAA_ACK=true` + credentials + an implemented adapter are all present;
+  otherwise it throws a clear setup error and **sends no PHI** (no silent
+  fallback, no silent ship). `ocrQueue` now routes through it.
+- Config documented in `12_DEPLOYMENT.md`. Tests 223 → 228; tsc clean.
+
 ## 2026-07-12 — Chart-structure preprocessing: learn & strip page furniture
 
 Large scanned charts (Trice's 1,026-page PSMC record) are dominated by repeated

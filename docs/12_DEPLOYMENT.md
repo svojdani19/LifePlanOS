@@ -43,6 +43,29 @@ No secrets in the repo; `.env` is gitignored.
 5. **Gate for any paid production pilot** (decision ATD-3): object-storage GC
    on deletion and auth rate limiting must be implemented first.
 
+## OCR configuration
+
+Scanned records are read by the **local** Tesseract pipeline by default — fully
+on-device, no PHI leaves the machine (`documents/ocr.ts`, rendered at
+`OCR_DPI`=300; an A/B showed 300 DPI without preprocessing beats 200, while
+binarization/contrast-stretch both regress — so `OCR_PREP` defaults to `none`).
+
+A **medical-grade cloud provider** (AWS Textract / Google Document AI / Azure
+Document Intelligence) can be switched on via `documents/ocrProvider.ts`, but it
+sends PHI to a third party and therefore requires, all together:
+
+- `OCR_PROVIDER` = `textract` | `documentai` | `azure`
+- `OCR_BAA_ACK=true` — explicit operator acknowledgement that a **BAA is signed**
+  with that vendor (a legal precondition for transmitting PHI)
+- the provider's credentials (e.g. `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
+  / `AWS_REGION`) in the env
+- the provider SDK added and the adapter in `cloudProvider()` implemented
+
+If a cloud provider is selected but any of these is missing, ingestion throws a
+clear setup error and **no PHI is sent** — it never silently falls back to local
+or silently ships data. Tuning knobs: `OCR_DPI` (150–400), `OCR_PREP`
+(`none`/`enhance`/`binarize`).
+
 ## Operational notes
 
 - Dev-only: repeated large-file edits can corrupt `.next`; fix `rm -rf .next`

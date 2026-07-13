@@ -9,6 +9,7 @@
 
 import path from "path";
 import { createCanvas } from "@napi-rs/canvas";
+import { preprocess, type OcrPrep } from "@/lib/documents/imagePrep";
 
 export interface OcrProgress {
   page: number;
@@ -26,12 +27,21 @@ export interface OcrResult {
   confidence: number;
 }
 
-// Render at ~200 DPI — a modest bump over 150 for small chart text without the
-// memory/time cost (and OCR regressions) of 300 DPI + binarization.
-const RENDER_DPI = 200;
+// Render at 300 DPI. An A/B over scanned chart pages showed 300 DPI (no
+// preprocessing) consistently equals or beats 200 — higher Tesseract
+// confidence, less garbage, more text captured — while hard binarization and
+// contrast-stretch BOTH regressed (binarization tanked confidence; the stretch
+// destroyed faint text). So we raise DPI but leave preprocessing OFF by default;
+// it stays available via OCR_PREP for document types where it is proven to help.
+// Env-overridable for speed/quality tuning on very large charts.
+const RENDER_DPI = Math.max(150, Math.min(400, parseInt(process.env.OCR_DPI ?? "300", 10) || 300));
 const RENDER_SCALE = RENDER_DPI / 72;
 // Bound the rendered bitmap so a large page can't exhaust memory.
-const MAX_EDGE = 3200;
+const MAX_EDGE = 4000;
+// Optional pre-OCR pixel preprocessing ("none" | "enhance" | "binarize").
+// Default "none" — the A/B showed both alternatives hurt this scan; keep the
+// hook so a future document type can opt in once measured.
+const OCR_PREP = (process.env.OCR_PREP as OcrPrep | undefined) ?? "none";
 // A page whose text layer has fewer characters than this is treated as a scan.
 const MIN_PAGE_TEXT = 30;
 // A page OCR'd below this confidence is retried with a different segmentation.
@@ -113,6 +123,12 @@ export async function readPdf(buffer: Buffer, onProgress?: (p: OcrProgress) => v
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             await page.render({ canvasContext: ctx as any, viewport, canvas: canvas as any, background: "#ffffff" }).promise;
             page.cleanup();
+            // Optional in-place pixel preprocessing (off by default).
+            if (OCR_PREP !== "none") {
+              const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+              preprocess(img.data, OCR_PREP);
+              ctx.putImageData(img, 0, 0);
+            }
             const png = canvas.toBuffer("image/png");
 
             const clean = (s: string) => (s ?? "").replace(/[ \t]+/g, " ").replace(/\s*\n\s*/g, "\n").trim();
