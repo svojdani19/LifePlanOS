@@ -2,6 +2,35 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-12 — Specialty-voiced clinical reasoning + qualitative confidence
+
+Clinical Intelligence Sprint. No report/UI redesign, no new sections, no added
+length — quality of the physician narrative only.
+
+- **Specialty-specific reasoning** (`engine/specialtyReasoning.ts`, new): each
+  recommendation now reasons in the voice of the responsible specialty — pain
+  management (medication optimization, opioid stewardship, symptom control),
+  PM&R (restoration of function, prevention of secondary disability), orthopedic
+  surgery (implant surveillance, post-traumatic arthritis, revision risk), spine
+  surgery (instability, fusion status, adjacent-segment disease), neurology,
+  urology (neurogenic bladder, renal protection), primary care. A service
+  keyword (e.g. a urologic service) overrides the category.
+- **Narrative rewrite** (`medicalNecessity.ts`): opens with a specialty-framed
+  clinical observation (varied so no two sections open alike — retires "The
+  reviewed records establish…"), leads with the **documented functional cost**
+  (§5), and closes each complex recommendation with an integrated **synthesis**
+  paragraph (diagnosis · objective findings · function · prior treatment ·
+  progression · necessity) written as expert testimony (§8).
+- **Qualitative probability** (§12): the report no longer prints an arbitrary
+  percentage ("approximately 74%"); it states medical probability qualitatively
+  ("more likely than not"). The numeric value remains internal for thresholding.
+  Confidence gains a **Very High** band (Very High / High / Moderate / Low /
+  Indeterminate).
+- Literature stays recommendation-gated (existing `citationCompatible` + tier
+  hierarchy); each article uses its own stored claim.
+- Tests: specialty lens mapping, specialty-distinct voices, function linkage,
+  no-percentage probability, synthesis close. 247 → 255.
+
 ## 2026-07-12 — Chronology quality fixes (duplicates, junk summaries, placeholders)
 
 Fixes surfaced on David Chen's timeline.

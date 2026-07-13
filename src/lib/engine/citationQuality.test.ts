@@ -200,8 +200,12 @@ describe("validateEvidenceQuality — automated evidence validation", () => {
 });
 
 describe("structuredConfidence", () => {
-  it("High: strong records + physician + guideline", () => {
+  it("Very High: strong records + physician + guideline + objective + top-tier evidence", () => {
     const c = structuredConfidence({ recordEvidenceCount: 3, hasObjectiveFindings: true, physicianSupport: true, guidelineSupport: true, bestEvidenceLevel: 1, hasContradictoryEvidence: false, hasMissingInfo: false });
+    expect(c.level).toBe("Very High");
+  });
+  it("High: solid support without the full top-tier stack", () => {
+    const c = structuredConfidence({ recordEvidenceCount: 2, hasObjectiveFindings: true, physicianSupport: true, guidelineSupport: false, bestEvidenceLevel: 6, hasContradictoryEvidence: false, hasMissingInfo: false });
     expect(c.level).toBe("High");
   });
   it("contradictory evidence lowers confidence", () => {

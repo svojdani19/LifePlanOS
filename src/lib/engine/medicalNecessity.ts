@@ -19,6 +19,7 @@
 
 import { bodyRegion } from "./integrity";
 import { citationCompatible, evidenceTier, selectPrimary, structuredConfidence, type ConfidenceLevel } from "./citationQuality";
+import { specialtyLens } from "./specialtyReasoning";
 
 // ── Inputs (structurally satisfied by the Prisma rows; kept minimal) ─────────
 export interface DossierItem {
@@ -333,16 +334,18 @@ export function buildRecommendationDossier(
   const areIs = /s$/.test(item.service) ? "are" : "is";
   const probability: ProbabilityAssessment = {
     percentage,
+    // Qualitative medical-probability statement — no arbitrary percentage in the
+    // report (§12); the numeric `percentage` remains only for internal thresholding.
     statement:
       percentage >= 51
         ? variant(item.service + "prob+", [
-            `On balance, ${lc(item.service)} ${areIs} more likely than not to be required (approximately ${percentage}%), to a reasonable degree of medical probability.`,
-            `To a reasonable degree of medical probability, ${lc(item.service)} ${areIs} more likely than not required (approximately ${percentage}%).`,
-            `The weight of the record places ${lc(item.service)} above the threshold of more likely than not (approximately ${percentage}%).`,
+            `On balance, ${lc(item.service)} ${areIs} more likely than not to be required, to a reasonable degree of medical probability.`,
+            `To a reasonable degree of medical probability, ${lc(item.service)} ${areIs} more likely than not required.`,
+            `The weight of the record places ${lc(item.service)} above the threshold of more likely than not.`,
           ])
         : variant(item.service + "prob-", [
-            `${cap(lc(item.service))} ${areIs} foreseeable but, on the present record, ${areIs} not more likely than not (approximately ${percentage}%); disclosed as a contingency rather than totaled.`,
-            `On the present record ${lc(item.service)} ${areIs} a reasonable possibility (approximately ${percentage}%) but below the more-likely-than-not threshold; carried as a contingency, not totaled.`,
+            `${cap(lc(item.service))} ${areIs} foreseeable but, on the present record, ${areIs} not more likely than not; disclosed as a contingency rather than totaled.`,
+            `On the present record ${lc(item.service)} ${areIs} a reasonable possibility but below the more-likely-than-not threshold; carried as a contingency, not totaled.`,
           ]),
     factors: probFactors,
   };
@@ -372,7 +375,7 @@ export function buildRecommendationDossier(
   if (!objectiveFindings.length) potentialChallenges.push("Objective evidence tying this item to the diagnosis is thin on the present record.");
 
   // ── Medical-necessity narrative (physician voice; NOT a diagnosis restate) ─
-  let necessity = buildNecessityNarrative(item, condition, { objectiveFindings, imaging, examination, functionalLimitations, priorTreatment, guidelines: guidelineEvidence }, kase, dxName, percentage);
+  let necessity = buildNecessityNarrative(item, condition, { objectiveFindings, imaging, examination, functionalLimitations, priorTreatment, guidelines: guidelineEvidence }, kase, dxName);
   // Weave the patient's own account and any treating-provider opinion.
   if (patientReports.length) necessity += ` On interview, ${kase.subject} reports ${lc(cleanClause(patientReports[0].text, 140))}, which the recommendation directly addresses.`;
   if (providerOpinions.length) necessity += ` This is consistent with the opinion of ${providerOpinions[0].providerName ?? "the treating provider"} on interview.`;
@@ -421,72 +424,70 @@ function buildNecessityNarrative(
   ev: { objectiveFindings: EvidenceItem[]; imaging: EvidenceItem[]; examination: EvidenceItem[]; functionalLimitations: EvidenceItem[]; priorTreatment: EvidenceItem[]; guidelines: EvidenceItem[] },
   kase: DossierCase,
   dxName: string,
-  percentage: number,
 ): string {
   const S = kase.subject;
   const sv = item.service;
   const areIs = /s$/.test(sv) ? "are" : "is";
   const complex = isComplexItem(item);
+  const lens = specialtyLens(item.category, sv);
+  const frame = variant(sv + "frame", lens.frames);
   const parts: string[] = [];
 
-  // Open with the pathology, not the label: what the record objectively shows.
-  // Phrasing varies by recommendation so no two sections open identically.
+  // 1) Specialty-framed clinical observation — the objective substrate seen
+  //    through the responsible specialty's lens (varied so no two open alike).
   const objective = ev.imaging[0]?.text || ev.objectiveFindings[0]?.text || ev.examination[0]?.text;
   if (objective) {
     const o = lc(cleanClause(objective, 150));
     parts.push(variant(sv + "open", [
-      `The reviewed records establish objective pathology underlying ${S}'s ${lc(dxName)}: ${o}.`,
-      `Objectively, ${S}'s ${lc(dxName)} is substantiated on the record — ${o}.`,
-      `${S}'s ${lc(dxName)} is more than a clinical label here; the record documents ${o}.`,
+      `${frame}, ${S}'s ${lc(dxName)} rests on a concrete finding — ${o}.`,
+      `${frame}, the pertinent finding is ${o}, which anchors ${S}'s ${lc(dxName)}.`,
+      `${frame}, ${lc(dxName)} is no bare label for ${S}: the record shows ${o}.`,
     ]));
   } else {
     parts.push(variant(sv + "open", [
-      `${S} carries ${lc(dxName)} as documented in the treating record.`,
-      `The treating record establishes ${S}'s ${lc(dxName)}.`,
-      `${S} is documented to have ${lc(dxName)}.`,
+      `${frame}, ${S} carries ${lc(dxName)} as documented in the treating record.`,
+      `${frame}, ${lc(dxName)} is established on ${S}'s treating record.`,
     ]));
   }
 
-  // Prior treatment → why it is not the end of care (full synthesis only).
+  // 2) Function-driven connection (§5) — the care is justified by the DOCUMENTED
+  //    functional cost, not by the diagnosis alone.
+  const fx = ev.functionalLimitations[0] ? lc(cleanClause(String(ev.functionalLimitations[0].text).replace(/^patient reports\s*/i, ""), 130)) : null;
+  if (fx) {
+    parts.push(variant(sv + "fx", [
+      `What makes the care necessary is functional: ${fx}.`,
+      `That pathology carries a functional cost — ${fx} — and it is the cost, not the label, that drives this recommendation.`,
+      `The operative issue is function: ${fx}.`,
+    ]));
+  }
+
+  // 3) Prior treatment → residual impairment (complex items only).
   if (complex && ev.priorTreatment.length) {
     const tx = ev.priorTreatment.slice(0, 2).map((t) => lc(cleanClause(String(t.text), 90))).join(" and ");
     parts.push(variant(sv + "tx", [
-      `${cap(kase.pronounPoss)} course has already included ${tx}; notwithstanding that treatment, the record reflects residual impairment.`,
-      `${S} has already undergone ${tx}, yet residual impairment persists on the record.`,
-      `Despite prior ${tx}, continued impairment is documented — the reason further care is contemplated.`,
+      `${cap(kase.pronounPoss)} course has already included ${tx}, yet the impairment has not resolved.`,
+      `Prior ${tx} has not returned ${S} to baseline, as the record reflects.`,
     ]));
   }
 
-  // Current functional impairment (full synthesis only; also in evidence bucket).
-  if (complex && ev.functionalLimitations.length) {
-    const fl = lc(cleanClause(String(ev.functionalLimitations[0].text), 120));
-    parts.push(variant(sv + "fx", [
-      `Functionally, the record documents ${fl}, which bears directly on the need for this care.`,
-      `The functional consequence is concrete: ${fl}.`,
-      `This care is driven by a documented functional deficit — ${fl}.`,
-    ]));
-  }
-
-  // The necessity itself, tied to progression / future need — the "why." Phrased
-  // so the (often plural) service name is the OBJECT, avoiding agreement slips.
+  // 4) The necessity, in the specialty's own voice (§1/§6) — its clinical goal
+  //    and the forward-looking concern it manages.
   const rationale = item.rationale ? lc(cleanClause(item.rationale, 140)) : `the sequelae of ${lc(dxName)}`;
-  const objBasis = objective ? " on an established objective basis" : "";
   const need = item.isLifetime
-    ? `${S} will require ${lc(sv)} on a recurring basis over ${kase.pronounPoss} remaining lifetime`
+    ? `${S} will require ${lc(sv)} on a recurring basis across ${kase.pronounPoss} lifetime`
     : `${S} will require ${lc(sv)} over a defined course`;
   parts.push(variant(sv + "need", [
-    `In my opinion, and to a reasonable degree of medical probability, ${lc(sv)} ${areIs} reasonable and necessary for ${rationale}. Because this condition ${item.isLifetime ? "is chronic" : "requires continued treatment"}${objBasis}, ${need}.`,
-    `To a reasonable degree of medical probability, ${need}; ${lc(sv)} ${areIs} reasonable and necessary to address ${rationale}${objBasis}.`,
-    `${cap(need)}. In my clinical judgment ${lc(sv)} ${areIs} reasonable and necessary for ${rationale}, to a reasonable degree of medical probability.`,
+    `${cap(lc(sv))} ${areIs} reasonable and necessary to ${lens.goal}, with ${lens.concern} the forward concern; on that basis ${need}.`,
+    `The clinical objective is ${lens.goal}: ${lc(sv)} ${areIs} reasonable and necessary to that end, managing ${lens.concern}. ${cap(need)}.`,
+    `Reasonably and necessarily, ${lc(sv)} addresses ${rationale} toward ${lens.goal} while watching for ${lens.concern}; ${need}.`,
   ]));
 
-  // Guideline anchoring, when present (full synthesis only — avoids repeating
-  // the same guideline sentence on every simple item).
-  if (complex && ev.guidelines.length) {
-    parts.push(variant(sv + "gl", [
-      `This need is consistent with the cited clinical guidance for this diagnosis.`,
-      `Published clinical guidance for this diagnosis supports the recommendation.`,
-      `The cited guideline framework aligns with this plan.`,
+  // 5) Synthesis close (§8) — expert-testimony integration for complex items.
+  if (complex) {
+    const prog = item.isLifetime ? "the condition is chronic and expected to progress" : "a defined further course is anticipated";
+    parts.push(variant(sv + "syn", [
+      `Taken together — the objective pathology,${fx ? " the documented functional loss," : ""} the prior treatment, and that ${prog} — this care is medically necessary to a reasonable degree of medical probability.`,
+      `Integrating the diagnosis, the objective findings,${fx ? " the functional consequences," : ""} and the expected course, it is my opinion, to a reasonable degree of medical probability, that this care is required.`,
     ]));
   }
 
@@ -495,13 +496,15 @@ function buildNecessityNarrative(
 
 function buildConfidenceExplanation(level: ConfidenceLevel, factors: string[]): string {
   const lead =
-    level === "High"
-      ? "Confidence is high"
-      : level === "Moderate"
-        ? "Confidence is moderate"
-        : level === "Low"
-          ? "Confidence is low"
-          : "Confidence is indeterminate";
+    level === "Very High"
+      ? "Confidence is very high"
+      : level === "High"
+        ? "Confidence is high"
+        : level === "Moderate"
+          ? "Confidence is moderate"
+          : level === "Low"
+            ? "Confidence is low"
+            : "Confidence is indeterminate";
   const reason =
     level === "Indeterminate"
       ? "there is insufficient evidence on the present record to reason from"

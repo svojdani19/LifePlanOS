@@ -245,7 +245,7 @@ export function selectPrimary<T extends { relevance: { evidenceLevel: number; sc
 }
 
 // ── Structured confidence ────────────────────────────────────────────────────
-export type ConfidenceLevel = "High" | "Moderate" | "Low" | "Indeterminate";
+export type ConfidenceLevel = "Very High" | "High" | "Moderate" | "Low" | "Indeterminate";
 export interface ConfidenceInput {
   /** page-cited evidence sources on the supporting diagnosis */
   recordEvidenceCount: number;
@@ -284,7 +284,7 @@ export function structuredConfidence(i: ConfidenceInput): ConfidenceResult {
 
   // Indeterminate: nothing to reason from (no records, no literature, no physician).
   const nothing = i.recordEvidenceCount === 0 && i.bestEvidenceLevel == null && !i.physicianSupport && !i.hasObjectiveFindings;
-  const level: ConfidenceLevel = nothing ? "Indeterminate" : score >= 70 ? "High" : score >= 45 ? "Moderate" : "Low";
+  const level: ConfidenceLevel = nothing ? "Indeterminate" : score >= 85 ? "Very High" : score >= 70 ? "High" : score >= 45 ? "Moderate" : "Low";
   return { level, score, factors };
 }
 

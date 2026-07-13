@@ -87,7 +87,7 @@ export interface SocAssessment {
     strength: string; // e.g. "Clinical practice guideline", "Cohort study", "None located"
     limitations: string[];
     unknowns: string[];
-    confidence: "High" | "Moderate" | "Low" | "Indeterminate";
+    confidence: "Very High" | "High" | "Moderate" | "Low" | "Indeterminate";
     confidenceFactors: string[];
   };
 }

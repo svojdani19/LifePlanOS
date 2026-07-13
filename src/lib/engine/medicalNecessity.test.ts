@@ -214,3 +214,38 @@ describe("functional-domain link (§12) and staged inclusion (§10)", () => {
     expect(d.functionalLink).toBeNull();
   });
 });
+
+describe("specialty-specific, function-driven narrative (Clinical Intelligence Sprint)", () => {
+  const k: DossierCase = { subject: "Mr. Poe", pronounPoss: "his", lifeExpectancyYears: 30, adult: true };
+  const knee: DossierCondition = { name: "Post-traumatic osteoarthritis of the right knee", relatedness: "RELATED", objectiveEvidence: "Tricompartmental joint-space narrowing", evidenceSources: [] } as unknown as DossierCondition;
+  const chrono = [{ eventDate: "2024-01-01", functionalStatus: "Right knee antalgic gait limited to 100 feet" }] as unknown as DossierChronoEvent[];
+  const mk = (o: Partial<DossierItem> & { service: string }): DossierItem => ({ probability: "PROBABLE", frequencyPerYear: 1, ...o });
+
+  it("writes pain-management and orthopedic recommendations in their own specialty voices", () => {
+    const pain = buildRecommendationDossier(mk({ service: "Pain management visits", category: "PAIN_MANAGEMENT", presentValue: 9000, isLifetime: true }), knee, chrono, k);
+    const ortho = buildRecommendationDossier(mk({ service: "Total knee arthroplasty", category: "ORTHOPEDIC_SURGERY", presentValue: 80000 }), knee, chrono, k);
+    expect(pain.medicalNecessity).toMatch(/pain-management standpoint|opioid|symptom control/i);
+    expect(ortho.medicalNecessity).toMatch(/orthopedic|revision risk|post-traumatic arthritis/i);
+    expect(pain.medicalNecessity).not.toBe(ortho.medicalNecessity);
+  });
+
+  it("connects the recommendation to the DOCUMENTED functional limitation (§5)", () => {
+    const d = buildRecommendationDossier(mk({ service: "Pain management visits", category: "PAIN_MANAGEMENT", presentValue: 9000 }), knee, chrono, k);
+    expect(d.medicalNecessity).toMatch(/antalgic gait limited to 100 feet/i);
+    expect(d.medicalNecessity).toMatch(/functional|function/i);
+  });
+
+  it("states probability qualitatively with NO numeric percentage in the report (§12)", () => {
+    const d = buildRecommendationDossier(mk({ service: "Total knee arthroplasty", category: "ORTHOPEDIC_SURGERY", presentValue: 80000 }), knee, chrono, k);
+    expect(d.probability.statement).not.toMatch(/\d+\s*%|approximately \d/);
+    expect(d.probability.statement).toMatch(/more likely than not/i);
+    // The numeric percentage remains available internally for thresholding.
+    expect(typeof d.probability.percentage).toBe("number");
+  });
+
+  it("closes complex recommendations with an integrated synthesis (§8)", () => {
+    const d = buildRecommendationDossier(mk({ service: "Total knee arthroplasty", category: "ORTHOPEDIC_SURGERY", presentValue: 120000, isLifetime: true }), knee, chrono, k);
+    expect(d.medicalNecessity).toMatch(/taken together|integrating the diagnosis/i);
+    expect(d.medicalNecessity).toMatch(/reasonable degree of medical probability/i);
+  });
+});
