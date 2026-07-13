@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit } from "@/lib/tenant";
 import { generateReviews, paraphraseSummary } from "@/lib/engine/generate";
 import { persistCaseValidation } from "@/lib/engine/validation";
+import { persistCaseReasoning } from "@/lib/engine/clinicalReasoningPersist";
 import { lifecycleFor } from "@/lib/engine/lifecycle";
 import { ok, handleError } from "@/lib/api";
 
@@ -74,8 +75,10 @@ export async function POST(req: Request, { params }: { params: { caseId: string;
     });
 
     await generateReviews(params.caseId);
-    // Review actions change inclusion eligibility — refresh persisted findings.
+    // Review actions change inclusion eligibility — refresh persisted findings
+    // and the clinical reasoning assessment (physician status is a material field).
     await persistCaseValidation(params.caseId, ctx.firm.id).catch(() => {});
+    await persistCaseReasoning(params.caseId, ctx.firm.id).catch(() => {});
     await audit(ctx, "physician.review", { type: "futureCareItem", id: item.id, caseId: params.caseId, meta: { status: input.status } });
     return ok({ item: updated });
   } catch (err) {

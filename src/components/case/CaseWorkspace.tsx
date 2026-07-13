@@ -49,6 +49,7 @@ import { pageRange } from "@/lib/documents/meta";
 import { recordEncounters, narrativeFor } from "@/lib/documents/recordSummary";
 import { structuredConfidence } from "@/lib/engine/citationQuality";
 import { buildRecommendationDossier, type DossierCondition, type DossierChronoEvent, type DossierCase, type EvidenceItem, type RecommendationDossier } from "@/lib/engine/medicalNecessity";
+import { buildReasoningAssessment, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningAssessment, type ReasoningItem } from "@/lib/engine/clinicalReasoning";
 import { Icd10Search } from "@/components/Icd10Search";
 import { PreExistingConditionsModal } from "@/components/PreExistingConditionsModal";
 import { parseConditions, serializeConditions, findConditionsInRecords } from "@/lib/intake/preExisting";
@@ -1334,10 +1335,21 @@ function EvidenceBucket({ label, items }: { label: string; items: EvidenceItem[]
     </div>
   );
 }
-function RecommendationDossierView({ dossier }: { dossier: RecommendationDossier }) {
+function RecommendationDossierView({ dossier, assessment }: { dossier: RecommendationDossier; assessment?: ReasoningAssessment }) {
   const se = dossier.supportingEvidence;
   return (
     <div className="space-y-3 text-sm">
+      {assessment && (
+        <div className="rounded-lg border border-brand-100 bg-brand-50/60 p-2.5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-brand-700">Clinical reasoning</p>
+          <p className="mt-0.5 leading-relaxed text-ink-800"><span className="font-medium">{PROBABILITY_LABEL[assessment.probabilityClassification]}.</span> {assessment.inclusionRationale}</p>
+          <p className="mt-1 text-xs text-ink-600">Pathway: {assessment.clinicalPathway} · Evidence strength: {EVIDENCE_STRENGTH_LABEL[assessment.evidenceStrength]} · Confidence: {CONFIDENCE_LABEL[assessment.recommendationConfidence]}{assessment.frequencySupported ? "" : " · frequency unverified"}</p>
+          <p className="mt-1 text-xs text-ink-600">{assessment.residualUncertainty}</p>
+          {assessment.conflictFlags.length > 0 && (
+            <ul className="mt-1 space-y-0.5">{assessment.conflictFlags.map((f, i) => <li key={i} className="text-xs text-amber-800">⚠ {f.note}</li>)}</ul>
+          )}
+        </div>
+      )}
       <div>
         <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Medical necessity</p>
         <p className="mt-1 leading-relaxed text-ink-800">{dossier.medicalNecessity}</p>
@@ -1388,13 +1400,25 @@ function RecommendationDossierView({ dossier }: { dossier: RecommendationDossier
     </div>
   );
 }
-function dossierForItem(it: AnyRec, data: AnyRec): RecommendationDossier {
+function caseInputs(it: AnyRec, data: AnyRec) {
   const cond = (data.conditions ?? []).find((c: AnyRec) => c.id === it.conditionId) ?? null;
   const poss = data.sex === "FEMALE" ? "her" : data.sex === "MALE" ? "his" : "the patient's";
   const kase: DossierCase = { subject: data.clientName || "the patient", pronounPoss: poss, lifeExpectancyYears: data.lifeExpectancyYears ?? 40, adult: true };
   const provName = new Map((data.treatingProviders ?? []).map((p: AnyRec) => [p.id, `${p.name}${p.credentials ? `, ${p.credentials}` : ""}`]));
   const interviews = ((data.interviewFindings ?? []) as AnyRec[]).map((f) => ({ subject: f.subject, category: f.category, text: f.text, quote: f.quote, conditionId: f.conditionId, futureCareItemId: f.futureCareItemId, providerName: f.providerId ? provName.get(f.providerId) ?? null : null }));
+  return { cond, kase, interviews };
+}
+function dossierForItem(it: AnyRec, data: AnyRec): RecommendationDossier {
+  const { cond, kase, interviews } = caseInputs(it, data);
   return buildRecommendationDossier(it as never, cond as DossierCondition | null, (data.chronologyEvents ?? []) as DossierChronoEvent[], kase, interviews as never);
+}
+// Clinical Reasoning Engine — the structured determination, computed client-side
+// from the same inputs (the pure engine has no server dependency).
+function assessmentForItem(it: AnyRec, data: AnyRec): ReasoningAssessment {
+  const { kase, interviews } = caseInputs(it, data);
+  const items = (data.futureCareItems ?? []) as ReasoningItem[];
+  const { flags, replacedByActive } = detectSetConflicts(items);
+  return buildReasoningAssessment(it as ReasoningItem, (data.conditions ?? []) as never, (data.chronologyEvents ?? []) as DossierChronoEvent[], kase, interviews as never, { conflicts: flags.get(it.id) ?? [], replacedByActive: replacedByActive.has(it.id) });
 }
 
 function FutureCarePanel({ data, canEdit, call, focusId }: { data: AnyRec; canEdit: boolean; call: any; focusId?: string | null }) {
@@ -1447,7 +1471,7 @@ function FutureCarePanel({ data, canEdit, call, focusId }: { data: AnyRec; canEd
           </div>
           {open === it.id && (
             <div className="mt-3 border-t border-ink-100 pt-3">
-              <RecommendationDossierView dossier={dossierForItem(it, data)} />
+              <RecommendationDossierView dossier={dossierForItem(it, data)} assessment={assessmentForItem(it, data)} />
               <div className="mt-3 border-t border-ink-100 pt-2 text-sm text-ink-600">
                 <span className="text-xs font-medium text-ink-500">Cost basis: </span>{formatMoney(it.unitCost)}/unit · {it.pricingSource} · range {formatMoney(it.lowCost)}–{formatMoney(it.highCost)}
                 {it.lowerCostAlternative ? <> · <span className="text-xs font-medium text-ink-500">Alternative: </span>{it.lowerCostAlternative}</> : null}

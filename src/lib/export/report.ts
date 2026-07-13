@@ -20,6 +20,7 @@ import { prisma } from "@/lib/db";
 import { assumptionsFor } from "@/lib/engine/generate";
 import { runIntegrityCheck, reviewLabel, evaluateCitation, functionalFinding, hasPatientRecordSupport, type RecInput, type CondInput, type PerItem, type IntegrityFinding } from "@/lib/engine/integrity";
 import { buildRecommendationDossier, type DossierCondition, type DossierChronoEvent, type DossierCase, type EvidenceItem } from "@/lib/engine/medicalNecessity";
+import { buildReasoningAssessment, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningItem } from "@/lib/engine/clinicalReasoning";
 import { referencesFor, guidelineSourcesFor } from "@/lib/references/sources";
 import { bodyRegion } from "@/lib/engine/integrity";
 import { project } from "@/lib/engine/cost";
@@ -328,6 +329,10 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
   // literature, and a clinical-confidence score. (Design unchanged — this is
   // content logic; the DOCX styling helpers are the same.)
   const dossierCase: DossierCase = { subject, pronounPoss: pr.poss, lifeExpectancyYears: life, adult: adultPatient };
+  // Clinical Reasoning Engine — the report narrative renders FROM the structured
+  // assessment. Cross-recommendation coherence is computed once for the set.
+  const reasoningConds = c.conditions as unknown as (CondInput & DossierCondition & { id: string })[];
+  const { flags: reasoningConflicts, replacedByActive: reasoningReplaced } = detectSetConflicts(items as unknown as ReasoningItem[]);
   const evLines = (label: string, items: EvidenceItem[], cap2 = 3) => {
     if (!items.length) return null;
     return labeled(label, items.slice(0, cap2).map((e) => `${e.text.replace(/\s+/g, " ").trim()}${e.source ? ` (${e.source})` : ""}`).join("; "));
@@ -427,6 +432,25 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
 
     // Clinical confidence.
     out.push(labeled("Clinical confidence", `${dossier.confidence.level}. ${dossier.confidence.explanation}`));
+
+    // Clinical reasoning (Clinical Reasoning Engine) — the structured
+    // determination the narrative renders from: probability class, the inclusion
+    // decision and why, the strength-vs-confidence distinction, and what remains
+    // uncertain. Reasoned before this prose was written.
+    const assessment = buildReasoningAssessment(
+      it as unknown as ReasoningItem,
+      reasoningConds,
+      c.chronologyEvents as unknown as DossierChronoEvent[],
+      dossierCase,
+      dossierInterviews as never,
+      { conflicts: reasoningConflicts.get(it.id) ?? [], replacedByActive: reasoningReplaced.has(it.id) },
+    );
+    out.push(labeled(
+      "Clinical reasoning",
+      `${PROBABILITY_LABEL[assessment.probabilityClassification]}. ${assessment.inclusionRationale} `
+      + `Evidence strength is ${EVIDENCE_STRENGTH_LABEL[assessment.evidenceStrength]} and recommendation confidence is ${CONFIDENCE_LABEL[assessment.recommendationConfidence]} — the two are assessed separately. ${assessment.residualUncertainty}`,
+    ));
+    if (assessment.alternativesConsidered.length) out.push(labeled("Alternative considered", assessment.alternativesConsidered[0].rationale));
 
     // Recommendation consistency — whether another recommendation conflicts with
     // this one, and how the conflict was resolved (§16).

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildReasoningAssessment, detectSetConflicts, type ReasoningItem } from "./clinicalReasoning";
+import { buildReasoningAssessment, detectSetConflicts, reasoningFindings, type ReasoningItem } from "./clinicalReasoning";
 import type { DossierCase, DossierChronoEvent, DossierCondition } from "./medicalNecessity";
 import type { CondInput } from "./integrity";
 
@@ -219,6 +219,30 @@ describe("Phase C — counter-analysis and missing evidence (§13–§14)", () =
     const w = a.weakeningEvidence.join(" ").toLowerCase();
     expect(w).not.toMatch(/no independent objective finding/);
     expect(w).not.toMatch(/not yet confirmed/);
+  });
+});
+
+describe("Phase D — export-gating findings", () => {
+  it("blocks export when a line is totaled alongside its own lower-cost alternative", () => {
+    const primary = tka({ id: "p", service: "Total knee arthroplasty", lowerCostAlternative: "Unicompartmental knee replacement" });
+    const alt = tka({ id: "alt", service: "Unicompartmental knee replacement" });
+    const findings = reasoningFindings([primary, alt], [kneeStrong], chronology, kase, new Set(["p", "alt"]));
+    const blocker = findings.find((f) => f.exportBlocking);
+    expect(blocker?.result).toMatch(/double-counted|replaced/i);
+  });
+
+  it("advises (does not block) when an included line's frequency is unsupported", () => {
+    const inj = tka({ id: "i", service: "Genicular nerve block injections", category: "INJECTION", frequencyPerYear: 4, physicianStatus: "PENDING" });
+    const findings = reasoningFindings([inj], [kneeBare], [], kase, new Set(["i"]));
+    const freq = findings.find((f) => f.result === "Frequency unsupported");
+    expect(freq).toBeTruthy();
+    expect(freq?.exportBlocking).toBe(false);
+  });
+
+  it("emits nothing for a well-supported, physician-approved, singular line", () => {
+    const a = tka({ id: "s", physicianStatus: "APPROVED" });
+    const findings = reasoningFindings([a], [kneeStrong], chronology, kase, new Set(["s"]));
+    expect(findings.length).toBe(0);
   });
 });
 

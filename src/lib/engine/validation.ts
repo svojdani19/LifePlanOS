@@ -19,6 +19,8 @@ import {
 } from "./integrity";
 import { validateEvidenceQuality } from "./citationQuality";
 import { buildRecommendationDossier, validateRecommendationCompleteness, type DossierChronoEvent, type DossierCondition } from "./medicalNecessity";
+import { reasoningFindings, type ReasoningItem } from "./clinicalReasoning";
+import type { CondInput as ReasoningCond } from "./integrity";
 
 export interface CaseValidation {
   findings: {
@@ -62,6 +64,16 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
     const dossier = buildRecommendationDossier(it as never, cond, chronology as unknown as DossierChronoEvent[], dossierCase);
     return validateRecommendationCompleteness(it as never, dossier, !!cond);
   });
+  // Clinical Reasoning Engine (Phase D) — reasoning-derived gating: double-count
+  // detection (blocking) plus advisory frequency/support flags on totaled lines.
+  const includedIds = new Set(items.filter((it) => report.perItem.get(it as unknown as RecInput)?.includedInTotal).map((it) => (it as { id: string }).id));
+  const reasoning = reasoningFindings(
+    items as unknown as ReasoningItem[],
+    conditions as unknown as (ReasoningCond & { id: string })[],
+    chronology as unknown as DossierChronoEvent[],
+    dossierCase,
+    includedIds,
+  );
   const findings = [
     ...report.findings.map((f) => ({
       service: f.recommendation,
@@ -85,6 +97,14 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
       issue: f.issue,
       severity: f.severity as string,
       suggestion: f.suggestedCorrection,
+      exportBlocking: f.exportBlocking,
+    })),
+    ...reasoning.map((f) => ({
+      service: f.service,
+      result: f.result,
+      issue: f.issue,
+      severity: f.severity as string,
+      suggestion: f.suggestion,
       exportBlocking: f.exportBlocking,
     })),
   ];

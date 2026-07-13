@@ -1,5 +1,3 @@
-import { prisma } from "@/lib/db";
-import { Prisma } from "@/generated/prisma";
 import { buildRecommendationDossier, type DossierItem, type DossierCondition, type DossierChronoEvent, type DossierCase, type DossierInterview } from "@/lib/engine/medicalNecessity";
 import { mapRecommendationToCondition, validateCode, validatePricing, classifyRecommendation, hasPatientRecordSupport, bodyRegion, type RecInput, type CondInput } from "@/lib/engine/integrity";
 import { specialtyLens } from "@/lib/engine/specialtyReasoning";
@@ -37,6 +35,18 @@ export interface ConflictFlag { type: ConflictType; otherService: string; note: 
 export interface SetContext { conflicts: ConflictFlag[]; replacedByActive: boolean }
 
 export interface LiteratureAssessment { title: string; pmid?: string; supports: string; applicability: string; evidenceLevel: number; limitations: string | null }
+
+// Human-readable labels for rendering the structured assessment (report / UI).
+export const PROBABILITY_LABEL: Record<ProbabilityClassification, string> = {
+  PROBABLE_INCLUDED: "More likely than not — included in the plan",
+  CONDITIONAL_STAGED: "Conditional / staged — disclosed, not totaled",
+  POSSIBLE_CONTINGENCY_NOT_INCLUDED: "Possible contingency — disclosed, not totaled",
+  INSUFFICIENTLY_SUPPORTED: "Insufficiently supported at this time",
+  NOT_RECOMMENDED: "Not recommended",
+  REJECTED_BY_REVIEWER: "Declined on physician review",
+};
+export const EVIDENCE_STRENGTH_LABEL: Record<EvidenceStrength, string> = { STRONG: "strong", MODERATE: "moderate", LIMITED: "limited", EXPERT_CONSENSUS: "expert consensus", INSUFFICIENT: "insufficient" };
+export const CONFIDENCE_LABEL: Record<RecommendationConfidence, string> = { HIGH: "high", MODERATE: "moderate", LOW: "low", INDETERMINATE: "indeterminate" };
 
 export interface ReasoningAssessment {
   recommendationService: string;
@@ -373,90 +383,57 @@ export function buildReasoningAssessment(
   };
 }
 
-// ── Persistence ──────────────────────────────────────────────────────────────
+// ── Export-gating findings (Phase D) ─────────────────────────────────────────
 
-const toRow = (a: ReasoningAssessment) => ({
-  recommendationService: a.recommendationService,
-  status: "ASSESSED" as const,
-  supportingDiagnosisIds: a.supportingDiagnosisIds as unknown as Prisma.InputJsonValue,
-  bodyRegion: a.bodyRegion,
-  responsibleSpecialty: a.responsibleSpecialty,
-  conditionTrajectory: a.conditionTrajectory,
-  causalRelationshipStatus: a.causalRelationshipStatus,
-  clinicalPurpose: a.clinicalPurpose,
-  objectiveEvidenceSummary: a.objectiveEvidenceSummary,
-  subjectiveEvidenceSummary: a.subjectiveEvidenceSummary,
-  functionalBasisSummary: a.functionalBasisSummary,
-  priorTreatmentSummary: a.priorTreatmentSummary,
-  treatmentResponseSummary: a.treatmentResponseSummary,
-  treatingRecordSupportSummary: a.treatingRecordSupportSummary,
-  medicalNecessityRationale: a.medicalNecessityRationale,
-  noTreatmentRisk: a.noTreatmentRisk,
-  probabilityClassification: a.probabilityClassification,
-  clinicalPathwayStage: a.clinicalPathwayStage,
-  clinicalPathway: a.clinicalPathway,
-  conflictFlags: a.conflictFlags as unknown as Prisma.InputJsonValue,
-  alternativesConsidered: a.alternativesConsidered as unknown as Prisma.InputJsonValue,
-  inclusionRationale: a.inclusionRationale,
-  frequencyRationale: a.frequencyRationale,
-  frequencySupported: a.frequencySupported,
-  durationClass: a.durationClass,
-  durationRationale: a.durationRationale,
-  weakeningEvidence: a.weakeningEvidence as unknown as Prisma.InputJsonValue,
-  unknowns: a.unknowns as unknown as Prisma.InputJsonValue,
-  missingEvidenceRequests: a.missingEvidenceRequests as unknown as Prisma.InputJsonValue,
-  supportingGuidelineAssessments: a.supportingGuidelineAssessments as unknown as Prisma.InputJsonValue,
-  supportingLiteratureAssessments: a.supportingLiteratureAssessments as unknown as Prisma.InputJsonValue,
-  literatureSynthesis: a.literatureSynthesis,
-  residualUncertainty: a.residualUncertainty,
-  evidenceStrength: a.evidenceStrength,
-  recommendationConfidence: a.recommendationConfidence,
-  confidenceExplanation: a.confidenceExplanation,
-  costEligibilityStatus: a.costEligibilityStatus,
-  inclusionInTotalsStatus: a.inclusionInTotalsStatus,
-  physicianReviewStatus: a.physicianReviewStatus,
-  validationStatus: a.validationStatus,
-  materialHash: a.materialHash,
-  generatedByModel: "deterministic-reasoning-v1",
-});
+export interface ReasoningFinding {
+  service: string;
+  result: string;
+  issue: string;
+  severity: "Critical" | "High" | "Moderate" | "Low";
+  suggestion: string;
+  exportBlocking: boolean;
+}
 
 /**
- * Assess every current recommendation of a case and persist. Upserts by
- * (caseId, recommendationId): an unchanged assessment (same materialHash) is
- * left alone; a changed one is updated in place (approval-invalidation is wired
- * in Phase D); assessments for removed recommendations are superseded. Returns
- * the persisted set.
+ * Reasoning-derived validation findings, layered onto the existing integrity /
+ * evidence / completeness checks. Export-blocking is reserved for genuine
+ * double-counting (a line totaled alongside its own lower-cost alternative);
+ * everything else is advisory so the reasoning surfaces without silently
+ * gating existing reports. `includedIds` are the ids the cost engine actually
+ * totals (from the integrity mapping), so we only gate what really counts.
  */
-export async function persistCaseReasoning(caseId: string, firmId: string) {
-  const [items, conditions, kase, chronology, interviews] = await Promise.all([
-    prisma.futureCareItem.findMany({ where: { caseId, supersededAt: null } }),
-    prisma.condition.findMany({ where: { caseId } }),
-    prisma.case.findUnique({ where: { id: caseId }, select: { clientName: true, dateOfBirth: true, lifeExpectancyYears: true } }),
-    prisma.chronologyEvent.findMany({ where: { caseId } }),
-    prisma.interviewFinding.findMany({ where: { caseId } }),
-  ]);
-  const adult = !kase?.dateOfBirth || (Date.now() - kase.dateOfBirth.getTime()) / (365.25 * 24 * 3600 * 1000) >= 18;
-  const dossierCase: DossierCase = { subject: kase?.clientName ?? "the patient", pronounPoss: "the patient's", lifeExpectancyYears: kase?.lifeExpectancyYears ?? 40, adult };
-  const conds = conditions as unknown as (CondInput & DossierCondition & { id: string })[];
-
-  const existing = await prisma.clinicalReasoningAssessment.findMany({ where: { caseId }, select: { id: true, recommendationId: true, materialHash: true, status: true } });
-  const byRec = new Map(existing.map((e) => [e.recommendationId, e]));
-  const seenRec = new Set<string>();
-  const ops: Prisma.PrismaPromise<unknown>[] = [];
-
-  // Phase B — cross-recommendation coherence, computed once across the set.
-  const { flags: conflictFlags, replacedByActive } = detectSetConflicts(items as unknown as ReasoningItem[]);
-
+export function reasoningFindings(
+  items: ReasoningItem[],
+  conditions: (CondInput & DossierCondition & { id: string })[],
+  chronology: DossierChronoEvent[],
+  kase: DossierCase,
+  includedIds: Set<string>,
+): ReasoningFinding[] {
+  const { flags, replacedByActive } = detectSetConflicts(items);
+  const out: ReasoningFinding[] = [];
   for (const it of items) {
-    seenRec.add(it.id);
-    const a = buildReasoningAssessment(it as unknown as ReasoningItem, conds, chronology as unknown as DossierChronoEvent[], dossierCase, interviews as unknown as DossierInterview[], { conflicts: conflictFlags.get(it.id) ?? [], replacedByActive: replacedByActive.has(it.id) });
-    const prior = byRec.get(it.id);
-    if (!prior) ops.push(prisma.clinicalReasoningAssessment.create({ data: { ...toRow(a), caseId, firmId, recommendationId: it.id } }));
-    else if (prior.materialHash !== a.materialHash || prior.status !== "ASSESSED") ops.push(prisma.clinicalReasoningAssessment.update({ where: { id: prior.id }, data: toRow(a) }));
+    const id = it.id ?? "";
+    const inTotals = includedIds.has(id);
+    const a = buildReasoningAssessment(it, conditions, chronology, kase, [], { conflicts: flags.get(id) ?? [], replacedByActive: replacedByActive.has(id) });
+    // Double-count: totaled alongside its own lower-cost alternative → blocking.
+    if (inTotals && a.conflictFlags.some((c) => c.type === "ALTERNATIVE_BOTH_INCLUDED")) {
+      out.push({ service: it.service, result: "Double-counted alternative", issue: `"${it.service}" is totaled alongside its own lower-cost alternative; only one should count.`, severity: "High", suggestion: "Keep one of the two in totals and disclose the other as an alternative.", exportBlocking: true });
+    }
+    // Replaced line still totaled → blocking (a staged replacement double-counts).
+    if (inTotals && replacedByActive.has(id)) {
+      out.push({ service: it.service, result: "Replaced line in totals", issue: `"${it.service}" is replaced by an active recommendation but is still in totals.`, severity: "High", suggestion: "Exclude the replaced line from totals; keep the replacement.", exportBlocking: true });
+    }
+    // Advisory: an included line whose frequency is unsupported.
+    if (inTotals && !a.frequencySupported) {
+      out.push({ service: it.service, result: "Frequency unsupported", issue: `The stated frequency for "${it.service}" is not yet grounded in a cadence, guideline, or physician review.`, severity: "Moderate", suggestion: "Document the cadence or obtain physician review before finalizing totals.", exportBlocking: false });
+    }
+    // Advisory: an included line the reasoning rates insufficiently supported.
+    if (inTotals && a.probabilityClassification === "INSUFFICIENTLY_SUPPORTED") {
+      out.push({ service: it.service, result: "Insufficiently supported", issue: `"${it.service}" is in totals but the reasoning rates its support insufficient.`, severity: "Moderate", suggestion: "Strengthen the record support or move it to a contingency.", exportBlocking: false });
+    }
   }
-  // Recommendations that no longer exist → supersede their assessment.
-  for (const e of existing) if (!seenRec.has(e.recommendationId) && e.status !== "SUPERSEDED") ops.push(prisma.clinicalReasoningAssessment.update({ where: { id: e.id }, data: { status: "SUPERSEDED" } }));
-
-  await prisma.$transaction(ops);
-  return prisma.clinicalReasoningAssessment.findMany({ where: { caseId, status: { not: "SUPERSEDED" } }, orderBy: { createdAt: "asc" } });
+  return out;
 }
+
+// Persistence lives in ./clinicalReasoningPersist (imports prisma). This module
+// stays pure so it can be imported into client components and the report.
