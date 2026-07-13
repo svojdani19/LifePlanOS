@@ -1091,6 +1091,8 @@ model ClinicalReasoningAssessment {
 
   supportingGuidelineAssessments  Json? // §15 — thin refs to existing guidelines
   supportingLiteratureAssessments Json? // §15 — thin refs to existing citations
+  literatureSynthesis             String? // Phase C — one-paragraph synthesis of the body of literature
+  residualUncertainty             String? // Phase C — plain-language summary of what remains unknown
 
   evidenceStrength         EvidenceStrength         @default(INSUFFICIENT) // §16
   recommendationConfidence RecommendationConfidence @default(INDETERMINATE)

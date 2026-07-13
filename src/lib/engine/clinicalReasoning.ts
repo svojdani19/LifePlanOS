@@ -69,6 +69,8 @@ export interface ReasoningAssessment {
   missingEvidenceRequests: string[];
   supportingGuidelineAssessments: { title: string; claim: string }[];
   supportingLiteratureAssessments: LiteratureAssessment[];
+  literatureSynthesis: string;
+  residualUncertainty: string;
   evidenceStrength: EvidenceStrength;
   recommendationConfidence: RecommendationConfidence;
   confidenceExplanation: string;
@@ -162,6 +164,58 @@ export function detectSetConflicts(items: ReasoningItem[]): { flags: Map<string,
 function alternativesFor(item: ReasoningItem): { alternative: string; rationale: string }[] {
   if (!item.lowerCostAlternative) return [];
   return [{ alternative: item.lowerCostAlternative, rationale: `A lower-cost alternative (${item.lowerCostAlternative}) is on record. ${item.service} is recommended on the documented clinical basis; if the alternative is clinically acceptable for this patient it should be substituted, and only one belongs in totals.` }];
+}
+
+const EVIDENCE_LABEL: Record<number, string> = { 1: "clinical practice guideline", 2: "consensus statement", 3: "systematic review", 4: "meta-analysis", 5: "randomized controlled trial", 6: "prospective study", 7: "registry study", 8: "cohort study", 9: "case series", 10: "case report" };
+
+// §15 (Phase C) — one honest paragraph on the body of published evidence.
+function synthesizeLiterature(literature: LiteratureAssessment[], hasGuideline: boolean, service: string): string {
+  if (!literature.length) {
+    return hasGuideline
+      ? `No individual published study was catalogued for ${lc(service)}; support rests on cited clinical guidance and the patient-specific record.`
+      : `No accepted published literature was located for ${lc(service)} in this specific context; the recommendation rests on the patient-specific record rather than external evidence.`;
+  }
+  const best = Math.min(...literature.map((l) => l.evidenceLevel));
+  const onPoint = literature.filter((l) => !/tangential|unrelated|different (region|population)/i.test(l.applicability ?? ""));
+  const limits = literature.map((l) => l.limitations).filter(Boolean) as string[];
+  const parts = [
+    `The recommendation is supported by ${literature.length} citation${literature.length > 1 ? "s" : ""}, the strongest a ${EVIDENCE_LABEL[best] ?? "clinical study"}.`,
+    onPoint.length ? `${onPoint.length === literature.length ? "Each" : `${onPoint.length} of ${literature.length}`} directly addresses this diagnosis-and-intervention pairing.` : "Applicability to this specific pairing is partial.",
+  ];
+  if (limits.length) parts.push(`Noted limitation${limits.length > 1 ? "s" : ""}: ${limits.slice(0, 2).join("; ")}.`);
+  return parts.join(" ");
+}
+
+// §13 (Phase C) — the honest counter-analysis: what could undermine this line.
+function deriveWeakening(base: string[], ctx: { objectiveCount: number; physicianApproved: boolean; frequencySupported: boolean; durationClass: DurationClass; lifetimeWellSupported: boolean; weakPrimary: boolean; matched: boolean; region: string }): string[] {
+  const out = [...base];
+  const add = (s: string) => { if (!out.some((x) => x.toLowerCase() === s.toLowerCase())) out.push(s); };
+  if (ctx.objectiveCount === 0) add(`No independent objective finding is documented for the ${ctx.region} in the current record.`);
+  if (!ctx.matched) add("No diagnosis in the relevant body region maps to this recommendation.");
+  if (!ctx.physicianApproved) add("Not yet confirmed or signed off by the treating physician.");
+  if (!ctx.frequencySupported) add("The stated frequency is assumed rather than grounded in a documented cadence.");
+  if (ctx.durationClass === "LIFETIME" && !ctx.lifetimeWellSupported) add("A lifetime duration is asserted on limited supporting evidence.");
+  if (ctx.weakPrimary) add("The strongest available citation is only a case series or case report.");
+  return out;
+}
+
+// §14 (Phase C) — actionable missing-evidence requests, not vague gaps.
+function deriveMissing(base: string[], ctx: { objectiveCount: number; physicianApproved: boolean; frequencySupported: boolean; region: string }): string[] {
+  const out = [...base.map((s) => s.trim()).filter(Boolean)];
+  const add = (s: string) => { if (!out.some((x) => x.toLowerCase() === s.toLowerCase())) out.push(s); };
+  if (ctx.objectiveCount === 0) add(`Obtain objective confirmation (imaging or examination) for the ${ctx.region}.`);
+  if (!ctx.physicianApproved) add("Treating-physician review and sign-off.");
+  if (!ctx.frequencySupported) add("Document the treatment cadence supporting the stated frequency.");
+  return out.slice(0, 5);
+}
+
+// Plain-language summary of what remains unknown and what would move the needle.
+function residualUncertaintyOf(confidence: RecommendationConfidence, factors: string[], missing: string[]): string {
+  const lead = confidence === "HIGH" ? "Little material uncertainty remains." : confidence === "MODERATE" ? "Some uncertainty remains." : confidence === "LOW" ? "Substantial uncertainty remains." : "The recommendation cannot yet be assessed with confidence.";
+  const weak = factors.filter((f) => /^no |awaiting|contradictory|open missing|single source/i.test(f));
+  const because = weak.length ? ` Chiefly driven by: ${weak.slice(0, 2).join("; ")}.` : "";
+  const next = missing.length ? ` It would strengthen most with: ${missing[0].replace(/\.$/, "")}.` : "";
+  return `${lead}${because}${next}`;
 }
 
 function evidenceStrengthFrom(bestLevel: number | null, hasGuideline: boolean): EvidenceStrength {
@@ -266,7 +320,12 @@ export function buildReasoningAssessment(
   const validationStatus: "ok" | "blocking" | "pending" = !mapping.matched || codeCritical ? "blocking" : physicianApproved || frequencySupported ? "ok" : "pending";
 
   const trajectory = condition?.opposingRecords && /improv/i.test(condition.opposingRecords) ? "improving" : item.isLifetime ? "chronic, stable-to-worsening" : "uncertain";
-  const missing = [condition?.missingInfo ?? "", item.missingSupport ?? "", ...dossier.unknowns].map((s) => String(s).trim()).filter(Boolean).slice(0, 4);
+  const weakPrimary = bestLevel != null && bestLevel >= 9;
+  const weakeningEvidence = deriveWeakening(dossier.contradictoryEvidence, { objectiveCount: objectiveItems.length, physicianApproved, frequencySupported, durationClass, lifetimeWellSupported, weakPrimary, matched: mapping.matched, region });
+  const missing = deriveMissing([condition?.missingInfo ?? "", item.missingSupport ?? "", ...dossier.unknowns], { objectiveCount: objectiveItems.length, physicianApproved, frequencySupported, region });
+  const literatureAssessments = dossier.literature.map((l) => ({ title: l.title, pmid: l.pmid, supports: l.supports, applicability: l.applicability, evidenceLevel: l.evidenceLevel, limitations: l.limitations }));
+  const literatureSynthesis = synthesizeLiterature(literatureAssessments, se.guidelines.length > 0, item.service);
+  const residualUncertainty = residualUncertaintyOf(recommendationConfidence, dossier.confidence.factors, missing);
 
   const materialHash = hashStr([item.service, item.category ?? "", mapping.conditionId ?? "", region, purposeFor(item.category, !!item.isLifetime), freqN, durationClass, probabilityClassification, inclusionInTotalsStatus, item.startTrigger ?? "", item.replacesService ?? "", item.physicianStatus ?? "", setContext.conflicts.map((c) => c.type + c.otherService).sort().join(",")].join("|"));
 
@@ -296,11 +355,13 @@ export function buildReasoningAssessment(
     frequencySupported,
     durationClass,
     durationRationale,
-    weakeningEvidence: dossier.contradictoryEvidence,
+    weakeningEvidence,
     unknowns: dossier.unknowns,
     missingEvidenceRequests: missing,
     supportingGuidelineAssessments: se.guidelines.map((g) => ({ title: g.text.slice(0, 140), claim: "supports the diagnosis and the intervention" })),
-    supportingLiteratureAssessments: dossier.literature.map((l) => ({ title: l.title, pmid: l.pmid, supports: l.supports, applicability: l.applicability, evidenceLevel: l.evidenceLevel, limitations: l.limitations })),
+    supportingLiteratureAssessments: literatureAssessments,
+    literatureSynthesis,
+    residualUncertainty,
     evidenceStrength,
     recommendationConfidence,
     confidenceExplanation: dossier.confidence.explanation,
@@ -346,6 +407,8 @@ const toRow = (a: ReasoningAssessment) => ({
   missingEvidenceRequests: a.missingEvidenceRequests as unknown as Prisma.InputJsonValue,
   supportingGuidelineAssessments: a.supportingGuidelineAssessments as unknown as Prisma.InputJsonValue,
   supportingLiteratureAssessments: a.supportingLiteratureAssessments as unknown as Prisma.InputJsonValue,
+  literatureSynthesis: a.literatureSynthesis,
+  residualUncertainty: a.residualUncertainty,
   evidenceStrength: a.evidenceStrength,
   recommendationConfidence: a.recommendationConfidence,
   confidenceExplanation: a.confidenceExplanation,

@@ -183,3 +183,55 @@ describe("Phase B — cross-recommendation conflicts (§9)", () => {
     expect(a.alternativesConsidered[0].rationale).toMatch(/only one belongs in totals/i);
   });
 });
+
+describe("Phase C — literature synthesis (§15)", () => {
+  it("states plainly when no published literature was located", () => {
+    const a = buildReasoningAssessment(tka(), [kneeStrong], chronology, kase);
+    expect(a.supportingLiteratureAssessments.length).toBe(0);
+    expect(a.literatureSynthesis).toMatch(/no (accepted )?(published|individual) /i);
+  });
+
+  it("synthesizes the strength and applicability of cited literature", () => {
+    const a = buildReasoningAssessment(tka({ citation: strongLiterature }), [kneeStrong], chronology, kase);
+    expect(a.literatureSynthesis).toMatch(/systematic review/i);
+    expect(a.literatureSynthesis).toMatch(/directly addresses|pairing/i);
+  });
+});
+
+describe("Phase C — counter-analysis and missing evidence (§13–§14)", () => {
+  it("enumerates concrete weaknesses when support is thin", () => {
+    const a = buildReasoningAssessment(tka({ service: "Genicular nerve block injections", category: "INJECTION", frequencyPerYear: 4, physicianStatus: "PENDING" }), [kneeBare], [], kase);
+    const w = a.weakeningEvidence.join(" | ").toLowerCase();
+    expect(w).toMatch(/no independent objective finding/);
+    expect(w).toMatch(/physician/);
+    expect(w).toMatch(/frequency is assumed/);
+  });
+
+  it("turns gaps into actionable missing-evidence requests", () => {
+    const a = buildReasoningAssessment(tka({ category: "INJECTION", physicianStatus: "PENDING" }), [kneeBare], [], kase);
+    const m = a.missingEvidenceRequests.join(" | ").toLowerCase();
+    expect(m).toMatch(/obtain objective confirmation/);
+    expect(m).toMatch(/sign-off|review/);
+  });
+
+  it("does not manufacture weaknesses when the recommendation is well supported", () => {
+    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED", citation: strongLiterature }), [kneeStrong], chronology, kase);
+    const w = a.weakeningEvidence.join(" ").toLowerCase();
+    expect(w).not.toMatch(/no independent objective finding/);
+    expect(w).not.toMatch(/not yet confirmed/);
+  });
+});
+
+describe("Phase C — residual uncertainty", () => {
+  it("reads as low uncertainty for a high-confidence recommendation", () => {
+    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase);
+    expect(a.recommendationConfidence).toBe("HIGH");
+    expect(a.residualUncertainty).toMatch(/little material uncertainty/i);
+  });
+
+  it("names what would strengthen a weakly-supported recommendation", () => {
+    const a = buildReasoningAssessment(tka({ category: "INJECTION", physicianStatus: "PENDING" }), [kneeBare], [], kase);
+    expect(a.residualUncertainty).toMatch(/uncertainty remains|cannot yet be assessed/i);
+    expect(a.residualUncertainty).toMatch(/would strengthen most with/i);
+  });
+});
