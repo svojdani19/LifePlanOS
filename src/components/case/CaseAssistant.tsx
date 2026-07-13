@@ -1,14 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Loader2, ShieldAlert, ShieldCheck, Send, X, Check, Clock, Ban, ChevronRight, ChevronLeft, ListChecks, CheckCircle2, ArrowUpRight, Undo2, RotateCcw, Keyboard } from "lucide-react";
+import { Loader2, ShieldAlert, ShieldCheck, Send, X, Check, Clock, Ban, ChevronRight, ChevronLeft, CheckCircle2, ArrowUpRight, Undo2, RotateCcw, Keyboard } from "lucide-react";
 
 interface Item {
   id: string; category: string; severity: string; title: string; summary: string; whyItMatters: string;
   suggestedAction: string; status: string; entityType: string | null; entityId: string | null; exportBlocking: boolean; stageLabel: string;
 }
 interface Stage { stage: string; label: string; ready: boolean; blocking: string[]; nextActions: string[] }
-interface Group { key: string; title: string; category: string; stageLabel: string; severity: string; exportBlocking: boolean; whyItMatters: string; suggestedAction: string; items: Item[] }
 
 const SEV_CHIP: Record<string, string> = {
   CRITICAL: "bg-red-100 text-red-700", HIGH: "bg-amber-100 text-amber-700",
@@ -19,19 +18,6 @@ const sevLabel = (s: string) => (s === "CRITICAL" ? "Critical" : s === "HIGH" ? 
 const isBlocking = (i: Item) => i.severity === "CRITICAL" || i.exportBlocking;
 
 type Seg = "all" | "blocking" | "important" | "review" | "deferred";
-
-function grouped(items: Item[]): Group[] {
-  const m = new Map<string, Group>();
-  for (const it of items) {
-    const key = `${it.category}|${it.title}`;
-    let g = m.get(key);
-    if (!g) { g = { key, title: it.title, category: it.category, stageLabel: it.stageLabel, severity: it.severity, exportBlocking: it.exportBlocking, whyItMatters: it.whyItMatters, suggestedAction: it.suggestedAction, items: [] }; m.set(key, g); }
-    g.items.push(it);
-    if (SEV_RANK[it.severity] < SEV_RANK[g.severity]) g.severity = it.severity;
-    if (it.exportBlocking) g.exportBlocking = true;
-  }
-  return [...m.values()];
-}
 
 export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; canEdit: boolean; onFocus?: (entityType: string | null, entityId: string | null, category: string) => void }) {
   const [open, setOpen] = useState(false);
@@ -66,11 +52,12 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
 
   useEffect(() => { if (open) setTimeout(() => asideRef.current?.focus(), 30); }, [open]);
 
-  // Filtered, grouped queue (deferred handled separately).
-  const filteredItems = useMemo(() => items.filter((i) => (seg === "all" ? true : seg === "blocking" ? isBlocking(i) : seg === "important" ? i.severity === "HIGH" && !i.exportBlocking : seg === "review" ? SEV_RANK[i.severity] >= 2 : true)), [items, seg]);
-  const groups = useMemo(() => grouped(filteredItems), [filteredItems]);
-  const current = seg === "deferred" ? undefined : groups[gIdx];
+  // Filtered queue — one item at a time; every decision is per-item.
+  const queue = useMemo(() => items.filter((i) => (seg === "all" ? true : seg === "blocking" ? isBlocking(i) : seg === "important" ? i.severity === "HIGH" && !i.exportBlocking : seg === "review" ? SEV_RANK[i.severity] >= 2 : true)), [items, seg]);
+  const current = seg === "deferred" ? undefined : queue[gIdx];
   useEffect(() => { setGIdx(0); }, [seg]);
+  // Clamp the cursor when the queue shrinks after a decision.
+  useEffect(() => { setGIdx((i) => Math.min(i, Math.max(0, queue.length - 1))); }, [queue.length]);
 
   const counts = useMemo(() => ({
     all: items.length, blocking: items.filter(isBlocking).length, important: items.filter((i) => i.severity === "HIGH" && !i.exportBlocking).length,
@@ -83,26 +70,25 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
 
   const act = useCallback(
     async (action: "resolve" | "defer" | "dismiss") => {
-      const g = groups[gIdx];
-      if (!g || busy) return;
+      const it = queue[gIdx];
+      if (!it || busy) return;
       let note: string | undefined;
-      if (action === "dismiss") { note = window.prompt(`Reason for dismissing ${g.items.length === 1 ? "this item" : `all ${g.items.length} items`}?`) ?? undefined; if (!note) return; }
+      if (action === "dismiss") { note = window.prompt("Reason for dismissing this item?") ?? undefined; if (!note) return; }
       setBusy(true);
       try {
-        await patchAll(g.items.map((i) => i.id), action, note);
+        await patchAll([it.id], action, note);
         const kkey = action === "resolve" ? "resolved" : action === "defer" ? "deferred" : "dismissed";
-        setDecided((d) => ({ ...d, [kkey]: d[kkey] + g.items.length }));
-        const ids = new Set(g.items.map((i) => i.id));
-        setItems((prev) => prev.filter((i) => !ids.has(i.id)));
-        if (action === "defer") setDeferred((prev) => [...g.items, ...prev]);
+        setDecided((d) => ({ ...d, [kkey]: d[kkey] + 1 }));
+        setItems((prev) => prev.filter((i) => i.id !== it.id));
+        if (action === "defer") setDeferred((prev) => [it, ...prev]);
         // Undo affordance.
-        const label = `${action === "resolve" ? "Resolved" : action === "defer" ? "Deferred" : "Dismissed"} ${g.items.length === 1 ? "1 item" : `${g.items.length} items`}`;
-        setUndo({ items: g.items, action, label });
+        const label = `${action === "resolve" ? "Resolved" : action === "defer" ? "Deferred" : "Dismissed"} “${it.title}”`;
+        setUndo({ items: [it], action, label });
         if (undoTimer.current) clearTimeout(undoTimer.current);
         undoTimer.current = setTimeout(() => setUndo(null), 6000);
       } finally { setBusy(false); }
     },
-    [caseId, groups, gIdx, busy],
+    [caseId, queue, gIdx, busy],
   );
 
   const undo = async () => {
@@ -146,12 +132,12 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
       if (e.key.toLowerCase() === "r") void act("resolve");
       if (e.key.toLowerCase() === "d") void act("defer");
       if (e.key.toLowerCase() === "x") void act("dismiss");
-      if (e.key === "ArrowRight") setGIdx((i) => Math.min(i + 1, groups.length - 1));
+      if (e.key === "ArrowRight") setGIdx((i) => Math.min(i + 1, queue.length - 1));
       if (e.key === "ArrowLeft") setGIdx((i) => Math.max(i - 1, 0));
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, current, canEdit, act, groups.length, undoState, showHelp]);
+  }, [open, current, canEdit, act, queue.length, undoState, showHelp]);
 
   const criticalCount = items.filter(isBlocking).length;
   const highCount = items.filter((i) => i.severity === "HIGH" && !i.exportBlocking).length;
@@ -193,7 +179,7 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
                 </div>
                 <div>
                   <p className="font-semibold text-ink-900">Case Review</p>
-                  <p className="text-xs text-ink-500">{groups.length ? `${Math.min(gIdx + 1, groups.length)} of ${groups.length}` : total === 0 ? "All clear" : "Nothing in this view"}</p>
+                  <p className="text-xs text-ink-500">{queue.length ? `${Math.min(gIdx + 1, queue.length)} of ${queue.length}` : total === 0 ? "All clear" : "Nothing in this view"}</p>
                 </div>
               </div>
               <div className="flex items-center gap-1">
@@ -203,7 +189,7 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
             </div>
 
             {/* Progress bar */}
-            {groups.length > 0 && <div className="h-1 w-full bg-ink-100"><div className="h-1 bg-brand-500 transition-all duration-300" style={{ width: `${(gIdx / groups.length) * 100}%` }} /></div>}
+            {queue.length > 0 && <div className="h-1 w-full bg-ink-100"><div className="h-1 bg-brand-500 transition-all duration-300" style={{ width: `${(gIdx / queue.length) * 100}%` }} /></div>}
 
             {/* Segmented filter */}
             <div className="flex gap-1 overflow-x-auto border-b border-ink-100 px-3 py-2">
@@ -241,32 +227,18 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
                   ))}
                 </ul>
               ) : current ? (
-                <div key={current.key} style={{ animation: "ca-in 180ms ease-out" }}>
+                <div key={current.id} style={{ animation: "ca-in 180ms ease-out" }}>
                   <div className="mb-2 flex items-center gap-2 text-xs">
                     <span className="rounded bg-ink-100 px-2 py-0.5 font-medium text-ink-600">{current.stageLabel}</span>
                     <span className={`rounded px-2 py-0.5 font-semibold ${SEV_CHIP[current.severity]}`}>{sevLabel(current.severity)}</span>
                     {current.exportBlocking && <span className="rounded bg-red-100 px-2 py-0.5 font-semibold text-red-700">blocks export</span>}
-                    {current.items.length > 1 && <span className="ml-auto rounded bg-brand-50 px-2 py-0.5 font-semibold text-brand-700">{current.items.length} recommendations</span>}
                   </div>
                   <h3 className="text-base font-semibold text-ink-900">{current.title}</h3>
-                  {current.items.length === 1 ? (
-                    <>
-                      {current.items[0].entityType === "recommendation" && current.items[0].entityId && <button onClick={() => focus(current.items[0])} className="mt-0.5 inline-flex items-center gap-1 text-xs font-medium text-brand-700 hover:underline">Open {current.items[0].entityId} <ArrowUpRight className="h-3 w-3" /></button>}
-                      <p className="mt-2 text-sm text-ink-700">{current.items[0].summary}</p>
-                    </>
-                  ) : (
-                    <div className="mt-2">
-                      <p className="text-xs text-ink-500">Affects — resolve all together, or open one to fix it in place:</p>
-                      <ul className="mt-1.5 space-y-1">
-                        {current.items.slice(0, 12).map((i) => (
-                          <li key={i.id} className="flex items-center justify-between gap-2 rounded border border-ink-100 px-2 py-1 text-xs">
-                            <span className="truncate text-ink-700">{i.entityId}</span>
-                            {i.entityType === "recommendation" && i.entityId && <button onClick={() => focus(i)} className="shrink-0 text-brand-700 hover:underline">Open</button>}
-                          </li>
-                        ))}
-                        {current.items.length > 12 && <li className="text-xs text-ink-400">+ {current.items.length - 12} more</li>}
-                      </ul>
-                    </div>
+                  <p className="mt-2 text-sm text-ink-700">{current.summary}</p>
+                  {current.entityType === "recommendation" && current.entityId && (
+                    <button onClick={() => focus(current)} className="mt-2 inline-flex items-center gap-1 rounded-lg bg-brand-50 px-2.5 py-1.5 text-xs font-semibold text-brand-700 transition hover:bg-brand-100">
+                      Go to this item <ArrowUpRight className="h-3.5 w-3.5" />
+                    </button>
                   )}
                   <div className="mt-3 rounded-lg bg-ink-50 p-3 text-sm">
                     <p className="text-ink-700"><span className="font-semibold text-ink-800">Why it matters. </span>{current.whyItMatters}</p>
@@ -311,7 +283,7 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
               <div className="border-t border-ink-100 p-3">
                 {canEdit ? (
                   <div className="grid grid-cols-3 gap-2">
-                    <button disabled={busy} onClick={() => void act("resolve")} className="flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-emerald-700 active:scale-95 disabled:opacity-50"><Check className="h-4 w-4" /> Resolve{current.items.length > 1 ? " all" : ""} <kbd className="ml-1 text-[10px] opacity-70">R</kbd></button>
+                    <button disabled={busy} onClick={() => void act("resolve")} className="flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-emerald-700 active:scale-95 disabled:opacity-50"><Check className="h-4 w-4" /> Resolve <kbd className="ml-1 text-[10px] opacity-70">R</kbd></button>
                     <button disabled={busy} onClick={() => void act("defer")} className="flex items-center justify-center gap-1.5 rounded-lg bg-ink-100 px-3 py-2 text-sm font-medium text-ink-700 transition hover:bg-ink-200 active:scale-95 disabled:opacity-50"><Clock className="h-4 w-4" /> Defer <kbd className="ml-1 text-[10px] opacity-70">D</kbd></button>
                     <button disabled={busy} onClick={() => void act("dismiss")} className="flex items-center justify-center gap-1.5 rounded-lg bg-white px-3 py-2 text-sm font-medium text-ink-500 ring-1 ring-ink-200 transition hover:text-red-600 active:scale-95 disabled:opacity-50"><Ban className="h-4 w-4" /> Dismiss <kbd className="ml-1 text-[10px] opacity-70">X</kbd></button>
                   </div>
@@ -319,7 +291,7 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
                 <div className="mt-2 flex items-center justify-between text-xs text-ink-500">
                   <button onClick={() => setGIdx((i) => Math.max(i - 1, 0))} disabled={gIdx === 0} className="flex items-center gap-1 disabled:opacity-30"><ChevronLeft className="h-3.5 w-3.5" /> Prev</button>
                   <button onClick={() => setShowHelp(true)} className="hover:text-ink-700">shortcuts</button>
-                  <button onClick={() => setGIdx((i) => Math.min(i + 1, groups.length - 1))} disabled={gIdx >= groups.length - 1} className="flex items-center gap-1 disabled:opacity-30">Next <ChevronRight className="h-3.5 w-3.5" /></button>
+                  <button onClick={() => setGIdx((i) => Math.min(i + 1, queue.length - 1))} disabled={gIdx >= queue.length - 1} className="flex items-center gap-1 disabled:opacity-30">Next <ChevronRight className="h-3.5 w-3.5" /></button>
                 </div>
               </div>
             )}

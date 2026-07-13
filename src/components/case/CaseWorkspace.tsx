@@ -117,17 +117,44 @@ export function CaseWorkspace({
   const [tab, setTab] = useState("overview");
   const [busy, setBusy] = useState<string | null>(null);
   const [focusId, setFocusId] = useState<string | null>(null);
+  const [focusCat, setFocusCat] = useState<string | null>(null);
   const can = (p: Permission) => permissions.includes(p);
 
-  // Deep-link from the Case Assistant: switch to the right tab and highlight the
-  // affected recommendation so the user can fix it in place.
-  const focusEntity = (entityType: string | null, entityId: string | null, category: string) => {
-    if (!entityId) return;
+  // Deep-link from the Case Assistant: switch to the right tab, scroll to the
+  // exact item, auto-expand its details, and highlight the specific section the
+  // finding is about (the target panel maps focusCat → section).
+  const focusEntity = (entityType: string | null, rawEntityId: string | null, category: string) => {
+    if (!rawEntityId) return;
+    // The attention engine falls back to the service NAME when it cannot resolve
+    // the item id — map either form to the real recommendation id.
+    const items = (data.futureCareItems ?? []) as AnyRec[];
+    const entityId = entityType === "recommendation"
+      ? (items.find((it) => it.id === rawEntityId)?.id ?? items.find((it) => it.service === rawEntityId)?.id ?? rawEntityId)
+      : rawEntityId;
     const targetTab = /pricing|cpt|duplicate_cost/.test(category) ? "costs" : entityType === "document" ? "records" : entityType === "recommendation" ? "futurecare" : tab;
     setTab(targetTab);
     setFocusId(entityId);
-    setTimeout(() => document.getElementById(`fc-${entityId}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 120);
-    setTimeout(() => setFocusId((f) => (f === entityId ? null : f)), 2600);
+    setFocusCat(category);
+    // The tab's content mounts asynchronously AND the card's details auto-expand
+    // (relayout) after focus — keep re-asserting the scroll until the card is
+    // actually centered, rather than firing a single smooth scroll that the
+    // expansion cancels.
+    const attempt = (n: number) => {
+      const card = document.getElementById(`fc-${entityId}`);
+      if (card) {
+        // Prefer the exact highlighted section inside the expanded card (the
+        // area the finding is about); fall back to the card header.
+        const section = card.querySelector("[data-focus-target]");
+        const el = (section as HTMLElement | null) ?? card;
+        const r = el.getBoundingClientRect();
+        const settled = r.top >= 0 && r.top < window.innerHeight * (section ? 0.55 : 0.42);
+        if (!settled) el.scrollIntoView({ behavior: "auto", block: section ? "center" : "start" });
+        if (settled && n > 2) return; // stable — stop
+      }
+      if (n < 16) setTimeout(() => attempt(n + 1), 150);
+    };
+    setTimeout(() => attempt(0), 120);
+    setTimeout(() => { setFocusId((f) => (f === entityId ? null : f)); setFocusCat(null); }, 6000);
   };
 
   async function call(url: string, method: string, body?: unknown, tag = "op") {
@@ -251,8 +278,8 @@ export function CaseWorkspace({
         {tab === "causation" && <CausationPanel data={data} />}
         {tab === "providers" && <TreatingProvidersPanel data={data} canEdit={can("case.edit") || can("physician.review")} call={call} />}
         {tab === "evidence" && <EvidencePanel data={data} />}
-        {tab === "futurecare" && <FutureCarePanel data={data} canEdit={can("futurecare.edit")} call={call} focusId={focusId} />}
-        {tab === "costs" && <CostsPanel data={data} assumptions={assumptions} totals={totals} canEdit={can("case.edit")} call={call} />}
+        {tab === "futurecare" && <FutureCarePanel data={data} canEdit={can("futurecare.edit")} call={call} focusId={focusId} focusCat={focusCat} />}
+        {tab === "costs" && <CostsPanel data={data} assumptions={assumptions} totals={totals} canEdit={can("case.edit")} call={call} focusId={focusId} />}
         {tab === "reviews" && <ReviewsPanel points={data.reviewFindings} hasPlan={hasPlan} />}
         {tab === "physician" && <PhysicianPanel data={data} canReview={can("physician.review")} call={call} />}
         {tab === "precedents" && <PrecedentsPanel precedents={precedents} data={data} />}
@@ -1335,12 +1362,23 @@ function EvidenceBucket({ label, items }: { label: string; items: EvidenceItem[]
     </div>
   );
 }
-function RecommendationDossierView({ dossier, assessment }: { dossier: RecommendationDossier; assessment?: ReasoningAssessment }) {
+// Which dossier section a Case Assistant finding category points at, so the
+// deep-link can highlight the exact area that needs to be addressed.
+const HIGHLIGHT_SECTION: Record<string, "reasoning" | "evidence" | "literature"> = {
+  diagnosis_mismatch: "reasoning", unsupported_recommendation: "reasoning", staged_care: "reasoning",
+  recommendation_conflict: "reasoning", duplicate_cost: "reasoning", physician_review_pending: "reasoning",
+  missing_evidence: "evidence",
+  literature: "literature",
+};
+const HL = "rounded-md bg-amber-50 p-2 ring-2 ring-amber-400";
+
+function RecommendationDossierView({ dossier, assessment, highlight }: { dossier: RecommendationDossier; assessment?: ReasoningAssessment; highlight?: string | null }) {
   const se = dossier.supportingEvidence;
+  const target = highlight ? HIGHLIGHT_SECTION[highlight] : undefined;
   return (
     <div className="space-y-3 text-sm">
       {assessment && (
-        <div className="rounded-lg border border-brand-100 bg-brand-50/60 p-2.5">
+        <div data-focus-target={target === "reasoning" ? "" : undefined} className={cn("rounded-lg border border-brand-100 bg-brand-50/60 p-2.5", target === "reasoning" && "ring-2 ring-amber-400")}>
           <p className="text-xs font-semibold uppercase tracking-wide text-brand-700">Clinical reasoning</p>
           <p className="mt-0.5 leading-relaxed text-ink-800"><span className="font-medium">{PROBABILITY_LABEL[assessment.probabilityClassification]}.</span> {assessment.inclusionRationale}</p>
           <p className="mt-1 text-xs text-ink-600">Pathway: {assessment.clinicalPathway} · Evidence strength: {EVIDENCE_STRENGTH_LABEL[assessment.evidenceStrength]} · Confidence: {CONFIDENCE_LABEL[assessment.recommendationConfidence]}{assessment.frequencySupported ? "" : " · frequency unverified"}</p>
@@ -1361,7 +1399,7 @@ function RecommendationDossierView({ dossier, assessment }: { dossier: Recommend
         <Badge tone={CONF_TONE_D[dossier.confidence.level]}>{dossier.confidence.level.toLowerCase()}</Badge>
       </div>
       <p className="text-ink-700">{dossier.probability.statement}</p>
-      <div>
+      <div data-focus-target={target === "evidence" ? "" : undefined} className={cn(target === "evidence" && HL)}>
         <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Supporting clinical evidence</p>
         <div className="mt-1 grid gap-2 md:grid-cols-2">
           <EvidenceBucket label="Supporting diagnoses" items={se.diagnoses} />
@@ -1374,7 +1412,7 @@ function RecommendationDossierView({ dossier, assessment }: { dossier: Recommend
           <EvidenceBucket label="Clinical guidelines" items={se.guidelines} />
         </div>
       </div>
-      <div>
+      <div data-focus-target={target === "literature" ? "" : undefined} className={cn(target === "literature" && HL)}>
         <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Supporting literature</p>
         {dossier.literature.length ? (
           <ol className="mt-1 space-y-1.5">
@@ -1421,9 +1459,15 @@ function assessmentForItem(it: AnyRec, data: AnyRec): ReasoningAssessment {
   return buildReasoningAssessment(it as ReasoningItem, (data.conditions ?? []) as never, (data.chronologyEvents ?? []) as DossierChronoEvent[], kase, interviews as never, { conflicts: flags.get(it.id) ?? [], replacedByActive: replacedByActive.has(it.id) });
 }
 
-function FutureCarePanel({ data, canEdit, call, focusId }: { data: AnyRec; canEdit: boolean; call: any; focusId?: string | null }) {
+function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: AnyRec; canEdit: boolean; call: any; focusId?: string | null; focusCat?: string | null }) {
   const [open, setOpen] = useState<string | null>(null);
   const [filter, setFilter] = useState<string>("All");
+  // Deep-link: when the assistant focuses an item, make sure it is visible
+  // (reset the category filter) and auto-expand its details so the finding's
+  // section can be highlighted in place.
+  useEffect(() => {
+    if (focusId && data.futureCareItems.some((it: AnyRec) => it.id === focusId)) { setFilter("All"); setOpen(focusId); }
+  }, [focusId, data.futureCareItems]);
   if (data.futureCareItems.length === 0) return <Empty>Run the AI pipeline to generate future care recommendations.</Empty>;
 
   // Organize by care category group; chips allow selective viewing per group.
@@ -1449,7 +1493,7 @@ function FutureCarePanel({ data, canEdit, call, focusId }: { data: AnyRec; canEd
           </div>
           <div className="space-y-2">
       {g.items.map((it: AnyRec) => (
-        <div key={it.id} id={`fc-${it.id}`} className={cn("card p-4 transition-shadow", focusId === it.id && "ring-2 ring-brand-400 ring-offset-2")}>
+        <div key={it.id} id={`fc-${it.id}`} className={cn("card scroll-mt-24 p-4 transition-shadow", focusId === it.id && "ring-2 ring-brand-400 ring-offset-2")}>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
@@ -1471,8 +1515,8 @@ function FutureCarePanel({ data, canEdit, call, focusId }: { data: AnyRec; canEd
           </div>
           {open === it.id && (
             <div className="mt-3 border-t border-ink-100 pt-3">
-              <RecommendationDossierView dossier={dossierForItem(it, data)} assessment={assessmentForItem(it, data)} />
-              <div className="mt-3 border-t border-ink-100 pt-2 text-sm text-ink-600">
+              <RecommendationDossierView dossier={dossierForItem(it, data)} assessment={assessmentForItem(it, data)} highlight={focusId === it.id ? focusCat : null} />
+              <div data-focus-target={focusId === it.id && focusCat && /cpt|pricing|duplicate_cost/.test(focusCat) ? "" : undefined} className={cn("mt-3 border-t border-ink-100 pt-2 text-sm text-ink-600", focusId === it.id && focusCat && /cpt|pricing|duplicate_cost/.test(focusCat) && "rounded-md bg-amber-50 p-2 ring-2 ring-amber-400")}>
                 <span className="text-xs font-medium text-ink-500">Cost basis: </span>{formatMoney(it.unitCost)}/unit · {it.pricingSource} · range {formatMoney(it.lowCost)}–{formatMoney(it.highCost)}
                 {it.lowerCostAlternative ? <> · <span className="text-xs font-medium text-ink-500">Alternative: </span>{it.lowerCostAlternative}</> : null}
               </div>
@@ -1504,7 +1548,7 @@ function InlineProbability({ item, caseId, call }: { item: AnyRec; caseId: strin
 }
 
 // ── Costs ────────────────────────────────────────────────────────────────────
-function CostsPanel({ data, assumptions, totals, canEdit, call }: { data: AnyRec; assumptions: AnyRec; totals: AnyRec; canEdit: boolean; call: any }) {
+function CostsPanel({ data, assumptions, totals, canEdit, call, focusId }: { data: AnyRec; assumptions: AnyRec; totals: AnyRec; canEdit: boolean; call: any; focusId?: string | null }) {
   const [a, setA] = useState({
     lifeExpectancyYears: Number(assumptions.lifeExpectancyYears.toFixed(1)),
     discountRate: assumptions.discountRate,
@@ -1512,6 +1556,10 @@ function CostsPanel({ data, assumptions, totals, canEdit, call }: { data: AnyRec
     geographicFactor: assumptions.geographicFactor,
   });
   const [open, setOpen] = useState<string | null>(null);
+  // Deep-link from the Case Assistant: expand the focused line's cost details.
+  useEffect(() => {
+    if (focusId && data.futureCareItems.some((it: AnyRec) => it.id === focusId)) setOpen(focusId);
+  }, [focusId, data.futureCareItems]);
   if (data.futureCareItems.length === 0) return <Empty>Run the AI pipeline to project costs.</Empty>;
   return (
     <div className="space-y-4">
@@ -1556,7 +1604,7 @@ function CostsPanel({ data, assumptions, totals, canEdit, call }: { data: AnyRec
           <tbody className="divide-y divide-ink-100">
             {data.futureCareItems.map((it: AnyRec) => (
               <Fragment key={it.id}>
-                <tr>
+                <tr id={`fc-${it.id}`} className={cn("scroll-mt-24", focusId === it.id && "bg-amber-50 ring-2 ring-inset ring-amber-400")}>
                   <td className="px-4 py-2 text-ink-800">{it.service}</td>
                   <td className="px-4 py-2 text-ink-600">{formatMoney(it.annualCost)}</td>
                   <td className="px-4 py-2 text-ink-500">{formatMoney(it.lowCost)}</td>
