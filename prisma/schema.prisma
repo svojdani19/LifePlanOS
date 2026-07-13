@@ -134,6 +134,7 @@ model Firm {
   precedents         PrecedentPlan[]
   validationFindings ValidationFinding[]
   attentionItems     AttentionItem[]
+  reasoningAssessments ClinicalReasoningAssessment[]
 
   @@index([slug])
 }
@@ -327,6 +328,7 @@ model Case {
   socUserInputs             SocUserInput[]
   validationFindings        ValidationFinding[]
   attentionItems            AttentionItem[]
+  reasoningAssessments      ClinicalReasoningAssessment[]
   recommendationTransitions RecommendationTransition[]
   evidenceLinks             EvidenceLink[]
   assumptionChanges         AssumptionChange[]
@@ -1000,6 +1002,110 @@ enum AttentionStatus {
   RESOLVED
   DISMISSED
   SUPERSEDED
+}
+
+// Clinical Reasoning Engine (Phase A). A structured, versioned assessment of
+// whether ONE future-care recommendation is medically supportable for THIS
+// patient — computed by the reasoning pipeline (reusing the dossier, integrity,
+// consistency, and citation engines) and PERSISTED so the report narrative and
+// Evidence Explorer render FROM it ("reason first, write second"). References
+// existing Condition / citation / review records rather than duplicating them.
+enum ReasoningStatus {
+  NEEDS_REASONING_REVIEW // default for backfilled / not-yet-assessed recommendations
+  ASSESSED
+  SUPERSEDED
+}
+
+enum ProbabilityClassification {
+  PROBABLE_INCLUDED
+  CONDITIONAL_STAGED
+  POSSIBLE_CONTINGENCY_NOT_INCLUDED
+  INSUFFICIENTLY_SUPPORTED
+  NOT_RECOMMENDED
+  REJECTED_BY_REVIEWER
+}
+
+enum EvidenceStrength {
+  STRONG
+  MODERATE
+  LIMITED
+  EXPERT_CONSENSUS
+  INSUFFICIENT
+}
+
+enum RecommendationConfidence {
+  HIGH
+  MODERATE
+  LOW
+  INDETERMINATE
+}
+
+model ClinicalReasoningAssessment {
+  id     String @id @default(uuid())
+  firmId String
+  firm   Firm   @relation(fields: [firmId], references: [id], onDelete: Cascade)
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  recommendationId      String // FutureCareItem.id
+  recommendationService String // denormalized service name (stable across regen)
+  status                ReasoningStatus @default(NEEDS_REASONING_REVIEW)
+
+  // Condition (§4) — references existing Condition ids; classifications derived.
+  supportingDiagnosisIds   Json? // string[] of Condition ids
+  bodyRegion               String?
+  responsibleSpecialty     String?
+  conditionTrajectory      String? // improving | stable | worsening | fluctuating | uncertain
+  causalRelationshipStatus String? // from Condition.relatedness
+
+  clinicalPurpose String?
+
+  // Evidence assembly summaries (§5) — each underlying fact traces to a source
+  // through the existing evidence buckets; these are the synthesized summaries.
+  objectiveEvidenceSummary     String?
+  subjectiveEvidenceSummary    String?
+  functionalBasisSummary       String?
+  priorTreatmentSummary        String?
+  treatmentResponseSummary     String?
+  treatingRecordSupportSummary String?
+
+  medicalNecessityRationale String? // §6
+  noTreatmentRisk           String?
+  probabilityClassification ProbabilityClassification @default(INSUFFICIENTLY_SUPPORTED) // §7
+
+  clinicalPathwayStage String? // §8 (expanded in Phase B)
+  frequencyRationale   String? // §10
+  frequencySupported   Boolean @default(false)
+  durationClass        String? // §11
+  durationRationale    String?
+
+  weakeningEvidence       Json? // §13
+  unknowns                Json? // §14
+  missingEvidenceRequests Json?
+
+  supportingGuidelineAssessments  Json? // §15 — thin refs to existing guidelines
+  supportingLiteratureAssessments Json? // §15 — thin refs to existing citations
+
+  evidenceStrength         EvidenceStrength         @default(INSUFFICIENT) // §16
+  recommendationConfidence RecommendationConfidence @default(INDETERMINATE)
+  confidenceExplanation    String?
+
+  costEligibilityStatus  String? // §17
+  inclusionInTotalsStatus String? // included | excluded | contingency
+  physicianReviewStatus  String?
+  validationStatus       String?
+
+  // Material-change fingerprint (§18): a change here invalidates prior approval.
+  materialHash    String?
+  generatedByModel String?
+  supersededById  String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([caseId])
+  @@index([firmId])
+  @@index([caseId, recommendationId])
 }
 
 model AttentionItem {

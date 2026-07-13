@@ -2,6 +2,48 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-13 — Clinical Reasoning Engine — Phase A (reason first, write second)
+
+Additive foundation for structured clinical reasoning: for each recommendation we
+now determine *whether it is medically supportable* as a structured object
+**before** any report narrative is written. Nothing in the existing app, report,
+cost engine, or recommendation lifecycle was changed — this only adds.
+
+- **Schema** — new `ClinicalReasoningAssessment` model (one per current
+  recommendation) with condition linkage, evidence summaries (objective /
+  subjective / functional / prior-treatment / treating-record), medical-necessity
+  rationale, probability classification, frequency & duration reasoning, evidence
+  strength, recommendation confidence, cost eligibility, inclusion, and review
+  status. Four enums: `ReasoningStatus`, `ProbabilityClassification`,
+  `EvidenceStrength`, `RecommendationConfidence`. Migration applied + resolved;
+  tenant-scoped (`firmId`, `caseId`), cascades with the case.
+- **Engine** — `src/lib/engine/clinicalReasoning.ts`:
+  - `buildReasoningAssessment(...)` (pure) reuses the existing dossier /
+    integrity / citation engines to assemble one structured assessment — no
+    second recommendation model, no chain-of-thought exposed.
+  - **Probability classification** (§7): PROBABLE_INCLUDED / CONDITIONAL_STAGED /
+    POSSIBLE_CONTINGENCY_NOT_INCLUDED / INSUFFICIENTLY_SUPPORTED / NOT_RECOMMENDED
+    / REJECTED_BY_REVIEWER; staged/contingent items are disclosed but never
+    entered into totals.
+  - **Frequency** carries an explicit `frequencySupported` flag — a frequency
+    with no documented cadence, guideline, or physician review is *not* treated
+    as supported.
+  - **Duration** is classified (ONE_TIME … LIFETIME / CONDITIONAL) with a
+    rationale; a lifetime duration on thin support is flagged.
+  - **Evidence strength** (about the literature) is kept distinct from
+    **recommendation confidence** (about this patient): strong patient-specific
+    evidence can yield high confidence with limited literature, and strong
+    literature cannot rescue confidence when patient support is absent.
+  - `persistCaseReasoning(caseId, firmId)` upserts per recommendation with a
+    material-change hash and supersedes assessments for removed recommendations.
+- **Tests** — `clinicalReasoning.test.ts` (10) covering probability
+  classification, frequency support, lifetime-duration support, and the
+  evidence-strength-vs-confidence separation. Suite 280 → **290**, all green.
+
+_Phased delivery: Phase A only. Phases B–E (pathway/conflicts/inclusion,
+literature/weakening/unknowns, Evidence-Explorer + narrative-from-assessment,
+backfill/regression) to follow._
+
 ## 2026-07-13 — Case Assistant: polished review experience
 
 - **Undo** — every decision (resolve/defer/dismiss, incl. batch) shows a 6-second
