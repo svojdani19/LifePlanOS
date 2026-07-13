@@ -2,6 +2,19 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-13 — Case Assistant: polished review experience
+
+- **Undo** — every decision (resolve/defer/dismiss, incl. batch) shows a 6-second
+  "Undo" toast (or press `U`); undo re-opens the item(s) and restores them.
+- **Deferred tray** — `DEFERRED` items are set aside out of the live queue
+  (`syncAttention` splits `active` vs `deferred`) but still counted for
+  readiness; a Deferred filter lists them with one-click **Restore**.
+- **Segmented filter** — All / Blocking / Important / Review / Deferred with live
+  counts, so the reviewer can focus on what matters.
+- **Progress ring + bar**, **animated card transitions** and slide-in drawer,
+  active-press feedback, a **keyboard-shortcut overlay** (`?`), autofocus, and
+  `role="dialog"` a11y. All within the existing design system.
+
 ## 2026-07-13 — Case Assistant: group-collapse + deep-link to the recommendation
 
 - **Group-collapse**: repetitive findings (same category + title, e.g. "9

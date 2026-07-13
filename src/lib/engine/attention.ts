@@ -318,12 +318,16 @@ export async function syncAttention(caseId: string, firmId: string, createdById?
     ...plan.supersede.map((id) => prisma.attentionItem.update({ where: { id }, data: { status: "SUPERSEDED", resolvedAt: now } })),
   ]);
 
-  const activeItems = await prisma.attentionItem.findMany({ where: { caseId, status: { in: ACTIVE } }, orderBy: { createdAt: "asc" } });
+  const rows = await prisma.attentionItem.findMany({ where: { caseId, status: { in: ACTIVE } }, orderBy: { createdAt: "asc" } });
   // Work order = AI-pipeline stage, then severity within a stage.
-  activeItems.sort(
+  rows.sort(
     (a, b) => pipelineRank(a.category) - pipelineRank(b.category) || SEVERITY_RANK[a.severity as AttentionSeverity] - SEVERITY_RANK[b.severity as AttentionSeverity],
   );
-  const active = activeItems.map((a) => ({ ...a, stageLabel: stageLabel(a.category) }));
-  const readiness = caseReadiness(activeItems.map((a) => ({ severity: a.severity as AttentionSeverity, category: a.category, exportBlocking: a.exportBlocking, title: a.title })), validation.counts);
-  return { active, readiness, counts: validation.counts, blocking: validation.blocking };
+  const enrich = (a: (typeof rows)[number]) => ({ ...a, stageLabel: stageLabel(a.category) });
+  // The live queue is OPEN/IN_REVIEW; DEFERRED items are set aside (restorable)
+  // but still counted for readiness — deferring never unblocks an export gate.
+  const active = rows.filter((a) => a.status !== "DEFERRED").map(enrich);
+  const deferred = rows.filter((a) => a.status === "DEFERRED").map(enrich);
+  const readiness = caseReadiness(rows.map((a) => ({ severity: a.severity as AttentionSeverity, category: a.category, exportBlocking: a.exportBlocking, title: a.title })), validation.counts);
+  return { active, deferred, readiness, counts: validation.counts, blocking: validation.blocking };
 }
