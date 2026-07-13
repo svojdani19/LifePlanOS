@@ -2,6 +2,34 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-12 — Recommendation consistency & conflict resolution
+
+Report Quality Sprint, part 1 — the biggest gap: every engine analyzed one
+recommendation in isolation, so nothing stopped two from contradicting each
+other. New cross-recommendation pass (additive; no UI/styling/cost-engine
+redesign, no Standard-of-Care module, no physician-consistency audit feature).
+
+- **`engine/recommendationConsistency.ts`** (pure, tested): classifies each
+  relevant pair as **mutually_exclusive** (competing pathways for the same
+  problem/period), **sequential** (conservative→surgery, primary→revision,
+  walker→wheelchair), **duplicate** (same/overlapping service), or **concurrent**
+  (complementary — no action). Resolves genuine conflicts by a fixed priority —
+  **medical probability → record support → cost only as a last tiebreak** (cost
+  never overrides probability; a cost tiebreak is flagged). It never edits or
+  deletes a recommendation — it annotates and flags.
+- **Wired into `runIntegrityCheck`** (the single point that already feeds
+  validation and the report): mutually-exclusive or duplicate pathways that are
+  BOTH totaled now emit **export-blocking** findings; a revision with no
+  survivorship/failure trigger emits a non-blocking finding. Findings persist via
+  `validateCase` and flip the existing DRAFT watermark.
+- **Report** (`export/report.ts`): each recommendation now shows a
+  *Recommendation consistency* line — what it conflicts with and how the conflict
+  was resolved — within the existing structure/styling.
+- Tests: 10 cases covering all 7 sprint scenarios (conservative-vs-fusion,
+  injections-vs-surgery, arthroplasty→revision, walker-vs-wheelchair, PT overlap,
+  two surgical alternatives, two non-conflicting probable services) plus
+  cost-never-overrides-probability and cost-tiebreak-only-when-equal. 228 → 238.
+
 ## 2026-07-12 — OCR: evidence-based DPI bump + cloud-provider seam
 
 Improves the local OCR that reads scanned charts, and lays in a ready-to-switch

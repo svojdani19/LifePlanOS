@@ -17,6 +17,8 @@
 // couple the report to the Prisma types.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { analyzeConsistency, type ConsistencyRec, type ConsistencyResult } from "@/lib/engine/recommendationConsistency";
+
 // ── Body region / anatomy ────────────────────────────────────────────────────
 export type BodyRegion =
   | "knee" | "hip" | "shoulder" | "spine" | "ankle_foot" | "wrist_hand" | "elbow"
@@ -448,6 +450,7 @@ export interface IntegrityReport {
   perItem: Map<RecInput, PerItem>;
   findings: IntegrityFinding[];
   blocking: boolean;
+  consistency: ConsistencyResult;
   counts: { proposed: number; recordSupported: number; physicianApproved: number; awaitingReview: number; excluded: number; included: number };
 }
 
@@ -496,6 +499,29 @@ export function runIntegrityCheck(input: IntegrityInput): IntegrityReport {
     }
   }
 
+  // Cross-recommendation consistency: detect mutually-exclusive / sequential /
+  // duplicate relationships across the whole set and resolve conflicts. Its
+  // findings (both-totaled contradictions block export) merge into the list.
+  const consistencyRecs: ConsistencyRec[] = input.recommendations.map((rec) => {
+    const r = rec as unknown as { id?: string; confidence?: number; durationYears?: number | null; isLifetime?: boolean; startTrigger?: string | null };
+    const pi = perItem.get(rec);
+    return {
+      id: r.id ?? rec.service,
+      service: rec.service,
+      category: rec.category ?? null,
+      conditionId: pi?.mapping.conditionId ?? rec.conditionId ?? null,
+      probability: rec.probability,
+      confidence: r.confidence,
+      presentValue: rec.presentValue,
+      durationYears: r.durationYears ?? null,
+      isLifetime: r.isLifetime,
+      startTrigger: r.startTrigger ?? null,
+      includedInTotal: pi?.includedInTotal ?? false,
+    };
+  });
+  const consistency = analyzeConsistency(consistencyRecs);
+  findings.push(...consistency.findings);
+
   const severityRank: Record<Severity, number> = { Critical: 0, High: 1, Moderate: 2, Low: 3 };
   findings.sort((a, b) => severityRank[a.severity] - severityRank[b.severity]);
   const blocking = findings.some((f) => f.exportBlocking);
@@ -503,6 +529,7 @@ export function runIntegrityCheck(input: IntegrityInput): IntegrityReport {
     perItem,
     findings,
     blocking,
+    consistency,
     counts: { proposed: input.recommendations.length, recordSupported, physicianApproved, awaitingReview, excluded, included },
   };
 }

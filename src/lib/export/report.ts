@@ -404,6 +404,19 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
 
     // Clinical confidence.
     out.push(labeled("Clinical confidence", `${dossier.confidence.level}. ${dossier.confidence.explanation}`));
+
+    // Recommendation consistency — whether another recommendation conflicts with
+    // this one, and how the conflict was resolved (§16).
+    const cnote = integrity.consistency.notes.get(it.id);
+    if (cnote && cnote.conflictsWith.length) {
+      const rel =
+        cnote.relationship === "mutually_exclusive" ? "is mutually exclusive with"
+          : cnote.relationship === "sequential" ? "is sequenced with"
+          : cnote.relationship === "duplicate" ? "overlaps with"
+          : "relates to";
+      const uniq = [...new Set(cnote.conflictsWith)];
+      out.push(labeled("Recommendation consistency", `This recommendation ${rel} ${uniq.join(", ")}.${cnote.resolution ? ` ${cnote.resolution}` : ""}`));
+    }
     return out;
   }
 
