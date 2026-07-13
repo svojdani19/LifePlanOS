@@ -167,6 +167,10 @@ function looksLikeProse(s: string): boolean {
   return true;
 }
 
+// A candidate sentence that leads with a metadata label or report boilerplate,
+// not a clinical finding — never a valid summary.
+const META_LEAD = /^(facility|location|date of|collected|fill date|\bndc\b|dispense|prepared by|reviewed by|dictated by|evaluated by|reported by|therapist|pharmacist|attending|surgeon|examiner|provider|page \d)\b|pharmacy record|record of fills|fills below|as written\b/i;
+
 /** Pull a single-sentence relevant finding from a record, or null if none. */
 export function extractFinding(text: string, complaint: Set<string>): string | null {
   if (!text || text.trim().length < 15) return null;
@@ -185,7 +189,7 @@ export function extractFinding(text: string, complaint: Set<string>): string | n
   const sentences = text
     .split(/(?<=[.!?])\s+|\n+/)
     .map((s) => s.replace(/\s+/g, " ").trim())
-    .filter((s) => s.length > 12 && !/^[A-Z0-9 :/,\-]+$/.test(s) && looksLikeProse(s)); // prose only — no OCR fragments/labels
+    .filter((s) => s.length > 12 && !/^[A-Z0-9 :/,\-]+$/.test(s) && !META_LEAD.test(s) && looksLikeProse(s)); // prose only — no OCR fragments, labels, or boilerplate
   let best: { s: string; score: number } | null = null;
   for (const s of sentences) {
     const lower = s.toLowerCase();
@@ -360,13 +364,16 @@ function significance(hay: string, condNames: string[], careServices: string[]):
 }
 
 // Compose a specific event summary from the extracted detail.
-function composeSummary(fields: { treatment?: string | null; diagnosis?: string | null; objectiveFindings?: string | null; imaging?: string | null }, fallback: string): string {
-  const { treatment, diagnosis, objectiveFindings, imaging } = fields;
+function composeSummary(fields: { treatment?: string | null; diagnosis?: string | null; objectiveFindings?: string | null; imaging?: string | null; medications?: string | null }, fallback: string): string {
+  const { treatment, diagnosis, objectiveFindings, imaging, medications } = fields;
   if (treatment && diagnosis) return firstSentence(`${treatment} for ${diagnosis.replace(/\.$/, "")}`.replace(/\s+/g, " "));
   if (treatment) return firstSentence(treatment);
   if (imaging) return firstSentence(imaging);
   if (objectiveFindings) return firstSentence(objectiveFindings);
   if (diagnosis) return firstSentence(diagnosis);
+  // A pharmacy dispensing line reads as "Drug dose. SIG: …" — keep the fuller
+  // line (not just the first micro-sentence "Gabapentin 300 mg").
+  if (medications) return medications.length > 100 ? medications.slice(0, 99).trim() + "…" : medications;
   return fallback;
 }
 
@@ -689,7 +696,12 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
     const docProvider = [doc.authorName, doc.authorCredentials].filter(Boolean).join(", ") + (doc.authorRole ? ` — ${doc.authorRole}` : "") || null;
 
     const draftFrom = (body: string, ev: { eventType: EventType; specialty: string; recordType?: string }, eventDate: Date, eventDateEnd: Date | null, dateInferred: boolean, page: number | null, encounter: boolean, keepAnyway = false): Draft | null => {
-      const finding = extractFinding(body, complaint);
+      // Every LCP data point for this encounter, from the single extractor.
+      const enc = extractEncounterData(body, { isImaging: ev.eventType === "IMAGING" });
+      // The finding headlines the event; for records whose value is a structured
+      // data point (a pharmacy dispensing line, an IME impairment), fall back to
+      // that when no clinical sentence extracts — otherwise the event would drop.
+      const finding = extractFinding(body, complaint) ?? enc.medications ?? enc.impairmentRating ?? enc.diagnosis ?? null;
       if (!finding) return null;
       const hay = `${finding}\n${body}`.toLowerCase();
       const targetOverlap = overlapCount(body, targets);
@@ -702,11 +714,10 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
       // encounter must ACTUALLY bear on the case (significance or ≥2 distinctive
       // target terms) to make the timeline.
       if (encounter ? !sig && targetOverlap < 2 : !isPivotal && !sig && !keepAnyway) return null;
-      // Every LCP data point for this encounter, from the single extractor.
       const {
         subjective, pastMedicalHistory, objectiveFindings, diagnosis, treatment, procedure,
         disposition, imagingFindings: imaging, medications, functionalStatus, workStatus, restrictions, impairmentRating,
-      } = extractEncounterData(body, { isImaging: ev.eventType === "IMAGING" });
+      } = enc;
       const segFacilityRaw = pickSection(body, [/\bfacility\s*:?\s*([^\n]{3,90})/i, /\blocation\s*:?\s*([^\n]{3,90})/i], 90);
       // Trim trailing OCR labels that ran into the facility ("… Date Taken: …").
       const segFacility = segFacilityRaw?.replace(/\s+(?:date|time|dob|mrn|account|device|room|bed|unit|provider|taken)\b.*$/i, "").replace(/\s+[A-Z][a-z]+\s*:.*$/, "").trim() || null;
@@ -725,7 +736,7 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
       // that actually speaks to the case rather than an incidental OCR line.
       const caseSentence = !subjective && !objectiveFindings && !diagnosis && !treatment && !procedure ? caseRelevantSentence(body, condNames) : null;
       let summary = composeSummary(
-        { treatment: prose(procedure ?? treatment), diagnosis: prose(diagnosis), objectiveFindings: prose(subjective ?? objectiveFindings), imaging: prose(imaging) },
+        { treatment: prose(procedure ?? treatment), diagnosis: prose(diagnosis), objectiveFindings: prose(subjective ?? objectiveFindings), imaging: prose(imaging), medications },
         prose(caseSentence) ?? (looksLikeProse(finding) ? finding : "Documented clinical encounter — see the cited page of the source record."),
       );
       // Final guard: if the OCR headline is still garbled, derive a clean one
@@ -733,9 +744,11 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
       // establishes the link) so no OCR soup ever surfaces as the summary.
       if (!isCleanClinical(summary)) {
         const topCond = condNames.find((n) => documentsDiagnosis(hay, n));
-        summary = topCond
-          ? `${ev.recordType ?? typeLabel(doc.type)} addressing ${topCond.replace(/,\s*initial encounter$/i, "").toLowerCase()}`
-          : "Documented clinical encounter — see the cited page of the source record.";
+        // A placeholder headline adds nothing — drop the event rather than surface
+        // "Documented clinical encounter — see the cited page." When the encounter
+        // clearly documents a diagnosis, headline that instead.
+        if (!topCond) return null;
+        summary = `${ev.recordType ?? typeLabel(doc.type)} addressing ${topCond.replace(/,\s*initial encounter$/i, "").toLowerCase()}`;
       }
       return {
         eventDate,
@@ -793,13 +806,15 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
     }
   }
 
-  // De-duplicate: the same day's care can be documented in several overlapping
-  // records — keep the strongest event per (date, type, summary-prefix).
+  // De-duplicate: the same day's care is often documented in several overlapping
+  // records (an ER note ALSO classified as a hospitalization, a therapy note
+  // reprinted). Keep the strongest event per (date, summary-prefix) REGARDLESS of
+  // event type, so an identical-summary duplicate never appears twice.
   const seenKeys = new Set<string>();
   const deduped = drafts
     .sort((a, b) => b.relevanceScore - a.relevanceScore)
     .filter((d) => {
-      const key = `${d.eventDate.toISOString().slice(0, 10)}|${d.eventType}|${d.summary.toLowerCase().slice(0, 40)}`;
+      const key = `${d.eventDate.toISOString().slice(0, 10)}|${d.summary.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().slice(0, 40)}`;
       if (seenKeys.has(key)) return false;
       seenKeys.add(key);
       return true;

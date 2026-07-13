@@ -2,6 +2,24 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-12 — Chronology quality fixes (duplicates, junk summaries, placeholders)
+
+Fixes surfaced on David Chen's timeline.
+
+- **De-duplicate across event types**: an ER note also classified as a
+  hospitalization (identical summary, same date) no longer appears twice — the
+  dedup key is now `(date, summary-prefix)`, type-independent.
+- **Reject metadata/boilerplate headlines**: a summary is never a `FACILITY:`
+  line or pharmacy boilerplate ("record of fills below") — `extractFinding`
+  drops metadata-lead sentences (`chronology.ts`), so e.g. a neuropsych event
+  headlines the cognitive finding, not the clinic address.
+- **Pharmacy/IME fallback**: when no clinical sentence extracts, the event
+  headlines its structured data point (the medication line, the impairment/MMI)
+  instead of being dropped or showing boilerplate.
+- **No placeholder events**: an encounter that would render "Documented clinical
+  encounter — see the cited page" is dropped unless it clearly documents a
+  diagnosis (then it's named). Tests 245 → 247.
+
 ## 2026-07-12 — Staged/conditional persistence + functional-domain link (sprint close)
 
 Report Quality Sprint, part 3 (§10, §12) — completes the sprint. Additive only.

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { segmentEncounters, extractEncounterData } from "./chronology";
+import { segmentEncounters, extractEncounterData, extractFinding } from "./chronology";
 import { pageMarks } from "@/lib/documents/meta";
 
 const CHART = [
@@ -113,5 +113,20 @@ describe("extractEncounterData — full LCP data points per medical-record event
     expect(extractEncounterData(ime).impairmentRating).toMatch(/impairment rating|maximum medical improvement/i);
     const lab = "LABORATORY REPORT\nHemoglobin 11.2 (REFERENCE RANGE 13.5-17.5) — result flag LOW.";
     expect(extractEncounterData(lab).imagingFindings).toMatch(/hemoglobin/i);
+  });
+});
+
+describe("extractFinding rejects metadata / boilerplate leads (Chen chronology fix)", () => {
+  it("skips a FACILITY line and picks the clinical sentence", () => {
+    const t = "NEUROPSYCHOLOGICAL EVALUATION\nFACILITY: Cognitive Health Institute, Newport Beach, CA.\nCognitive functioning and memory index scores are reported.";
+    const f = extractFinding(t, new Set(["cognitive"]));
+    expect(f).toBeTruthy();
+    expect(f).not.toMatch(/facility|cognitive health institute/i);
+    expect(f).toMatch(/memory index|cognitive functioning/i);
+  });
+
+  it("does not headline pharmacy boilerplate", () => {
+    const t = "PHARMACY PRINTOUT\nDispense as written. Pharmacy record of fills below. NDC listed.";
+    expect(extractFinding(t, new Set())).toBeNull();
   });
 });
