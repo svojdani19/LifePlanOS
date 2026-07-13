@@ -194,3 +194,23 @@ describe("physician-narrative variation & recommendation-specific literature (Re
     expect(d.literature.some((l) => /arthroplasty/i.test(l.title))).toBe(false);
   });
 });
+
+describe("functional-domain link (§12) and staged inclusion (§10)", () => {
+  const k: DossierCase = { subject: "Ms. Roe", pronounPoss: "her", lifeExpectancyYears: 30, adult: true };
+  const knee: DossierCondition = { name: "Post-traumatic osteoarthritis of the right knee", relatedness: "RELATED", objectiveEvidence: "Joint-space narrowing", evidenceSources: [] } as unknown as DossierCondition;
+  const gaitChrono = [{ eventDate: "2024-01-01", functionalStatus: "Right knee antalgic gait limited to 100 feet, with stair difficulty" }] as unknown as DossierChronoEvent[];
+
+  it("links a mobility recommendation to the documented gait limitation, with quantified detection", () => {
+    const d = buildRecommendationDossier({ service: "Rolling walker", category: "MOBILITY_AID", frequencyPerYear: 1 }, knee, gaitChrono, k);
+    expect(d.functionalLink).not.toBeNull();
+    expect(d.functionalLink!.domain).toBe("Mobility");
+    expect(d.functionalLink!.limitation).toMatch(/gait|stair/i);
+    expect(d.functionalLink!.quantified).toBe(true); // "1 flight"
+    expect(d.functionalLink!.relationship).toMatch(/rolling walker/i);
+  });
+
+  it("does not invent a functional link when none is documented", () => {
+    const d = buildRecommendationDossier({ service: "Surveillance knee MRI", category: "IMAGING", frequencyPerYear: 1 }, knee, [], k);
+    expect(d.functionalLink).toBeNull();
+  });
+});

@@ -32,6 +32,8 @@ export interface ConsistencyRec {
   durationYears?: number | null;
   isLifetime?: boolean;
   startTrigger?: string | null;
+  replacesService?: string | null; // the recommendation this one supersedes when triggered
+  contingencyOnly?: boolean; // disclosed but never totaled
   includedInTotal?: boolean;
 }
 
@@ -104,6 +106,11 @@ function sameProblem(a: ConsistencyRec, b: ConsistencyRec): boolean {
 // Classify a relevant pair. Returns null for independent/complementary pairs.
 function relate(a: ConsistencyRec, b: ConsistencyRec): { type: RecRelationType; basis: string } | null {
   if (norm(a.service) === norm(b.service)) return { type: "duplicate", basis: "the same service is listed twice" };
+  // Explicit staged replacement metadata (§10) is authoritative: one supersedes
+  // the other when triggered, so they are sequential, not concurrent.
+  if ((a.replacesService && norm(a.replacesService) === norm(b.service)) || (b.replacesService && norm(b.replacesService) === norm(a.service))) {
+    return { type: "sequential", basis: "one recommendation explicitly replaces the other when its trigger fires" };
+  }
   if (!sameProblem(a, b)) return null; // different problem/region → independent (concurrent)
 
   const ka = kindOf(a);

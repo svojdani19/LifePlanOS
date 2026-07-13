@@ -2,6 +2,26 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-12 — Staged/conditional persistence + functional-domain link (sprint close)
+
+Report Quality Sprint, part 3 (§10, §12) — completes the sprint. Additive only.
+
+- **Staged/conditional metadata (§10)**: `FutureCareItem` gains `prerequisite`,
+  `earliestTiming`, `replacesService`, `contingencyOnly` (migration
+  `20260712180000`). A `contingencyOnly` item is **excluded from totals** in
+  `classifyRecommendation`; an explicit `replacesService` marks the pair
+  **sequential** in the consistency engine (so a staged replacement is never
+  totaled twice); the report states trigger / prerequisite / earliest timing /
+  what-it-replaces; a conditional item with no earliest timing raises a
+  (non-blocking) validation finding.
+- **Functional-domain link (§12)**: the dossier now carries a `functionalLink`
+  (domain · documented limitation · source · quantified · relationship), derived
+  only from a **documented** functional finding in the recommendation's region —
+  it is `null` when none is documented (never invents a deficit). The report
+  renders a *Functional basis* line per recommendation.
+- Tests: functional link present-with-quantified / absent-when-undocumented, and
+  explicit-replacement sequencing. 242 → 245.
+
 ## 2026-07-12 — Physician-narrative variation + recommendation-specific literature
 
 Report Quality Sprint, part 2 (§1, §4, §5, §15). No structure/styling change.

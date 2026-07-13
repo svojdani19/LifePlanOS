@@ -57,6 +57,13 @@ connection's search_path targets `lifeplanos`) → `npx prisma migrate resolve
 
 ### Change log (schema)
 
+- **2026-07-12 (Staged/conditional care)** `FutureCareItem.prerequisite`,
+  `earliestTiming`, `replacesService`, `contingencyOnly` (migration
+  `20260712180000_add_staged_conditional_fields`). Complete the staged-care
+  picture (§10): trigger (`startTrigger`) + prerequisite + earliest timing +
+  which recommendation it replaces if triggered; a `contingencyOnly` item is
+  disclosed but never entered into totals (enforced in `classifyRecommendation`).
+
 - **2026-07-12 (Encounter data points)** `ChronologyEvent.pastMedicalHistory`,
   `ChronologyEvent.impairmentRating` (migration
   `20260712170000_add_encounter_datapoints`). Complete the LCP data-point set

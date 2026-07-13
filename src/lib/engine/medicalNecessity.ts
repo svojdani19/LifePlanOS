@@ -110,10 +110,21 @@ export interface ProbabilityAssessment {
   statement: string;
   factors: { label: string; present: boolean; detail: string }[];
 }
+// §12 — explicit link between a documented functional limitation and this
+// recommendation. Null when no functional limitation is documented (the plan
+// never claims an undocumented deficit).
+export interface FunctionalLink {
+  domain: string; // Mobility · Self-care/ADLs · Cognition · Pain/neurologic · Rehabilitation
+  limitation: string; // the documented limitation (source-traceable)
+  source: string | null;
+  quantified: boolean; // numerically quantified in the record
+  relationship: string; // how the limitation supports this recommendation
+}
 export interface RecommendationDossier {
   medicalNecessity: string; // physician narrative (never restates the diagnosis)
   probability: ProbabilityAssessment;
   potentialChallenges: string[];
+  functionalLink: FunctionalLink | null;
   supportingEvidence: {
     diagnoses: EvidenceItem[];
     objectiveFindings: EvidenceItem[];
@@ -143,6 +154,20 @@ function hashStr(s: string): number {
 function variant<T>(seed: string, opts: T[]): T {
   return opts[hashStr(seed) % opts.length];
 }
+// §12 — the functional domain a recommendation serves (null when it is not a
+// function-directed service, e.g. surveillance imaging or labs).
+function functionalDomainOf(item: DossierItem): string | null {
+  const c = (item.category ?? "").toUpperCase();
+  const s = item.service.toLowerCase();
+  if (["MOBILITY_AID", "ORTHOTICS_PROSTHETICS"].includes(c) || /\b(walker|wheelchair|gait|ambulat|brace|prosthes|orthos|crutch|cane)\b/.test(s)) return "Mobility";
+  if (["ATTENDANT_CARE", "SKILLED_NURSING", "HOME_MODIFICATION"].includes(c) || /\b(attendant|home health|home modif|adl|self-?care|bathing|dressing|transfer)\b/.test(s)) return "Self-care / ADLs";
+  if (["COGNITIVE_THERAPY", "PSYCH"].includes(c) || /\b(cognit|neuropsych|memory|attention|compensatory)\b/.test(s)) return "Cognition";
+  if (["PAIN_MANAGEMENT", "INJECTION", "MEDICATION"].includes(c) || /\b(pain|radiculopath|neuralgia|neuropath)\b/.test(s)) return "Pain / neurologic";
+  if (["PHYSICAL_THERAPY", "OCCUPATIONAL_THERAPY", "SPEECH_THERAPY"].includes(c) || /\b(therapy|rehab)\b/.test(s)) return "Rehabilitation";
+  return null;
+}
+const QUANTIFIED = /\d+\s*(?:degree|°|feet|foot|meter|metre|minute|flight|%|percent|grade|\/5|out of|pound|\blb\b|\bkg\b|hour|repetition|rep\b|week|day|\bmph\b|second)/i;
+
 // A recommendation warranting the full multi-sentence synthesis vs. a concise
 // one — high cost, lifetime/contingent, disputed, or below the probability bar.
 function isComplexItem(item: DossierItem): boolean {
@@ -352,10 +377,31 @@ export function buildRecommendationDossier(
   if (patientReports.length) necessity += ` On interview, ${kase.subject} reports ${lc(cleanClause(patientReports[0].text, 140))}, which the recommendation directly addresses.`;
   if (providerOpinions.length) necessity += ` This is consistent with the opinion of ${providerOpinions[0].providerName ?? "the treating provider"} on interview.`;
 
+  // §12 — tie the recommendation to a DOCUMENTED functional limitation (never an
+  // undocumented one). Uses the source-traceable functional-limitations bucket.
+  const domain = functionalDomainOf(item);
+  let functionalLink: FunctionalLink | null = null;
+  if (domain && functionalLimitations.length) {
+    const fl = functionalLimitations[0];
+    const limText = String(fl.text).replace(/^Patient reports\s*/i, "").trim();
+    functionalLink = {
+      domain,
+      limitation: cleanClause(limText, 160),
+      source: fl.source ?? null,
+      quantified: QUANTIFIED.test(limText),
+      relationship: variant(item.service + "flink", [
+        `The documented ${domain.toLowerCase()} limitation supports ${lc(item.service)}.`,
+        `${lc(item.service)} directly addresses this documented ${domain.toLowerCase()} deficit.`,
+        `This ${domain.toLowerCase()} impairment is the functional basis for ${lc(item.service)}.`,
+      ]),
+    };
+  }
+
   return {
     medicalNecessity: necessity,
     probability,
     potentialChallenges,
+    functionalLink,
     supportingEvidence: { diagnoses, objectiveFindings, imaging, examination, functionalLimitations, physicianDocumentation, priorTreatment, guidelines: guidelineEvidence },
     literature,
     contradictoryEvidence,

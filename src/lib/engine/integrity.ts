@@ -400,6 +400,12 @@ export function classifyRecommendation(rec: RecInput, ctx: ClassifyContext): Cla
   const st = rec.physicianStatus ?? "PENDING";
   const prob = rec.probability ?? "POSSIBLE";
   if (st === "REJECTED") return { status: "REJECTED", label: STATUS_LABEL.REJECTED, includedInTotal: false, reason: "Declined on physician review." };
+  // A staged item marked contingency-only is disclosed but never totaled (§10) —
+  // this is the guard against totaling both halves of a staged/mutually-exclusive
+  // pathway simultaneously.
+  if ((rec as unknown as { contingencyOnly?: boolean }).contingencyOnly) {
+    return { status: "POSSIBLE_CONTINGENCY", label: STATUS_LABEL.POSSIBLE_CONTINGENCY, includedInTotal: false, reason: "Disclosed as a contingency only; not entered into totals." };
+  }
 
   // A critical mapping/coding defect blocks inclusion regardless of status.
   if (!ctx.matched) return { status: "INSUFFICIENT", label: STATUS_LABEL.INSUFFICIENT, includedInTotal: false, reason: "No region-matched diagnosis supports this recommendation." };
@@ -497,13 +503,18 @@ export function runIntegrityCheck(input: IntegrityInput): IntegrityReport {
     if (classify.includedInTotal && !hasRecordSupport && rec.physicianStatus !== "APPROVED" && rec.physicianStatus !== "MODIFIED") {
       findings.push({ recommendation: rec.service, result: "Unsupported item in totals", issue: "Included in totals without record support or physician approval.", severity: "Critical", suggestedCorrection: "Exclude from totals until supported.", exportBlocking: true });
     }
+    // Conditional/contingent care should record its earliest expected timing (§10/§17).
+    const staged = rec as unknown as { startTrigger?: string | null; earliestTiming?: string | null; contingencyOnly?: boolean };
+    if ((staged.startTrigger || staged.contingencyOnly) && !staged.earliestTiming) {
+      findings.push({ recommendation: rec.service, result: "Conditional care missing timing", issue: "A conditional/contingent recommendation has no earliest-expected timing recorded.", severity: "Low", suggestedCorrection: "Record the earliest expected timing (and prerequisite) so the staged item is not treated as concurrent.", exportBlocking: false });
+    }
   }
 
   // Cross-recommendation consistency: detect mutually-exclusive / sequential /
   // duplicate relationships across the whole set and resolve conflicts. Its
   // findings (both-totaled contradictions block export) merge into the list.
   const consistencyRecs: ConsistencyRec[] = input.recommendations.map((rec) => {
-    const r = rec as unknown as { id?: string; confidence?: number; durationYears?: number | null; isLifetime?: boolean; startTrigger?: string | null };
+    const r = rec as unknown as { id?: string; confidence?: number; durationYears?: number | null; isLifetime?: boolean; startTrigger?: string | null; replacesService?: string | null; contingencyOnly?: boolean };
     const pi = perItem.get(rec);
     return {
       id: r.id ?? rec.service,
@@ -516,6 +527,8 @@ export function runIntegrityCheck(input: IntegrityInput): IntegrityReport {
       durationYears: r.durationYears ?? null,
       isLifetime: r.isLifetime,
       startTrigger: r.startTrigger ?? null,
+      replacesService: r.replacesService ?? null,
+      contingencyOnly: r.contingencyOnly ?? false,
       includedInTotal: pi?.includedInTotal ?? false,
     };
   });

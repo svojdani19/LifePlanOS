@@ -765,6 +765,14 @@ model FutureCareItem {
   defenseVulnerability Vulnerability @default(LOW)
   missingSupport       String?
 
+  // Staged / conditional recommendation metadata (§10). `startTrigger` above is
+  // the trigger; these complete the staged picture so a contingent item is never
+  // silently totaled alongside the pathway it would replace.
+  prerequisite    String? // what must occur first (e.g. "failure of conservative care")
+  earliestTiming  String? // earliest expected timing (e.g. "~15 years — implant survivorship")
+  replacesService String? // the recommendation that becomes inactive if this triggers (denormalized service name)
+  contingencyOnly Boolean @default(false) // disclosed as a contingency; never entered into totals
+
   // Physician review (Module 12).
   physicianStatus  PhysicianStatus @default(PENDING)
   physicianNote    String?

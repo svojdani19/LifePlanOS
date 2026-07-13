@@ -402,6 +402,23 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
     if (dossier.unknowns.length) out.push(labeled("Unknowns", dossier.unknowns.slice(0, 3).join(" ")));
     out.push(labeled("Potential challenges", dossier.potentialChallenges.slice(0, 4).join(" ")));
 
+    // Functional basis (§12) — the documented limitation this care addresses.
+    if (dossier.functionalLink) {
+      const fl = dossier.functionalLink;
+      out.push(labeled("Functional basis", `${fl.domain} — ${fl.limitation}${fl.source ? ` (${fl.source})` : ""}${fl.quantified ? "; quantified in the record" : ""}. ${fl.relationship}`));
+    }
+
+    // Staged / conditional (§10) — trigger, prerequisite, timing, and whether it
+    // replaces another recommendation or is a contingency only.
+    const staged = [
+      it.startTrigger && `Trigger: ${it.startTrigger}`,
+      it.prerequisite && `Prerequisite: ${it.prerequisite}`,
+      it.earliestTiming && `Earliest expected timing: ${it.earliestTiming}`,
+      it.replacesService && `Replaces if triggered: ${it.replacesService}`,
+      it.contingencyOnly && "Disclosed as a contingency — not entered into the totals",
+    ].filter(Boolean) as string[];
+    if (staged.length) out.push(labeled("Staged / conditional", staged.join(". ") + "."));
+
     // Clinical confidence.
     out.push(labeled("Clinical confidence", `${dossier.confidence.level}. ${dossier.confidence.explanation}`));
 

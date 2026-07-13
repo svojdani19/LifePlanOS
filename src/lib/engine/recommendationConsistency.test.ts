@@ -107,3 +107,15 @@ describe("recommendationConsistency", () => {
     expect(res.costTiebreak).toBe(true);
   });
 });
+
+describe("staged/conditional metadata (§10)", () => {
+  const rec2 = (o: Partial<ConsistencyRec> & { id: string; service: string }): ConsistencyRec => ({ probability: "PROBABLE", confidence: 70, presentValue: 10000, includedInTotal: true, ...o });
+
+  it("an explicit replacesService makes the pair sequential, not concurrent", () => {
+    const r = analyzeConsistency([
+      rec2({ id: "cons", service: "Conservative lumbar management", category: "PAIN_MANAGEMENT", conditionId: "c1" }),
+      rec2({ id: "fus", service: "Lumbar fusion", category: "NEUROSURGERY", conditionId: "c1", replacesService: "Conservative lumbar management", startTrigger: "if conservative care fails" }),
+    ]);
+    expect(r.relations.some((x) => x.type === "sequential" && /explicitly replaces/.test(x.basis))).toBe(true);
+  });
+});
