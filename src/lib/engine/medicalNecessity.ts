@@ -130,6 +130,32 @@ export interface RecommendationDossier {
   confidence: { level: ConfidenceLevel; score: number; explanation: string; factors: string[] };
 }
 
+// ── Deterministic phrasing variation ────────────────────────────────────────
+// A stable FNV-1a hash → a variant index, so the SAME recommendation always
+// renders the same wording (reproducible) while DIFFERENT recommendations pick
+// different phrasings (breaks the identical-template repetition the report is
+// prone to). Never changes clinical content — only sentence structure/wording.
+function hashStr(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h >>> 0;
+}
+function variant<T>(seed: string, opts: T[]): T {
+  return opts[hashStr(seed) % opts.length];
+}
+// A recommendation warranting the full multi-sentence synthesis vs. a concise
+// one — high cost, lifetime/contingent, disputed, or below the probability bar.
+function isComplexItem(item: DossierItem): boolean {
+  return (
+    (item.presentValue ?? 0) >= 75000 ||
+    !!item.isLifetime ||
+    !!item.lowerCostAlternative ||
+    !!item.startTrigger ||
+    (item.probability ?? "POSSIBLE") !== "PROBABLE" ||
+    /\b(revision|future surgery|replacement|arthroplasty|fusion|reconstruction|attendant|nursing)\b/i.test(item.service)
+  );
+}
+
 // ── Small text helpers (kept local; no cross-module coupling) ────────────────
 const lc = (s: string) => (/^[A-Z][a-z]/.test(s) ? s[0].toLowerCase() + s.slice(1) : s);
 const cap = (s: string) => (s ? s[0].toUpperCase() + s.slice(1) : s);
@@ -244,8 +270,13 @@ export function buildRecommendationDossier(
     doi: cc.doi,
     studyType: cc.relevance?.evidenceLabel ?? evidenceTier(cc.title!).label,
     evidenceLevel: relevance.evidenceLevel,
-    supports: `the medical necessity of ${lc(item.service)} for ${lc(dxName)}`,
-    applicability: `${kase.subject} carries ${lc(dxName)}${region !== "general" ? ` (${region.replace(/_/g, "/")})` : ""}, the population and condition this study addresses`,
+    // Prefer the article's own stored claim; otherwise state what it supports.
+    supports: cc.relevance?.supports?.trim() || `the medical necessity of ${lc(item.service)} for ${lc(dxName)}`,
+    applicability: variant((cc.title ?? "") + item.service, [
+      `${kase.subject} carries ${lc(dxName)}${region !== "general" ? ` (${region.replace(/_/g, "/")})` : ""} — the condition and population this study addresses`,
+      `this study's population (${lc(dxName)}${region !== "general" ? `, ${region.replace(/_/g, "/")}` : ""}) matches ${kase.subject}'s presentation`,
+      `directly applicable: ${kase.subject}'s ${lc(dxName)}${region !== "general" ? ` (${region.replace(/_/g, "/")})` : ""} is the clinical context this evidence speaks to`,
+    ]),
     limitations: cc.relevance?.limitations ?? null,
     whySelected: cc.relevance?.whyRelevant ?? "recommendation-relevant and region/procedure/population compatible",
   }));
@@ -279,8 +310,15 @@ export function buildRecommendationDossier(
     percentage,
     statement:
       percentage >= 51
-        ? `On balance, ${lc(item.service)} ${areIs} more likely than not to be required (approximately ${percentage}%), to a reasonable degree of medical probability.`
-        : `${cap(lc(item.service))} ${areIs} foreseeable but, on the present record, ${areIs} not more likely than not (approximately ${percentage}%); disclosed as a contingency rather than totaled.`,
+        ? variant(item.service + "prob+", [
+            `On balance, ${lc(item.service)} ${areIs} more likely than not to be required (approximately ${percentage}%), to a reasonable degree of medical probability.`,
+            `To a reasonable degree of medical probability, ${lc(item.service)} ${areIs} more likely than not required (approximately ${percentage}%).`,
+            `The weight of the record places ${lc(item.service)} above the threshold of more likely than not (approximately ${percentage}%).`,
+          ])
+        : variant(item.service + "prob-", [
+            `${cap(lc(item.service))} ${areIs} foreseeable but, on the present record, ${areIs} not more likely than not (approximately ${percentage}%); disclosed as a contingency rather than totaled.`,
+            `On the present record ${lc(item.service)} ${areIs} a reasonable possibility (approximately ${percentage}%) but below the more-likely-than-not threshold; carried as a contingency, not totaled.`,
+          ]),
     factors: probFactors,
   };
 
@@ -340,38 +378,71 @@ function buildNecessityNarrative(
   percentage: number,
 ): string {
   const S = kase.subject;
+  const sv = item.service;
+  const areIs = /s$/.test(sv) ? "are" : "is";
+  const complex = isComplexItem(item);
   const parts: string[] = [];
 
   // Open with the pathology, not the label: what the record objectively shows.
+  // Phrasing varies by recommendation so no two sections open identically.
   const objective = ev.imaging[0]?.text || ev.objectiveFindings[0]?.text || ev.examination[0]?.text;
   if (objective) {
-    parts.push(`The reviewed records establish objective pathology underlying ${S}'s ${lc(dxName)}: ${lc(cleanClause(objective, 150))}.`);
+    const o = lc(cleanClause(objective, 150));
+    parts.push(variant(sv + "open", [
+      `The reviewed records establish objective pathology underlying ${S}'s ${lc(dxName)}: ${o}.`,
+      `Objectively, ${S}'s ${lc(dxName)} is substantiated on the record — ${o}.`,
+      `${S}'s ${lc(dxName)} is more than a clinical label here; the record documents ${o}.`,
+    ]));
   } else {
-    parts.push(`${S} carries ${lc(dxName)} as documented in the treating record.`);
+    parts.push(variant(sv + "open", [
+      `${S} carries ${lc(dxName)} as documented in the treating record.`,
+      `The treating record establishes ${S}'s ${lc(dxName)}.`,
+      `${S} is documented to have ${lc(dxName)}.`,
+    ]));
   }
 
-  // Prior treatment → why it is not the end of care.
-  if (ev.priorTreatment.length) {
+  // Prior treatment → why it is not the end of care (full synthesis only).
+  if (complex && ev.priorTreatment.length) {
     const tx = ev.priorTreatment.slice(0, 2).map((t) => lc(cleanClause(String(t.text), 90))).join(" and ");
-    parts.push(`${cap(kase.pronounPoss)} course has already included ${tx}; notwithstanding that treatment, the record reflects residual impairment.`);
+    parts.push(variant(sv + "tx", [
+      `${cap(kase.pronounPoss)} course has already included ${tx}; notwithstanding that treatment, the record reflects residual impairment.`,
+      `${S} has already undergone ${tx}, yet residual impairment persists on the record.`,
+      `Despite prior ${tx}, continued impairment is documented — the reason further care is contemplated.`,
+    ]));
   }
 
-  // Current functional impairment (metadata lines already filtered upstream).
-  if (ev.functionalLimitations.length) {
-    parts.push(`Functionally, the record documents ${lc(cleanClause(String(ev.functionalLimitations[0].text), 120))}, which bears directly on the need for continued care.`);
+  // Current functional impairment (full synthesis only; also in evidence bucket).
+  if (complex && ev.functionalLimitations.length) {
+    const fl = lc(cleanClause(String(ev.functionalLimitations[0].text), 120));
+    parts.push(variant(sv + "fx", [
+      `Functionally, the record documents ${fl}, which bears directly on the need for this care.`,
+      `The functional consequence is concrete: ${fl}.`,
+      `This care is driven by a documented functional deficit — ${fl}.`,
+    ]));
   }
 
   // The necessity itself, tied to progression / future need — the "why." Phrased
-  // so the (often plural) service name is the OBJECT, avoiding agreement slips
-  // and "manage … management" redundancy.
+  // so the (often plural) service name is the OBJECT, avoiding agreement slips.
   const rationale = item.rationale ? lc(cleanClause(item.rationale, 140)) : `the sequelae of ${lc(dxName)}`;
+  const objBasis = objective ? " on an established objective basis" : "";
   const need = item.isLifetime
-    ? `${S} will require ${lc(item.service)} on a recurring basis over ${kase.pronounPoss} remaining lifetime`
-    : `${S} will require ${lc(item.service)} over a defined course`;
-  parts.push(`In my opinion, and to a reasonable degree of medical probability, ${lc(item.service)} ${/s$/.test(item.service) ? "are" : "is"} reasonable and necessary for ${rationale}. Because this condition ${item.isLifetime ? "is chronic" : "requires continued treatment"}${objective ? " on an established objective basis" : ""}, ${need}.`);
+    ? `${S} will require ${lc(sv)} on a recurring basis over ${kase.pronounPoss} remaining lifetime`
+    : `${S} will require ${lc(sv)} over a defined course`;
+  parts.push(variant(sv + "need", [
+    `In my opinion, and to a reasonable degree of medical probability, ${lc(sv)} ${areIs} reasonable and necessary for ${rationale}. Because this condition ${item.isLifetime ? "is chronic" : "requires continued treatment"}${objBasis}, ${need}.`,
+    `To a reasonable degree of medical probability, ${need}; ${lc(sv)} ${areIs} reasonable and necessary to address ${rationale}${objBasis}.`,
+    `${cap(need)}. In my clinical judgment ${lc(sv)} ${areIs} reasonable and necessary for ${rationale}, to a reasonable degree of medical probability.`,
+  ]));
 
-  // Guideline anchoring, when present.
-  if (ev.guidelines.length) parts.push(`This need is consistent with the cited clinical guidance for this diagnosis.`);
+  // Guideline anchoring, when present (full synthesis only — avoids repeating
+  // the same guideline sentence on every simple item).
+  if (complex && ev.guidelines.length) {
+    parts.push(variant(sv + "gl", [
+      `This need is consistent with the cited clinical guidance for this diagnosis.`,
+      `Published clinical guidance for this diagnosis supports the recommendation.`,
+      `The cited guideline framework aligns with this plan.`,
+    ]));
+  }
 
   return parts.join(" ");
 }

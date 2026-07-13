@@ -2,6 +2,29 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-12 — Physician-narrative variation + recommendation-specific literature
+
+Report Quality Sprint, part 2 (§1, §4, §5, §15). No structure/styling change.
+
+- **Narrative de-repetition** (`engine/medicalNecessity.ts`): each sentence role
+  (opening pathology, prior treatment, functional impact, the necessity opinion,
+  guideline anchoring), the probability statement, and each article's
+  applicability now draw from several phrasings chosen by a **stable hash of the
+  recommendation** — so different recommendations read differently while the same
+  recommendation is byte-for-byte reproducible across regenerations. No clinical
+  content changes; only sentence structure/wording.
+- **Length modulation** (§15): simple, low-cost, non-disputed items get a concise
+  necessity (pathology + opinion); the full multi-sentence synthesis (prior
+  treatment, functional, guideline) is reserved for complex, high-cost, lifetime,
+  contingent, or disputed recommendations.
+- **Recommendation-specific literature** (§4/§5): each cited article now uses its
+  own stored claim (`supports`) and a varied applicability line instead of one
+  template. Confirmed the existing hard gate already rejects off-target evidence
+  — a pain-management *office-visit* recommendation does not draw on a knee-
+  arthroplasty or lumbar-fusion study (procedure-family + management-scope gate).
+- Tests: opening/probability variation across recommendations, reproducibility,
+  concise-vs-full length, and the §4 scope rejection. 238 → 242.
+
 ## 2026-07-12 — Recommendation consistency & conflict resolution
 
 Report Quality Sprint, part 1 — the biggest gap: every engine analyzed one

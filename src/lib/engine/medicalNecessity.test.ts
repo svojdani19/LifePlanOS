@@ -150,3 +150,47 @@ describe("validateRecommendationCompleteness", () => {
     expect(f).toHaveLength(0);
   });
 });
+
+describe("physician-narrative variation & recommendation-specific literature (Report Quality Sprint)", () => {
+  const k: DossierCase = { subject: "Mr. Doe", pronounPoss: "his", lifeExpectancyYears: 30, adult: true };
+  const knee: DossierCondition = {
+    name: "Post-traumatic osteoarthritis of the right knee",
+    relatedness: "RELATED",
+    objectiveEvidence: "Tricompartmental joint-space narrowing on weight-bearing radiographs",
+    evidenceSources: [],
+  } as unknown as DossierCondition;
+  const mk = (o: Partial<DossierItem> & { service: string }): DossierItem => ({ probability: "PROBABLE", frequencyPerYear: 1, ...o });
+  const firstSentence = (s: string) => s.split(/\.\s/)[0];
+
+  it("opens different recommendations with different phrasing (no identical boilerplate)", () => {
+    const a = buildRecommendationDossier(mk({ service: "Total knee arthroplasty", presentValue: 38000 }), knee, [], k);
+    const b = buildRecommendationDossier(mk({ service: "Pain management office visits", presentValue: 9000 }), knee, [], k);
+    const c = buildRecommendationDossier(mk({ service: "Revision knee arthroplasty", presentValue: 52000, startTrigger: "on implant failure" }), knee, [], k);
+    const opens = [firstSentence(a.medicalNecessity), firstSentence(b.medicalNecessity), firstSentence(c.medicalNecessity)];
+    // At least two distinct opening structures across three recommendations.
+    expect(new Set(opens).size).toBeGreaterThanOrEqual(2);
+    // Probability statements are not all identical templates either.
+    const probs = [a, b, c].map((d) => d.probability.statement);
+    expect(new Set(probs).size).toBeGreaterThanOrEqual(2);
+  });
+
+  it("is reproducible — the same recommendation renders identical narrative each time", () => {
+    const one = buildRecommendationDossier(mk({ service: "Total knee arthroplasty", presentValue: 38000 }), knee, [], k);
+    const two = buildRecommendationDossier(mk({ service: "Total knee arthroplasty", presentValue: 38000 }), knee, [], k);
+    expect(two.medicalNecessity).toBe(one.medicalNecessity);
+    expect(two.probability.statement).toBe(one.probability.statement);
+  });
+
+  it("is concise for simple low-cost items and fuller for complex ones (§15)", () => {
+    const chrono = [{ eventDate: "2024-01-01", functionalStatus: "Antalgic gait; stair negotiation limited to one flight", procedure: "Arthroscopic debridement of the knee" }] as unknown as DossierChronoEvent[];
+    const simple = buildRecommendationDossier(mk({ service: "Elastic knee sleeve", presentValue: 200 }), knee, chrono, k);
+    const complex = buildRecommendationDossier(mk({ service: "Total knee arthroplasty", presentValue: 120000, isLifetime: true }), knee, chrono, k);
+    expect(complex.medicalNecessity.length).toBeGreaterThan(simple.medicalNecessity.length);
+  });
+
+  it("does not select a knee-arthroplasty study for a pain-management office-visit recommendation (§4 scope)", () => {
+    const item = mk({ service: "Pain management office visits", presentValue: 9000, citation: [{ title: "Total knee arthroplasty survivorship: a registry study", relevance: { evidenceLevel: 7 } }] });
+    const d = buildRecommendationDossier(item, knee, [], k);
+    expect(d.literature.some((l) => /arthroplasty/i.test(l.title))).toBe(false);
+  });
+});
