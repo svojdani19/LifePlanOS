@@ -2,6 +2,34 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-12 — Chart-structure preprocessing: learn & strip page furniture
+
+Large scanned charts (Trice's 1,026-page PSMC record) are dominated by repeated
+page furniture — patient/facility banners, audit/acknowledgement lines, and
+medication-administration / intake-&-output flowsheet grids — that OCR turns
+into noise and that date-anchoring mistakes for encounters.
+
+- **`documents/chartStructure.ts`** (pure, tested): `stripChartFurniture` learns
+  the furniture from the chart itself — a line recurring above a page-scaled
+  threshold is furniture, since a real finding rarely repeats verbatim — and
+  drops it, while **preserving `Page N of M` markers** (page citations) and
+  **never dropping a clinically-worded line** even when repeated. High-frequency
+  banners that OCR merges onto a real line are scrubbed as substrings; flowsheet/
+  MAR/audit rows are dropped by shape. Vendor-agnostic (adapts per chart); a
+  no-op on records < 4 KB.
+- Wired in **ahead of** both segmentation (`segment.ts`) and the chronology
+  builder (`chronology.ts`).
+- On the Trice PSMC chart: total segments **357 → 137**, administrative noise
+  roughly halved, and new real findings surfaced (pneumonia dx, additional
+  imaging, line/tube placement) — clinical set stays ~26 clean, page-cited
+  encounters. Clean records unaffected (sample 4/4, PPG 6). Tests 219 → 223.
+
+  Note: this is the first, deterministic step of the "scanned-chart quality"
+  program. The remaining big levers — medical-grade OCR (Textract / Google
+  Document AI; needs a BAA) and gated LLM field extraction — are still to come
+  and require customer credentials; PDF-bookmark and header/note-boundary
+  splitting are queued deterministic follow-ups.
+
 ## 2026-07-12 — Full LCP data points per medical-record event
 
 Each timeline event was essentially a one-line summary (on David Chen's case,

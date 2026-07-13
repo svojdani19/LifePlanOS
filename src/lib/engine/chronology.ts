@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { typeLabel } from "@/lib/documents/taxonomy";
 import { pageForOffset, pageMarks } from "@/lib/documents/meta";
+import { stripChartFurniture } from "@/lib/documents/chartStructure";
 import type { Case } from "@/generated/prisma";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -674,7 +675,9 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
   for (const doc of docs) {
     if (EXCLUDED_TYPES.has(doc.type)) continue; // administrative / legal — not a clinical finding
 
-    const text = doc.extractedText ?? "";
+    // Strip learned page furniture (banners/footers/audit/flowsheet) before
+    // building events; a no-op on small single-encounter records.
+    const text = stripChartFurniture(doc.extractedText ?? "");
     const marks = pageMarks(text);
 
     // Draft one candidate event from a body of text (a whole single-encounter

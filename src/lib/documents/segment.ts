@@ -23,6 +23,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { pageMarks, pageForOffset } from "@/lib/documents/meta";
+import { stripChartFurniture } from "@/lib/documents/chartStructure";
 import { classifyByContent } from "@/lib/documents/classify";
 import {
   S,
@@ -230,7 +231,9 @@ const CLINICAL_FALLBACK_TYPE = "MEDICAL_RECORD";
  * records render as a single narrative, unchanged.
  */
 export function segmentDocument(text: string | null | undefined): DocumentSegment[] | null {
-  const t = String(text || "");
+  // Strip learned page furniture (banners, footers, audit lines, MAR/flowsheet
+  // grids) up front so date-anchoring lands on real notes, not boilerplate.
+  const t = stripChartFurniture(String(text || ""));
   if (t.length < 80) return null;
   const marks = pageMarks(t);
 
