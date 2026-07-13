@@ -2,6 +2,18 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-13 — Case Assistant: group-collapse + deep-link to the recommendation
+
+- **Group-collapse**: repetitive findings (same category + title, e.g. "9
+  recommendations have a bundled-estimate price") collapse into ONE focus card
+  showing the count + the affected recommendations, with **batch** Resolve /
+  Defer / Dismiss-all actions — instead of nine separate cards. Cuts the queue
+  length dramatically on real cases.
+- **Deep-link**: each item (and each affected recommendation in a group) has an
+  "Open" control that closes the drawer, switches to the right tab
+  (Future Care / Costs), scrolls to the exact recommendation, and highlights it
+  with a ring so it can be fixed in place, then re-reviewed.
+
 ## 2026-07-13 — Case Review Assistant: focus-flow drawer
 
 Reworked the assistant UX from an inline header panel (which pushed the page

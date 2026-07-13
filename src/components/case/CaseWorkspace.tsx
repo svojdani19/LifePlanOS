@@ -115,7 +115,19 @@ export function CaseWorkspace({
   const router = useRouter();
   const [tab, setTab] = useState("overview");
   const [busy, setBusy] = useState<string | null>(null);
+  const [focusId, setFocusId] = useState<string | null>(null);
   const can = (p: Permission) => permissions.includes(p);
+
+  // Deep-link from the Case Assistant: switch to the right tab and highlight the
+  // affected recommendation so the user can fix it in place.
+  const focusEntity = (entityType: string | null, entityId: string | null, category: string) => {
+    if (!entityId) return;
+    const targetTab = /pricing|cpt|duplicate_cost/.test(category) ? "costs" : entityType === "document" ? "records" : entityType === "recommendation" ? "futurecare" : tab;
+    setTab(targetTab);
+    setFocusId(entityId);
+    setTimeout(() => document.getElementById(`fc-${entityId}`)?.scrollIntoView({ behavior: "smooth", block: "center" }), 120);
+    setTimeout(() => setFocusId((f) => (f === entityId ? null : f)), 2600);
+  };
 
   async function call(url: string, method: string, body?: unknown, tag = "op") {
     setBusy(tag);
@@ -165,7 +177,7 @@ export function CaseWorkspace({
             </p>
           </div>
           <div className="flex items-center gap-2">
-            {hasPlan && <CaseAssistant caseId={data.id} canEdit={can("case.edit")} />}
+            {hasPlan && <CaseAssistant caseId={data.id} canEdit={can("case.edit")} onFocus={focusEntity} />}
             {can("futurecare.edit") && (
               <button className="btn-primary" disabled={busy === "gen"} onClick={() => call(`/api/cases/${data.id}/generate`, "POST", undefined, "gen")}>
                 {busy === "gen" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
@@ -238,7 +250,7 @@ export function CaseWorkspace({
         {tab === "causation" && <CausationPanel data={data} />}
         {tab === "providers" && <TreatingProvidersPanel data={data} canEdit={can("case.edit") || can("physician.review")} call={call} />}
         {tab === "evidence" && <EvidencePanel data={data} />}
-        {tab === "futurecare" && <FutureCarePanel data={data} canEdit={can("futurecare.edit")} call={call} />}
+        {tab === "futurecare" && <FutureCarePanel data={data} canEdit={can("futurecare.edit")} call={call} focusId={focusId} />}
         {tab === "costs" && <CostsPanel data={data} assumptions={assumptions} totals={totals} canEdit={can("case.edit")} call={call} />}
         {tab === "reviews" && <ReviewsPanel points={data.reviewFindings} hasPlan={hasPlan} />}
         {tab === "physician" && <PhysicianPanel data={data} canReview={can("physician.review")} call={call} />}
@@ -1385,7 +1397,7 @@ function dossierForItem(it: AnyRec, data: AnyRec): RecommendationDossier {
   return buildRecommendationDossier(it as never, cond as DossierCondition | null, (data.chronologyEvents ?? []) as DossierChronoEvent[], kase, interviews as never);
 }
 
-function FutureCarePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; call: any }) {
+function FutureCarePanel({ data, canEdit, call, focusId }: { data: AnyRec; canEdit: boolean; call: any; focusId?: string | null }) {
   const [open, setOpen] = useState<string | null>(null);
   const [filter, setFilter] = useState<string>("All");
   if (data.futureCareItems.length === 0) return <Empty>Run the AI pipeline to generate future care recommendations.</Empty>;
@@ -1413,7 +1425,7 @@ function FutureCarePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
           </div>
           <div className="space-y-2">
       {g.items.map((it: AnyRec) => (
-        <div key={it.id} className="card p-4">
+        <div key={it.id} id={`fc-${it.id}`} className={cn("card p-4 transition-shadow", focusId === it.id && "ring-2 ring-brand-400 ring-offset-2")}>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
