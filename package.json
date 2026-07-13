@@ -19,6 +19,7 @@
     "db:deploy": "prisma migrate deploy",
     "db:seed": "tsx prisma/seed.ts",
     "citations:refresh": "tsx scripts/refresh-citations.ts",
+    "reasoning:backfill": "tsx scripts/backfill-reasoning.ts",
     "ocr:redo": "tsx scripts/ocr-redo.ts",
     "setup": "prisma migrate deploy && tsx prisma/seed.ts"
   },

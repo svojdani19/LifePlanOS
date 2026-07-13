@@ -2,6 +2,45 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-13 — Clinical Reasoning Engine — Phases B–E (complete)
+
+The reasoning engine is now end-to-end: every recommendation is assessed as a
+structured object first, and the report, workspace, and export gate render and
+enforce that assessment. Purely additive throughout — no existing model,
+report section, cost total, or workflow was removed or changed in meaning.
+
+**Phase B — pathway, conflicts, alternatives, inclusion.** `pathwayOf()` places
+each recommendation on the treatment continuum. `detectSetConflicts()` is a pure
+cross-recommendation pass that flags duplicate lines, staged replacement chains
+(A replaces B), and a line counted alongside its own lower-cost alternative.
+Inclusion gained a precedence rule (replaced-by-active → staged → supported →
+excluded) and an explicit `inclusionRationale`. Schema: +clinicalPathway,
++conflictFlags, +alternativesConsidered, +inclusionRationale.
+
+**Phase C — literature, weakening, unknowns, confidence.** `synthesizeLiterature()`
+writes one honest paragraph on the body of published evidence; `deriveWeakening()`
+enumerates concrete, de-duplicated weaknesses (and manufactures none when the
+line is solid); `deriveMissing()` turns gaps into actionable requests; and
+`residualUncertaintyOf()` states plainly what remains unknown and what would most
+strengthen the line. Schema: +literatureSynthesis, +residualUncertainty.
+
+**Phase D — integration.** The pure engine (clinicalReasoning.ts) was split from
+its persistence (clinicalReasoningPersist.ts) so it is client-safe. New
+GET/POST `/api/cases/:id/reasoning` (tenant-guarded, audited). Plan generation
+and physician review refresh the assessment alongside validation. The report's
+per-recommendation narrative now renders a "Clinical reasoning" block FROM the
+assessment (probability class, inclusion decision + why, evidence-strength-vs-
+confidence, residual uncertainty, alternatives). The case workspace shows a
+matching "Clinical reasoning" strip on each recommendation. `reasoningFindings()`
+layers onto `validateCase` — export-blocking for genuine double-counting,
+advisory for unsupported frequency / insufficient support.
+
+**Phase E — backfill, performance, regression, docs.** `npm run reasoning:backfill`
+(scripts/backfill-reasoning.ts) assesses every existing case; verified idempotent
+on live data (David Chen, Angela White, Jennifer Trice — 0 duplicate rows,
+all ASSESSED). Conflict detection is computed once per case; assessments persist
+in a single transaction. Full suite green (307), tsc clean.
+
 ## 2026-07-13 — Clinical Reasoning Engine — Phase A (reason first, write second)
 
 Additive foundation for structured clinical reasoning: for each recommendation we
