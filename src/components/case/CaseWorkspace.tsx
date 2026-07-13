@@ -164,12 +164,15 @@ export function CaseWorkspace({
               {data.icd10Code ? <span className="font-mono text-xs text-ink-500"> [{data.icd10Code}]</span> : null} · {data.jurisdiction || "no jurisdiction"}
             </p>
           </div>
-          {can("futurecare.edit") && (
-            <button className="btn-primary" disabled={busy === "gen"} onClick={() => call(`/api/cases/${data.id}/generate`, "POST", undefined, "gen")}>
-              {busy === "gen" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-              {hasPlan ? "Re-run AI Pipeline" : "Run AI Pipeline"}
-            </button>
-          )}
+          <div className="flex items-center gap-2">
+            {hasPlan && <CaseAssistant caseId={data.id} canEdit={can("case.edit")} />}
+            {can("futurecare.edit") && (
+              <button className="btn-primary" disabled={busy === "gen"} onClick={() => call(`/api/cases/${data.id}/generate`, "POST", undefined, "gen")}>
+                {busy === "gen" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                {hasPlan ? "Re-run AI Pipeline" : "Run AI Pipeline"}
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Progress tracker */}
@@ -197,9 +200,6 @@ export function CaseWorkspace({
           </div>
         )}
 
-        {/* Case Review Assistant — projects the deterministic findings into a
-            triage queue + readiness, with grounded Q&A. */}
-        {hasPlan && <CaseAssistant caseId={data.id} canEdit={can("case.edit")} />}
       </div>
 
       {/* Tabs — single non-wrapping row (scrolls horizontally if too narrow) */}

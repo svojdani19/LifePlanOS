@@ -39,6 +39,29 @@ export interface AttentionDraft {
 const SEV: Record<string, AttentionSeverity> = { Critical: "CRITICAL", High: "HIGH", Moderate: "MODERATE", Low: "LOW" };
 export const SEVERITY_RANK: Record<AttentionSeverity, number> = { CRITICAL: 0, HIGH: 1, MODERATE: 2, LOW: 3, INFORMATIONAL: 4 };
 
+// The order attention items are worked in mirrors the AI pipeline — resolve
+// upstream (diagnosis, evidence) before downstream (literature, consistency,
+// costs, review) so fixing a cause clears its effects. Each item carries the
+// stage label for the focus-flow UI.
+const PIPELINE: { label: string; cats: string[] }[] = [
+  { label: "Records & intake", cats: ["missing_records", "incomplete_info"] },
+  { label: "Diagnosis", cats: ["diagnosis_mismatch"] },
+  { label: "Objective evidence", cats: ["missing_evidence"] },
+  { label: "Recommendations", cats: ["unsupported_recommendation"] },
+  { label: "Literature", cats: ["literature"] },
+  { label: "Consistency", cats: ["recommendation_conflict", "staged_care"] },
+  { label: "Costs & coding", cats: ["cpt_mismatch", "pricing_mismatch", "duplicate_cost"] },
+  { label: "Physician review", cats: ["physician_review_pending"] },
+  { label: "Export readiness", cats: ["other"] },
+];
+export function pipelineRank(category: string): number {
+  const i = PIPELINE.findIndex((s) => s.cats.includes(category));
+  return i === -1 ? PIPELINE.length : i;
+}
+export function stageLabel(category: string): string {
+  return PIPELINE[pipelineRank(category)]?.label ?? "Review";
+}
+
 const fingerprint = (service: string, result: string) => `${service}::${result}`.toLowerCase().replace(/\s+/g, " ").trim();
 
 // Map a finding's `result` to an assistant category + why-it-matters. Unknown
@@ -296,7 +319,11 @@ export async function syncAttention(caseId: string, firmId: string, createdById?
   ]);
 
   const activeItems = await prisma.attentionItem.findMany({ where: { caseId, status: { in: ACTIVE } }, orderBy: { createdAt: "asc" } });
-  activeItems.sort((a, b) => SEVERITY_RANK[a.severity as AttentionSeverity] - SEVERITY_RANK[b.severity as AttentionSeverity]);
+  // Work order = AI-pipeline stage, then severity within a stage.
+  activeItems.sort(
+    (a, b) => pipelineRank(a.category) - pipelineRank(b.category) || SEVERITY_RANK[a.severity as AttentionSeverity] - SEVERITY_RANK[b.severity as AttentionSeverity],
+  );
+  const active = activeItems.map((a) => ({ ...a, stageLabel: stageLabel(a.category) }));
   const readiness = caseReadiness(activeItems.map((a) => ({ severity: a.severity as AttentionSeverity, category: a.category, exportBlocking: a.exportBlocking, title: a.title })), validation.counts);
-  return { active: activeItems, readiness, counts: validation.counts, blocking: validation.blocking };
+  return { active, readiness, counts: validation.counts, blocking: validation.blocking };
 }

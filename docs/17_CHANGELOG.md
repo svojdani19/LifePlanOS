@@ -2,6 +2,18 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-13 — Case Review Assistant: focus-flow drawer
+
+Reworked the assistant UX from an inline header panel (which pushed the page
+down) into a **right slide-over drawer** launched from a compact header control.
+The drawer reviews **one item at a time** — a decision (resolve / defer /
+dismiss) advances to the next — in **AI-pipeline order** (records → diagnosis →
+evidence → recommendations → literature → consistency → costs → physician review
+→ export). Adds a progress bar, a readiness strip, keyboard shortcuts (R/D/X,
+arrows to skip, Esc), a "view all" list toggle, and a completion summary. Engine
+gains `pipelineRank`/`stageLabel`; `syncAttention` orders the queue by stage then
+severity and tags each item with its stage.
+
 ## 2026-07-13 — Case Review Assistant
 
 A case-specific review/quality-control assistant that **projects and prioritizes
