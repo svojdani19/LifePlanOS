@@ -20,6 +20,8 @@ import { prisma } from "@/lib/db";
 import { assumptionsFor } from "@/lib/engine/generate";
 import { runIntegrityCheck, reviewLabel, evaluateCitation, functionalFinding, hasPatientRecordSupport, type RecInput, type CondInput, type PerItem, type IntegrityFinding } from "@/lib/engine/integrity";
 import { buildRecommendationDossier, type DossierCondition, type DossierChronoEvent, type DossierCase, type EvidenceItem } from "@/lib/engine/medicalNecessity";
+import { referencesFor, guidelineSourcesFor } from "@/lib/references/sources";
+import { bodyRegion } from "@/lib/engine/integrity";
 import { project } from "@/lib/engine/cost";
 import { typeLabel } from "@/lib/documents/taxonomy";
 import { parseConditions } from "@/lib/intake/preExisting";
@@ -181,11 +183,10 @@ const ABBREVIATIONS: [string, string][] = [
   ["ROM", "range of motion"],
 ];
 
-const REFERENCES = [
-  "Official Disability Guidelines (ODG), evidence-based medical treatment guidelines (ODGbyMCG).",
-  "FAIR Health (fairhealth.org), actual billed charges by CPT code and geography.",
-  "Centers for Medicare & Medicaid Services (CMS) RVU, DMEPOS, and clinical laboratory fee schedules.",
-  "GoodRx (goodrx.com), retail pharmaceutical pricing.",
+// Methodology texts that are always disclosed; the specific pricing, guideline,
+// and evidence SOURCES are drawn per-case from the reference registry so the
+// appendix lists only what the plan actually relied upon.
+const METHODOLOGY_REFS = [
   "United States Social Security Administration actuarial life tables (ssa.gov/OACT).",
   "A Physician's Guide to Life Care Planning, AAPLCP (2017).",
   "Life Care Planning and Case Management Across the Lifespan, 5th ed. (ICHCC, 2024).",
@@ -378,6 +379,11 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
       evLines("Supporting clinical guidelines", se.guidelines),
     ].filter(Boolean) as Paragraph[];
     out.push(...evBlock);
+
+    // Applicable treatment-guideline sources (ODG first, then specialty-apt) —
+    // the basis on which medical necessity now/in future is assessed (§9).
+    const guideBasis = guidelineSourcesFor(it.category as CareCategory, bodyRegion(`${it.service} ${dxName}`)).slice(0, 3).map((s) => s.label);
+    if (guideBasis.length) out.push(labeled("Guideline basis", `${guideBasis.join("; ")} — applied to determine whether this care is medically necessary now or in the future.`));
 
     // Literature — each article stating exactly what it supports + limitations.
     if (dossier.literature.length) {
@@ -944,7 +950,11 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
 
   // ══ APPENDIX A — REFERENCES ══════════════════════════════════════════════════
   body.push(h1("Appendix A — References Relied Upon", { pageBreak: true }));
-  REFERENCES.forEach((r) => body.push(bullet(r)));
+  // Only the sources this plan actually relied upon: the guideline/evidence and
+  // pricing sources for the care categories present, plus the methodology texts.
+  const planCategories = [...new Set(reportItems.map((i) => i.category as CareCategory))];
+  referencesFor(planCategories, { includeGuidelines: true }).forEach((s) => body.push(bullet(s.citation)));
+  METHODOLOGY_REFS.forEach((r) => body.push(bullet(r)));
 
   // ══ APPENDIX B — ABBREVIATIONS ═══════════════════════════════════════════════
   body.push(h1("Appendix B — Abbreviations", { pageBreak: true }));

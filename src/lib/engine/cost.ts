@@ -1,4 +1,5 @@
 import type { CareCategory } from "@/generated/prisma";
+import { pricingSourceFor } from "@/lib/references/sources";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Cost projection engine (Module 8). Baseline unit costs are illustrative
@@ -112,7 +113,9 @@ export function project(input: ProjectionInput, a: CaseAssumptions): Projection 
     presentValue: round(pv),
     lowCost: round(pv * LOW),
     highCost: round(pv * HIGH),
-    pricingSource: ref.source,
+    // Cite the actual professional pricing source for this category (FAIR Health
+    // for coded services, GoodRx for drugs, Genworth for attendant care, …).
+    pricingSource: pricingSourceFor(input.category).label,
     cptCode: ref.cpt,
     years,
   };

@@ -2,6 +2,33 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-12 — Professional source registry: pricing + evidence/guideline seams
+
+Maps LifePlanOS's cost and evidence basis onto the actual professional sources a
+CLCP relies on (matching the reference list of a signed physician LCP).
+
+- **`lib/references/sources.ts`** (new, tested): a typed catalog of pricing,
+  guideline, reference, utilization, and literature sources — FAIR Health,
+  GoodRx, Genworth, DME-Direct, RinellaPro, Healix, RS Medical, TENSpros, New
+  Choice, Organicell, Chiropractic Economics, CostHelper, CMS; ODG, Orthobullets,
+  AAPM, ICSI, StatPearls, Healthline, Milliman, and the Moss opioid-weaning
+  article — each categorized and mapped to the care categories / body regions it
+  applies to. Selectors: `pricingSourceFor`, `guidelineSourcesFor`, `referencesFor`.
+- **Cost engine**: each item now cites its **real** pricing source (GoodRx for
+  drugs, Genworth for attendant care, DME-Direct for equipment, RinellaPro for
+  prosthetics, Healix for labs, FAIR Health for coded services) instead of a
+  generic "UCR" label.
+- **Pricing-provider seam** (`lib/references/pricingProvider.ts`): a live FAIR
+  Health / GoodRx / Genworth lookup is pluggable behind `PRICING_PROVIDER` +
+  credentials + an adapter; default `static` does no network and never invents a
+  figure. Same guard pattern as the OCR seam (licensed feeds → loud, not silent).
+- **Report**: the References appendix is registry-driven (only sources the plan
+  relied upon); each recommendation shows a **Guideline basis** line (ODG first,
+  then specialty-apt sources — AAPM/Moss for pain, Orthobullets/Milliman for
+  spine) stating the basis for medical-necessity determination.
+- Tests: pricing routing, specialty-apt guideline selection, dedup, seam guards.
+  255 → 262.
+
 ## 2026-07-12 — Specialty-voiced clinical reasoning + qualitative confidence
 
 Clinical Intelligence Sprint. No report/UI redesign, no new sections, no added

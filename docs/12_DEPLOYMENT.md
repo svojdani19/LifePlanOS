@@ -66,6 +66,22 @@ clear setup error and **no PHI is sent** — it never silently falls back to loc
 or silently ships data. Tuning knobs: `OCR_DPI` (150–400), `OCR_PREP`
 (`none`/`enhance`/`binarize`).
 
+## Pricing sources
+
+Costs are priced from a per-category **reference figure** (illustrative national
+number, editable per item) and labeled with the professional source that would
+supply the real amount, from the reference registry (`lib/references/sources.ts`):
+FAIR Health (coded services), GoodRx (drugs), Genworth (attendant/nursing),
+DME-Direct (equipment), RinellaPro (prosthetics/orthotics), Healix (labs), etc.
+The References appendix lists only the sources a plan actually relied upon.
+
+A **live pricing provider** (`lib/references/pricingProvider.ts`) can supply
+venue-specific, sourced figures. These are LICENSED data feeds, so a live lookup
+runs only when `PRICING_PROVIDER` (`fairhealth` | `goodrx` | `genworth`) is set
+AND the provider's credentials are present (e.g. `FAIRHEALTH_API_KEY`) AND the
+adapter is implemented; otherwise it throws a clear setup error rather than
+inventing or silently falling back. Default (`static`) does no network.
+
 ## Operational notes
 
 - Dev-only: repeated large-file edits can corrupt `.next`; fix `rm -rf .next`
