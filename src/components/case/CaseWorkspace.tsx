@@ -57,6 +57,7 @@ import { confidenceBand, confidenceDefinition } from "@/lib/engine/confidence";
 import { BookOpenCheck } from "lucide-react";
 import { MEDICAL_SPECIALTIES } from "@/lib/intake/specialties";
 import { US_STATES } from "@/lib/intake/jurisdictions";
+import { CaseAssistant } from "@/components/case/CaseAssistant";
 
 // Loosely-typed serialized case (dates are ISO strings after JSON round-trip).
 type AnyRec = Record<string, any>;
@@ -195,6 +196,10 @@ export function CaseWorkspace({
             <Stat label="Physician Pending" value={String(pendingPhysician)} />
           </div>
         )}
+
+        {/* Case Review Assistant — projects the deterministic findings into a
+            triage queue + readiness, with grounded Q&A. */}
+        {hasPlan && <CaseAssistant caseId={data.id} canEdit={can("case.edit")} />}
       </div>
 
       {/* Tabs — single non-wrapping row (scrolls horizontally if too narrow) */}

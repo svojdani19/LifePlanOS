@@ -2,6 +2,38 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-13 — Case Review Assistant
+
+A case-specific review/quality-control assistant that **projects and prioritizes
+the existing deterministic findings** — it does not run a second validation
+engine or invent issues. No app/report/UI redesign; additive.
+
+- **Schema**: `AttentionItem` (+ `AttentionSeverity`, `AttentionStatus` enums)
+  — a lifecycle-tracked projection of a finding, with triage/assignment/
+  resolution + audit history that the atomically-replaced `ValidationFinding`
+  rows can't hold (migration `20260713120000`).
+- **`engine/attention.ts`** (pure + tested): `projectAttention` maps each
+  `validateCase` finding (integrity, consistency, evidence-quality, completeness)
+  + physician-review status into attention drafts; `reconcileAttention`
+  dedups by a stable fingerprint (update-in-place, supersede vanished issues,
+  never re-create resolved/dismissed → history preserved); `caseReadiness`
+  gives four multi-factor stages (physician / attorney / draft / final) each
+  listing satisfied/outstanding/blocking/next-actions (never one opaque score);
+  `answerCaseQuestion` answers case questions **only** from the structured
+  findings, cites entities, never claims physician approval, never fabricates.
+- **Routes**: `GET/POST /attention` (sync + readiness), `PATCH
+  /attention/:id` (assign/resolve/defer/dismiss/reopen — audited, dismiss needs
+  a reason), `POST /assistant/ask` (grounded Q&A). All tenant-guarded.
+- **UI**: a "Case Assistant" control in the case header — readiness chips,
+  attention items grouped Critical / Important / Review / Informational with
+  resolve/defer/dismiss actions, and an ask box. Existing design system.
+- **Export blocking (§9)** reuses `integrity.blocking`: dismissing an attention
+  item can't bypass a real export-blocking finding (the gate is the deterministic
+  layer). **Safety (§8)**: the assistant only mutates attention triage state —
+  it never approves recommendations/costs/opinions or edits signed content.
+- Tests: projection, dedup, supersede, resolved-history, readiness, grounded
+  Q&A. 262 → 280.
+
 ## 2026-07-12 — Professional source registry: pricing + evidence/guideline seams
 
 Maps LifePlanOS's cost and evidence basis onto the actual professional sources a

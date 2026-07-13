@@ -133,6 +133,7 @@ model Firm {
   reports            ReportExport[]
   precedents         PrecedentPlan[]
   validationFindings ValidationFinding[]
+  attentionItems     AttentionItem[]
 
   @@index([slug])
 }
@@ -325,6 +326,7 @@ model Case {
   reports                   ReportExport[]
   socUserInputs             SocUserInput[]
   validationFindings        ValidationFinding[]
+  attentionItems            AttentionItem[]
   recommendationTransitions RecommendationTransition[]
   evidenceLinks             EvidenceLink[]
   assumptionChanges         AssumptionChange[]
@@ -975,6 +977,71 @@ model ValidationFinding {
 
   @@index([caseId])
   @@index([firmId])
+}
+
+// Case Review Assistant — an attention item is a persisted, lifecycle-tracked
+// PROJECTION of a deterministic finding (ValidationFinding / integrity /
+// consistency / evidence / physician-review status). The assistant does not
+// invent issues; it explains and prioritizes structured findings and tracks
+// their triage (assign / resolve / defer / dismiss) with audit history that the
+// atomically-replaced ValidationFinding rows cannot hold.
+enum AttentionSeverity {
+  CRITICAL
+  HIGH
+  MODERATE
+  LOW
+  INFORMATIONAL
+}
+
+enum AttentionStatus {
+  OPEN
+  IN_REVIEW
+  DEFERRED
+  RESOLVED
+  DISMISSED
+  SUPERSEDED
+}
+
+model AttentionItem {
+  id     String @id @default(uuid())
+  firmId String
+  firm   Firm   @relation(fields: [firmId], references: [id], onDelete: Cascade)
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  caseVersionId String? // report/snapshot version the item was raised against
+
+  category     String // e.g. diagnosis_mismatch, recommendation_conflict, physician_review_pending
+  severity     AttentionSeverity
+  title        String
+  summary      String
+  whyItMatters String
+  suggestedAction String
+
+  // What the item concerns, for a direct link + source traceability.
+  entityType       String? // recommendation | condition | cost | document | report
+  entityId         String?
+  sourceDocumentId String?
+  sourcePage       Int?
+
+  // Stable fingerprint of the underlying finding — the dedup/supersede key so a
+  // re-projection updates the same item instead of creating a duplicate.
+  validationRuleId String
+  exportBlocking   Boolean @default(false)
+
+  status         AttentionStatus @default(OPEN)
+  assignedUserId String?
+  createdById    String?
+
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  resolvedAt     DateTime?
+  resolutionNote String?
+
+  @@index([caseId])
+  @@index([firmId])
+  @@index([caseId, status])
+  @@index([caseId, validationRuleId])
 }
 
 // ── EPIC-011: clinical interviews & reviewer credentials ─────────────────────
