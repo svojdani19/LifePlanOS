@@ -478,6 +478,12 @@ export interface Encounter {
 
 const ENCOUNTER_TEXT_CAP = 8000; // enough for detail extraction, bounded for safety
 
+// Narrative/report-style encounter header: a date at the START of a line,
+// followed by a dash (or a dated range, "07/13/2023 - 02/26/2024 -") and a
+// capitalized provider/heading — the format of records-review documents and
+// compiled chronology reports, where dates are never labeled "Date of Service".
+const NARRATIVE_HEADER = /^[ \t]*(\d{1,2}\/\d{1,2}\/\d{4})(?:\s*[-–—]\s*\d{1,2}\/\d{1,2}\/\d{4})?\s*[-–—,]\s*(?=[A-Z])/gm;
+
 export function segmentEncounters(text: string, marks: { offset: number; page: number }[]): Encounter[] {
   const anchors: { offset: number; iso: string }[] = [];
   const re = new RegExp(ANCHOR_LABEL.source, "gi");
@@ -488,6 +494,17 @@ export function segmentEncounters(text: string, marks: { offset: number; page: n
     if (!v) continue;
     const iso = anchorToIso(v[1].trim());
     if (iso) anchors.push({ offset: m.index, iso });
+  }
+  // Narrative fallback: when labeled anchors can't segment the document, look
+  // for line-leading "MM/DD/YYYY - Provider…" headers (report-style sources).
+  if (new Set(anchors.map((a) => a.iso)).size < 2) {
+    const nre = new RegExp(NARRATIVE_HEADER.source, "gm");
+    while ((m = nre.exec(text))) {
+      if (NON_CLINICAL_DATE.test(text.slice(Math.max(0, m.index - 14), m.index))) continue;
+      const iso = anchorToIso(m[1].trim());
+      if (iso) anchors.push({ offset: m.index, iso });
+    }
+    anchors.sort((a, b) => a.offset - b.offset);
   }
   const distinct = new Set(anchors.map((a) => a.iso));
   if (distinct.size < 2) return []; // single-encounter document — no segmentation

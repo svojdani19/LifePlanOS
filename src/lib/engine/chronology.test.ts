@@ -130,3 +130,27 @@ describe("extractFinding rejects metadata / boilerplate leads (Chen chronology f
     expect(extractFinding(t, new Set())).toBeNull();
   });
 });
+
+describe("segmentEncounters — narrative/report-style sources", () => {
+  it("segments line-leading 'MM/DD/YYYY - Provider' headers when no labeled dates exist", () => {
+    const text = [
+      "Records Review (DOB: 02/09/1972)", // inline DOB must NOT anchor
+      "",
+      "06/13/2023 - Jill A. Ward, M.D./HCA Florida Memorial Hospital - Emergency Department Report",
+      "Subjective: Slipped and fell in the shower, striking her head. Brief loss of consciousness.",
+      "Assessment: Closed head injury, back strain, knee contusion.",
+      "",
+      "07/13/2023 - 02/26/2024 - Edward Young, M.D./Jacksonville Orthopaedic Institute",
+      "Assessment: Severe DJD of the right knee. Plan: total knee arthroplasty.",
+      "",
+      "08/02/2023 - Richard Newman, M.D./EMAS Spine and Brain Specialists - Videonystagmography Report",
+      "Impressions: Significant peripheral and central vestibular dysfunction.",
+    ].join("\n");
+    const enc = segmentEncounters(text, []);
+    expect(enc.map((e) => e.dateIso)).toEqual(["2023-06-13", "2023-07-13", "2023-08-02"]);
+    expect(enc[0].text).toMatch(/closed head injury/i);
+    expect(enc[1].text).toMatch(/arthroplasty/i);
+    // The DOB in the page header never becomes an encounter.
+    expect(enc.some((e) => e.dateIso === "1972-02-09")).toBe(false);
+  });
+});
