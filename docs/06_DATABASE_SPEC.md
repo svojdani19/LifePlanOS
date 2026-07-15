@@ -148,3 +148,24 @@ durationYears, isLifetime, unitCost, pricingSource`. Nonmaterial =
 (`supersededById = null`) is eligible for totals. Regeneration matches
 lineages by service identity; unreviewed AI drafts may still be
 replaced-in-place.
+
+## CRE v1 — ClinicalReasoningAssessment (2026-07-14)
+
+One structured assessment per **recommendation version** (`recommendationId` pins a
+specific `FutureCareItem` row; `recommendationLineageId`/`recommendationVersion`
+make the chain queryable; `caseVersion` records the snapshot version at assessment
+time). Lifecycle: `PENDING → PROCESSING → (NEEDS_REVIEW | VALIDATED | INVALID | ERROR)`,
+with `SUPERSEDED` terminal. **VALIDATED is derived** — every gate must pass; a row
+is never validated merely because it exists. On a material change the prior row is
+SUPERSEDED (`supersededById` lineage), never updated in place or deleted; if the
+recommendation was physician-approved, the new row is forced to NEEDS_REVIEW,
+`reviewerMetadata` records `{ invalidatedApproval, changedFields, priorPhysicianStatus }`,
+and a `reasoning.approval_invalidated` audit event is written. Evidence is itemized
+in `evidenceItems` (category, source/page/date/provider, objective flag, epistemic
+status: documented_fact | patient_report | provider_opinion | planner_inference |
+ai_inference | unknown); adverse evidence in `weakeningEvidence` and gaps in
+`unknowns` are structured objects with materiality/severity and effect flags.
+`rejectedLiterature` is the auditable ledger of citations excluded at assessment
+time with reasons. `ReportExport.draft` marks watermarked draft exports.
+Migration `20260714100000_cre_v1_lifecycle_lineage` (additive; `rollback.sql` in
+the same folder drops the new columns).

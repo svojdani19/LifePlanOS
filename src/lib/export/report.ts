@@ -20,7 +20,7 @@ import { prisma } from "@/lib/db";
 import { assumptionsFor } from "@/lib/engine/generate";
 import { runIntegrityCheck, reviewLabel, evaluateCitation, functionalFinding, hasPatientRecordSupport, type RecInput, type CondInput, type PerItem, type IntegrityFinding } from "@/lib/engine/integrity";
 import { buildRecommendationDossier, type DossierCondition, type DossierChronoEvent, type DossierCase, type EvidenceItem } from "@/lib/engine/medicalNecessity";
-import { buildReasoningAssessment, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningItem } from "@/lib/engine/clinicalReasoning";
+import { buildReasoningAssessment, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningItem, type ReasoningAssessment } from "@/lib/engine/clinicalReasoning";
 import { referencesFor, guidelineSourcesFor } from "@/lib/references/sources";
 import { bodyRegion } from "@/lib/engine/integrity";
 import { project } from "@/lib/engine/cost";
@@ -232,7 +232,12 @@ function durationText(i: { isLifetime: boolean; durationYears: number | null }, 
   return `${i.durationYears} year${i.durationYears === 1 ? "" : "s"}`;
 }
 
-export async function buildReportDocx(caseId: string, template: CaseSide): Promise<ReportPayload> {
+export interface ReportOptions {
+  /** CRE v1 §18 — draft export: DRAFT watermark + unresolved-issues appendix. */
+  draft?: boolean;
+}
+
+export async function buildReportDocx(caseId: string, template: CaseSide, reportOpts: ReportOptions = {}): Promise<ReportPayload> {
   const c = await prisma.case.findUniqueOrThrow({
     where: { id: caseId },
     include: {
@@ -329,8 +334,12 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
   // literature, and a clinical-confidence score. (Design unchanged — this is
   // content logic; the DOCX styling helpers are the same.)
   const dossierCase: DossierCase = { subject, pronounPoss: pr.poss, lifeExpectancyYears: life, adult: adultPatient };
-  // Clinical Reasoning Engine — the report narrative renders FROM the structured
-  // assessment. Cross-recommendation coherence is computed once for the set.
+  // Clinical Reasoning Engine — the report narrative renders FROM the PERSISTED
+  // structured assessment (reason first, write second). The pure engine is the
+  // fallback only when no persisted row exists yet (e.g., pre-backfill cases);
+  // the two are the same deterministic computation.
+  const persistedAssessments = await prisma.clinicalReasoningAssessment.findMany({ where: { caseId, status: { not: "SUPERSEDED" } } });
+  const assessmentByRec = new Map(persistedAssessments.map((r) => [r.recommendationId, r]));
   const reasoningConds = c.conditions as unknown as (CondInput & DossierCondition & { id: string })[];
   const { flags: reasoningConflicts, replacedByActive: reasoningReplaced } = detectSetConflicts(items as unknown as ReasoningItem[]);
   const evLines = (label: string, items: EvidenceItem[], cap2 = 3) => {
@@ -436,15 +445,19 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
     // Clinical reasoning (Clinical Reasoning Engine) — the structured
     // determination the narrative renders from: probability class, the inclusion
     // decision and why, the strength-vs-confidence distinction, and what remains
-    // uncertain. Reasoned before this prose was written.
-    const assessment = buildReasoningAssessment(
-      it as unknown as ReasoningItem,
-      reasoningConds,
-      c.chronologyEvents as unknown as DossierChronoEvent[],
-      dossierCase,
-      dossierInterviews as never,
-      { conflicts: reasoningConflicts.get(it.id) ?? [], replacedByActive: reasoningReplaced.has(it.id) },
-    );
+    // uncertain. Reasoned and PERSISTED before this prose is written; the
+    // in-line computation is only a fallback for unassessed legacy items.
+    const persisted = assessmentByRec.get(it.id);
+    const assessment = persisted?.inclusionRationale // an ERROR row has no content — fall back to inline computation
+      ? (persisted as unknown as Pick<ReasoningAssessment, "probabilityClassification" | "inclusionRationale" | "evidenceStrength" | "recommendationConfidence" | "residualUncertainty" | "alternativesConsidered">)
+      : buildReasoningAssessment(
+          it as unknown as ReasoningItem,
+          reasoningConds,
+          c.chronologyEvents as unknown as DossierChronoEvent[],
+          dossierCase,
+          dossierInterviews as never,
+          { conflicts: reasoningConflicts.get(it.id) ?? [], replacedByActive: reasoningReplaced.has(it.id) },
+        );
     out.push(labeled(
       "Clinical reasoning",
       `${PROBABILITY_LABEL[assessment.probabilityClassification]}. ${assessment.inclusionRationale} `
@@ -476,6 +489,10 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
   if (isDraft) body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 200, after: 200 }, children: [new TextRun({ text: "DRAFT — CONTAINS UNRESOLVED CRITICAL VALIDATION ISSUES · NOT FOR SERVICE", bold: true, size: 24, color: "B91C1C" })] }));
   body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: isDraft ? 200 : 720, after: 40 }, children: [new TextRun({ text: c.firm.letterhead || c.firm.name, bold: true, size: 26, color: NAVY })] }));
   body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 480 }, children: [new TextRun({ text: c.firm.letterhead ? "" : "Certified Life Care Planning", size: 20, color: GREY })] }));
+  // CRE v1 §18 — a draft export is visibly a draft on its face.
+  if (reportOpts.draft) {
+    body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 120, after: 0 }, children: [new TextRun({ text: "DRAFT — NOT FOR SERVICE OR PRODUCTION", bold: true, size: 26, color: "B91C1C" })] }));
+  }
   body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 360, after: 20 }, children: [new TextRun({ text: "LIFE CARE PLAN", bold: true, size: 40, color: INK })] }));
   body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 40 }, children: [new TextRun({ text: "& Future Medical Cost Analysis", size: 30, color: INK })] }));
   body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 520 }, border: { bottom: { style: BorderStyle.SINGLE, size: 10, color: NAVY, space: 8 } }, children: [new TextRun({ text: templateLabel === "Life Care Plan" ? "" : templateLabel, italics: true, size: 24, color: GREY })] }));
@@ -1067,6 +1084,32 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
     if (integrity.blocking) body.push(p("One or more critical issues remain unresolved. This document is a DRAFT and is not to be served or relied upon until the issues above are corrected.", { bold: true, color: "B91C1C" }));
   }
 
+  // ══ APPENDIX G — UNRESOLVED ISSUES (DRAFT ONLY, CRE v1 §18) ══════════════════
+  // A draft export carries its open questions on its face: every unresolved
+  // export-blocking finding plus the contingency / excluded recommendations,
+  // so a reviewer can see exactly what stands between this draft and a final.
+  if (reportOpts.draft) {
+    const persistedFindings = await prisma.validationFinding.findMany({ where: { caseId }, orderBy: { createdAt: "asc" } });
+    const unresolved = persistedFindings.filter((f) => f.exportBlocking);
+    body.push(h1("Appendix G — Unresolved Issues (Draft)", { pageBreak: true }));
+    body.push(p("This is a DRAFT. The following issues must be resolved before a final export is permitted."));
+    if (!unresolved.length) body.push(p("No export-blocking issues are currently recorded.", { italics: true }));
+    else {
+      const gRows: TableRow[] = [rowOf([td("Recommendation", { header: true, width: 24 }), td("Issue", { header: true, width: 46 }), td("Suggested action", { header: true, width: 30 })])];
+      unresolved.forEach((f, i) => {
+        const fill = i % 2 ? ALT : "FFFFFF";
+        gRows.push(rowOf([td(f.service, { fill }), td(`${f.result} — ${f.issue}`, { fill }), td(f.suggestion, { fill })]));
+      });
+      body.push(table(gRows));
+    }
+    const disclosed = items.filter((i) => !perItemOf(i).includedInTotal);
+    if (disclosed.length) {
+      body.push(h2("Contingency and excluded recommendations"));
+      body.push(p("The following recommendations are disclosed but not entered into the totals of this draft (contingent, staged, or insufficiently supported at this time):"));
+      for (const d of disclosed) body.push(bullet(`${d.service} — ${perItemOf(d).classify.status.replace(/_/g, " ").toLowerCase()}`));
+    }
+  }
+
   // ── Closing disclaimer ───────────────────────────────────────────────────────
   body.push(new Paragraph({ spacing: { before: 360, after: 80 }, border: { top: { style: BorderStyle.SINGLE, size: 6, color: RULE, space: 8 } }, children: [new TextRun({ text: "This Life Care Plan is based upon the past, present, and reasonably anticipated future medical needs of the patient, and upon the medical records available at the time of its preparation. Costs are stated at present-day values. Every recommendation is subject to the final professional judgment of the reviewing physician and the certified life care planner.", italics: true, size: 18, color: GREY })] }));
 
@@ -1093,7 +1136,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide): Promi
       new Paragraph({
         alignment: AlignmentType.CENTER,
         border: { top: { style: BorderStyle.SINGLE, size: 4, color: RULE, space: 4 } },
-        children: [new TextRun({ text: "CONFIDENTIAL   ·   PREPARED IN ANTICIPATION OF LITIGATION", size: 15, color: GREY })],
+        children: [new TextRun({ text: `${reportOpts.draft ? "DRAFT   ·   " : ""}CONFIDENTIAL   ·   PREPARED IN ANTICIPATION OF LITIGATION`, size: 15, color: reportOpts.draft ? "B91C1C" : GREY })],
       }),
     ],
   });

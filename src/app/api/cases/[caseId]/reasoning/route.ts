@@ -23,13 +23,20 @@ export async function GET(_req: Request, { params }: { params: { caseId: string 
   }
 }
 
-export async function POST(_req: Request, { params }: { params: { caseId: string } }) {
+export async function POST(req: Request, { params }: { params: { caseId: string } }) {
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.edit");
     await requireCase(ctx, params.caseId);
-    const assessments = await persistCaseReasoning(params.caseId, ctx.firm.id);
-    await audit(ctx, "reasoning.run", { type: "case", id: params.caseId, caseId: params.caseId, meta: { assessments: assessments.length } });
+    // Incremental reassessment (§19): { recommendationId } reassesses one line;
+    // no body reassesses the whole case. Idempotent either way.
+    const body = await req.json().catch(() => ({}));
+    const recommendationId = typeof body?.recommendationId === "string" ? body.recommendationId : undefined;
+    const assessments = await persistCaseReasoning(params.caseId, ctx.firm.id, {
+      recommendationIds: recommendationId ? [recommendationId] : undefined,
+      actorUserId: ctx.user.id,
+    });
+    await audit(ctx, "reasoning.run", { type: "case", id: params.caseId, caseId: params.caseId, meta: { assessments: assessments.length, incremental: !!recommendationId } });
     return ok({ assessments });
   } catch (err) {
     return handleError(err);

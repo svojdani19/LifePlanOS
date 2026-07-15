@@ -80,6 +80,9 @@ const PROCEDURAL_FAMILIES = new Set(["arthroplasty", "revision_arthroplasty", "f
 
 // ── Population ───────────────────────────────────────────────────────────────
 const PEDIATRIC = /\b(pediatric|paediatric|congenital|neonat\w*|infant|adolescen\w*|in children|childhood|\bchild\b|juvenile)\b/i;
+// CRE v1 §12 — pregnancy/obstetric literature cannot support routine care for a
+// non-pregnant (or male) patient without an explicit applicability analysis.
+const OBSTETRIC = /\b(pregnan\w*|obstetric\w*|gestation\w*|peripartum|postpartum|antenatal|prenatal|in pregnancy)\b/i;
 
 export interface ClinicalContext {
   /** the diagnosis the citation must speak to */
@@ -135,6 +138,12 @@ export function citationCompatible(article: ArticleLike, ctx: ClinicalContext): 
   const adult = ctx.adult !== false;
   if (adult && PEDIATRIC.test(`${article.title ?? ""} ${(article.pubtype ?? []).join(" ")}`)) {
     return { compatible: false, reason: "population mismatch (pediatric/congenital literature; adult recommendation)" };
+  }
+  // 3b — population: pregnancy/obstetric literature cannot support routine care
+  // unless the recommendation or diagnosis is itself obstetric.
+  const ctxObstetric = OBSTETRIC.test(`${ctx.service} ${ctx.diagnosis}`);
+  if (!ctxObstetric && OBSTETRIC.test(`${article.title ?? ""} ${(article.pubtype ?? []).join(" ")}`)) {
+    return { compatible: false, reason: "population mismatch (pregnancy/obstetric literature; non-obstetric recommendation)" };
   }
   return { compatible: true, reason: "region, procedure, and population compatible" };
 }

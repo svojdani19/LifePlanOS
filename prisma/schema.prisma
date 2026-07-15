@@ -943,6 +943,7 @@ model ReportExport {
 
   format            ExportFormat
   template          CaseSide     @default(PLAINTIFF) // plaintiff/defense/neutral template
+  draft             Boolean      @default(false) // CRE v1 — draft export (watermark + unresolved-issues appendix)
   version           Int          @default(1)
   storageKey        String?
   generatedById     String?
@@ -1011,9 +1012,16 @@ enum AttentionStatus {
 // Evidence Explorer render FROM it ("reason first, write second"). References
 // existing Condition / citation / review records rather than duplicating them.
 enum ReasoningStatus {
-  NEEDS_REASONING_REVIEW // default for backfilled / not-yet-assessed recommendations
-  ASSESSED
+  NEEDS_REASONING_REVIEW // legacy default for backfilled / not-yet-assessed rows
+  ASSESSED // legacy "computed" status (pre-v1); new writes use the states below
   SUPERSEDED
+  // CRE v1 lifecycle:
+  PENDING // queued, not yet computed
+  PROCESSING // computation in flight
+  NEEDS_REVIEW // computed, but a gate (frequency, lifetime, unknowns, approval invalidation) needs human review
+  VALIDATED // computed and every gate passed
+  INVALID // computed and a structural defect found (diagnosis/laterality/coding mismatch)
+  ERROR // computation failed; see errorDetail
 }
 
 enum ProbabilityClassification {
@@ -1047,18 +1055,35 @@ model ClinicalReasoningAssessment {
   caseId String
   case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
 
-  recommendationId      String // FutureCareItem.id
+  recommendationId      String // FutureCareItem.id — version-specific (each row IS a version)
   recommendationService String // denormalized service name (stable across regen)
   status                ReasoningStatus @default(NEEDS_REASONING_REVIEW)
+
+  // CRE v1 — lineage / version awareness. The recommendationId already pins a
+  // specific FutureCareItem version; these make the chain queryable.
+  recommendationLineageId String? // FutureCareItem.lineageId (constant across versions)
+  recommendationVersion   Int? // FutureCareItem.version
+  caseVersion             Int? // latest CaseSnapshot version at assessment time
 
   // Condition (§4) — references existing Condition ids; classifications derived.
   supportingDiagnosisIds   Json? // string[] of Condition ids
   bodyRegion               String?
+  laterality               String? // left | right | bilateral | n/a — CRE v1
+  conditionSeverity        String? // mild | moderate | severe | end-stage | undetermined — CRE v1
+  conditionChronicity      String? // acute | subacute | chronic | undetermined — CRE v1
+  currentClinicalStatus    String? // under active treatment | surveillance | resolved | undetermined — CRE v1
   responsibleSpecialty     String?
   conditionTrajectory      String? // improving | stable | worsening | fluctuating | uncertain
   causalRelationshipStatus String? // from Condition.relatedness
 
   clinicalPurpose String?
+
+  // CRE v1 — itemized, epistemically classified evidence: typed array of
+  // { category, text, source, page, date, provider, objective, epistemic }
+  // where epistemic ∈ documented_fact | patient_report | provider_opinion |
+  // planner_inference | ai_inference | unknown. Deep normalization stays in
+  // EvidenceLink; this is the assessment's classified view of it.
+  evidenceItems Json?
 
   // Evidence assembly summaries (§5) — each underlying fact traces to a source
   // through the existing evidence buckets; these are the synthesized summaries.
@@ -1071,6 +1096,8 @@ model ClinicalReasoningAssessment {
 
   medicalNecessityRationale String? // §6
   noTreatmentRisk           String?
+  leastIntensiveRationale   String? // CRE v1 — why preferable to no/lower-intensity care
+  timingRationale           String? // CRE v1 — when the care begins and why
   probabilityClassification ProbabilityClassification @default(INSUFFICIENTLY_SUPPORTED) // §7
 
   clinicalPathwayStage String? // §8
@@ -1090,7 +1117,8 @@ model ClinicalReasoningAssessment {
   missingEvidenceRequests Json?
 
   supportingGuidelineAssessments  Json? // §15 — thin refs to existing guidelines
-  supportingLiteratureAssessments Json? // §15 — thin refs to existing citations
+  supportingLiteratureAssessments Json? // §15 — thin refs to existing citations (ACCEPTED after the relevance re-filter)
+  rejectedLiterature              Json? // CRE v1 — citations excluded at assessment time: { title, pmid?, reason }[]
   literatureSynthesis             String? // Phase C — one-paragraph synthesis of the body of literature
   residualUncertainty             String? // Phase C — plain-language summary of what remains unknown
 
@@ -1106,7 +1134,9 @@ model ClinicalReasoningAssessment {
   // Material-change fingerprint (§18): a change here invalidates prior approval.
   materialHash    String?
   generatedByModel String?
-  supersededById  String?
+  supersededById  String? // the assessment that replaced this one (lineage; prior rows are preserved)
+  reviewerMetadata Json? // CRE v1 — { invalidatedApproval?: bool, changedFields?: string[], priorPhysicianStatus?: string }
+  errorDetail      String? // CRE v1 — populated when status = ERROR
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

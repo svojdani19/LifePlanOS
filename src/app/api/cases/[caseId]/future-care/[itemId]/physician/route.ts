@@ -76,9 +76,10 @@ export async function POST(req: Request, { params }: { params: { caseId: string;
 
     await generateReviews(params.caseId);
     // Review actions change inclusion eligibility — refresh persisted findings
-    // and the clinical reasoning assessment (physician status is a material field).
+    // and the clinical reasoning assessment (physician status is a material
+    // field). Incremental: only the reviewed item is reassessed (§19).
     await persistCaseValidation(params.caseId, ctx.firm.id).catch(() => {});
-    await persistCaseReasoning(params.caseId, ctx.firm.id).catch(() => {});
+    await persistCaseReasoning(params.caseId, ctx.firm.id, { recommendationIds: [params.itemId], actorUserId: ctx.user.id }).catch(() => {});
     await audit(ctx, "physician.review", { type: "futureCareItem", id: item.id, caseId: params.caseId, meta: { status: input.status } });
     return ok({ item: updated });
   } catch (err) {

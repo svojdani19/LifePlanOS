@@ -1,5 +1,6 @@
 import { buildRecommendationDossier, type DossierItem, type DossierCondition, type DossierChronoEvent, type DossierCase, type DossierInterview } from "@/lib/engine/medicalNecessity";
 import { mapRecommendationToCondition, validateCode, validatePricing, classifyRecommendation, hasPatientRecordSupport, bodyRegion, type RecInput, type CondInput } from "@/lib/engine/integrity";
+import { citationCompatible } from "@/lib/engine/citationQuality";
 import { specialtyLens } from "@/lib/engine/specialtyReasoning";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -29,6 +30,48 @@ export type ReasoningItem = DossierItem & { contingencyOnly?: boolean | null; re
 export type ConflictType = "DUPLICATE" | "REPLACED_BY" | "REPLACES" | "ALTERNATIVE_BOTH_INCLUDED" | "OVERLAP";
 export interface ConflictFlag { type: ConflictType; otherService: string; note: string }
 
+// ── CRE v1 structured sub-objects ────────────────────────────────────────────
+
+// Epistemic status of a piece of evidence — the engine must never present a
+// patient report or an inference as a documented fact (§4).
+export type EpistemicStatus = "documented_fact" | "patient_report" | "provider_opinion" | "planner_inference" | "ai_inference" | "unknown";
+export type EvidenceCategory = "imaging" | "operative_findings" | "physical_examination" | "diagnostic_study" | "laboratory" | "symptom" | "functional_limitation" | "prior_treatment" | "treatment_response" | "treating_provider_recommendation" | "patient_interview" | "caregiver_interview" | "formal_assessment" | "guideline";
+export interface ClassifiedEvidenceItem {
+  category: EvidenceCategory;
+  text: string;
+  source: string | null; // filename / provider / "record"
+  page: number | null;
+  date: string | null;
+  provider: string | null;
+  objective: boolean;
+  epistemic: EpistemicStatus;
+}
+
+// A weakening-evidence item (§9) — adverse evidence is never hidden.
+export interface WeakeningItem {
+  claim: string; // what part of the recommendation it weakens
+  detail: string;
+  source: string | null;
+  page: number | null;
+  materiality: "HIGH" | "MODERATE" | "LOW";
+  reducesConfidence: boolean;
+  changesInclusion: boolean;
+  requiresReview: boolean;
+}
+
+// A precise unknown / evidence gap (§10) — never "progression is uncertain".
+export interface UnknownItem {
+  missing: string;
+  whyItMatters: string;
+  likelySource: string; // where the evidence would come from
+  severity: "HIGH" | "MODERATE" | "LOW";
+  blocksInclusion: boolean;
+  reducesConfidence: boolean;
+  suggestedAction: string;
+}
+
+export interface RejectedCitation { title: string; pmid?: string; reason: string }
+
 // Set-level context computed across ALL of a case's recommendations, injected
 // into the per-item builder so one assessment can reason about its neighbours
 // (duplicates, staged replacements, alternatives) without a second model.
@@ -48,14 +91,21 @@ export const PROBABILITY_LABEL: Record<ProbabilityClassification, string> = {
 export const EVIDENCE_STRENGTH_LABEL: Record<EvidenceStrength, string> = { STRONG: "strong", MODERATE: "moderate", LIMITED: "limited", EXPERT_CONSENSUS: "expert consensus", INSUFFICIENT: "insufficient" };
 export const CONFIDENCE_LABEL: Record<RecommendationConfidence, string> = { HIGH: "high", MODERATE: "moderate", LOW: "low", INDETERMINATE: "indeterminate" };
 
+export type AssessmentLifecycleStatus = "NEEDS_REVIEW" | "VALIDATED" | "INVALID";
+
 export interface ReasoningAssessment {
   recommendationService: string;
   supportingDiagnosisIds: string[];
   bodyRegion: string;
+  laterality: string; // left | right | bilateral | n/a
+  conditionSeverity: string; // mild | moderate | severe | end-stage | undetermined
+  conditionChronicity: string; // acute | subacute | chronic | undetermined
+  currentClinicalStatus: string; // under active treatment | surveillance | resolved | undetermined
   responsibleSpecialty: string;
   conditionTrajectory: string;
   causalRelationshipStatus: string;
   clinicalPurpose: string;
+  evidenceItems: ClassifiedEvidenceItem[];
   objectiveEvidenceSummary: string | null;
   subjectiveEvidenceSummary: string | null;
   functionalBasisSummary: string | null;
@@ -64,6 +114,8 @@ export interface ReasoningAssessment {
   treatingRecordSupportSummary: string | null;
   medicalNecessityRationale: string;
   noTreatmentRisk: string;
+  leastIntensiveRationale: string;
+  timingRationale: string;
   probabilityClassification: ProbabilityClassification;
   clinicalPathwayStage: string | null;
   clinicalPathway: string;
@@ -74,11 +126,12 @@ export interface ReasoningAssessment {
   frequencySupported: boolean;
   durationClass: DurationClass;
   durationRationale: string;
-  weakeningEvidence: string[];
-  unknowns: string[];
+  weakeningEvidence: WeakeningItem[];
+  unknowns: UnknownItem[];
   missingEvidenceRequests: string[];
   supportingGuidelineAssessments: { title: string; claim: string }[];
   supportingLiteratureAssessments: LiteratureAssessment[];
+  rejectedLiterature: RejectedCitation[];
   literatureSynthesis: string;
   residualUncertainty: string;
   evidenceStrength: EvidenceStrength;
@@ -88,6 +141,8 @@ export interface ReasoningAssessment {
   inclusionInTotalsStatus: "included" | "excluded" | "contingency";
   physicianReviewStatus: string;
   validationStatus: "ok" | "blocking" | "pending";
+  /** CRE v1 lifecycle verdict — VALIDATED only when every gate passes. */
+  lifecycleStatus: AssessmentLifecycleStatus;
   materialHash: string;
 }
 
@@ -114,6 +169,91 @@ function purposeFor(category: string | null | undefined, isLifetime: boolean): s
 }
 
 const CAUSAL: Record<string, string> = { RELATED: "incident-related", AGGRAVATION: "aggravated pre-existing condition", PREEXISTING_UNRELATED: "unrelated (pre-existing)", SUBSEQUENT_UNRELATED: "unrelated (subsequent)", UNCLEAR: "unclear" };
+
+// ── CRE v1 §3 — condition definition ─────────────────────────────────────────
+
+/** Laterality stated in a text ("right knee", "left L4-5", "bilateral"). */
+export function lateralityOf(text: string): "left" | "right" | "bilateral" | "n/a" {
+  const t = text.toLowerCase();
+  if (/\bbilateral\b|\bboth (knees|hips|shoulders|wrists|ankles|eyes|ears|legs|arms)\b/.test(t)) return "bilateral";
+  const left = /\bleft\b|\bl(?:t)?\.\s/.test(t);
+  const right = /\bright\b|\br(?:t)?\.\s/.test(t);
+  if (left && right) return "bilateral";
+  if (left) return "left";
+  if (right) return "right";
+  return "n/a";
+}
+
+function severityOf(condition: DossierCondition | null): string {
+  const quotes = Array.isArray(condition?.evidenceSources) ? (condition!.evidenceSources as { quote?: string }[]).map((e) => e?.quote ?? "").join(" ") : "";
+  const hay = `${condition?.name ?? ""} ${condition?.objectiveEvidence ?? ""} ${quotes}`.toLowerCase();
+  if (/end-?stage|bone-on-bone|complete (tear|rupture)|severe|grade (iv|4)|high-grade/.test(hay)) return "severe";
+  if (/moderate|grade (iii|3)|partial (tear|rupture)/.test(hay)) return "moderate";
+  if (/mild|grade (i{1,2}|[12])\b|low-grade|minimal/.test(hay)) return "mild";
+  return "undetermined";
+}
+
+function chronicityOf(condition: DossierCondition | null, isLifetime: boolean): string {
+  const hay = `${condition?.name ?? ""} ${condition?.reasoning ?? ""}`.toLowerCase();
+  if (/chronic|degenerat|arthrit|post-?traumatic|permanent/.test(hay) || isLifetime) return "chronic";
+  if (/subacute/.test(hay)) return "subacute";
+  if (/acute|initial encounter|fracture\b/.test(hay)) return "acute";
+  return "undetermined";
+}
+
+function clinicalStatusOf(condition: DossierCondition | null, priorTreatmentCount: number): string {
+  const opp = (condition?.opposingRecords ?? "").toLowerCase();
+  if (/resolved|full recovery|returned to baseline/.test(opp)) return "resolved";
+  if (priorTreatmentCount > 0) return "under active treatment";
+  if (condition) return "surveillance";
+  return "undetermined";
+}
+
+// ── CRE v1 §4 — epistemically classified evidence items ─────────────────────
+// Symptoms/patient reports are never labeled objective; physician approval is
+// never treating-record support; literature is never patient-specific evidence.
+type Bucketed = { text: string; source?: string | null };
+function classifyBucket(items: Bucketed[], category: EvidenceCategory, objective: boolean, epistemic: EpistemicStatus): ClassifiedEvidenceItem[] {
+  return items.map((e) => {
+    const page = e.source ? Number(/p\.\s*(\d+)/.exec(e.source)?.[1] ?? NaN) : NaN;
+    const date = e.source ? (/\b(\d{4}-\d{2}-\d{2})\b/.exec(e.source)?.[1] ?? null) : null;
+    const provider = e.source ? (/·\s*([^·(]+?)\s*(?:\(|$)/.exec(e.source)?.[1]?.trim() ?? null) : null;
+    return { category, text: e.text, source: e.source ?? null, page: Number.isNaN(page) ? null : page, date, provider, objective, epistemic };
+  });
+}
+
+// ── CRE v1 §5 — necessity extensions ─────────────────────────────────────────
+function leastIntensiveOf(item: ReasoningItem, priorTreatmentCount: number, pathway: string): string {
+  if (item.lowerCostAlternative) return `A lower-intensity option (${lc(item.lowerCostAlternative)}) is documented as the alternative; ${lc(item.service)} is recommended because the documented clinical basis supports it, and only one of the two belongs in totals.`;
+  if (/surgical|revision/.test(pathway)) return priorTreatmentCount > 0 ? "Lower-intensity care is documented and has not resolved the impairment; escalation along the treatment continuum is the clinically expected next step rather than a first resort." : "Surgical care is proposed without documented exhaustion of conservative care — the record should establish why lower-intensity options are not adequate.";
+  if (/conservative/.test(pathway)) return "This is itself the lower-intensity option on the treatment continuum — preferable to interventional or surgical escalation while it maintains function.";
+  return "No treatment would leave the documented impairment unaddressed; this recommendation is the least-intensive documented means of addressing it.";
+}
+
+function timingOf(item: ReasoningItem): string {
+  if (item.startTrigger) return `Begins when the documented trigger is met: ${lc(item.startTrigger)}.`;
+  if (item.isLifetime) return "Begins from the date of the plan and continues across the projection horizon.";
+  if ((item.durationYears ?? 0) === 0) return "A single occurrence anticipated within the projection horizon.";
+  return "Begins from the date of the plan for the stated course.";
+}
+
+// ── CRE v1 §12 — recommendation-specific literature re-filter ───────────────
+// Applicability outranks hierarchy: an article must be compatible with THIS
+// recommendation (region, procedure family, scope, population) or it is
+// rejected with a stated reason — keyword overlap alone never qualifies.
+export function filterLiterature(
+  literature: LiteratureAssessment[],
+  ctx: { service: string; diagnosis: string; adult: boolean },
+): { accepted: LiteratureAssessment[]; rejected: RejectedCitation[] } {
+  const accepted: LiteratureAssessment[] = [];
+  const rejected: RejectedCitation[] = [];
+  for (const l of literature) {
+    const gate = citationCompatible({ title: l.title }, { service: ctx.service, diagnosis: ctx.diagnosis, adult: ctx.adult });
+    if (gate.compatible) accepted.push(l);
+    else rejected.push({ title: l.title, pmid: l.pmid, reason: gate.reason });
+  }
+  return { accepted, rejected };
+}
 
 // §8 — where a recommendation sits on the treatment continuum.
 const PATHWAY: Partial<Record<string, string>> = {
@@ -196,27 +336,57 @@ function synthesizeLiterature(literature: LiteratureAssessment[], hasGuideline: 
   return parts.join(" ");
 }
 
-// §13 (Phase C) — the honest counter-analysis: what could undermine this line.
-function deriveWeakening(base: string[], ctx: { objectiveCount: number; physicianApproved: boolean; frequencySupported: boolean; durationClass: DurationClass; lifetimeWellSupported: boolean; weakPrimary: boolean; matched: boolean; region: string }): string[] {
-  const out = [...base];
-  const add = (s: string) => { if (!out.some((x) => x.toLowerCase() === s.toLowerCase())) out.push(s); };
-  if (ctx.objectiveCount === 0) add(`No independent objective finding is documented for the ${ctx.region} in the current record.`);
-  if (!ctx.matched) add("No diagnosis in the relevant body region maps to this recommendation.");
-  if (!ctx.physicianApproved) add("Not yet confirmed or signed off by the treating physician.");
-  if (!ctx.frequencySupported) add("The stated frequency is assumed rather than grounded in a documented cadence.");
-  if (ctx.durationClass === "LIFETIME" && !ctx.lifetimeWellSupported) add("A lifetime duration is asserted on limited supporting evidence.");
-  if (ctx.weakPrimary) add("The strongest available citation is only a case series or case report.");
+// §9 (CRE v1) — the honest counter-analysis, as structured items with
+// materiality, source, and effect flags. Adverse evidence is never hidden and
+// nothing is manufactured for a well-supported line.
+function deriveWeakening(
+  base: string[],
+  ctx: { objectiveCount: number; physicianApproved: boolean; frequencySupported: boolean; durationClass: DurationClass; lifetimeWellSupported: boolean; weakPrimary: boolean; matched: boolean; lateralityMismatch: boolean; region: string; service: string; contradictorySource?: string | null },
+): WeakeningItem[] {
+  const out: WeakeningItem[] = base.map((detail) => ({
+    claim: "the supporting record", detail, source: ctx.contradictorySource ?? "case record", page: null,
+    materiality: /improv|resolved|normal/i.test(detail) ? "HIGH" : "MODERATE", reducesConfidence: true, changesInclusion: false, requiresReview: true,
+  }));
+  const add = (w: WeakeningItem) => { if (!out.some((x) => x.detail.toLowerCase() === w.detail.toLowerCase())) out.push(w); };
+  if (!ctx.matched) add({ claim: "diagnosis linkage", detail: "No diagnosis in the relevant body region maps to this recommendation.", source: null, page: null, materiality: "HIGH", reducesConfidence: true, changesInclusion: true, requiresReview: true });
+  if (ctx.lateralityMismatch) add({ claim: "anatomic laterality", detail: `The recommendation and its supporting diagnosis state different sides for the ${ctx.region}.`, source: null, page: null, materiality: "HIGH", reducesConfidence: true, changesInclusion: true, requiresReview: true });
+  if (ctx.objectiveCount === 0) add({ claim: "objective basis", detail: `No independent objective finding is documented for the ${ctx.region} in the current record.`, source: null, page: null, materiality: "HIGH", reducesConfidence: true, changesInclusion: true, requiresReview: true });
+  if (!ctx.physicianApproved) add({ claim: "treating-record support", detail: "Not yet confirmed or signed off by the treating physician.", source: null, page: null, materiality: "MODERATE", reducesConfidence: true, changesInclusion: false, requiresReview: true });
+  if (!ctx.frequencySupported) add({ claim: "frequency", detail: "The stated frequency is assumed rather than grounded in a documented cadence.", source: null, page: null, materiality: "MODERATE", reducesConfidence: true, changesInclusion: false, requiresReview: true });
+  if (ctx.durationClass === "LIFETIME" && !ctx.lifetimeWellSupported) add({ claim: "duration", detail: "A lifetime duration is asserted on limited supporting evidence.", source: null, page: null, materiality: "HIGH", reducesConfidence: true, changesInclusion: false, requiresReview: true });
+  if (ctx.weakPrimary) add({ claim: "published support", detail: "The strongest available citation is only a case series or case report.", source: null, page: null, materiality: "LOW", reducesConfidence: true, changesInclusion: false, requiresReview: false });
   return out;
 }
 
-// §14 (Phase C) — actionable missing-evidence requests, not vague gaps.
-function deriveMissing(base: string[], ctx: { objectiveCount: number; physicianApproved: boolean; frequencySupported: boolean; region: string }): string[] {
-  const out = [...base.map((s) => s.trim()).filter(Boolean)];
-  const add = (s: string) => { if (!out.some((x) => x.toLowerCase() === s.toLowerCase())) out.push(s); };
-  if (ctx.objectiveCount === 0) add(`Obtain objective confirmation (imaging or examination) for the ${ctx.region}.`);
-  if (!ctx.physicianApproved) add("Treating-physician review and sign-off.");
-  if (!ctx.frequencySupported) add("Document the treatment cadence supporting the stated frequency.");
-  return out.slice(0, 5);
+// §10 (CRE v1) — precise unknowns: what is missing, why it matters, where it
+// would come from, and what to do — never "progression is uncertain".
+function deriveUnknowns(
+  base: string[],
+  ctx: { objectiveCount: number; physicianApproved: boolean; frequencySupported: boolean; region: string; service: string; isSurgical: boolean; isImagingRec: boolean },
+): UnknownItem[] {
+  const out: UnknownItem[] = base
+    .map((s) => s.trim()).filter(Boolean)
+    .map((missing) => ({ missing, whyItMatters: "It bears directly on whether this recommendation is supportable as stated.", likelySource: "treating records or updated studies", severity: "MODERATE" as const, blocksInclusion: false, reducesConfidence: true, suggestedAction: "Request the identified records or studies." }));
+  const add = (u: UnknownItem) => { if (!out.some((x) => x.missing.toLowerCase() === u.missing.toLowerCase())) out.push(u); };
+  if (ctx.objectiveCount === 0) add({
+    missing: `No current objective study (imaging or examination) documents the ${ctx.region}.`,
+    whyItMatters: `Without an objective finding, the need for ${lc(ctx.service)} rests on report alone and cannot be confirmed.`,
+    likelySource: "updated imaging or a documented physical examination", severity: "HIGH", blocksInclusion: true, reducesConfidence: true,
+    suggestedAction: `Obtain current imaging or an examination of the ${ctx.region}.`,
+  });
+  if (!ctx.physicianApproved) add({
+    missing: "No treating-physician review of this recommendation is on file.",
+    whyItMatters: "A recommendation carries materially more weight once the treating physician has reviewed and endorsed it.",
+    likelySource: "the reviewing physician", severity: "MODERATE", blocksInclusion: false, reducesConfidence: true,
+    suggestedAction: "Route the recommendation for physician review.",
+  });
+  if (!ctx.frequencySupported) add({
+    missing: "No documented treatment cadence, guideline, or review supports the stated frequency.",
+    whyItMatters: "An assumed frequency multiplies directly into the cost totals and is the first target of a challenge.",
+    likelySource: "treatment records showing the actual visit cadence, or applicable clinical guidance", severity: "HIGH", blocksInclusion: false, reducesConfidence: true,
+    suggestedAction: "Document the cadence supporting the stated frequency, or obtain physician confirmation.",
+  });
+  return out.slice(0, 6);
 }
 
 // Plain-language summary of what remains unknown and what would move the needle.
@@ -287,6 +457,13 @@ export function buildReasoningAssessment(
   const region = bodyRegion(`${item.service} ${condition?.name ?? ""}`);
   const staged = !!item.contingencyOnly || !!item.startTrigger;
 
+  // CRE v1 §3 — condition definition: laterality (with mismatch detection),
+  // severity, chronicity, and current clinical status.
+  const recLaterality = lateralityOf(item.service);
+  const dxLaterality = lateralityOf(condition?.name ?? "");
+  const lateralityMismatch = recLaterality !== "n/a" && dxLaterality !== "n/a" && recLaterality !== dxLaterality && dxLaterality !== "bilateral" && recLaterality !== "bilateral";
+  const laterality = recLaterality !== "n/a" ? recLaterality : dxLaterality;
+
   // §7 probability classification.
   let probabilityClassification: ProbabilityClassification;
   if (item.physicianStatus === "REJECTED") probabilityClassification = "REJECTED_BY_REVIEWER";
@@ -312,7 +489,20 @@ export function buildReasoningAssessment(
   const lifetimeWellSupported = se.guidelines.length > 0 || objectiveItems.length > 0 || physicianApproved;
   const { durationClass, durationRationale } = durationOf(item, lifetimeWellSupported);
 
-  const bestLevel = dossier.literature.length ? Math.min(...dossier.literature.map((l) => l.evidenceLevel)) : null;
+  // CRE v1 §12 — the literature ledger. The dossier already gates citations
+  // through the hard compatibility filter, so its output is the ACCEPTED set;
+  // the ledger of REJECTED citations is computed from the item's raw stored
+  // citations so every exclusion is auditable with its reason.
+  const dossierLit = dossier.literature.map((l) => ({ title: l.title, pmid: l.pmid, supports: l.supports, applicability: l.applicability, evidenceLevel: l.evidenceLevel, limitations: l.limitations }));
+  const { accepted: literatureAssessments } = filterLiterature(dossierLit, { service: item.service, diagnosis: condition?.name ?? item.service, adult: kase.adult !== false });
+  const rawCitations = (Array.isArray(item.citation) ? item.citation : item.citation ? [item.citation] : []) as { title?: string; pmid?: string }[];
+  const rejectedLiterature: RejectedCitation[] = rawCitations
+    .filter((cc): cc is { title: string; pmid?: string } => !!cc.title)
+    .map((cc) => ({ cc, gate: citationCompatible({ title: cc.title }, { service: item.service, diagnosis: condition?.name ?? item.service, adult: kase.adult !== false }) }))
+    .filter(({ gate }) => !gate.compatible) // only genuine incompatibility — not mere non-selection as primary
+    .map(({ cc, gate }) => ({ title: cc.title, pmid: cc.pmid, reason: gate.reason }));
+
+  const bestLevel = literatureAssessments.length ? Math.min(...literatureAssessments.map((l) => l.evidenceLevel)) : null;
   const evidenceStrength = evidenceStrengthFrom(bestLevel, se.guidelines.length > 0);
   const recommendationConfidence = mapConfidence(dossier.confidence.level);
 
@@ -331,22 +521,52 @@ export function buildReasoningAssessment(
 
   const trajectory = condition?.opposingRecords && /improv/i.test(condition.opposingRecords) ? "improving" : item.isLifetime ? "chronic, stable-to-worsening" : "uncertain";
   const weakPrimary = bestLevel != null && bestLevel >= 9;
-  const weakeningEvidence = deriveWeakening(dossier.contradictoryEvidence, { objectiveCount: objectiveItems.length, physicianApproved, frequencySupported, durationClass, lifetimeWellSupported, weakPrimary, matched: mapping.matched, region });
-  const missing = deriveMissing([condition?.missingInfo ?? "", item.missingSupport ?? "", ...dossier.unknowns], { objectiveCount: objectiveItems.length, physicianApproved, frequencySupported, region });
-  const literatureAssessments = dossier.literature.map((l) => ({ title: l.title, pmid: l.pmid, supports: l.supports, applicability: l.applicability, evidenceLevel: l.evidenceLevel, limitations: l.limitations }));
+  const isSurgicalRec = /surgical|revision/.test(pathwayOf(item));
+  const weakeningEvidence = deriveWeakening(dossier.contradictoryEvidence, { objectiveCount: objectiveItems.length, physicianApproved, frequencySupported, durationClass, lifetimeWellSupported, weakPrimary, matched: mapping.matched, lateralityMismatch, region, service: item.service });
+  const unknowns = deriveUnknowns([condition?.missingInfo ?? "", item.missingSupport ?? "", ...dossier.unknowns], { objectiveCount: objectiveItems.length, physicianApproved, frequencySupported, region, service: item.service, isSurgical: isSurgicalRec, isImagingRec: (item.category ?? "") === "IMAGING" });
+  const missing = unknowns.map((u) => u.suggestedAction);
   const literatureSynthesis = synthesizeLiterature(literatureAssessments, se.guidelines.length > 0, item.service);
   const residualUncertainty = residualUncertaintyOf(recommendationConfidence, dossier.confidence.factors, missing);
 
-  const materialHash = hashStr([item.service, item.category ?? "", mapping.conditionId ?? "", region, purposeFor(item.category, !!item.isLifetime), freqN, durationClass, probabilityClassification, inclusionInTotalsStatus, item.startTrigger ?? "", item.replacesService ?? "", item.physicianStatus ?? "", setContext.conflicts.map((c) => c.type + c.otherService).sort().join(",")].join("|"));
+  // CRE v1 §4 — itemized, epistemically classified evidence. Symptoms and
+  // functional reports stay subjective; only independently documented findings
+  // are objective; interview content is patient report; physician notes are
+  // provider opinion. Nothing here is an AI inference presented as fact.
+  const evidenceItems: ClassifiedEvidenceItem[] = [
+    ...classifyBucket(se.imaging, "imaging", true, "documented_fact"),
+    ...classifyBucket(se.objectiveFindings, "diagnostic_study", true, "documented_fact"),
+    ...classifyBucket(se.examination, "physical_examination", true, "documented_fact"),
+    ...classifyBucket(se.functionalLimitations.filter((e) => !/patient reports/i.test(e.text)), "functional_limitation", true, "documented_fact"),
+    ...classifyBucket(subjectiveItems, "symptom", false, "patient_report"),
+    ...classifyBucket(se.priorTreatment, "prior_treatment", true, "documented_fact"),
+    ...classifyBucket(se.physicianDocumentation, "treating_provider_recommendation", false, "provider_opinion"),
+    ...classifyBucket(se.guidelines, "guideline", false, "provider_opinion"),
+  ];
+
+  // CRE v1 lifecycle verdict — VALIDATED only when every gate passes.
+  const blockingUnknowns = unknowns.some((u) => u.blocksInclusion);
+  const structuralDefect = !mapping.matched || lateralityMismatch || codeCritical;
+  const lifecycleStatus: AssessmentLifecycleStatus = structuralDefect
+    ? "INVALID"
+    : !frequencySupported || (durationClass === "LIFETIME" && !lifetimeWellSupported) || blockingUnknowns || probabilityClassification === "INSUFFICIENTLY_SUPPORTED"
+      ? "NEEDS_REVIEW"
+      : "VALIDATED";
+
+  const materialHash = hashStr([item.service, item.category ?? "", mapping.conditionId ?? "", region, laterality, purposeFor(item.category, !!item.isLifetime), freqN, durationClass, probabilityClassification, inclusionInTotalsStatus, item.startTrigger ?? "", item.replacesService ?? "", item.physicianStatus ?? "", evidenceStrength, setContext.conflicts.map((c) => c.type + c.otherService).sort().join(",")].join("|"));
 
   return {
     recommendationService: item.service,
     supportingDiagnosisIds: mapping.conditionId ? [mapping.conditionId] : [],
     bodyRegion: region,
+    laterality,
+    conditionSeverity: severityOf(condition),
+    conditionChronicity: chronicityOf(condition, !!item.isLifetime),
+    currentClinicalStatus: clinicalStatusOf(condition, se.priorTreatment.length),
     responsibleSpecialty: lens.label,
     conditionTrajectory: trajectory,
     causalRelationshipStatus: CAUSAL[condition?.relatedness ?? "UNCLEAR"] ?? "unclear",
     clinicalPurpose: purposeFor(item.category, !!item.isLifetime),
+    evidenceItems,
     objectiveEvidenceSummary: sum(objectiveItems),
     subjectiveEvidenceSummary: sum(subjectiveItems),
     functionalBasisSummary: dossier.functionalLink ? `${dossier.functionalLink.domain} — ${dossier.functionalLink.limitation}` : sum(se.functionalLimitations),
@@ -355,6 +575,8 @@ export function buildReasoningAssessment(
     treatingRecordSupportSummary: sum(se.physicianDocumentation),
     medicalNecessityRationale: dossier.medicalNecessity,
     noTreatmentRisk: `Without ${lc(item.service)}, ${lens.concern} would go unaddressed for ${kase.subject}.`,
+    leastIntensiveRationale: leastIntensiveOf(item, se.priorTreatment.length, pathwayOf(item)),
+    timingRationale: timingOf(item),
     probabilityClassification,
     clinicalPathwayStage: staged ? "contingent / staged" : classify.includedInTotal ? "active plan" : "proposed",
     clinicalPathway: pathwayOf(item),
@@ -366,10 +588,11 @@ export function buildReasoningAssessment(
     durationClass,
     durationRationale,
     weakeningEvidence,
-    unknowns: dossier.unknowns,
+    unknowns,
     missingEvidenceRequests: missing,
     supportingGuidelineAssessments: se.guidelines.map((g) => ({ title: g.text.slice(0, 140), claim: "supports the diagnosis and the intervention" })),
     supportingLiteratureAssessments: literatureAssessments,
+    rejectedLiterature,
     literatureSynthesis,
     residualUncertainty,
     evidenceStrength,
@@ -379,6 +602,7 @@ export function buildReasoningAssessment(
     inclusionInTotalsStatus,
     physicianReviewStatus: item.physicianStatus ?? "PENDING",
     validationStatus,
+    lifecycleStatus,
     materialHash,
   };
 }
@@ -396,11 +620,12 @@ export interface ReasoningFinding {
 
 /**
  * Reasoning-derived validation findings, layered onto the existing integrity /
- * evidence / completeness checks. Export-blocking is reserved for genuine
- * double-counting (a line totaled alongside its own lower-cost alternative);
- * everything else is advisory so the reasoning surfaces without silently
- * gating existing reports. `includedIds` are the ids the cost engine actually
- * totals (from the integrity mapping), so we only gate what really counts.
+ * evidence / completeness checks (CRE v1 §16, §18). Export-blocking (final
+ * export) applies to genuine double-counting and to totaled lines with an
+ * unsupported frequency/duration, an unresolved critical evidence gap, or
+ * assessment-rejected primary literature; a draft export remains available
+ * with a watermark and an unresolved-issues appendix. `includedIds` are the
+ * ids the cost engine actually totals, so we only gate what really counts.
  */
 export function reasoningFindings(
   items: ReasoningItem[],
@@ -415,6 +640,8 @@ export function reasoningFindings(
     const id = it.id ?? "";
     const inTotals = includedIds.has(id);
     const a = buildReasoningAssessment(it, conditions, chronology, kase, [], { conflicts: flags.get(id) ?? [], replacedByActive: replacedByActive.has(id) });
+    const physicianApproved = it.physicianStatus === "APPROVED" || it.physicianStatus === "MODIFIED";
+    const pv = it.presentValue ?? 0;
     // Double-count: totaled alongside its own lower-cost alternative → blocking.
     if (inTotals && a.conflictFlags.some((c) => c.type === "ALTERNATIVE_BOTH_INCLUDED")) {
       out.push({ service: it.service, result: "Double-counted alternative", issue: `"${it.service}" is totaled alongside its own lower-cost alternative; only one should count.`, severity: "High", suggestion: "Keep one of the two in totals and disclose the other as an alternative.", exportBlocking: true });
@@ -423,9 +650,33 @@ export function reasoningFindings(
     if (inTotals && replacedByActive.has(id)) {
       out.push({ service: it.service, result: "Replaced line in totals", issue: `"${it.service}" is replaced by an active recommendation but is still in totals.`, severity: "High", suggestion: "Exclude the replaced line from totals; keep the replacement.", exportBlocking: true });
     }
-    // Advisory: an included line whose frequency is unsupported.
+    // Laterality mismatch — a right-sided service tied to a left-sided diagnosis.
+    if (a.weakeningEvidence.some((w) => w.claim === "anatomic laterality")) {
+      out.push({ service: it.service, result: "Laterality mismatch", issue: `"${it.service}" and its supporting diagnosis state different sides.`, severity: "High", suggestion: "Correct the service or map it to the diagnosis on the matching side.", exportBlocking: inTotals });
+    }
+    // Unsupported frequency on a totaled line: blocks FINAL export unless a
+    // qualified reviewer has explicitly approved the item (§7, §18).
     if (inTotals && !a.frequencySupported) {
-      out.push({ service: it.service, result: "Frequency unsupported", issue: `The stated frequency for "${it.service}" is not yet grounded in a cadence, guideline, or physician review.`, severity: "Moderate", suggestion: "Document the cadence or obtain physician review before finalizing totals.", exportBlocking: false });
+      out.push({ service: it.service, result: "Frequency unsupported", issue: `The stated frequency for "${it.service}" is not yet grounded in a cadence, guideline, or physician review.`, severity: "High", suggestion: "Document the cadence or obtain physician review before finalizing totals.", exportBlocking: !physicianApproved });
+    }
+    // Unsupported lifetime duration on a totaled line — severity scales with
+    // financial materiality (§8); blocks final export unless reviewer-approved.
+    if (inTotals && a.durationClass === "LIFETIME" && /limited support/i.test(a.durationRationale)) {
+      const critical = pv >= 100_000;
+      out.push({ service: it.service, result: "Unsupported lifetime duration", issue: `"${it.service}" asserts lifetime duration on limited support${pv ? ` (PV ${Math.round(pv).toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 })})` : ""}.`, severity: critical ? "Critical" : "High", suggestion: "Establish the chronic/progressive objective basis, cite applicable guidance, or obtain physician endorsement.", exportBlocking: !physicianApproved });
+    }
+    // Critical evidence gap on a totaled line (a blocking unknown) → blocks final.
+    const blockingUnknown = a.unknowns.find((u) => u.blocksInclusion);
+    if (inTotals && blockingUnknown) {
+      out.push({ service: it.service, result: "Material evidence gap", issue: `${blockingUnknown.missing} ${blockingUnknown.whyItMatters}`, severity: "High", suggestion: blockingUnknown.suggestedAction, exportBlocking: !physicianApproved });
+    }
+    // Assessment-rejected literature still attached to the recommendation.
+    for (const r of a.rejectedLiterature) {
+      out.push({ service: it.service, result: "Irrelevant literature", issue: `"${r.title.slice(0, 90)}" — ${r.reason}.`, severity: "High", suggestion: "Remove the citation or replace it with literature that addresses this diagnosis, region, and population.", exportBlocking: inTotals });
+    }
+    // Low recommendation confidence on a totaled line — advisory.
+    if (inTotals && (a.recommendationConfidence === "LOW" || a.recommendationConfidence === "INDETERMINATE")) {
+      out.push({ service: it.service, result: "Low recommendation confidence", issue: `"${it.service}" is in totals with ${a.recommendationConfidence.toLowerCase()} confidence.`, severity: "Moderate", suggestion: "Strengthen the patient-specific record support before finalizing.", exportBlocking: false });
     }
     // Advisory: an included line the reasoning rates insufficiently supported.
     if (inTotals && a.probabilityClassification === "INSUFFICIENTLY_SUPPORTED") {

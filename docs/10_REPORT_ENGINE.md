@@ -90,3 +90,18 @@ Generate against seeded demo data, unzip the DOCX, strip XML to text, then
 assert: section flow, forbidden-term absence (AI/score/vulnerability/%), DRAFT
 logic, totals consistency, and prose quality. See the Priority-1 test additions
 and `scripts/` helpers.
+
+## CRE v1 — narrative from the persisted assessment (2026-07-14)
+
+`buildReportDocx` loads the case's persisted ClinicalReasoningAssessment rows and
+renders each recommendation's "Clinical reasoning" block FROM them (probability
+classification, inclusion decision and rationale, evidence-strength vs
+recommendation-confidence, residual uncertainty, alternatives). Inline
+computation remains only as a fallback for unassessed legacy items — the same
+deterministic function. The export route persists reasoning + validation BEFORE
+building the narrative. `mode: "final"` is refused (422, defects listed) while
+any totaled item carries an unresolved export-blocking finding; `mode: "draft"`
+renders with a DRAFT banner on the title page, a DRAFT footer on every page, and
+Appendix G (unresolved issues + contingency/excluded items), records
+`ReportExport.draft = true`, and does not advance the case status. Report design
+and typography are unchanged.

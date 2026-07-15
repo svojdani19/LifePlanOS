@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit, recordUsage } from "@/lib/tenant";
 import { buildReportDocx, buildCostCsv } from "@/lib/export/report";
 import { persistCaseValidation } from "@/lib/engine/validation";
+import { persistCaseReasoning } from "@/lib/engine/clinicalReasoningPersist";
 import { buildSnapshotPayload } from "@/lib/engine/snapshot";
 import { assumptionsFor } from "@/lib/engine/generate";
 import { putObject } from "@/lib/storage";
@@ -23,6 +24,10 @@ export async function GET(_req: Request, { params }: { params: { caseId: string 
 const schema = z.object({
   format: z.enum(["DOCX", "CSV"]),
   template: z.enum(["PLAINTIFF", "DEFENSE", "NEUTRAL"]).default("PLAINTIFF"),
+  // CRE v1 §18 — FINAL export is blocked while any totaled recommendation
+  // carries an unresolved export-blocking finding; DRAFT is always available
+  // with a visible watermark and an unresolved-issues appendix.
+  mode: z.enum(["final", "draft"]).default("final"),
 });
 
 export async function POST(req: Request, { params }: { params: { caseId: string } }) {
@@ -30,7 +35,27 @@ export async function POST(req: Request, { params }: { params: { caseId: string 
     const ctx = await requireApiContext();
     requirePermission(ctx, "report.export");
     await requireCase(ctx, params.caseId);
-    const { format, template } = schema.parse(await req.json());
+    const { format, template, mode } = schema.parse(await req.json());
+
+    // Reason first, write second: assessments and validation findings are
+    // recomputed and PERSISTED before any narrative is generated, and the
+    // final-export gate is evaluated against those persisted results.
+    const [, validation] = await Promise.all([
+      persistCaseReasoning(params.caseId, ctx.firm.id, { actorUserId: ctx.user.id }).catch(() => null),
+      persistCaseValidation(params.caseId, ctx.firm.id),
+    ]);
+    if (format === "DOCX" && mode === "final" && validation.blocking) {
+      const defects = validation.findings.filter((f) => f.exportBlocking).slice(0, 10);
+      return ok(
+        {
+          error: "Final export blocked by unresolved critical findings.",
+          blocking: true,
+          defects: defects.map((f) => ({ service: f.service, result: f.result, issue: f.issue, suggestion: f.suggestion })),
+          hint: 'Resolve the findings, or export a draft (mode: "draft") with the DRAFT watermark and unresolved-issues appendix.',
+        },
+        422,
+      );
+    }
 
     const priorCount = await prisma.reportExport.count({ where: { caseId: params.caseId } });
 
@@ -40,7 +65,7 @@ export async function POST(req: Request, { params }: { params: { caseId: string 
     let itemCount = 0;
 
     if (format === "DOCX") {
-      const r = await buildReportDocx(params.caseId, template);
+      const r = await buildReportDocx(params.caseId, template, { draft: mode === "draft" });
       key = await putObject(r.buffer, ".docx");
       totalLifetime = r.totalLifetime;
       totalPresentValue = r.totalPresentValue;
@@ -60,6 +85,7 @@ export async function POST(req: Request, { params }: { params: { caseId: string 
         firmId: ctx.firm.id,
         format,
         template,
+        draft: mode === "draft",
         version: priorCount + 1,
         storageKey: key,
         generatedById: ctx.user.id,
@@ -69,11 +95,14 @@ export async function POST(req: Request, { params }: { params: { caseId: string 
       },
     });
 
-    // Advance the case toward FINAL once a report has been produced.
-    await prisma.case.updateMany({
-      where: { id: params.caseId, status: { in: ["FUTURE_CARE", "PRICING", "PHYSICIAN_REVIEW", "DRAFTING"] } },
-      data: { status: "FINAL" },
-    });
+    // Advance the case toward FINAL once a FINAL report has been produced.
+    // A draft export leaves the case status untouched (§18).
+    if (mode === "final") {
+      await prisma.case.updateMany({
+        where: { id: params.caseId, status: { in: ["FUTURE_CARE", "PRICING", "PHYSICIAN_REVIEW", "DRAFTING"] } },
+        data: { status: "FINAL" },
+      });
+    }
 
     await recordUsage(ctx, "REPORT_EXPORT", { caseId: params.caseId, meta: { format, template } });
     await audit(ctx, "export.report", { type: "reportExport", id: record.id, caseId: params.caseId, meta: { format, template, version: record.version } });

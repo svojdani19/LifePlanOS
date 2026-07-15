@@ -109,3 +109,27 @@ and must obey the fabrication rules below.
 | No guideline for a diagnosis | honest "no indexed guideline located; add a source" |
 | Critical validation finding | item excluded from totals; export watermarked DRAFT |
 | Pipeline interrupted | chronology rebuilds are transactional (never a half-empty timeline) |
+
+## CRE v1 — Clinical Reasoning Engine pipeline (2026-07-14)
+
+Reason first, persist, write second. Stages per recommendation:
+1. **Condition definition** — region/laterality mapping (mismatch = INVALID),
+   severity, chronicity, current clinical status, trajectory, causal status.
+2. **Evidence assembly** — itemized, epistemically classified evidence
+   (objective vs subjective; documented fact vs patient report vs provider
+   opinion) with source/page traceability.
+3. **Necessity** — clinical purpose, patient-specific rationale, prior treatment
+   and response, functional basis, risk without treatment, why preferable to
+   no/lower-intensity care, timing.
+4. **Probability classification** — the six-label scheme; no percentages shown.
+5. **Frequency & duration validation** — independent rationales; unsupported
+   assumptions flagged, never copied across items.
+6. **Counter-analysis** — structured weakening evidence and precise unknowns.
+7. **Literature re-filter** — applicability gates; accepted vs rejected ledger.
+8. **Classification** — evidence strength (published base) kept separate from
+   recommendation confidence (this patient); lifecycle verdict derived.
+9. **Persistence** — supersession lineage, approval invalidation with audit,
+   idempotent by material hash, incremental (per-recommendation) reassessment,
+   per-item ERROR capture.
+The report, Evidence Explorer, Case Assistant, and export gate consume the SAME
+persisted assessment. Narrative is generated only from the persisted object.

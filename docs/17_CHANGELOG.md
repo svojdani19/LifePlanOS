@@ -2,6 +2,63 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-14 — Clinical Reasoning Engine v1 (production sprint)
+
+Builds v1 of the reasoning engine on the Phase A–E foundation. Reason first,
+persist, write second — the report, Evidence Explorer, Case Assistant, and
+export gate all consume the same persisted assessment. Additive throughout.
+
+- **Lifecycle & lineage** — assessment statuses PENDING/PROCESSING/NEEDS_REVIEW/
+  VALIDATED/INVALID/ERROR (+ legacy); VALIDATED is *derived*, never granted for
+  merely existing. Rows carry recommendation lineage/version and case version.
+  Material changes supersede (never overwrite/delete) the prior assessment; an
+  approved recommendation whose assessment materially changes is forced to
+  NEEDS_REVIEW with `reviewerMetadata` (what changed) and a
+  `reasoning.approval_invalidated` audit event — approval history preserved.
+- **Condition definition** — laterality extraction with mismatch detection
+  (left service vs right diagnosis = INVALID + finding), severity, chronicity,
+  current clinical status. A knee recommendation can never ride on a lumbar
+  diagnosis.
+- **Epistemic evidence items** — itemized evidence with category, source/page,
+  objective flag, and epistemic status (documented fact / patient report /
+  provider opinion / …). Symptoms are never objective; approval is never
+  treating-record support; literature is never patient-specific evidence.
+- **Structured counter-analysis** — weakening evidence and unknowns are typed
+  objects (materiality/severity, source, blocks-inclusion, reduces-confidence,
+  suggested action). Nothing adverse is hidden; nothing is manufactured for a
+  well-supported line.
+- **Literature re-filter** — applicability outranks hierarchy: region, procedure
+  family, scope, and population gates (pediatric + new pregnancy/obstetric);
+  accepted citations feed evidence strength, rejections persist with reasons
+  (`rejectedLiterature`). ML/fusion articles cannot support pain-management
+  visits; pediatric/pregnancy evidence cannot support adult urology care.
+- **Findings & export safeguards** — new findings for laterality mismatch,
+  unsupported frequency (HIGH, blocks FINAL export unless physician-approved),
+  unsupported lifetime duration (HIGH, or CRITICAL when PV ≥ $100k), material
+  evidence gaps, irrelevant literature, low confidence. FINAL export returns
+  422 with the named defects while blocking findings persist; DRAFT export is
+  always available — DRAFT banner + footer watermark + Appendix G (unresolved
+  issues, contingency/excluded items), `ReportExport.draft`, case status
+  untouched.
+- **Narrative from persistence** — the export route persists reasoning +
+  validation BEFORE the narrative is generated; the report renders each
+  recommendation's reasoning block from the persisted row.
+- **Evidence Explorer** — displays the persisted assessment per recommendation:
+  condition/laterality/chronicity, purpose, necessity, probability, frequency &
+  duration rationale, strength vs confidence, weakening evidence, unknowns,
+  accepted + rejected literature, inclusion and review status.
+- **Incremental & resilient** — per-recommendation reassessment
+  (`POST /reasoning { recommendationId }`, used by physician review), material-
+  hash caching, per-item ERROR capture with retry on next run.
+- **Verification** — 319 tests green (+12 CRE v1); backfill on live data:
+  179 recommendations preserved exactly, statuses derived (45 VALIDATED /
+  33 NEEDS_REVIEW — never blanket-validated), 0 duplicate active assessments,
+  idempotent re-run (0 new supersessions/audits); final export 422 with defects
+  and draft export 200 verified live; Explorer verified in-browser. Migration
+  `20260714100000_cre_v1_lifecycle_lineage` + rollback.sql.
+- **Not added:** no Standard-of-Care or malpractice analysis, no second
+  recommendation model, no chain-of-thought exposure, no report redesign.
+
 ## 2026-07-13 — Clinical Reasoning Engine — Phases B–E (complete)
 
 The reasoning engine is now end-to-end: every recommendation is assessed as a

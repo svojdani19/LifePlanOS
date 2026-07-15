@@ -123,3 +123,27 @@ Findings grade Critical / High / Moderate / Low. Any unresolved Critical ⇒
 report exports with a visible DRAFT watermark and the finding table
 (Appendix F). Roadmap: frequency/duration plausibility rules (narrow,
 deterministic first — see decision ATD-4 in [16_DECISION_LOG.md](16_DECISION_LOG.md)).
+
+## CRE v1 — reasoning gates (2026-07-14)
+
+- **Condition definition (§3):** a recommendation never defaults to the first
+  diagnosis; region mapping is enforced, and a laterality mismatch between the
+  service and its diagnosis is a structural defect (assessment INVALID, finding
+  raised, blocks final export when totaled).
+- **Epistemic discipline (§4):** patient reports are never objective findings;
+  physician approval is never treating-record support; literature is never
+  patient-specific evidence.
+- **Inclusion (§6):** an item enters totals only when probable, patient-supported,
+  necessary, anatomically compatible, frequency- and duration-defensible, and
+  cost-validated. Strong literature cannot rescue absent patient support.
+- **Frequency (§7):** every frequency needs its own rationale; an unsupported
+  frequency on a totaled line raises a HIGH finding that blocks FINAL export
+  unless the reviewing physician has explicitly approved the item.
+- **Duration (§8):** lifetime care requires stronger support than short-term;
+  an unsupported lifetime line is HIGH, or CRITICAL when PV ≥ $100k.
+- **Literature (§12):** applicability outranks hierarchy — region, procedure
+  family, scope (management vs procedural), and population (pediatric,
+  pregnancy/obstetric) gates; rejections persist with reasons.
+- **Export (§18):** final export blocks on unresolved critical defects; draft
+  export is always available with a DRAFT watermark and an unresolved-issues
+  appendix, and never advances the case to FINAL.

@@ -2009,6 +2009,10 @@ function EvidencePanel({ data }: { data: AnyRec }) {
   const [links, setLinks] = useState<AnyRec[] | null>(null);
   const [sel, setSel] = useState<string>("");
   const [rebuilding, setRebuilding] = useState(false);
+  // CRE v1 §15 — the Explorer displays the PERSISTED clinical reasoning
+  // assessment for a selected recommendation (the same structured object the
+  // report narrative renders from), never a recomputed variant.
+  const [assessments, setAssessments] = useState<AnyRec[]>([]);
   async function load(method: "GET" | "POST" = "GET") {
     if (method === "POST") setRebuilding(true);
     try {
@@ -2019,6 +2023,9 @@ function EvidencePanel({ data }: { data: AnyRec }) {
     }
   }
   useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [data.id]);
+  useEffect(() => {
+    fetch(`/api/cases/${data.id}/reasoning`).then(async (r) => { if (r.ok) setAssessments((await r.json()).assessments ?? []); }).catch(() => {});
+  }, [data.id]);
 
   const conditions: AnyRec[] = data.conditions ?? [];
   const items: AnyRec[] = data.futureCareItems ?? [];
@@ -2103,6 +2110,60 @@ function EvidencePanel({ data }: { data: AnyRec }) {
               <span className="text-[11px] text-ink-400">{confidence.factors.join(" · ")}</span>
             </div>
           )}
+          {selType === "futureCareItem" && (() => {
+            const cra = assessments.find((x) => x.recommendationId === selId && x.status !== "SUPERSEDED");
+            if (!cra) return null;
+            const STATUS_TONE: Record<string, "green" | "amber" | "red" | "neutral"> = { VALIDATED: "green", NEEDS_REVIEW: "amber", INVALID: "red", ERROR: "red", ASSESSED: "neutral" };
+            const weakening = (Array.isArray(cra.weakeningEvidence) ? cra.weakeningEvidence : []) as AnyRec[];
+            const unknowns = (Array.isArray(cra.unknowns) ? cra.unknowns : []) as AnyRec[];
+            const lit = (Array.isArray(cra.supportingLiteratureAssessments) ? cra.supportingLiteratureAssessments : []) as AnyRec[];
+            const rejected = (Array.isArray(cra.rejectedLiterature) ? cra.rejectedLiterature : []) as AnyRec[];
+            return (
+              <div className="rounded-lg border border-brand-100 bg-brand-50/50 p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h4 className="text-xs font-semibold uppercase tracking-wide text-brand-700">Clinical reasoning assessment</h4>
+                  <Badge tone={STATUS_TONE[cra.status] ?? "neutral"}>{String(cra.status).replace(/_/g, " ").toLowerCase()}</Badge>
+                </div>
+                <p className="mt-1.5 text-xs text-ink-600">
+                  {cra.responsibleSpecialty} · {cra.clinicalPurpose} · {cra.bodyRegion}{cra.laterality && cra.laterality !== "n/a" ? ` (${cra.laterality})` : ""} · {cra.conditionChronicity} · {cra.causalRelationshipStatus}
+                </p>
+                <p className="mt-1.5 text-sm text-ink-800">{cra.medicalNecessityRationale}</p>
+                <div className="mt-2 grid gap-x-4 gap-y-1 text-xs text-ink-700 sm:grid-cols-2">
+                  <p><span className="font-medium text-ink-500">Probability:</span> {PROBABILITY_LABEL[cra.probabilityClassification as keyof typeof PROBABILITY_LABEL] ?? cra.probabilityClassification}</p>
+                  <p><span className="font-medium text-ink-500">Inclusion:</span> {cra.inclusionInTotalsStatus} — {cra.inclusionRationale}</p>
+                  <p><span className="font-medium text-ink-500">Frequency:</span> {cra.frequencyRationale}{cra.frequencySupported ? "" : " (unverified)"}</p>
+                  <p><span className="font-medium text-ink-500">Duration:</span> {String(cra.durationClass ?? "").replace(/_/g, " ").toLowerCase()} — {cra.durationRationale}</p>
+                  <p><span className="font-medium text-ink-500">Evidence strength:</span> {String(cra.evidenceStrength).replace(/_/g, " ").toLowerCase()} <span className="text-ink-400">(published evidence)</span></p>
+                  <p><span className="font-medium text-ink-500">Recommendation confidence:</span> {String(cra.recommendationConfidence).toLowerCase()} <span className="text-ink-400">(this patient)</span></p>
+                </div>
+                {weakening.length > 0 && (
+                  <div className="mt-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-700">Weakening evidence</p>
+                    <ul className="mt-0.5 space-y-0.5">{weakening.slice(0, 5).map((w, i) => <li key={i} className="text-xs text-amber-800">{w.detail}{w.source ? ` (${w.source})` : ""} — {String(w.materiality).toLowerCase()} materiality</li>)}</ul>
+                  </div>
+                )}
+                {unknowns.length > 0 && (
+                  <div className="mt-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">Unknowns / evidence gaps</p>
+                    <ul className="mt-0.5 space-y-0.5">{unknowns.slice(0, 4).map((u, i) => <li key={i} className="text-xs text-ink-700">{u.missing} <span className="text-ink-500">→ {u.suggestedAction}</span></li>)}</ul>
+                  </div>
+                )}
+                {lit.length > 0 && (
+                  <div className="mt-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">Accepted literature</p>
+                    <ul className="mt-0.5 space-y-0.5">{lit.slice(0, 4).map((l, i) => <li key={i} className="text-xs text-ink-700">{l.title}{l.pmid ? ` · PMID ${l.pmid}` : ""} — supports {l.supports}</li>)}</ul>
+                  </div>
+                )}
+                {rejected.length > 0 && (
+                  <div className="mt-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-red-700">Rejected literature</p>
+                    <ul className="mt-0.5 space-y-0.5">{rejected.slice(0, 4).map((r, i) => <li key={i} className="text-xs text-red-800">{r.title} — {r.reason}</li>)}</ul>
+                  </div>
+                )}
+                <p className="mt-2 text-[11px] text-ink-500">{cra.residualUncertainty}</p>
+              </div>
+            );
+          })()}
           <div>
             <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-500">Why this item exists</h4>
             <p className="mt-1 text-sm text-ink-800">
