@@ -1707,31 +1707,94 @@ function ReviewsPanel({ points, hasPlan }: { points: AnyRec[]; hasPlan: boolean 
 }
 
 // ── Physician ────────────────────────────────────────────────────────────────
+// Inline review forms (no window.prompt/confirm — those are blocked in embedded
+// browsers and gave the reviewer no way to reject or modify). Every action the
+// API supports is exposed: approve (optional note), modify (note + probability
+// + frequency + duration), reject (reason required), and reopen to Pending.
+function PhysicianReviewForm({ it, mode, onSubmit, onCancel }: { it: AnyRec; mode: "approve" | "modify" | "reject"; onSubmit: (body: AnyRec) => void; onCancel: () => void }) {
+  const [note, setNote] = useState<string>("");
+  const [probability, setProbability] = useState<string>(it.probability);
+  const [freq, setFreq] = useState<string>(String(it.frequencyPerYear ?? 1));
+  const [years, setYears] = useState<string>(it.isLifetime ? "" : String(it.durationYears ?? ""));
+  const title = mode === "approve" ? "Approve — optional note for the record" : mode === "modify" ? "Modify — adjust the clinical parameters and state what changed" : "Reject — a documented reason is required";
+  const canSubmit = mode !== "reject" || note.trim().length > 0;
+  return (
+    <div className="mt-3 rounded-lg border border-ink-200 bg-ink-50/60 p-3">
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-600">{title}</p>
+      {mode === "modify" && (
+        <div className="mt-2 grid gap-2 sm:grid-cols-3">
+          <label className="text-xs text-ink-600">Probability
+            <select className="input mt-0.5 w-full py-1 text-sm" value={probability} onChange={(e) => setProbability(e.target.value)}>
+              {["PROBABLE", "POSSIBLE", "SPECULATIVE", "NOT_SUPPORTED"].map((p) => <option key={p} value={p}>{p.replace(/_/g, " ").toLowerCase()}</option>)}
+            </select>
+          </label>
+          <label className="text-xs text-ink-600">Frequency / year
+            <input type="number" min={0} className="input mt-0.5 w-full py-1 text-sm" value={freq} onChange={(e) => setFreq(e.target.value)} />
+          </label>
+          <label className="text-xs text-ink-600">{it.isLifetime ? "Duration (lifetime)" : "Duration (years)"}
+            <input type="number" min={0} disabled={it.isLifetime} placeholder={it.isLifetime ? "for life" : "years"} className="input mt-0.5 w-full py-1 text-sm disabled:opacity-50" value={years} onChange={(e) => setYears(e.target.value)} />
+          </label>
+        </div>
+      )}
+      <textarea
+        className="input mt-2 w-full py-1.5 text-sm"
+        rows={2}
+        autoFocus
+        placeholder={mode === "approve" ? "Optional medical-necessity note…" : mode === "modify" ? "What changed and why (folded into the summary)…" : "Reason for rejection (required; recorded in the review ledger)…"}
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+      />
+      <div className="mt-2 flex items-center gap-2">
+        <button
+          className={cn("py-1.5 text-xs", mode === "reject" ? "rounded-lg bg-red-600 px-3 font-medium text-white hover:bg-red-700 disabled:opacity-40" : "btn-primary")}
+          disabled={!canSubmit}
+          onClick={() => {
+            const body: AnyRec = { status: mode === "approve" ? "APPROVED" : mode === "modify" ? "MODIFIED" : "REJECTED" };
+            if (note.trim()) body.note = note.trim();
+            if (mode === "modify") {
+              if (probability !== it.probability) body.probability = probability;
+              const f = Number(freq);
+              if (Number.isFinite(f) && f !== it.frequencyPerYear) body.frequencyPerYear = f;
+              if (!it.isLifetime) {
+                const y = years === "" ? null : Number(years);
+                if (y !== it.durationYears) body.durationYears = y;
+              }
+            }
+            onSubmit(body);
+          }}
+        >
+          {mode === "approve" ? "Approve" : mode === "modify" ? "Save modification" : "Reject item"}
+        </button>
+        <button className="text-xs font-medium text-ink-500 hover:underline" onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 function PhysicianPanel({ data, canReview, call }: { data: AnyRec; canReview: boolean; call: any }) {
   const [open, setOpen] = useState<string | null>(null);
+  const [form, setForm] = useState<{ id: string; mode: "approve" | "modify" | "reject" } | null>(null);
+  const [confirmAll, setConfirmAll] = useState(false);
   if (data.futureCareItems.length === 0) return <Empty>Run the AI pipeline first to build the physician review packet.</Empty>;
 
   const pending = data.futureCareItems.filter((i: AnyRec) => i.physicianStatus === "PENDING").length;
-
-  function modify(it: AnyRec) {
-    const info = prompt(`Add information for "${it.service}". The paraphrased summary will be updated to include it.`);
-    if (info == null) return;
-    call(`/api/cases/${data.id}/future-care/${it.id}/physician`, "POST", { status: "MODIFIED", note: info });
-  }
-
-  function approveAll() {
-    if (!confirm(`Approve all ${pending} pending item${pending === 1 ? "" : "s"}? Each will carry physician sign-off and be included in the report.`)) return;
-    call(`/api/cases/${data.id}/future-care/accept-all`, "POST", undefined, "op");
-  }
+  const submit = (it: AnyRec, body: AnyRec) => { setForm(null); call(`/api/cases/${data.id}/future-care/${it.id}/physician`, "POST", body); };
 
   return (
     <div className="space-y-3">
       <div className="card flex flex-wrap items-center justify-between gap-3 p-4 text-sm text-ink-600">
         <span className="min-w-0 flex-1">
-          Physician review packet — {canReview ? "every item stays Pending until you designate it. Review the paraphrased summary, then approve, reject, or modify by adding information (the summary updates automatically). Use Approve All only when you intend to sign off on the whole packet." : "read-only: your role cannot sign off on medical necessity."}
+          Physician review packet — {canReview ? "every item stays Pending until you designate it. Review the paraphrased summary, then approve, modify (adjust probability, frequency, or duration), or reject with a documented reason. A decided item can be reopened." : "read-only: your role cannot sign off on medical necessity."}
         </span>
         {canReview && pending > 0 && (
-          <button className="btn-primary shrink-0 py-1.5 text-xs" onClick={approveAll}>Approve All ({pending})</button>
+          confirmAll ? (
+            <span className="flex shrink-0 items-center gap-2">
+              <button className="btn-primary py-1.5 text-xs" onClick={() => { setConfirmAll(false); call(`/api/cases/${data.id}/future-care/accept-all`, "POST", undefined, "op"); }}>Confirm — sign off on all {pending}</button>
+              <button className="text-xs font-medium text-ink-500 hover:underline" onClick={() => setConfirmAll(false)}>Cancel</button>
+            </span>
+          ) : (
+            <button className="btn-primary shrink-0 py-1.5 text-xs" onClick={() => setConfirmAll(true)}>Approve All ({pending})</button>
+          )
         )}
       </div>
       {data.futureCareItems.map((it: AnyRec) => (
@@ -1745,15 +1808,26 @@ function PhysicianPanel({ data, canReview, call }: { data: AnyRec; canReview: bo
               <button className="text-xs font-medium text-brand-700 hover:underline" onClick={() => setOpen(open === it.id ? null : it.id)}>
                 {open === it.id ? "Hide summary" : "Summary"}
               </button>
-              {canReview && (
+              {canReview && it.physicianStatus === "PENDING" && (
                 <>
-                  <button className="btn-outline py-1 text-xs" onClick={() => call(`/api/cases/${data.id}/future-care/${it.id}/physician`, "POST", { status: "APPROVED", note: it.physicianNote || undefined })}>Approve</button>
-                  <button className="btn-outline py-1 text-xs" onClick={() => modify(it)}>Modify</button>
-                  <button className="py-1 text-xs font-medium text-red-600 hover:underline" onClick={() => { const n = prompt("Reason for rejection"); if (n != null) call(`/api/cases/${data.id}/future-care/${it.id}/physician`, "POST", { status: "REJECTED", note: n }); }}>Reject</button>
+                  <button className="btn-outline py-1 text-xs" onClick={() => setForm(form?.id === it.id && form?.mode === "approve" ? null : { id: it.id, mode: "approve" })}>Approve</button>
+                  <button className="btn-outline py-1 text-xs" onClick={() => setForm(form?.id === it.id && form?.mode === "modify" ? null : { id: it.id, mode: "modify" })}>Modify</button>
+                  <button className="py-1 text-xs font-medium text-red-600 hover:underline" onClick={() => setForm(form?.id === it.id && form?.mode === "reject" ? null : { id: it.id, mode: "reject" })}>Reject</button>
+                </>
+              )}
+              {canReview && it.physicianStatus !== "PENDING" && (
+                <>
+                  <button className="btn-outline py-1 text-xs" onClick={() => setForm(form?.id === it.id && form?.mode === "modify" ? null : { id: it.id, mode: "modify" })}>Modify</button>
+                  <button className="py-1 text-xs font-medium text-ink-500 hover:underline" title="Return this item to Pending for re-review" onClick={() => submit(it, { status: "PENDING" })}>Reopen</button>
                 </>
               )}
             </div>
           </div>
+
+          {/* Inline review form — approve note / modify parameters / reject reason */}
+          {canReview && form !== null && form.id === it.id && (
+            <PhysicianReviewForm key={`${form.id}:${form.mode}`} it={it} mode={form.mode} onSubmit={(body) => submit(it, body)} onCancel={() => setForm(null)} />
+          )}
 
           {/* Expandable paraphrased summary of the point being made */}
           {open === it.id && (
