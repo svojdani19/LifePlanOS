@@ -296,12 +296,25 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
               </div>
             )}
 
-            {/* Ask */}
+            {/* Ask — case-aware, evidence-grounded Q&A with contextual starters */}
             <div className="border-t border-ink-100 p-3">
               {answer && (
                 <div className="mb-2 rounded-lg bg-ink-50 p-2.5 text-sm text-ink-800" style={{ animation: "ca-in 160ms ease-out" }}>
-                  <button onClick={() => setAnswer(null)} className="float-right text-ink-400 hover:text-ink-700"><X className="h-3.5 w-3.5" /></button>
+                  <button onClick={() => setAnswer(null)} aria-label="Dismiss answer" className="float-right text-ink-400 hover:text-ink-700"><X className="h-3.5 w-3.5" /></button>
                   <p className="whitespace-pre-wrap">{answer}</p>
+                </div>
+              )}
+              {!answer && !q && (
+                <div className="mb-2 flex flex-wrap gap-1.5" aria-label="Suggested questions">
+                  {["What blocks final export?", "Which items lack physician confirmation?", "Show recommendation conflicts.", "Summarize unresolved findings."].map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => setQ(s)}
+                      className="rounded-full border border-ink-200 px-2 py-0.5 text-[11px] text-ink-600 transition-colors hover:border-brand-300 hover:bg-brand-50 hover:text-brand-800"
+                    >
+                      {s}
+                    </button>
+                  ))}
                 </div>
               )}
               <div className="flex gap-2">

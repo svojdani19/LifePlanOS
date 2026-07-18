@@ -50,6 +50,7 @@ import { recordEncounters, narrativeFor } from "@/lib/documents/recordSummary";
 import { structuredConfidence } from "@/lib/engine/citationQuality";
 import { buildRecommendationDossier, type DossierCondition, type DossierChronoEvent, type DossierCase, type EvidenceItem, type RecommendationDossier } from "@/lib/engine/medicalNecessity";
 import { buildReasoningAssessment, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningAssessment, type ReasoningItem } from "@/lib/engine/clinicalReasoning";
+import { filterSortCare, type CareSortKey } from "@/lib/uiFilters";
 import { Icd10Search } from "@/components/Icd10Search";
 import { PreExistingConditionsModal } from "@/components/PreExistingConditionsModal";
 import { parseConditions, serializeConditions, findConditionsInRecords } from "@/lib/intake/preExisting";
@@ -207,7 +208,7 @@ export function CaseWorkspace({
   return (
     <div>
       {/* ── Compact clinical workspace header (sticky) ─────────────────────── */}
-      <div className="sticky top-0 z-30 -mx-6 -mt-6 border-b border-ink-200 bg-white/95 px-6 pt-3 backdrop-blur supports-[backdrop-filter]:bg-white/85">
+      <div className="sticky top-0 z-30 -mx-6 border-b border-ink-200 bg-white/95 px-6 pt-3 backdrop-blur supports-[backdrop-filter]:bg-white/85">
         <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
           <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
             <h1 className="truncate text-lg font-bold tracking-tight text-ink-900">{data.clientName}</h1>
@@ -1498,28 +1499,70 @@ function assessmentForItem(it: AnyRec, data: AnyRec): ReasoningAssessment {
 }
 
 function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: AnyRec; canEdit: boolean; call: any; focusId?: string | null; focusCat?: string | null }) {
-  const [open, setOpen] = useState<string | null>(null);
+  const [openIds, setOpenIds] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<string>("All");
+  // Review-at-scale controls (Phase 11): search, probability / MD-status
+  // filters, sorting, compact density, expand/collapse all.
+  const [q, setQ] = useState("");
+  const [prob, setProb] = useState("");
+  const [phys, setPhys] = useState("");
+  const [sortKey, setSortKey] = useState<CareSortKey>("presentValue");
+  const [compact, setCompact] = useState(false);
+  const toggleOpen = (id: string) => setOpenIds((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   // Deep-link: when the assistant focuses an item, make sure it is visible
-  // (reset the category filter) and auto-expand its details so the finding's
-  // section can be highlighted in place.
+  // (reset filters) and auto-expand its details so the finding's section can
+  // be highlighted in place.
   useEffect(() => {
-    if (focusId && data.futureCareItems.some((it: AnyRec) => it.id === focusId)) { setFilter("All"); setOpen(focusId); }
+    if (focusId && data.futureCareItems.some((it: AnyRec) => it.id === focusId)) {
+      setFilter("All"); setQ(""); setProb(""); setPhys("");
+      setOpenIds((s) => new Set(s).add(focusId));
+    }
   }, [focusId, data.futureCareItems]);
   if (data.futureCareItems.length === 0) return <Empty>Run the AI pipeline to generate future care recommendations.</Empty>;
 
   // Organize by care category group; chips allow selective viewing per group.
-  const groups = CARE_GROUPS.map((g) => ({ ...g, items: data.futureCareItems.filter((it: AnyRec) => g.cats.includes(it.category)) })).filter((g) => g.items.length > 0);
+  const groups = CARE_GROUPS
+    .map((g) => ({ ...g, items: filterSortCare(data.futureCareItems.filter((it: AnyRec) => g.cats.includes(it.category)) as never, { q, probability: prob, physicianStatus: phys, sortKey }) as AnyRec[] }))
+    .filter((g) => g.items.length > 0);
   const shown = filter === "All" ? groups : groups.filter((g) => g.title === filter);
+  const shownCount = shown.reduce((s, g) => s + g.items.length, 0);
+  const allShownIds = shown.flatMap((g) => g.items.map((it: AnyRec) => it.id as string));
 
   return (
     <div className="space-y-5">
+      {/* Controls */}
+      <div className="flex flex-wrap items-center gap-2">
+        <input className="input w-52 py-1.5 text-sm" placeholder="Search recommendations…" aria-label="Search recommendations" value={q} onChange={(e) => setQ(e.target.value)} />
+        <select className="input w-auto py-1.5 text-sm" aria-label="Filter by probability" value={prob} onChange={(e) => setProb(e.target.value)}>
+          <option value="">All probabilities</option>
+          {["PROBABLE", "POSSIBLE", "SPECULATIVE", "NOT_SUPPORTED"].map((p) => <option key={p} value={p}>{p.replace(/_/g, " ").toLowerCase()}</option>)}
+        </select>
+        <select className="input w-auto py-1.5 text-sm" aria-label="Filter by physician status" value={phys} onChange={(e) => setPhys(e.target.value)}>
+          <option value="">All MD statuses</option>
+          {["PENDING", "APPROVED", "MODIFIED", "REJECTED"].map((p) => <option key={p} value={p}>MD: {p.toLowerCase()}</option>)}
+        </select>
+        <select className="input w-auto py-1.5 text-sm" aria-label="Sort recommendations" value={sortKey} onChange={(e) => setSortKey(e.target.value as CareSortKey)}>
+          <option value="presentValue">Sort: present value</option>
+          <option value="lifetimeCost">Sort: lifetime cost</option>
+          <option value="service">Sort: name</option>
+          <option value="physicianStatus">Sort: MD status</option>
+        </select>
+        <div className="ml-auto flex items-center gap-2 text-xs">
+          <span className="text-ink-400">{shownCount} of {data.futureCareItems.length}</span>
+          <button className="focusable rounded font-medium text-ink-500 hover:text-ink-800" onClick={() => setCompact((c) => !c)}>{compact ? "Detailed view" : "Compact view"}</button>
+          <button className="focusable rounded font-medium text-brand-700 hover:underline" onClick={() => setOpenIds(new Set(allShownIds))}>Expand all</button>
+          <button className="focusable rounded font-medium text-ink-500 hover:text-ink-800" onClick={() => setOpenIds(new Set())}>Collapse all</button>
+        </div>
+      </div>
+
       <div className="flex flex-wrap gap-2">
         <FilterChip label="All" count={data.futureCareItems.length} active={filter === "All"} onClick={() => setFilter("All")} />
         {groups.map((g) => (
           <FilterChip key={g.title} label={g.title} count={g.items.length} icon={g.icon} active={filter === g.title} onClick={() => setFilter(g.title)} />
         ))}
       </div>
+
+      {shownCount === 0 && <Empty>No recommendations match the current filters.</Empty>}
 
       {shown.map((g) => (
         <div key={g.title}>
@@ -1531,27 +1574,35 @@ function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: Any
           </div>
           <div className="space-y-2">
       {g.items.map((it: AnyRec) => (
-        <div key={it.id} id={`fc-${it.id}`} className={cn("card scroll-mt-24 p-4 transition-shadow", focusId === it.id && "ring-2 ring-brand-400 ring-offset-2")}>
+        <div key={it.id} id={`fc-${it.id}`} className={cn("card scroll-mt-24 transition-shadow", compact ? "p-2.5" : "p-4", focusId === it.id && "ring-2 ring-brand-400 ring-offset-2")}>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="font-semibold text-ink-900">{it.service}</span>
+                <span className={cn("font-semibold text-ink-900", compact && "text-sm")}>{it.service}</span>
                 <Badge tone={PROB_TONE[it.probability]}>{it.probability.toLowerCase()}</Badge>
-                <Badge tone={VULN_TONE[it.defenseVulnerability]}>{it.defenseVulnerability.toLowerCase()} vuln</Badge>
+                {!compact && <Badge tone={VULN_TONE[it.defenseVulnerability]}>{it.defenseVulnerability.toLowerCase()} vuln</Badge>}
                 <Badge tone={PHYS_TONE[it.physicianStatus]}>MD: {it.physicianStatus.toLowerCase()}</Badge>
-                {it.edited && <Badge tone="amber">edited</Badge>}
+                {!compact && it.edited && <Badge tone="amber">edited</Badge>}
               </div>
-              <p className="mt-1 text-xs text-ink-500">{it.category.replace(/_/g, " ").toLowerCase()} · {it.specialty} · {it.cptCode || "no CPT"} · {it.frequencyPerYear}/yr {it.isLifetime ? "for life" : it.durationYears ? `× ${it.durationYears}y` : ""}</p>
+              {!compact && (
+                <p className="mt-1 text-xs text-ink-500">{it.category.replace(/_/g, " ").toLowerCase()} · {it.specialty} · {it.cptCode || "no CPT"} · {it.frequencyPerYear}/yr {it.isLifetime ? "for life" : it.durationYears ? `× ${it.durationYears}y` : ""}</p>
+              )}
             </div>
             <div className="flex items-center gap-4">
               <div className="text-right">
-                <div className="text-sm font-bold text-brand-800">{formatMoney(it.presentValue)}</div>
-                <div className="text-xs text-ink-400">PV · {formatMoney(it.lifetimeCost)} lifetime</div>
+                <div className="num-metric text-sm text-brand-800">{formatMoney(it.presentValue)}</div>
+                {!compact && <div className="text-xs text-ink-400">PV · {formatMoney(it.lifetimeCost)} lifetime</div>}
               </div>
-              <button className="text-xs font-medium text-brand-700 hover:underline" onClick={() => setOpen(open === it.id ? null : it.id)}>{open === it.id ? "Hide" : "Details"}</button>
+              <button
+                className="focusable rounded text-xs font-medium text-brand-700 hover:underline"
+                aria-expanded={openIds.has(it.id)}
+                onClick={() => toggleOpen(it.id)}
+              >
+                {openIds.has(it.id) ? "Hide" : "Details"}
+              </button>
             </div>
           </div>
-          {open === it.id && (
+          {openIds.has(it.id) && (
             <div className="mt-3 border-t border-ink-100 pt-3">
               <RecommendationDossierView dossier={dossierForItem(it, data)} assessment={assessmentForItem(it, data)} highlight={focusId === it.id ? focusCat : null} />
               <div data-focus-target={focusId === it.id && focusCat && /cpt|pricing|duplicate_cost/.test(focusCat) ? "" : undefined} className={cn("mt-3 border-t border-ink-100 pt-2 text-sm text-ink-600", focusId === it.id && focusCat && /cpt|pricing|duplicate_cost/.test(focusCat) && "rounded-md bg-amber-50 p-2 ring-2 ring-amber-400")}>
@@ -1594,11 +1645,18 @@ function CostsPanel({ data, assumptions, totals, canEdit, call, focusId }: { dat
     geographicFactor: assumptions.geographicFactor,
   });
   const [open, setOpen] = useState<string | null>(null);
+  const [costCat, setCostCat] = useState("");
+  const [costSort, setCostSort] = useState("presentValue");
   // Deep-link from the Case Assistant: expand the focused line's cost details.
   useEffect(() => {
-    if (focusId && data.futureCareItems.some((it: AnyRec) => it.id === focusId)) setOpen(focusId);
+    if (focusId && data.futureCareItems.some((it: AnyRec) => it.id === focusId)) { setCostCat(""); setOpen(focusId); }
   }, [focusId, data.futureCareItems]);
   if (data.futureCareItems.length === 0) return <Empty>Run the AI pipeline to project costs.</Empty>;
+  const costCategories = [...new Set(data.futureCareItems.map((it: AnyRec) => it.category as string))].sort() as string[];
+  const notTotaled = (it: AnyRec) => it.contingencyOnly || it.physicianStatus === "REJECTED";
+  const costRows = (data.futureCareItems as AnyRec[])
+    .filter((it) => !costCat || it.category === costCat)
+    .sort((x, y) => (y[costSort] ?? 0) - (x[costSort] ?? 0));
   return (
     <div className="space-y-4">
       <div className="card p-5">
@@ -1634,25 +1692,48 @@ function CostsPanel({ data, assumptions, totals, canEdit, call, focusId }: { dat
           </div>
         )}
       </div>
+      {/* Cost table controls (Phase 12) — filter + sort are view-only; the
+          Total row always reflects the SERVER-computed case totals so a
+          filtered view can never misstate the damages figure. */}
+      <div className="flex flex-wrap items-center gap-2">
+        <select className="input w-auto py-1.5 text-sm" aria-label="Filter by category" value={costCat} onChange={(e) => setCostCat(e.target.value)}>
+          <option value="">All categories</option>
+          {costCategories.map((c) => <option key={c} value={c}>{c.replace(/_/g, " ").toLowerCase()}</option>)}
+        </select>
+        <select className="input w-auto py-1.5 text-sm" aria-label="Sort cost rows" value={costSort} onChange={(e) => setCostSort(e.target.value)}>
+          <option value="presentValue">Sort: present value</option>
+          <option value="lifetimeCost">Sort: lifetime</option>
+          <option value="annualCost">Sort: annual</option>
+        </select>
+        <span className="ml-auto text-meta">
+          {costRows.length} of {data.futureCareItems.length} rows · <span className="text-emerald-700">included</span> rows enter totals; <span className="text-ink-500">contingent/excluded</span> rows are disclosed only
+        </span>
+      </div>
       <div className="card overflow-hidden">
         <table className="w-full text-sm">
           <thead className="border-b border-ink-200 bg-ink-50 text-left text-xs uppercase tracking-wide text-ink-500">
-            <tr><th className="px-4 py-2 font-medium">Service</th><th className="px-4 py-2 font-medium">Annual</th><th className="px-4 py-2 font-medium">Low</th><th className="px-4 py-2 font-medium">Lifetime</th><th className="px-4 py-2 font-medium">Present Value</th><th /></tr>
+            <tr><th className="px-4 py-2 font-medium">Service</th><th className="px-4 py-2 font-medium">Basis</th><th className="px-4 py-2 font-medium">Annual</th><th className="px-4 py-2 font-medium">Low</th><th className="px-4 py-2 font-medium">Lifetime</th><th className="px-4 py-2 font-medium">Present Value</th><th /></tr>
           </thead>
           <tbody className="divide-y divide-ink-100">
-            {data.futureCareItems.map((it: AnyRec) => (
+            {costRows.map((it: AnyRec) => (
               <Fragment key={it.id}>
-                <tr id={`fc-${it.id}`} className={cn("scroll-mt-24", focusId === it.id && "bg-amber-50 ring-2 ring-inset ring-amber-400")}>
-                  <td className="px-4 py-2 text-ink-800">{it.service}</td>
-                  <td className="px-4 py-2 text-ink-600">{formatMoney(it.annualCost)}</td>
-                  <td className="px-4 py-2 text-ink-500">{formatMoney(it.lowCost)}</td>
-                  <td className="px-4 py-2 text-ink-600">{formatMoney(it.lifetimeCost)}</td>
-                  <td className="px-4 py-2 font-medium text-brand-800">{formatMoney(it.presentValue)}</td>
-                  <td className="px-4 py-2 text-right"><button className="text-xs font-medium text-brand-700 hover:underline" onClick={() => setOpen(open === it.id ? null : it.id)}>{open === it.id ? "Hide" : "Details"}</button></td>
+                <tr id={`fc-${it.id}`} className={cn("scroll-mt-24", notTotaled(it) && "opacity-60", focusId === it.id && "bg-amber-50 ring-2 ring-inset ring-amber-400")}>
+                  <td className="px-4 py-2 text-ink-800">
+                    {it.service}
+                    {it.contingencyOnly ? <Badge tone="neutral" className="ml-2" title="Disclosed as a contingency — not entered into totals">contingency</Badge>
+                      : it.physicianStatus === "REJECTED" ? <Badge tone="danger" className="ml-2" title="Physician rejected — excluded from totals">excluded</Badge>
+                      : it.startTrigger ? <Badge tone="info" className="ml-2" title={`Conditional: ${it.startTrigger}`}>conditional</Badge> : null}
+                  </td>
+                  <td className="px-4 py-2 text-xs text-ink-500">{it.isLifetime ? "lifetime" : it.durationYears ? `${it.durationYears}y recurring` : "one-time"}</td>
+                  <td className="px-4 py-2 tabular-nums text-ink-600">{formatMoney(it.annualCost)}</td>
+                  <td className="px-4 py-2 tabular-nums text-ink-500">{formatMoney(it.lowCost)}</td>
+                  <td className="px-4 py-2 tabular-nums text-ink-600">{formatMoney(it.lifetimeCost)}</td>
+                  <td className="px-4 py-2 font-medium tabular-nums text-brand-800">{formatMoney(it.presentValue)}</td>
+                  <td className="px-4 py-2 text-right"><button className="focusable rounded text-xs font-medium text-brand-700 hover:underline" aria-expanded={open === it.id} onClick={() => setOpen(open === it.id ? null : it.id)}>{open === it.id ? "Hide" : "Details"}</button></td>
                 </tr>
                 {open === it.id && (
                   <tr className="bg-ink-50/60">
-                    <td colSpan={6} className="px-4 py-3">
+                    <td colSpan={7} className="px-4 py-3">
                       <div className="grid gap-x-6 gap-y-1.5 text-xs sm:grid-cols-2">
                         <p><span className="font-medium text-ink-500">Unit cost:</span> {formatMoney(it.unitCost)} {it.cptCode ? `· CPT ${it.cptCode}` : ""}</p>
                         <p><span className="font-medium text-ink-500">Frequency & duration:</span> {it.frequencyPerYear}/yr {it.isLifetime ? `× ${a.lifeExpectancyYears.toFixed(1)} yrs (life)` : it.durationYears ? `× ${it.durationYears} yrs` : "one-time"}</p>
@@ -1670,7 +1751,7 @@ function CostsPanel({ data, assumptions, totals, canEdit, call, focusId }: { dat
                 )}
               </Fragment>
             ))}
-            <tr className="bg-ink-50 font-bold"><td className="px-4 py-2">Total</td><td /><td /><td className="px-4 py-2">{formatMoney(totals.totalLifetime)}</td><td className="px-4 py-2 text-brand-800">{formatMoney(totals.totalPresentValue)}</td><td /></tr>
+            <tr className="bg-ink-50 font-bold"><td className="px-4 py-2">Total — included items (all categories)</td><td /><td /><td /><td className="px-4 py-2 tabular-nums">{formatMoney(totals.totalLifetime)}</td><td className="px-4 py-2 tabular-nums text-brand-800">{formatMoney(totals.totalPresentValue)}</td><td /></tr>
           </tbody>
         </table>
       </div>
@@ -1813,9 +1894,19 @@ function PhysicianPanel({ data, canReview, call }: { data: AnyRec; canReview: bo
   const [open, setOpen] = useState<string | null>(null);
   const [form, setForm] = useState<{ id: string; mode: "approve" | "modify" | "reject" } | null>(null);
   const [confirmAll, setConfirmAll] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<string>("");
   if (data.futureCareItems.length === 0) return <Empty>Run the AI pipeline first to build the physician review packet.</Empty>;
 
-  const pending = data.futureCareItems.filter((i: AnyRec) => i.physicianStatus === "PENDING").length;
+  // Review-speed affordances (Phase 14): live counts double as filters.
+  const countOf = (s: string) => data.futureCareItems.filter((i: AnyRec) => i.physicianStatus === s).length;
+  const pending = countOf("PENDING");
+  const REVIEW_STATES: { key: string; label: string; tone: "warning" | "success" | "info" | "danger" }[] = [
+    { key: "PENDING", label: "Pending", tone: "warning" },
+    { key: "APPROVED", label: "Approved", tone: "success" },
+    { key: "MODIFIED", label: "Modified", tone: "info" },
+    { key: "REJECTED", label: "Rejected", tone: "danger" },
+  ];
+  const items = statusFilter ? data.futureCareItems.filter((i: AnyRec) => i.physicianStatus === statusFilter) : data.futureCareItems;
   const submit = (it: AnyRec, body: AnyRec) => { setForm(null); call(`/api/cases/${data.id}/future-care/${it.id}/physician`, "POST", body); };
 
   return (
@@ -1835,7 +1926,28 @@ function PhysicianPanel({ data, canReview, call }: { data: AnyRec; canReview: bo
           )
         )}
       </div>
-      {data.futureCareItems.map((it: AnyRec) => (
+
+      {/* Status counts — click to filter */}
+      <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filter by review status">
+        {REVIEW_STATES.map((s) => {
+          const n = countOf(s.key);
+          const active = statusFilter === s.key;
+          return (
+            <button
+              key={s.key}
+              onClick={() => setStatusFilter(active ? "" : s.key)}
+              aria-pressed={active}
+              className={cn("focusable rounded-full transition-shadow", active && "ring-2 ring-brand-400 ring-offset-1")}
+            >
+              <Badge tone={n === 0 ? "neutral" : s.tone}>{s.label} {n}</Badge>
+            </button>
+          );
+        })}
+        {statusFilter && <button className="text-xs font-medium text-ink-500 hover:underline" onClick={() => setStatusFilter("")}>Show all</button>}
+      </div>
+
+      {items.length === 0 && <Empty>No items with this review status.</Empty>}
+      {items.map((it: AnyRec) => (
         <div key={it.id} className="card p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="min-w-0">

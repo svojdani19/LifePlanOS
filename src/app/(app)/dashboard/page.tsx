@@ -125,6 +125,50 @@ export default async function DashboardPage() {
     });
   }
 
+  // "Today's Work" (Phase 5) — the first question the dashboard answers is
+  // what needs attention now: blocked exports lead, then the role queues,
+  // then recently completed AI generations. All real data; nothing invented.
+  const blockedExportCases = await prisma.validationFinding.groupBy({
+    by: ["caseId"],
+    where: { firmId, exportBlocking: true },
+    _count: true,
+    orderBy: { _count: { caseId: "desc" } },
+    take: 6,
+  });
+  if (blockedExportCases.length) {
+    const names = await caseName(blockedExportCases.map((b) => b.caseId));
+    roleCards.unshift({
+      title: "Final Export Blocked",
+      empty: "",
+      rows: blockedExportCases.map((b) => ({
+        href: `/cases/${b.caseId}`,
+        label: names.get(b.caseId)?.clientName ?? "Case",
+        meta: `${b._count} blocking finding${b._count === 1 ? "" : "s"}`,
+      })),
+    });
+  }
+  const recentGenerations = await prisma.auditLog.findMany({
+    where: { firmId, action: "plan.generate" },
+    orderBy: { createdAt: "desc" },
+    take: 4,
+    select: { caseId: true, createdAt: true },
+  });
+  if (recentGenerations.some((g) => g.caseId)) {
+    const names = await caseName(recentGenerations.map((g) => g.caseId).filter((x): x is string => !!x));
+    roleCards.push({
+      title: "Recent AI Generations",
+      empty: "",
+      rows: recentGenerations
+        .filter((g): g is typeof g & { caseId: string } => !!g.caseId)
+        .map((g) => ({
+          href: `/cases/${g.caseId}`,
+          label: names.get(g.caseId)?.clientName ?? "Case",
+          meta: formatDate(g.createdAt),
+        })),
+    });
+  }
+  const workCards = roleCards.filter((c) => c.rows.length > 0);
+
   const kpis = [
     { label: "Active Cases", value: active, sub: limits.caseLimit === null ? "unlimited" : `of ${limits.caseLimit}`, icon: FolderKanban },
     { label: "Awaiting Physician Sign-off", value: physicianReview, sub: "cases", icon: Sparkles },
@@ -136,7 +180,7 @@ export default async function DashboardPage() {
     <div>
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-ink-900">Firm Dashboard</h1>
+          <h1 className="h-page">Firm Dashboard</h1>
           <p className="mt-1 text-sm text-ink-600">
             {ctx.firm.name} · {PLANS[tier].name} plan
           </p>
@@ -146,33 +190,21 @@ export default async function DashboardPage() {
         </Link>
       </div>
 
-      {/* KPIs */}
-      <div className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {kpis.map((k) => (
-          <div key={k.label} className="card p-5">
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-ink-500">{k.label}</span>
-              <k.icon className="h-5 w-5 text-brand-500" />
-            </div>
-            <div className="mt-2 flex items-baseline gap-1.5">
-              <span className="text-3xl font-bold text-ink-900">{k.value}</span>
-              <span className="text-xs text-ink-500">{k.sub}</span>
-            </div>
-          </div>
-        ))}
-      </div>
-
-      {/* Role-specific work queues (P3) */}
-      {roleCards.length > 0 && (
-        <div className="mt-6 grid gap-6 lg:grid-cols-2">
-          {roleCards.map((card) => (
-            <div key={card.title} className="card p-6">
-              <h2 className="text-sm font-semibold text-ink-900">{card.title}</h2>
-              <ul className="mt-4 space-y-2">
-                {card.rows.length === 0 && <li className="text-sm text-ink-500">{card.empty}</li>}
+      {/* ── Today's Work — actionable queues first ─────────────────────────── */}
+      <h2 className="text-label mt-6">Today&apos;s Work</h2>
+      {workCards.length === 0 ? (
+        <div className="card mt-2 p-5 text-sm text-ink-500">
+          Nothing needs your attention right now — no blocked exports, pending sign-offs, or open findings.
+        </div>
+      ) : (
+        <div className="mt-2 grid gap-4 lg:grid-cols-2">
+          {workCards.map((card) => (
+            <div key={card.title} className="card p-5">
+              <h3 className="h-section">{card.title}</h3>
+              <ul className="mt-3 space-y-2">
                 {card.rows.map((r) => (
                   <li key={r.href + r.label} className="flex items-center justify-between gap-2 text-sm">
-                    <Link href={r.href} className="min-w-0 truncate font-medium text-brand-700 hover:underline">{r.label}</Link>
+                    <Link href={r.href} className="focusable min-w-0 truncate rounded font-medium text-brand-700 hover:underline">{r.label}</Link>
                     <span className="shrink-0 text-xs text-ink-500">{r.meta}</span>
                   </li>
                 ))}
@@ -181,6 +213,23 @@ export default async function DashboardPage() {
           ))}
         </div>
       )}
+
+      {/* ── Operational metrics ────────────────────────────────────────────── */}
+      <h2 className="text-label mt-6">Operations</h2>
+      <div className="mt-2 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        {kpis.map((k) => (
+          <div key={k.label} className="card p-4">
+            <div className="flex items-center justify-between">
+              <span className="text-meta">{k.label}</span>
+              <k.icon className="h-4 w-4 text-ink-400" aria-hidden />
+            </div>
+            <div className="mt-1.5 flex items-baseline gap-1.5">
+              <span className="num-metric text-2xl">{k.value}</span>
+              <span className="text-xs text-ink-500">{k.sub}</span>
+            </div>
+          </div>
+        ))}
+      </div>
 
       <div className="mt-6 grid gap-6 lg:grid-cols-2">
         {/* Cases by stage */}
@@ -226,9 +275,8 @@ export default async function DashboardPage() {
       </div>
 
       <div className="mt-6 flex items-center gap-2 text-xs text-ink-500">
-        <Badge tone="green">HIPAA-ready</Badge>
-        <Badge tone="brand">Audit trail active</Badge>
-        <span>Every action on this dashboard is scoped to your firm and logged.</span>
+        <Badge tone="neutral">Audit trail active</Badge>
+        <span>Every action is scoped to your firm and logged.</span>
       </div>
     </div>
   );
