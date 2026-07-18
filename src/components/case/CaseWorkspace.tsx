@@ -415,7 +415,7 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
   }
 
   return (
-    <div className="card max-w-3xl p-6">
+    <div className="card p-6">
       <h3 className="text-sm font-semibold text-ink-900">Case Intake</h3>
       <p className="mt-1 text-xs text-ink-500">Structured intake. The future-care engine infers specialty-specific rules from the diagnosis.</p>
 
