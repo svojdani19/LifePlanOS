@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Loader2, ShieldAlert, ShieldCheck, Send, X, Check, Clock, Ban, ChevronRight, ChevronLeft, CheckCircle2, ArrowUpRight, Undo2, RotateCcw, Keyboard } from "lucide-react";
 
 interface Item {
@@ -53,6 +54,15 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
   }, [open, load]);
 
   useEffect(() => { if (open) setTimeout(() => asideRef.current?.focus(), 30); }, [open]);
+
+  // While the panel is open, shift the app's working surface left so nothing
+  // hides behind it — the case stays fully visible and interactive beside the
+  // review panel. Purely CSS-driven via a body class (see globals.css); JS
+  // viewport APIs are unreliable in embedded webviews.
+  useEffect(() => {
+    document.body.classList.toggle("assistant-open", open);
+    return () => document.body.classList.remove("assistant-open");
+  }, [open]);
 
   // Filtered queue — one item at a time; every decision is per-item.
   const queue = useMemo(() => items.filter((i) => (seg === "all" ? true : seg === "blocking" ? isBlocking(i) : seg === "important" ? i.severity === "HIGH" && !i.exportBlocking : seg === "review" ? SEV_RANK[i.severity] >= 2 : true)), [items, seg]);
@@ -167,10 +177,14 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
         {counts.deferred > 0 && <span className="rounded-full bg-ink-100 px-1.5 text-xs font-semibold text-ink-500" title={`${counts.deferred} deferred`}>{counts.deferred}⏱</span>}
       </button>
 
-      {open && (
-        <div className="fixed inset-0 z-50 flex justify-end">
-          <div className="absolute inset-0 bg-ink-900/30 backdrop-blur-[1px]" onClick={() => setOpen(false)} />
-          <aside ref={asideRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label="Case review" style={{ animation: "ca-slide 220ms cubic-bezier(.22,.61,.36,1)" }} className="relative flex h-full w-full max-w-md flex-col bg-white shadow-2xl outline-none">
+      {open && createPortal(
+        // Non-modal side panel: full height of the screen on the right, with
+        // the workspace shifted left (see the paddingRight effect) so the case
+        // stays visible and interactive while reviewing. Portaled to <body> so
+        // no backdrop-filter ancestor (e.g. the sticky case header) can become
+        // its containing block and shrink the fixed positioning.
+        <div className="fixed inset-y-0 right-0 z-50 flex w-full sm:w-[40rem] sm:max-w-[46vw]">
+          <aside ref={asideRef} tabIndex={-1} role="dialog" aria-label="Case review" style={{ animation: "ca-slide 220ms cubic-bezier(.22,.61,.36,1)" }} className="relative flex h-full w-full flex-col border-l border-ink-200 bg-white shadow-2xl outline-none">
             {/* Header + progress ring */}
             <div className="flex items-center justify-between border-b border-ink-100 px-4 py-3">
               <div className="flex items-center gap-3">
@@ -337,7 +351,8 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
               </div>
             </div>
           </aside>
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   );

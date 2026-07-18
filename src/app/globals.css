@@ -22,6 +22,19 @@ body {
   @apply bg-ink-300;
 }
 
+/* While the Case Review panel is open, the app's working surface shifts left
+   by the panel's width so nothing hides behind it. CSS-driven (media queries
+   are reliable where JS viewport APIs are not in embedded webviews). */
+body.assistant-open main {
+  padding-right: min(40rem, 46vw);
+  transition: padding-right 220ms cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+@media (max-width: 639px) {
+  body.assistant-open main {
+    padding-right: 0;
+  }
+}
+
 /* Respect reduced-motion: collapse transitions/animations to near-instant. */
 @media (prefers-reduced-motion: reduce) {
   *,
