@@ -188,87 +188,133 @@ export function CaseWorkspace({
     { id: "report", label: "Report", icon: FileOutput },
   ];
 
+  // The numbered clinical workflow (Phase 4). Stage state derives from real
+  // case data: completed/current from `data.status`, warning when physician
+  // review has pending items. Each stage opens its workspace tab.
+  const FLOW: { n: number; label: string; tab: string; stage: string; count?: number; warn?: boolean }[] = [
+    { n: 1, label: "Intake", tab: "overview", stage: "INTAKE" },
+    { n: 2, label: "Records", tab: "records", stage: "RECORDS", count: data.documents.length },
+    { n: 3, label: "Chronology", tab: "chronology", stage: "CHRONOLOGY", count: data.chronologyEvents.length },
+    { n: 4, label: "Causation", tab: "causation", stage: "CAUSATION" },
+    { n: 5, label: "Future Care", tab: "futurecare", stage: "FUTURE_CARE", count: data.futureCareItems.length },
+    { n: 6, label: "Pricing", tab: "costs", stage: "PRICING" },
+    { n: 7, label: "Physician", tab: "physician", stage: "PHYSICIAN_REVIEW", count: pendingPhysician, warn: pendingPhysician > 0 },
+    { n: 8, label: "Report", tab: "report", stage: "FINAL" },
+  ];
+  const stageIdx = Math.max(0, STAGES.indexOf(data.status === "DRAFTING" ? "FINAL" : data.status));
+  const SECONDARY = TABS.filter((t) => ["providers", "evidence", "reviews", "precedents"].includes(t.id));
+
   return (
     <div>
-      {/* Header */}
-      <div className="card p-6">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-2xl font-bold text-ink-900">{data.clientName}</h1>
-              <Badge tone="neutral">{data.caseNumber}</Badge>
-              <Badge tone={data.side === "PLAINTIFF" ? "brand" : data.side === "DEFENSE" ? "amber" : "slate"}>{data.side.toLowerCase()}</Badge>
-            </div>
-            <p className="mt-1 text-sm text-ink-600">
-              {data.caseType.replace(/_/g, " ").toLowerCase()} · {data.diagnosis || "no diagnosis set"}
-              {data.icd10Code ? <span className="font-mono text-xs text-ink-500"> [{data.icd10Code}]</span> : null} · {data.jurisdiction || "no jurisdiction"}
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            {hasPlan && <CaseAssistant caseId={data.id} canEdit={can("case.edit")} onFocus={focusEntity} />}
-            {can("futurecare.edit") && (
-              <button className="btn-primary" disabled={busy === "gen"} onClick={() => call(`/api/cases/${data.id}/generate`, "POST", undefined, "gen")}>
-                {busy === "gen" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                {hasPlan ? "Re-run AI Pipeline" : "Run AI Pipeline"}
-              </button>
+      {/* ── Compact clinical workspace header (sticky) ─────────────────────── */}
+      <div className="sticky top-0 z-30 -mx-6 -mt-6 border-b border-ink-200 bg-white/95 px-6 pt-3 backdrop-blur supports-[backdrop-filter]:bg-white/85">
+        <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
+            <h1 className="truncate text-lg font-bold tracking-tight text-ink-900">{data.clientName}</h1>
+            <span className="font-mono text-xs text-ink-400">{data.caseNumber}</span>
+            <Badge tone={data.side === "PLAINTIFF" ? "brand" : data.side === "DEFENSE" ? "warning" : "slate"}>{data.side.toLowerCase()}</Badge>
+            <span className="hidden text-xs text-ink-500 md:inline">{data.caseType.replace(/_/g, " ").toLowerCase()}</span>
+            {data.diagnosis && (
+              <span className="hidden max-w-[24rem] truncate text-xs text-ink-500 xl:inline" title={`${data.diagnosis}${data.icd10Code ? ` [${data.icd10Code}]` : ""}`}>
+                · {data.diagnosis}
+                {data.icd10Code ? <span className="font-mono text-ink-400"> [{data.icd10Code}]</span> : null}
+              </span>
             )}
           </div>
-        </div>
-
-        {/* Progress tracker */}
-        <div className="mt-5 flex flex-wrap items-center gap-1.5">
-          {STAGES.map((s, i) => {
-            const reached = STAGES.indexOf(data.status) >= i;
-            return (
-              <div key={s} className="flex items-center gap-1.5">
-                <span className={cn("rounded-full px-2.5 py-1 text-xs font-medium", reached ? "bg-brand-600 text-white" : "bg-ink-100 text-ink-400")}>
-                  {s.replace(/_/g, " ").toLowerCase()}
-                </span>
-                {i < STAGES.length - 1 && <span className="text-ink-300">›</span>}
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Quick totals */}
-        {hasPlan && (
-          <div className="mt-5 grid gap-3 sm:grid-cols-4">
-            <Stat label="Future Care Items" value={String(data.futureCareItems.length)} />
-            <Stat label="Lifetime (Undiscounted)" value={formatMoney(totals.totalLifetime)} />
-            <Stat label="Present Value" value={formatMoney(totals.totalPresentValue)} highlight />
-            <Stat label="Physician Pending" value={String(pendingPhysician)} />
-          </div>
-        )}
-
-      </div>
-
-      {/* Tabs — single non-wrapping row (scrolls horizontally if too narrow) */}
-      <div className="mt-5 flex items-center gap-1 overflow-x-auto border-b border-ink-200">
-        {TABS.map((t) =>
-          t.id === "report" ? (
-            // The Report tab is presented as a primary call-to-action button,
-            // matching the "Re-run AI Pipeline" button format, kept compact so it
-            // fits inline with the other tabs.
-            <button
-              key={t.id}
-              onClick={() => setTab(t.id)}
-              className={cn("btn-primary ml-auto shrink-0 whitespace-nowrap self-center px-3 py-1.5 text-sm", tab === t.id && "ring-2 ring-brand-300 ring-offset-1")}
-            >
-              <t.icon className="h-4 w-4" /> {t.label}
-            </button>
-          ) : (
-            <button
-              key={t.id}
-              onClick={() => setTab(t.id)}
-              className={cn(
-                "flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-2.5 py-2 text-sm font-medium transition-colors",
-                tab === t.id ? "border-brand-600 text-brand-700" : "border-transparent text-ink-500 hover:text-ink-800",
+          <div className="flex items-center gap-4">
+            {hasPlan && (
+              <dl className="hidden items-center gap-4 md:flex" aria-label="Case metrics">
+                <div className="text-right">
+                  <dd className="num-metric text-sm">{data.futureCareItems.length}</dd>
+                  <dt className="text-meta">items</dt>
+                </div>
+                <div className="text-right">
+                  <dd className="num-metric text-sm">{formatMoney(totals.totalLifetime)}</dd>
+                  <dt className="text-meta">lifetime</dt>
+                </div>
+                <div className="text-right">
+                  <dd className="num-metric text-sm text-brand-800">{formatMoney(totals.totalPresentValue)}</dd>
+                  <dt className="text-meta">present value</dt>
+                </div>
+                <div className="text-right">
+                  <dd className={cn("num-metric text-sm", pendingPhysician > 0 && "text-amber-700")}>{pendingPhysician}</dd>
+                  <dt className="text-meta">MD pending</dt>
+                </div>
+                {data.reviewFindings.length > 0 && (
+                  <div className="text-right">
+                    <dd className="num-metric text-sm text-amber-700">{data.reviewFindings.length}</dd>
+                    <dt className="text-meta">findings</dt>
+                  </div>
+                )}
+              </dl>
+            )}
+            <div className="flex items-center gap-2">
+              {hasPlan && <CaseAssistant caseId={data.id} canEdit={can("case.edit")} onFocus={focusEntity} />}
+              {can("futurecare.edit") && (
+                <button className="btn-primary px-3 py-1.5 text-sm" disabled={busy === "gen"} onClick={() => call(`/api/cases/${data.id}/generate`, "POST", undefined, "gen")}>
+                  {busy === "gen" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                  {hasPlan ? "Re-run AI Pipeline" : "Run AI Pipeline"}
+                </button>
               )}
-            >
-              <t.icon className="h-4 w-4" /> {t.label}
-            </button>
-          ),
-        )}
+            </div>
+          </div>
+        </div>
+
+        {/* Workflow sequence + secondary workspaces */}
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4">
+          <ol className="flex items-center gap-0.5 overflow-x-auto" aria-label="Case workflow">
+            {FLOW.map((s, i) => {
+              const sIdx = STAGES.indexOf(s.stage);
+              const state = sIdx < stageIdx ? "done" : sIdx === stageIdx ? "current" : "next";
+              const open = tab === s.tab;
+              return (
+                <li key={s.tab} className="flex shrink-0 items-center">
+                  {i > 0 && <span aria-hidden className={cn("mx-0.5 h-px w-3", state === "next" ? "bg-ink-200" : "bg-brand-300")} />}
+                  <button
+                    onClick={() => setTab(s.tab)}
+                    aria-current={open ? "page" : undefined}
+                    title={s.warn ? `${s.count} item${s.count === 1 ? "" : "s"} awaiting physician review` : undefined}
+                    className={cn(
+                      "focusable flex items-center gap-1.5 whitespace-nowrap rounded-md border-b-2 px-2 py-1.5 text-[13px] transition-colors",
+                      open ? "border-brand-600 font-semibold text-brand-800" : "border-transparent",
+                      !open && (state === "next" ? "text-ink-400 hover:text-ink-700" : "text-ink-600 hover:text-ink-900"),
+                    )}
+                  >
+                    <span
+                      aria-hidden
+                      className={cn(
+                        "grid h-[18px] w-[18px] shrink-0 place-items-center rounded-full text-[10px] font-semibold",
+                        state === "done" && "bg-brand-100 text-brand-800",
+                        state === "current" && "bg-brand-600 text-white",
+                        state === "next" && "bg-ink-100 text-ink-400",
+                        s.warn && "bg-amber-100 text-amber-800",
+                      )}
+                    >
+                      {state === "done" && !s.warn ? "✓" : s.n}
+                    </span>
+                    {s.label}
+                    {typeof s.count === "number" && s.count > 0 && <span className="text-[11px] text-ink-400">{s.count}</span>}
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
+          <div className="flex items-center gap-0.5" role="navigation" aria-label="Case workspaces">
+            {SECONDARY.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => setTab(t.id)}
+                aria-current={tab === t.id ? "page" : undefined}
+                className={cn(
+                  "focusable flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border-b-2 px-2 py-1.5 text-[13px] transition-colors",
+                  tab === t.id ? "border-brand-600 font-semibold text-brand-800" : "border-transparent text-ink-500 hover:text-ink-800",
+                )}
+              >
+                <t.icon className="h-3.5 w-3.5" aria-hidden /> {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
       </div>
 
       <div className="mt-5">
@@ -289,14 +335,6 @@ export function CaseWorkspace({
   );
 }
 
-function Stat({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
-  return (
-    <div className={cn("rounded-lg border p-3", highlight ? "border-brand-200 bg-brand-50" : "border-ink-200 bg-white")}>
-      <p className="text-xs text-ink-500">{label}</p>
-      <p className={cn("mt-0.5 text-lg font-bold", highlight ? "text-brand-800" : "text-ink-900")}>{value}</p>
-    </div>
-  );
-}
 
 function Empty({ children }: { children: React.ReactNode }) {
   return <div className="card p-10 text-center text-sm text-ink-500">{children}</div>;

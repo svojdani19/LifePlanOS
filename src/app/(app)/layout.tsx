@@ -13,7 +13,9 @@ export default async function AppLayout({ children }: { children: React.ReactNod
         permissions={ROLE_PERMISSIONS[ctx.user.role]}
       />
       <main className="flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-6xl px-8 py-8">{children}</div>
+        {/* Wider working surface, tighter vertical rhythm — the case workspace
+            and tables benefit from the width; density lives inside content. */}
+        <div className="mx-auto max-w-7xl px-6 py-6">{children}</div>
       </main>
     </div>
   );
