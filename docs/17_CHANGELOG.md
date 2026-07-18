@@ -2,6 +2,22 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-17 — Clinical-workstation UX refinement (sprint 1)
+
+Design tokens (semantic badge tones incl. AI-purple; typography/metric/label
+classes; focus-visible rings; reduced-motion), icon-rail responsive sidebar +
+PageHeader, compact sticky case header (~340px → ~160px) with inline metrics,
+numbered 8-stage workflow nav derived from real case status (+ separated
+secondary workspaces), dashboard "Today's Work" (export-blocked queue first),
+case list search/filter/sort/keyboard-nav (pure helpers + 7 tests), Future
+Care search/filters/sort/density/expand-all, physician status-count filters,
+cost table category filter/sort + inclusion badges (contingency/excluded/
+conditional) with server-total integrity, assistant suggested prompts,
+landing repositioned with accurate claims. Deferred: chronology 3-pane,
+evidence node-graph, per-stage record-processing states (no granular backend
+state), precedent side-by-side. 327 tests green; build passes.
+
+
 ## 2026-07-14 — Clinical Reasoning Engine v1 (production sprint)
 
 Builds v1 of the reasoning engine on the Phase A–E foundation. Reason first,
