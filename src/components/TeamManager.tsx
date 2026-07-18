@@ -102,6 +102,7 @@ export function TeamManager({ currentUserId }: { currentUserId: string }) {
   const [lastInviteLink, setLastInviteLink] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [credsFor, setCredsFor] = useState<string | null>(null);
+  const [confirmRevokeId, setConfirmRevokeId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const res = await fetch("/api/team");
@@ -142,8 +143,11 @@ export function TeamManager({ currentUserId }: { currentUserId: string }) {
     load();
   }
 
+  // Destructive action uses an inline two-step confirm (browser confirm() is
+  // blocked in embedded browsers, which silently disabled this button).
   async function revoke(id: string) {
-    if (!confirm("Revoke this teammate's access? Their sessions will be terminated.")) return;
+    if (confirmRevokeId !== id) { setConfirmRevokeId(id); return; }
+    setConfirmRevokeId(null);
     await fetch(`/api/team/${id}`, { method: "DELETE" });
     load();
   }
@@ -256,9 +260,18 @@ export function TeamManager({ currentUserId }: { currentUserId: string }) {
                       </button>
                     )}
                     {m.id !== currentUserId && m.status !== "SUSPENDED" && (
-                      <button onClick={() => revoke(m.id)} className="text-xs font-medium text-red-600 hover:underline">
-                        Revoke
-                      </button>
+                      confirmRevokeId === m.id ? (
+                        <span className="flex items-center gap-2">
+                          <button onClick={() => revoke(m.id)} className="rounded bg-red-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-red-700">
+                            Confirm revoke — sessions end
+                          </button>
+                          <button onClick={() => setConfirmRevokeId(null)} className="text-xs font-medium text-ink-500 hover:underline">Cancel</button>
+                        </span>
+                      ) : (
+                        <button onClick={() => revoke(m.id)} className="text-xs font-medium text-red-600 hover:underline">
+                          Revoke
+                        </button>
+                      )
                     )}
                   </div>
                 </td>

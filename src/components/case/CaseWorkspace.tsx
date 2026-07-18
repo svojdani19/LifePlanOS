@@ -660,6 +660,7 @@ function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: bo
   const [filter, setFilter] = useState<string>("All");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [confirmDelDoc, setConfirmDelDoc] = useState<string | null>(null);
 
   async function upload(files: FileList | null) {
     if (!files?.length) return;
@@ -871,11 +872,16 @@ function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: bo
                         >
                           <ExternalLink className="h-4 w-4" />
                         </a>
-                        {canEdit && (
-                          <button className="rounded-md p-1.5 text-ink-300 hover:bg-ink-100 hover:text-red-600" title="Remove" onClick={async () => { if (confirm(`Remove ${d.filename}?`)) await call(`/api/cases/${data.id}/documents/${d.id}`, "DELETE"); }}>
+                        {canEdit && (confirmDelDoc === d.id ? (
+                          <span className="flex items-center gap-1.5">
+                            <button className="rounded bg-red-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-red-700" onClick={async () => { setConfirmDelDoc(null); await call(`/api/cases/${data.id}/documents/${d.id}`, "DELETE"); }}>Confirm remove</button>
+                            <button className="text-xs font-medium text-ink-500 hover:underline" onClick={() => setConfirmDelDoc(null)}>Cancel</button>
+                          </span>
+                        ) : (
+                          <button className="rounded-md p-1.5 text-ink-300 hover:bg-ink-100 hover:text-red-600" title={`Remove ${d.filename}`} aria-label={`Remove ${d.filename}`} onClick={() => setConfirmDelDoc(d.id)}>
                             <X className="h-4 w-4" />
                           </button>
-                        )}
+                        ))}
                       </div>
                     </div>
                   </div>
@@ -931,6 +937,13 @@ function ChronologyPanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [filter, setFilter] = useState("ALL");
+  // Master-detail review (Phase 8): search + type/year filters over a compact
+  // event list, full detail beside it. Renders ONLY extracted record content —
+  // no content or evidence mappings are altered or invented here.
+  const [chronoQ, setChronoQ] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [mobileDetail, setMobileDetail] = useState(false);
+  const listRef = useRef<HTMLOListElement>(null);
 
   const events: AnyRec[] = data.chronologyEvents;
   if (events.length === 0)
@@ -942,33 +955,29 @@ function ChronologyPanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
   const typeCounts: Record<string, number> = {};
   events.forEach((e) => (typeCounts[e.eventType ?? "OTHER"] = (typeCounts[e.eventType ?? "OTHER"] ?? 0) + 1));
   const presentTypes = Object.keys(typeCounts);
-  const filtered = filter === "ALL" ? events : events.filter((e) => (e.eventType ?? "OTHER") === filter);
+  const q = chronoQ.trim().toLowerCase();
+  const filtered = events.filter((e) => {
+    if (filter !== "ALL" && (e.eventType ?? "OTHER") !== filter) return false;
+    if (q && !`${e.provider ?? ""} ${e.facility ?? ""} ${e.diagnosis ?? ""} ${e.summary ?? ""} ${e.procedure ?? ""} ${e.imagingFindings ?? ""}`.toLowerCase().includes(q)) return false;
+    return true;
+  });
+  const years = [...new Set(events.map((e) => String(e.eventDate).slice(0, 4)))].sort();
+  const selected = filtered.find((e) => e.id === selectedId) ?? filtered[0] ?? null;
 
   const excluded = Math.max(0, data.documents.length - events.length);
+  const jumpToYear = (y: string) => {
+    const target = filtered.find((e) => String(e.eventDate).startsWith(y));
+    if (target) {
+      setSelectedId(target.id);
+      listRef.current?.querySelector(`[data-ev="${target.id}"]`)?.scrollIntoView({ block: "nearest" });
+    }
+  };
 
-  return (
-    <div className="space-y-4">
-      <p className="text-sm text-ink-500">
-        {events.length} pivotal {events.length === 1 ? "event" : "events"} — those bearing on the diagnoses and future care — screened from {data.documents.length}{" "}
-        {data.documents.length === 1 ? "record" : "records"}
-        {excluded > 0 ? ` (${excluded} without a bearing on the complaint were excluded)` : ""}.
-      </p>
-
-      {/* Type filter chips */}
-      <div className="flex flex-wrap gap-2">
-        <FilterChip label="All" count={events.length} active={filter === "ALL"} onClick={() => setFilter("ALL")} />
-        {presentTypes.map((t) => (
-          <FilterChip key={t} label={styleFor(t).label} count={typeCounts[t]} active={filter === t} onClick={() => setFilter(t)} />
-        ))}
-      </div>
-
-      {/* Vertical timeline */}
-      <ol className="relative ml-2 border-l border-ink-200 pl-6">
-        {filtered.map((e) => {
-          const s = styleFor(e.eventType);
-          return (
-            <li key={e.id} className="relative mb-6">
-              <span className="absolute -left-[31px] top-1.5 h-3.5 w-3.5 rounded-full border-2 border-white" style={{ background: s.dot }} />
+  // Full event detail — the exact content the timeline always showed (labeled
+  // clinical sections, significance, source citation, edit), unchanged.
+  const detail = (e: AnyRec) => {
+    const s = styleFor(e.eventType);
+    return (
               <div className="card p-4">
                 {/* LCP-style encounter header: date[-range] · provider / facility · record type */}
                 <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
@@ -1042,10 +1051,89 @@ function ChronologyPanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
                   </a>
                 )}
               </div>
-            </li>
-          );
-        })}
-      </ol>
+    );
+  };
+
+  return (
+    <div className="space-y-3">
+      <p className="text-sm text-ink-500">
+        {events.length} pivotal {events.length === 1 ? "event" : "events"} — those bearing on the diagnoses and future care — screened from {data.documents.length}{" "}
+        {data.documents.length === 1 ? "record" : "records"}
+        {excluded > 0 ? ` (${excluded} without a bearing on the complaint were excluded)` : ""}.
+      </p>
+
+      {/* Search + type chips + jump-to-year */}
+      <div className="flex flex-wrap items-center gap-2">
+        <input className="input w-56 py-1.5 text-sm" placeholder="Search events…" aria-label="Search chronology events" value={chronoQ} onChange={(e) => { setChronoQ(e.target.value); setSelectedId(null); }} />
+        <div className="flex flex-wrap gap-1.5">
+          <FilterChip label="All" count={events.length} active={filter === "ALL"} onClick={() => setFilter("ALL")} />
+          {presentTypes.map((t) => (
+            <FilterChip key={t} label={styleFor(t).label} count={typeCounts[t]} active={filter === t} onClick={() => setFilter(t)} />
+          ))}
+        </div>
+        {years.length > 1 && (
+          <div className="ml-auto flex items-center gap-1" role="group" aria-label="Jump to year">
+            <span className="text-meta">Jump:</span>
+            {years.map((y) => (
+              <button key={y} className="focusable rounded px-1.5 py-0.5 text-xs font-medium text-brand-700 hover:bg-brand-50" onClick={() => jumpToYear(y)}>{y}</button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {filtered.length === 0 ? (
+        <Empty>No events match the current filters.</Empty>
+      ) : (
+        <div className="grid gap-4 lg:grid-cols-[minmax(280px,340px)_1fr]">
+          {/* Master list — compact, scrollable, keyboard-navigable */}
+          <ol
+            ref={listRef}
+            aria-label="Chronology events"
+            className={cn("max-h-[70vh] space-y-1 overflow-y-auto pr-1 lg:block", mobileDetail && "hidden")}
+            onKeyDown={(e) => {
+              const idx = filtered.findIndex((x) => x.id === selected?.id);
+              if (e.key === "ArrowDown" && idx < filtered.length - 1) { e.preventDefault(); setSelectedId(filtered[idx + 1].id); }
+              if (e.key === "ArrowUp" && idx > 0) { e.preventDefault(); setSelectedId(filtered[idx - 1].id); }
+              if (e.key === "Enter") setMobileDetail(true);
+            }}
+          >
+            {filtered.map((e) => {
+              const s = styleFor(e.eventType);
+              const active = selected?.id === e.id;
+              const headline = e.diagnosis || e.procedure || e.imagingFindings || e.summary || "";
+              return (
+                <li key={e.id} data-ev={e.id}>
+                  <button
+                    onClick={() => { setSelectedId(e.id); setMobileDetail(true); }}
+                    aria-current={active ? "true" : undefined}
+                    className={cn(
+                      "focusable w-full rounded-lg border px-3 py-2 text-left transition-colors",
+                      active ? "border-brand-300 bg-brand-50" : "border-transparent hover:bg-ink-50",
+                    )}
+                  >
+                    <div className="flex items-center gap-2">
+                      <span aria-hidden className="h-2 w-2 shrink-0 rounded-full" style={{ background: s.dot }} />
+                      <span className="text-xs font-semibold text-ink-900">{lcpDate(e.eventDate)}</span>
+                      <span className={cn("rounded-full px-1.5 py-0.5 text-[10px] font-medium", s.chip)}>{s.label}</span>
+                      {e.dateInferred && <span className="text-[10px] text-amber-700">inferred</span>}
+                    </div>
+                    <p className="mt-0.5 truncate text-xs text-ink-600">{e.provider || "Treating provider"}{e.facility ? ` · ${String(e.facility).replace(/[.\s]+$/, "")}` : ""}</p>
+                    {headline && <p className="mt-0.5 truncate text-xs text-ink-500">{headline}</p>}
+                  </button>
+                </li>
+              );
+            })}
+          </ol>
+
+          {/* Detail pane — the full encounter, exactly as extracted */}
+          <div className={cn("min-w-0 lg:block", !mobileDetail && "hidden")}>
+            <button className="focusable mb-2 rounded text-xs font-medium text-brand-700 hover:underline lg:hidden" onClick={() => setMobileDetail(false)}>
+              ← Back to event list
+            </button>
+            {selected ? detail(selected) : <Empty>Select an event to view its full detail.</Empty>}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1609,14 +1697,7 @@ function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: Any
                 <span className="text-xs font-medium text-ink-500">Cost basis: </span>{formatMoney(it.unitCost)}/unit · {it.pricingSource} · range {formatMoney(it.lowCost)}–{formatMoney(it.highCost)}
                 {it.lowerCostAlternative ? <> · <span className="text-xs font-medium text-ink-500">Alternative: </span>{it.lowerCostAlternative}</> : null}
               </div>
-              {canEdit && (
-                <div className="mt-2 flex flex-wrap gap-2 pt-1">
-                  <InlineProbability item={it} caseId={data.id} call={call} />
-                  <button className="btn-outline py-1 text-xs" onClick={async () => { const v = prompt("Frequency per year", String(it.frequencyPerYear)); if (v != null) await call(`/api/cases/${data.id}/future-care/${it.id}`, "PATCH", { frequencyPerYear: Number(v) }); }}>Edit Frequency</button>
-                  <button className="btn-outline py-1 text-xs" onClick={async () => { const v = prompt("Unit cost (USD)", String(it.unitCost)); if (v != null) await call(`/api/cases/${data.id}/future-care/${it.id}`, "PATCH", { unitCost: Number(v) }); }}>Edit Unit Cost</button>
-                  <button className="py-1 text-xs font-medium text-red-600 hover:underline" onClick={async () => { if (confirm("Remove this item?")) await call(`/api/cases/${data.id}/future-care/${it.id}`, "DELETE"); }}>Remove</button>
-                </div>
-              )}
+              {canEdit && <InlineItemEdit item={it} caseId={data.id} call={call} />}
             </div>
           )}
         </div>
@@ -1630,9 +1711,56 @@ function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: Any
 
 function InlineProbability({ item, caseId, call }: { item: AnyRec; caseId: string; call: any }) {
   return (
-    <select className="rounded-md border border-ink-300 bg-white px-2 py-1 text-xs" value={item.probability} onChange={(e) => call(`/api/cases/${caseId}/future-care/${item.id}`, "PATCH", { probability: e.target.value })}>
+    <select className="rounded-md border border-ink-300 bg-white px-2 py-1 text-xs" aria-label="Probability" value={item.probability} onChange={(e) => call(`/api/cases/${caseId}/future-care/${item.id}`, "PATCH", { probability: e.target.value })}>
       {["PROBABLE", "POSSIBLE", "SPECULATIVE", "NOT_SUPPORTED"].map((p) => <option key={p} value={p}>{p.toLowerCase()}</option>)}
     </select>
+  );
+}
+
+// Inline recommendation editing — no browser prompt()/confirm() dialogs (they
+// are blocked in embedded browsers). Frequency and unit cost edit in place;
+// Remove is a two-step confirm.
+function InlineItemEdit({ item, caseId, call }: { item: AnyRec; caseId: string; call: any }) {
+  const [freq, setFreq] = useState(String(item.frequencyPerYear ?? 1));
+  const [cost, setCost] = useState(String(item.unitCost ?? 0));
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const freqChanged = Number(freq) !== item.frequencyPerYear && Number.isFinite(Number(freq));
+  const costChanged = Number(cost) !== item.unitCost && Number.isFinite(Number(cost));
+  return (
+    <div className="mt-2 flex flex-wrap items-end gap-2 pt-1">
+      <InlineProbability item={item} caseId={caseId} call={call} />
+      <label className="text-[11px] text-ink-500">
+        Frequency / yr
+        <input type="number" min={0} className="input mt-0.5 w-24 py-1 text-xs" value={freq} onChange={(e) => setFreq(e.target.value)} />
+      </label>
+      <label className="text-[11px] text-ink-500">
+        Unit cost (USD)
+        <input type="number" min={0} className="input mt-0.5 w-28 py-1 text-xs" value={cost} onChange={(e) => setCost(e.target.value)} />
+      </label>
+      {(freqChanged || costChanged) && (
+        <button
+          className="btn-primary px-2.5 py-1 text-xs"
+          onClick={async () => {
+            const body: AnyRec = {};
+            if (freqChanged) body.frequencyPerYear = Number(freq);
+            if (costChanged) body.unitCost = Number(cost);
+            await call(`/api/cases/${caseId}/future-care/${item.id}`, "PATCH", body);
+          }}
+        >
+          Save changes
+        </button>
+      )}
+      {confirmRemove ? (
+        <span className="flex items-center gap-2">
+          <button className="rounded-lg bg-red-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-red-700" onClick={async () => { setConfirmRemove(false); await call(`/api/cases/${caseId}/future-care/${item.id}`, "DELETE"); }}>
+            Confirm remove
+          </button>
+          <button className="text-xs font-medium text-ink-500 hover:underline" onClick={() => setConfirmRemove(false)}>Cancel</button>
+        </span>
+      ) : (
+        <button className="py-1 text-xs font-medium text-red-600 hover:underline" onClick={() => setConfirmRemove(true)}>Remove</button>
+      )}
+    </div>
   );
 }
 
@@ -1647,6 +1775,7 @@ function CostsPanel({ data, assumptions, totals, canEdit, call, focusId }: { dat
   const [open, setOpen] = useState<string | null>(null);
   const [costCat, setCostCat] = useState("");
   const [costSort, setCostSort] = useState("presentValue");
+  const [recomputeReason, setRecomputeReason] = useState("");
   // Deep-link from the Case Assistant: expand the focused line's cost details.
   useEffect(() => {
     if (focusId && data.futureCareItems.some((it: AnyRec) => it.id === focusId)) { setCostCat(""); setOpen(focusId); }
@@ -1668,16 +1797,28 @@ function CostsPanel({ data, assumptions, totals, canEdit, call, focusId }: { dat
           <NumField label="Geographic Factor" value={a.geographicFactor} step={0.05} disabled={!canEdit} onChange={(v) => setA({ ...a, geographicFactor: v })} />
         </div>
         {canEdit && (
-          <button
-            className="btn-primary mt-4"
-            onClick={() => {
-              // P3 — assumption changes are ledgered with an optional reason.
-              const reason = prompt("Reason for the assumption change (optional — recorded in the audit ledger):") ?? undefined;
-              call(`/api/cases/${data.id}`, "PATCH", { ...a, assumptionReason: reason || undefined }, "recompute");
-            }}
-          >
-            Recompute Costs
-          </button>
+          // Assumption changes are ledgered with an optional reason — captured
+          // inline (browser prompt() is blocked in embedded browsers). A
+          // recompute affects downstream physician-reviewed totals, so the
+          // action is explicit and the audit ledger records every change.
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <input
+              className="input w-72 py-1.5 text-sm"
+              placeholder="Reason for change (optional — audit ledger)"
+              aria-label="Reason for assumption change"
+              value={recomputeReason}
+              onChange={(e) => setRecomputeReason(e.target.value)}
+            />
+            <button
+              className="btn-primary py-1.5"
+              onClick={() => {
+                call(`/api/cases/${data.id}`, "PATCH", { ...a, assumptionReason: recomputeReason.trim() || undefined }, "recompute");
+                setRecomputeReason("");
+              }}
+            >
+              Recompute Costs
+            </button>
+          </div>
         )}
         {Array.isArray(data.assumptionChanges) && data.assumptionChanges.length > 0 && (
           <div className="mt-4 border-t border-ink-100 pt-3">
@@ -1998,18 +2139,47 @@ function PhysicianPanel({ data, canReview, call }: { data: AnyRec; canReview: bo
 // ── Precedents (comparable finalized LCPs, ranked by likeness) ───────────────
 const injuryLabel = (s?: string | null) => (s || "").replace(/_/g, " ").toLowerCase().replace(/\b\w/g, (m) => m.toUpperCase());
 function PrecedentsPanel({ precedents, data }: { precedents: AnyRec[]; data: AnyRec }) {
+  const [pq, setPq] = useState("");
+  const [compareId, setCompareId] = useState<string | null>(null);
   if (!precedents.length) {
     return <Empty>No precedents in the firm library yet. Add finalized LCPs in Firm Management → LCP Precedent Library, then return here to see the closest comparables to this case.</Empty>;
   }
   const barColor = (n: number) => (n >= 70 ? "bg-emerald-500" : n >= 45 ? "bg-amber-500" : "bg-ink-300");
   const numColor = (n: number) => (n >= 70 ? "text-emerald-600" : n >= 45 ? "text-amber-600" : "text-ink-400");
+  const pqLower = pq.trim().toLowerCase();
+  const shownPrecedents = pqLower
+    ? precedents.filter((p) => `${p.title ?? ""} ${p.diagnosis ?? ""} ${p.jurisdiction ?? ""} ${p.mechanism ?? ""}`.toLowerCase().includes(pqLower))
+    : precedents;
+  // Side-by-side rows — ONLY fields both records actually carry; a missing
+  // value renders as an explicit em-dash, never inferred. Case cost totals are
+  // deliberately not recomputed here (the audited totals live in Costs/Report).
+  const caseAge = data.dateOfBirth ? Math.floor((Date.now() - new Date(data.dateOfBirth).getTime()) / (365.25 * 24 * 3600 * 1000)) : null;
+  const compareRows = (p: AnyRec): [string, string, string][] => [
+    ["Diagnosis", data.diagnosis ?? "—", p.diagnosis ?? "—"],
+    ["ICD-10", data.icd10Code ?? "—", p.icd10Code ?? "—"],
+    ["Specialty", injuryLabel(data.injurySpecialty) || "—", injuryLabel(p.injurySpecialty) || "—"],
+    ["Age", caseAge != null ? String(caseAge) : "—", p.age != null ? String(p.age) : "—"],
+    ["Jurisdiction", data.jurisdiction ?? "—", p.jurisdiction ?? "—"],
+    ["Mechanism", data.caseType ? String(data.caseType).replace(/_/g, " ").toLowerCase() : "—", p.mechanism ? String(p.mechanism).toLowerCase() : "—"],
+    ["Present value", "see Costs tab", p.presentValue != null ? formatMoney(p.presentValue) : "—"],
+    ["Lifetime cost", "see Costs tab", p.lifetimeCost != null ? formatMoney(p.lifetimeCost) : "—"],
+    ["Resolution", "open case", p.outcome ?? "—"],
+  ];
   return (
     <div className="space-y-4">
       <p className="text-sm text-ink-500">
         Finalized LCPs from your firm library ranked by <span className="font-medium text-ink-700">likeness</span> to {data.clientName}&apos;s case — the closest precedents to compare against, benchmark, and cite.
       </p>
+      <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800" role="note">
+        Precedent cases are contextual references only — they do not determine medical necessity or the value of this case. Clinical determinations remain the reviewing physician&apos;s.
+      </div>
+      <div className="flex items-center gap-2">
+        <input className="input w-64 py-1.5 text-sm" placeholder="Search precedents…" aria-label="Search precedents" value={pq} onChange={(e) => setPq(e.target.value)} />
+        <span className="text-meta">{shownPrecedents.length} of {precedents.length} · ranked by likeness</span>
+      </div>
       <div className="space-y-3">
-        {precedents.map((p) => {
+        {shownPrecedents.length === 0 && <Empty>No precedents match the search.</Empty>}
+        {shownPrecedents.map((p) => {
           const m = p.match || { likeness: 0, factors: [] };
           const hits = (m.factors || []).filter((f: AnyRec) => f.got > 0).sort((a: AnyRec, b: AnyRec) => b.got - a.got);
           const misses = (m.factors || []).filter((f: AnyRec) => f.got === 0);
@@ -2047,11 +2217,34 @@ function PrecedentsPanel({ precedents, data }: { precedents: AnyRec[]; data: Any
                   <span key={`m${i}`} className="rounded-full bg-ink-50 px-2 py-0.5 text-[11px] text-ink-400">{f.label}: {f.note}</span>
                 ))}
               </div>
-              <div className="mt-3">
+              <div className="mt-3 flex items-center gap-4">
                 <a href={`/api/precedents/${p.id}/view`} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs font-medium text-brand-700 hover:underline">
                   <ExternalLink className="h-3.5 w-3.5" /> Open precedent LCP
                 </a>
+                <button className="focusable rounded text-xs font-medium text-brand-700 hover:underline" aria-expanded={compareId === p.id} onClick={() => setCompareId(compareId === p.id ? null : p.id)}>
+                  {compareId === p.id ? "Hide comparison" : "Compare side-by-side"}
+                </button>
               </div>
+              {compareId === p.id && (
+                <table className="mt-3 w-full border-t border-ink-100 text-xs">
+                  <thead>
+                    <tr className="text-left text-[10px] uppercase tracking-wide text-ink-400">
+                      <th className="py-1.5 pr-2 font-medium" />
+                      <th className="py-1.5 pr-2 font-medium">This case — {data.clientName}</th>
+                      <th className="py-1.5 font-medium">Precedent — {p.title}</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-ink-100">
+                    {compareRows(p).map(([label, a2, b2]) => (
+                      <tr key={label}>
+                        <td className="py-1.5 pr-2 font-medium text-ink-500">{label}</td>
+                        <td className="py-1.5 pr-2 text-ink-800">{a2}</td>
+                        <td className="py-1.5 text-ink-800">{b2}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
           );
         })}
@@ -2334,6 +2527,64 @@ function EvidencePanel({ data }: { data: AnyRec }) {
               <span className="text-[11px] text-ink-400">{confidence.factors.join(" · ")}</span>
             </div>
           )}
+          {selType === "futureCareItem" && entity && (() => {
+            // ── Evidence provenance chain (Phase 10) ─────────────────────────
+            // A structured, accessible node-flow of how this recommendation is
+            // grounded: source records → objective finding → diagnosis →
+            // functional basis → prior treatment → medical necessity →
+            // recommendation → cost → physician review. Every node shows ONLY
+            // what the case actually contains; an undocumented step is shown
+            // as an honest gap, never filled in. Purple marks AI-synthesized
+            // analysis (the persisted assessment); everything else is
+            // source-stated record content or workflow state.
+            const craForChain = assessments.find((x) => x.recommendationId === selId && x.status !== "SUPERSEDED");
+            const recordLinks = [...own, ...inherited].filter((l) => l.kind === "DIAGNOSIS_EVIDENCE");
+            const objective = selType === "futureCareItem" ? mappedCond?.objectiveEvidence : null;
+            const chain: { label: string; value: string | null; kind: "source" | "derived" | "workflow" }[] = [
+              { label: "Source records", value: recordLinks.length ? `${recordLinks.length} page-cited source${recordLinks.length === 1 ? "" : "s"}` : null, kind: "source" },
+              { label: "Objective finding", value: objective ? String(objective).slice(0, 60) : null, kind: "source" },
+              { label: "Diagnosis", value: mappedCond?.name ?? null, kind: "source" },
+              { label: "Functional basis", value: craForChain?.functionalBasisSummary ? String(craForChain.functionalBasisSummary).slice(0, 60) : null, kind: "derived" },
+              { label: "Prior treatment", value: craForChain?.priorTreatmentSummary ? String(craForChain.priorTreatmentSummary).slice(0, 60) : null, kind: "source" },
+              { label: "Medical necessity", value: craForChain?.medicalNecessityRationale ? "assessed" : null, kind: "derived" },
+              { label: "Recommendation", value: entity.service, kind: "derived" },
+              { label: "Cost", value: `PV ${formatMoney(entity.presentValue)}`, kind: "workflow" },
+              { label: "Physician review", value: entity.physicianStatus === "PENDING" ? null : String(entity.physicianStatus).toLowerCase(), kind: "workflow" },
+            ];
+            return (
+              <div>
+                <h4 className="text-xs font-semibold uppercase tracking-wide text-ink-500">Evidence provenance</h4>
+                <ol className="mt-1.5 flex flex-wrap items-stretch gap-y-2" aria-label="Evidence provenance chain">
+                  {chain.map((n, i) => (
+                    <li key={n.label} className="flex items-center">
+                      {i > 0 && <span aria-hidden className="mx-1 text-ink-300">→</span>}
+                      <div
+                        title={n.value ?? "Not documented in the current record"}
+                        className={cn(
+                          "max-w-[11rem] rounded-md border px-2 py-1",
+                          n.value === null
+                            ? "border-dashed border-amber-300 bg-amber-50"
+                            : n.kind === "derived"
+                              ? "border-violet-200 bg-violet-50"
+                              : "border-ink-200 bg-white",
+                        )}
+                      >
+                        <p className="text-[10px] font-semibold uppercase tracking-wide text-ink-500">{n.label}</p>
+                        <p className={cn("truncate text-[11px]", n.value === null ? "italic text-amber-700" : "text-ink-700")}>
+                          {n.value ?? "not documented"}
+                        </p>
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+                <p className="mt-1 text-[10px] text-ink-400">
+                  <span className="mr-2"><span aria-hidden className="mr-1 inline-block h-2 w-2 rounded-sm border border-ink-200 bg-white align-middle" />source-stated</span>
+                  <span className="mr-2"><span aria-hidden className="mr-1 inline-block h-2 w-2 rounded-sm border border-violet-200 bg-violet-50 align-middle" />AI-synthesized analysis</span>
+                  <span><span aria-hidden className="mr-1 inline-block h-2 w-2 rounded-sm border border-dashed border-amber-300 bg-amber-50 align-middle" />not documented</span>
+                </p>
+              </div>
+            );
+          })()}
           {selType === "futureCareItem" && (() => {
             const cra = assessments.find((x) => x.recommendationId === selId && x.status !== "SUPERSEDED");
             if (!cra) return null;

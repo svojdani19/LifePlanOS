@@ -34,6 +34,8 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
   const [answer, setAnswer] = useState<string | null>(null);
   const [asking, setAsking] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [dismissOpen, setDismissOpen] = useState(false);
+  const [dismissNote, setDismissNote] = useState("");
   const asideRef = useRef<HTMLElement>(null);
   const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -69,11 +71,13 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
   const patchAll = (ids: string[], action: string, note?: string) => Promise.all(ids.map((id) => fetch(`/api/cases/${caseId}/attention/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, note }) })));
 
   const act = useCallback(
-    async (action: "resolve" | "defer" | "dismiss") => {
+    async (action: "resolve" | "defer" | "dismiss", note?: string) => {
       const it = queue[gIdx];
       if (!it || busy) return;
-      let note: string | undefined;
-      if (action === "dismiss") { note = window.prompt("Reason for dismissing this item?") ?? undefined; if (!note) return; }
+      // Dismissal requires a documented reason — captured with an inline field
+      // (window.prompt is blocked in embedded browsers).
+      if (action === "dismiss" && !note) { setDismissOpen(true); return; }
+      setDismissOpen(false); setDismissNote("");
       setBusy(true);
       try {
         await patchAll([it.id], action, note);
@@ -281,6 +285,16 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
             {/* Action bar */}
             {current && seg !== "deferred" && (
               <div className="border-t border-ink-100 p-3">
+                {canEdit && dismissOpen && (
+                  <div className="mb-2 rounded-lg border border-ink-200 bg-ink-50/60 p-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-600">Reason for dismissing (required)</p>
+                    <textarea className="input mt-1 w-full py-1 text-sm" rows={2} autoFocus value={dismissNote} onChange={(e) => setDismissNote(e.target.value)} placeholder="Recorded with the dismissal…" />
+                    <div className="mt-1.5 flex items-center gap-2">
+                      <button className="rounded-lg bg-red-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-40" disabled={!dismissNote.trim()} onClick={() => void act("dismiss", dismissNote.trim())}>Dismiss item</button>
+                      <button className="text-xs font-medium text-ink-500 hover:underline" onClick={() => { setDismissOpen(false); setDismissNote(""); }}>Cancel</button>
+                    </div>
+                  </div>
+                )}
                 {canEdit ? (
                   <div className="grid grid-cols-3 gap-2">
                     <button disabled={busy} onClick={() => void act("resolve")} className="flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-emerald-700 active:scale-95 disabled:opacity-50"><Check className="h-4 w-4" /> Resolve <kbd className="ml-1 text-[10px] opacity-70">R</kbd></button>
