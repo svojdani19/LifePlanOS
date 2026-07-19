@@ -207,8 +207,9 @@ export function CaseWorkspace({
 
   return (
     <div>
-      {/* ── Compact clinical workspace header (sticky) ─────────────────────── */}
+      {/* ── Clinical workspace header (sticky) ─────────────────────────────── */}
       <div className="sticky top-0 z-30 -mx-6 border-b border-ink-200 bg-white/95 px-6 pt-3 backdrop-blur supports-[backdrop-filter]:bg-white/85">
+        {/* Identity + actions */}
         <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
           <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
             <h1 className="truncate text-lg font-bold tracking-tight text-ink-900">{data.clientName}</h1>
@@ -222,65 +223,54 @@ export function CaseWorkspace({
               </span>
             )}
           </div>
-          <div className="flex items-center gap-4">
-            {hasPlan && (
-              <dl className="hidden items-center gap-4 md:flex" aria-label="Case metrics">
-                <div className="text-right">
-                  <dd className="num-metric text-sm">{data.futureCareItems.length}</dd>
-                  <dt className="text-meta">items</dt>
-                </div>
-                <div className="text-right">
-                  <dd className="num-metric text-sm">{formatMoney(totals.totalLifetime)}</dd>
-                  <dt className="text-meta">lifetime</dt>
-                </div>
-                <div className="text-right">
-                  <dd className="num-metric text-sm text-brand-800">{formatMoney(totals.totalPresentValue)}</dd>
-                  <dt className="text-meta">present value</dt>
-                </div>
-                <div className="text-right">
-                  <dd className={cn("num-metric text-sm", pendingPhysician > 0 && "text-amber-700")}>{pendingPhysician}</dd>
-                  <dt className="text-meta">MD pending</dt>
-                </div>
-                {data.reviewFindings.length > 0 && (
-                  <div className="text-right">
-                    <dd className="num-metric text-sm text-amber-700">{data.reviewFindings.length}</dd>
-                    <dt className="text-meta">findings</dt>
-                  </div>
-                )}
-              </dl>
+          <div className="flex items-center gap-2">
+            {hasPlan && <CaseAssistant caseId={data.id} canEdit={can("case.edit")} onFocus={focusEntity} />}
+            {can("futurecare.edit") && (
+              <button className="btn-primary px-3 py-1.5 text-sm" disabled={busy === "gen"} onClick={() => call(`/api/cases/${data.id}/generate`, "POST", undefined, "gen")}>
+                {busy === "gen" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                {hasPlan ? "Re-run AI Pipeline" : "Run AI Pipeline"}
+              </button>
             )}
-            <div className="flex items-center gap-2">
-              {hasPlan && <CaseAssistant caseId={data.id} canEdit={can("case.edit")} onFocus={focusEntity} />}
-              {can("futurecare.edit") && (
-                <button className="btn-primary px-3 py-1.5 text-sm" disabled={busy === "gen"} onClick={() => call(`/api/cases/${data.id}/generate`, "POST", undefined, "gen")}>
-                  {busy === "gen" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
-                  {hasPlan ? "Re-run AI Pipeline" : "Run AI Pipeline"}
-                </button>
-              )}
-            </div>
           </div>
         </div>
 
-        {/* Workflow sequence + secondary workspaces */}
-        <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4">
-          <ol className="flex items-center gap-0.5 overflow-x-auto" aria-label="Case workflow">
-            {FLOW.map((s, i) => {
-              const sIdx = STAGES.indexOf(s.stage);
-              const state = sIdx < stageIdx ? "done" : sIdx === stageIdx ? "current" : "next";
-              const open = tab === s.tab;
-              return (
-                <li key={s.tab} className="flex shrink-0 items-center">
-                  {i > 0 && <span aria-hidden className={cn("mx-0.5 h-px w-3", state === "next" ? "bg-ink-200" : "bg-brand-300")} />}
-                  <button
-                    onClick={() => setTab(s.tab)}
-                    aria-current={open ? "page" : undefined}
-                    title={s.warn ? `${s.count} item${s.count === 1 ? "" : "s"} awaiting physician review` : undefined}
-                    className={cn(
-                      "focusable flex items-center gap-1.5 whitespace-nowrap rounded-md border-b-2 px-2 py-1.5 text-[13px] transition-colors",
-                      open ? "border-brand-600 font-semibold text-brand-800" : "border-transparent",
-                      !open && (state === "next" ? "text-ink-400 hover:text-ink-700" : "text-ink-600 hover:text-ink-900"),
-                    )}
-                  >
+        {/* Full-width case metrics band */}
+        {hasPlan && (
+          <dl className="mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-ink-200 bg-ink-200 sm:grid-cols-5" aria-label="Case metrics">
+            {[
+              { label: "Future Care Items", value: String(data.futureCareItems.length), cls: "" },
+              { label: "Lifetime (Undiscounted)", value: formatMoney(totals.totalLifetime), cls: "" },
+              { label: "Present Value", value: formatMoney(totals.totalPresentValue), cls: "text-brand-800" },
+              { label: "Physician Pending", value: String(pendingPhysician), cls: pendingPhysician > 0 ? "text-amber-700" : "" },
+              { label: "Open Findings", value: String(data.reviewFindings.length), cls: data.reviewFindings.length > 0 ? "text-amber-700" : "" },
+            ].map((m) => (
+              <div key={m.label} className="bg-white px-4 py-2">
+                <dt className="text-meta">{m.label}</dt>
+                <dd className={cn("num-metric mt-0.5 text-xl", m.cls)}>{m.value}</dd>
+              </div>
+            ))}
+          </dl>
+        )}
+
+        {/* Full-width workflow pipeline — each stage a demarcated segment with
+            its own progress rail, so the sequence reads as distinct steps. */}
+        <ol className="mt-3 flex w-full items-stretch overflow-x-auto" aria-label="Case workflow">
+          {FLOW.map((s, i) => {
+            const sIdx = STAGES.indexOf(s.stage);
+            const state = sIdx < stageIdx ? "done" : sIdx === stageIdx ? "current" : "next";
+            const open = tab === s.tab;
+            return (
+              <li key={s.tab} className={cn("flex min-w-[7.5rem] flex-1 items-stretch", i > 0 && "border-l border-ink-200")}>
+                <button
+                  onClick={() => setTab(s.tab)}
+                  aria-current={open ? "page" : undefined}
+                  title={s.warn ? `${s.count} item${s.count === 1 ? "" : "s"} awaiting physician review` : undefined}
+                  className={cn(
+                    "focusable flex w-full flex-col justify-between gap-1.5 px-3 pb-0 pt-1.5 text-[13px] transition-colors",
+                    open ? "bg-brand-50/60 font-semibold text-brand-800" : state === "next" ? "text-ink-400 hover:bg-ink-50 hover:text-ink-700" : "text-ink-600 hover:bg-ink-50 hover:text-ink-900",
+                  )}
+                >
+                  <span className="flex items-center gap-1.5 whitespace-nowrap">
                     <span
                       aria-hidden
                       className={cn(
@@ -294,27 +284,39 @@ export function CaseWorkspace({
                       {state === "done" && !s.warn ? "✓" : s.n}
                     </span>
                     {s.label}
-                    {typeof s.count === "number" && s.count > 0 && <span className="text-[11px] text-ink-400">{s.count}</span>}
-                  </button>
-                </li>
-              );
-            })}
-          </ol>
-          <div className="flex items-center gap-0.5" role="navigation" aria-label="Case workspaces">
-            {SECONDARY.map((t) => (
-              <button
-                key={t.id}
-                onClick={() => setTab(t.id)}
-                aria-current={tab === t.id ? "page" : undefined}
-                className={cn(
-                  "focusable flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border-b-2 px-2 py-1.5 text-[13px] transition-colors",
-                  tab === t.id ? "border-brand-600 font-semibold text-brand-800" : "border-transparent text-ink-500 hover:text-ink-800",
-                )}
-              >
-                <t.icon className="h-3.5 w-3.5" aria-hidden /> {t.label}
-              </button>
-            ))}
-          </div>
+                    {typeof s.count === "number" && s.count > 0 && <span className="text-[11px] font-normal text-ink-400">{s.count}</span>}
+                  </span>
+                  {/* Per-segment progress rail */}
+                  <span
+                    aria-hidden
+                    className={cn(
+                      "block h-[3px] w-full rounded-t-full",
+                      s.warn ? "bg-amber-400" : state === "done" ? "bg-brand-400" : state === "current" ? "bg-brand-600" : "bg-ink-200",
+                      open && "bg-brand-600",
+                    )}
+                  />
+                </button>
+              </li>
+            );
+          })}
+        </ol>
+
+        {/* Secondary workspaces — a visually separate band of their own */}
+        <div className="-mx-6 flex items-center gap-1 border-t border-ink-200 bg-ink-50/70 px-6 py-1" role="navigation" aria-label="Case workspaces">
+          <span className="text-label mr-2">Workspaces</span>
+          {SECONDARY.map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              aria-current={tab === t.id ? "page" : undefined}
+              className={cn(
+                "focusable flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1 text-[13px] transition-colors",
+                tab === t.id ? "bg-white font-semibold text-brand-800 shadow-sm ring-1 ring-ink-200" : "text-ink-500 hover:bg-white/70 hover:text-ink-800",
+              )}
+            >
+              <t.icon className="h-3.5 w-3.5" aria-hidden /> {t.label}
+            </button>
+          ))}
         </div>
       </div>
 
