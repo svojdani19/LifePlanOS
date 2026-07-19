@@ -38,8 +38,8 @@ function DashboardTabs({ view }: { view: "firm" | "me" }) {
   );
   return (
     <div className="mt-4 inline-flex items-center gap-1 rounded-xl bg-ink-100 p-1" role="tablist" aria-label="Dashboard view">
-      {tab("/dashboard", "Firm Dashboard", view === "firm")}
-      {tab("/dashboard?view=me", "My Dashboard", view === "me")}
+      {tab("/dashboard", "My Dashboard", view === "me")}
+      {tab("/dashboard?view=firm", "Firm Dashboard", view === "firm")}
     </div>
   );
 }
@@ -49,7 +49,8 @@ export default async function DashboardPage({ searchParams }: { searchParams?: {
   const firmId = ctx.firm.id;
   const tier = ctx.subscription?.tier ?? "SOLO";
   const limits = effectiveLimits(tier, ctx.subscription ?? undefined);
-  const view: "firm" | "me" = searchParams?.view === "me" ? "me" : "firm";
+  // My Dashboard is the primary view; the firm-wide view sits behind ?view=firm.
+  const view: "firm" | "me" = searchParams?.view === "firm" ? "firm" : "me";
 
   // ── My Dashboard — scoped to the signed-in user's real assignments:
   //    cases they created or are the preparing physician for, plus review
