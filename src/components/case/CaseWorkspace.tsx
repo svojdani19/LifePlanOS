@@ -275,7 +275,7 @@ export function CaseWorkspace({
                       aria-hidden
                       className={cn(
                         "grid h-[18px] w-[18px] shrink-0 place-items-center rounded-full text-[10px] font-semibold",
-                        state === "done" && "bg-brand-100 text-brand-800",
+                        state === "done" && "bg-emerald-100 text-emerald-800",
                         state === "current" && "bg-brand-600 text-white",
                         state === "next" && "bg-ink-100 text-ink-400",
                         s.warn && "bg-amber-100 text-amber-800",
@@ -291,7 +291,7 @@ export function CaseWorkspace({
                     aria-hidden
                     className={cn(
                       "block h-[3px] w-full rounded-t-full",
-                      s.warn ? "bg-amber-400" : state === "done" ? "bg-brand-400" : state === "current" ? "bg-brand-600" : "bg-ink-200",
+                      s.warn ? "bg-amber-400" : state === "done" ? "bg-emerald-500" : state === "current" ? "bg-brand-600" : "bg-ink-200",
                       open && "bg-brand-600",
                     )}
                   />
@@ -302,15 +302,15 @@ export function CaseWorkspace({
         </ol>
 
         {/* Secondary workspaces — a visually separate band of their own */}
-        <div className="-mx-6 flex items-center gap-1 border-t border-ink-200 bg-ink-50/70 px-6 py-1" role="navigation" aria-label="Case workspaces">
-          <span className="text-label mr-2">Workspaces</span>
+        <div className="-mx-6 flex items-center border-t border-ink-200 bg-ink-50/70 px-6 py-1" role="navigation" aria-label="Case workspaces">
+          <span className="text-label mr-4 shrink-0">Workspaces</span>
           {SECONDARY.map((t) => (
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
               aria-current={tab === t.id ? "page" : undefined}
               className={cn(
-                "focusable flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1 text-[13px] transition-colors",
+                "focusable flex flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1 text-[13px] transition-colors",
                 tab === t.id ? "bg-white font-semibold text-brand-800 shadow-sm ring-1 ring-ink-200" : "text-ink-500 hover:bg-white/70 hover:text-ink-800",
               )}
             >
