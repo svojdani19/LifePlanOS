@@ -20,11 +20,158 @@ const STAGE_LABELS: Record<string, string> = {
   ARCHIVED: "Archived",
 };
 
-export default async function DashboardPage() {
+// Segmented view switch — the firm-wide dashboard and the signed-in user's
+// personal dashboard (their cases can be a subset of the firm's).
+function DashboardTabs({ view }: { view: "firm" | "me" }) {
+  const tab = (href: string, label: string, active: boolean) => (
+    <Link
+      href={href}
+      aria-current={active ? "page" : undefined}
+      className={
+        active
+          ? "rounded-lg bg-white px-3 py-1.5 text-sm font-semibold text-brand-800 shadow-sm"
+          : "rounded-lg px-3 py-1.5 text-sm font-medium text-ink-500 hover:text-ink-800"
+      }
+    >
+      {label}
+    </Link>
+  );
+  return (
+    <div className="mt-4 inline-flex items-center gap-1 rounded-xl bg-ink-100 p-1" role="tablist" aria-label="Dashboard view">
+      {tab("/dashboard", "Firm Dashboard", view === "firm")}
+      {tab("/dashboard?view=me", "My Dashboard", view === "me")}
+    </div>
+  );
+}
+
+export default async function DashboardPage({ searchParams }: { searchParams?: { view?: string } }) {
   const ctx = await requireContext();
   const firmId = ctx.firm.id;
   const tier = ctx.subscription?.tier ?? "SOLO";
   const limits = effectiveLimits(tier, ctx.subscription ?? undefined);
+  const view: "firm" | "me" = searchParams?.view === "me" ? "me" : "firm";
+
+  // ── My Dashboard — scoped to the signed-in user's real assignments:
+  //    cases they created or are the preparing physician for, plus review
+  //    findings explicitly assigned to them. Nothing is invented.
+  if (view === "me") {
+    const uid = ctx.user.id;
+    const myCases = await prisma.case.findMany({
+      where: { firmId, OR: [{ createdById: uid }, { preparingPhysicianId: uid }], status: { notIn: ["CLOSED", "ARCHIVED"] } },
+      orderBy: { updatedAt: "desc" },
+      select: { id: true, clientName: true, caseNumber: true, status: true, updatedAt: true, preparingPhysicianId: true },
+    });
+    const myCaseIds = myCases.map((c) => c.id);
+    const [pendingMd, blocking, assignedToMe, myActivity] = await Promise.all([
+      myCaseIds.length
+        ? prisma.futureCareItem.groupBy({ by: ["caseId"], where: { caseId: { in: myCaseIds }, physicianStatus: "PENDING", supersededAt: null }, _count: true })
+        : Promise.resolve([] as { caseId: string; _count: number }[]),
+      myCaseIds.length
+        ? prisma.validationFinding.groupBy({ by: ["caseId"], where: { caseId: { in: myCaseIds }, exportBlocking: true }, _count: true })
+        : Promise.resolve([] as { caseId: string; _count: number }[]),
+      prisma.attentionItem.findMany({
+        where: { firmId, assignedUserId: uid, status: { in: ["OPEN", "IN_REVIEW"] } },
+        orderBy: { createdAt: "desc" },
+        take: 8,
+        select: { id: true, caseId: true, title: true, severity: true },
+      }),
+      prisma.auditLog.findMany({ where: { firmId, userId: uid }, orderBy: { createdAt: "desc" }, take: 6, select: { id: true, action: true, createdAt: true } }),
+    ]);
+    const mdByCase = new Map(pendingMd.map((p) => [p.caseId, p._count]));
+    const blockingByCase = new Map(blocking.map((b) => [b.caseId, b._count]));
+    const caseNameById = new Map(myCases.map((c) => [c.id, c.clientName]));
+    const totalMd = pendingMd.reduce((s, p) => s + p._count, 0);
+    const totalBlocking = blocking.reduce((s, b) => s + b._count, 0);
+
+    return (
+      <div>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="h-page">My Dashboard</h1>
+            <p className="mt-1 text-sm text-ink-600">{ctx.user.name} · {ctx.firm.name}</p>
+          </div>
+          <Link href="/cases" className="btn-primary"><FolderKanban className="h-4 w-4" /> Go to Cases</Link>
+        </div>
+        <DashboardTabs view="me" />
+
+        {/* My metrics */}
+        <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {[
+            { label: "My Active Cases", value: myCases.length, sub: "created or preparing" },
+            { label: "Awaiting My Physician Review", value: totalMd, sub: "items on my cases" },
+            { label: "Blocking Findings", value: totalBlocking, sub: "on my cases" },
+            { label: "Findings Assigned to Me", value: assignedToMe.length, sub: "open / in review" },
+          ].map((k) => (
+            <div key={k.label} className="card p-4">
+              <span className="text-meta">{k.label}</span>
+              <div className="mt-1.5 flex items-baseline gap-1.5">
+                <span className="num-metric text-2xl">{k.value}</span>
+                <span className="text-xs text-ink-500">{k.sub}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* My cases */}
+        <h2 className="text-label mt-6">My Cases</h2>
+        {myCases.length === 0 ? (
+          <div className="card mt-2 p-5 text-sm text-ink-500">No cases are assigned to you yet — cases you create, or where you are the preparing physician, appear here.</div>
+        ) : (
+          <div className="card mt-2 overflow-hidden">
+            <table className="w-full text-sm">
+              <thead className="border-b border-ink-200 bg-ink-50 text-left text-xs uppercase tracking-wide text-ink-500">
+                <tr><th className="px-4 py-2.5 font-medium">Case</th><th className="px-4 py-2.5 font-medium">Stage</th><th className="px-4 py-2.5 font-medium">MD pending</th><th className="px-4 py-2.5 font-medium">Blocking</th><th className="px-4 py-2.5 font-medium">Updated</th></tr>
+              </thead>
+              <tbody className="divide-y divide-ink-100">
+                {myCases.map((c) => (
+                  <tr key={c.id} className="hover:bg-ink-50">
+                    <td className="px-4 py-2.5">
+                      <Link href={`/cases/${c.id}`} className="font-medium text-brand-700 hover:underline">{c.clientName}</Link>
+                      <span className="ml-2 font-mono text-xs text-ink-400">{c.caseNumber}</span>
+                      {c.preparingPhysicianId === uid && <Badge tone="info" className="ml-2">preparing physician</Badge>}
+                    </td>
+                    <td className="px-4 py-2.5"><Badge tone="neutral">{c.status.toLowerCase().replace(/_/g, " ")}</Badge></td>
+                    <td className="px-4 py-2.5 tabular-nums">{mdByCase.get(c.id) ?? 0}</td>
+                    <td className="px-4 py-2.5 tabular-nums">{blockingByCase.get(c.id) ? <span className="font-medium text-red-700">{blockingByCase.get(c.id)}</span> : 0}</td>
+                    <td className="px-4 py-2.5 text-ink-500">{formatDate(c.updatedAt)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        <div className="mt-6 grid gap-4 lg:grid-cols-2">
+          {/* Findings assigned to me */}
+          <div className="card p-5">
+            <h3 className="h-section">Findings Assigned to Me</h3>
+            <ul className="mt-3 space-y-2">
+              {assignedToMe.length === 0 && <li className="text-sm text-ink-500">No review findings are assigned to you.</li>}
+              {assignedToMe.map((f) => (
+                <li key={f.id} className="flex items-center justify-between gap-2 text-sm">
+                  <Link href={`/cases/${f.caseId}`} className="min-w-0 truncate font-medium text-brand-700 hover:underline">{f.title}</Link>
+                  <span className="shrink-0 text-xs text-ink-500">{caseNameById.get(f.caseId) ?? "case"} · {f.severity.toLowerCase()}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+          {/* My recent activity */}
+          <div className="card p-5">
+            <h3 className="h-section">My Recent Activity</h3>
+            <ul className="mt-3 space-y-2">
+              {myActivity.length === 0 && <li className="text-sm text-ink-500">No activity yet.</li>}
+              {myActivity.map((log) => (
+                <li key={log.id} className="flex items-center justify-between gap-2 text-sm">
+                  <span className="text-ink-600">{log.action}</span>
+                  <span className="shrink-0 text-xs text-ink-400">{formatDate(log.createdAt)}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   const [active, seats, byStage, aiThisPeriod, recent] = await Promise.all([
     activeCaseCount(firmId),
@@ -189,6 +336,7 @@ export default async function DashboardPage() {
           <FolderKanban className="h-4 w-4" /> Go to Cases
         </Link>
       </div>
+      <DashboardTabs view="firm" />
 
       {/* ── Today's Work — actionable queues first ─────────────────────────── */}
       <h2 className="text-label mt-6">Today&apos;s Work</h2>
