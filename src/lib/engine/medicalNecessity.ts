@@ -292,7 +292,13 @@ export function buildRecommendationDossier(
   // treating-provider opinions → physician documentation. Verbatim, user-entered.
   for (const iv of patientReports) functionalLimitations.push({ text: `Patient reports ${lc(cleanClause(iv.text, 150))}${iv.quote ? ` — “${iv.quote}”` : ""}`, source: iv.category ? `patient interview · ${iv.category}` : "patient interview" });
   for (const iv of providerOpinions) physicianDocumentation.push({ text: `${iv.providerName ? `${iv.providerName}` : "Treating provider"}: ${cleanClause(iv.text, 160)}${iv.quote ? ` — “${iv.quote}”` : ""}`, source: "provider interview" });
-  const guidelineEvidence: EvidenceItem[] = guidelines.filter((g) => g.title).map((g) => ({ text: `${g.quote ? `“${g.quote}” — ` : ""}${g.title}${g.year ? ` (${g.year})` : ""}`, source: g.relevance?.evidenceLabel ?? "clinical guideline" }));
+  // Guidelines pass through the SAME anatomy stack as record evidence and
+  // literature: coarse region, spinal level, laterality, and within-joint
+  // sub-structure. A condition-level guideline (e.g. rotator-cuff CPG) never
+  // surfaces under an item addressing a different structure of that joint.
+  const guidelineEvidence: EvidenceItem[] = guidelines
+    .filter((g) => g.title && regionOk(`${g.title} ${g.quote ?? ""}`))
+    .map((g) => ({ text: `${g.quote ? `“${g.quote}” — ` : ""}${g.title}${g.year ? ` (${g.year})` : ""}`, source: g.relevance?.evidenceLabel ?? "clinical guideline" }));
   const diagnoses: EvidenceItem[] = condition ? [{ text: `${condition.name}${condition.relatedness ? ` — ${condition.relatedness.replace(/_/g, " ").toLowerCase()}` : ""}`, source: condition.reasoning ? "causation analysis" : null }] : [];
 
   // ── Gated, relevance-ranked literature (recommendation-centric) ─────────────

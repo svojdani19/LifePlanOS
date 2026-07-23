@@ -662,3 +662,39 @@ describe("Reliability — within-joint sub-structure specificity (all joints)", 
     expect(accepted.some((a2) => /rotator cuff repair/i.test(a2.title))).toBe(true);
   });
 });
+
+describe("Reliability — guidelines obey the full anatomy stack", () => {
+  it("excludes a guideline for a different spinal level / joint structure from the item's dossier", () => {
+    const cuffDxWithLabralCpg: typeof kneeStrong = {
+      id: "cond-cuff2", name: "Right rotator cuff tear (supraspinatus)", relatedness: "RELATED",
+      supportingRecords: "records", objectiveEvidence: "Full-thickness supraspinatus tear on MRI",
+      evidenceSources: [{ filename: "mri.pdf", page: 2, quote: "full-thickness supraspinatus tear" }],
+      missingInfo: null, reasoning: "Attributed.", physicianConfirmed: false,
+      socAnalysis: { guidelines: [
+        { title: "SLAP labral repair clinical practice guideline", year: "2024", quote: "Labral repair is indicated for type II SLAP lesions.", relevance: { evidenceLevel: 1, evidenceLabel: "Clinical practice guideline" } },
+        { title: "Rotator cuff tear management guideline", year: "2023", quote: "Repair is recommended for full-thickness tears.", relevance: { evidenceLevel: 1, evidenceLabel: "Clinical practice guideline" } },
+      ] },
+    };
+    const a = buildReasoningAssessment(tka({ service: "Right rotator cuff repair", category: "ORTHOPEDIC_SURGERY" }), [cuffDxWithLabralCpg], [], kase);
+    const g = a.supportingGuidelineAssessments.map((x) => x.title).join(" | ");
+    expect(g).toMatch(/rotator cuff tear management/i);
+    expect(g).not.toMatch(/SLAP labral/i);
+  });
+
+  it("excludes a cervical guideline from a lumbar recommendation", () => {
+    const lumbarDx: typeof kneeStrong = {
+      id: "cond-lum2", name: "Lumbar stenosis L4-L5", relatedness: "RELATED",
+      supportingRecords: "records", objectiveEvidence: "L4-L5 stenosis on MRI",
+      evidenceSources: [{ filename: "mri.pdf", page: 5, quote: "L4-L5 central stenosis" }],
+      missingInfo: null, reasoning: "Attributed.", physicianConfirmed: false,
+      socAnalysis: { guidelines: [
+        { title: "Cervical radiculopathy practice guideline", year: "2022", quote: "ACDF is indicated for refractory cervical radiculopathy.", relevance: { evidenceLevel: 1, evidenceLabel: "Clinical practice guideline" } },
+        { title: "Lumbar stenosis surgical guideline", year: "2023", quote: "Decompression is indicated for symptomatic stenosis.", relevance: { evidenceLevel: 1, evidenceLabel: "Clinical practice guideline" } },
+      ] },
+    };
+    const a = buildReasoningAssessment(tka({ service: "Lumbar decompression / fusion", category: "NEUROSURGERY" }), [lumbarDx], [], kase);
+    const g = a.supportingGuidelineAssessments.map((x) => x.title).join(" | ");
+    expect(g).toMatch(/lumbar stenosis/i);
+    expect(g).not.toMatch(/cervical radiculopathy/i);
+  });
+});
