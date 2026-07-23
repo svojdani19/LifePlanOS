@@ -430,3 +430,81 @@ describe("CRE v1 §7–§10 — findings for duration, gaps, and confidence", ()
     expect(good.lifecycleStatus).toBe("VALIDATED");
   });
 });
+
+// ═════════════════════════════════════════════════════════════════════════════
+// Reasoning Reliability sprint tests
+// ═════════════════════════════════════════════════════════════════════════════
+
+describe("Reliability — evidence sufficiency (Phase 2)", () => {
+  it("states 'insufficient supporting evidence' with exactly what is missing", () => {
+    const a = buildReasoningAssessment(tka({ physicianStatus: "PENDING" }), [kneeBare], [], kase);
+    expect(a.evidenceSufficiency.sufficient).toBe(false);
+    expect(a.evidenceSufficiency.explanation).toMatch(/insufficient supporting evidence/i);
+    expect(a.evidenceSufficiency.missing.join(" ")).toMatch(/imaging|objective/i);
+    expect(a.lifecycleStatus).not.toBe("VALIDATED"); // gate feeds review, never silent validation
+  });
+
+  it("passes the threshold when objective, imaging, record, and provider evidence exist", () => {
+    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase);
+    expect(a.evidenceSufficiency.sufficient).toBe(true);
+    expect(a.evidenceSufficiency.score).toBeGreaterThanOrEqual(a.evidenceSufficiency.threshold);
+    expect(a.evidenceSufficiency.missing.length).toBeLessThan(3);
+  });
+});
+
+describe("Reliability — reasoning chain (Phase 1/6)", () => {
+  it("stores a complete complaint→approval chain where every node declares its basis and rationale", () => {
+    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase);
+    expect(a.reasoningChain.length).toBe(12);
+    expect(a.reasoningChain.map((n) => n.stage)[0]).toMatch(/complaint/i);
+    expect(a.reasoningChain.map((n) => n.stage).at(-1)).toMatch(/physician/i);
+    for (const n of a.reasoningChain) {
+      expect(["documented_fact", "inference", "assumption", "workflow"]).toContain(n.basis);
+      expect(n.rationale.length).toBeGreaterThan(10); // every edge explains itself
+    }
+    // Facts vs inferences never blurred: necessity/recommendation are inferences.
+    expect(a.reasoningChain.find((n) => /necessity/i.test(n.stage))?.basis).toBe("inference");
+    expect(a.reasoningChain.find((n) => /^imaging/i.test(n.stage))?.basis).toBe("documented_fact");
+  });
+
+  it("records an absent step as null content — never fabricated", () => {
+    const a = buildReasoningAssessment(tka({ physicianStatus: "PENDING" }), [kneeBare], [], kase);
+    const imaging = a.reasoningChain.find((n) => /^imaging/i.test(n.stage));
+    expect(imaging?.content).toBeNull();
+  });
+});
+
+describe("Reliability — self-critique (Phase 4)", () => {
+  it("answers why / why-not / what-would-change and names its assumptions", () => {
+    const a = buildReasoningAssessment(tka({ service: "Attendant care", category: "ATTENDANT_CARE", isLifetime: true, frequencyPerYear: 4, physicianStatus: "PENDING" }), [kneeBare], [], kase);
+    const c = a.selfCritique;
+    expect(c.whyRecommended.length).toBeGreaterThan(40);
+    expect(c.whyPossiblyWrong.length).toBeGreaterThan(0);
+    expect(c.recordsThatWouldChangeConfidence.length).toBeGreaterThan(0);
+    expect(c.assumptions.join(" ")).toMatch(/frequency|lifetime/i);
+  });
+});
+
+describe("Reliability — confidence vector (Phase 7)", () => {
+  it("scores ten dimensions independently — literature cannot mask absent patient evidence", () => {
+    const a = buildReasoningAssessment(tka({ physicianStatus: "PENDING", citation: strongLiterature }), [kneeBare], [], kase);
+    const v = a.confidenceVector;
+    expect(Object.keys(v).length).toBe(10);
+    expect(v.literatureSupport).toBeGreaterThan(50); // strong literature
+    expect(v.objectiveEvidence).toBeLessThan(30); // but no patient-specific objective evidence
+    expect(v.physicianReview).toBe(50); // pending
+  });
+});
+
+describe("Reliability — alternative explanations (Phase 3)", () => {
+  it("surfaces same-region competing diagnoses from the case's own causation map only", () => {
+    const preexisting: typeof kneeBare = { ...kneeBare, id: "cond-preex", name: "Degenerative arthritis of the right knee (pre-existing)", relatedness: "PREEXISTING_UNRELATED" };
+    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong, preexisting], chronology, kase);
+    expect(a.alternativeExplanations.length).toBe(1);
+    expect(a.alternativeExplanations[0].name).toMatch(/pre-existing/i);
+    expect(a.alternativeExplanations[0].whyConsidered).toMatch(/unrelated condition/i);
+    // No alternatives invented when none exist in the map.
+    const solo = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase);
+    expect(solo.alternativeExplanations.length).toBe(0);
+  });
+});

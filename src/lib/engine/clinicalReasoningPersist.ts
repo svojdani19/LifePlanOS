@@ -61,6 +61,11 @@ const toRow = (a: ReasoningAssessment) => ({
   supportingGuidelineAssessments: j(a.supportingGuidelineAssessments),
   supportingLiteratureAssessments: j(a.supportingLiteratureAssessments),
   rejectedLiterature: j(a.rejectedLiterature),
+  reasoningChain: j(a.reasoningChain),
+  evidenceSufficiency: j(a.evidenceSufficiency),
+  selfCritique: j(a.selfCritique),
+  confidenceVector: j(a.confidenceVector),
+  alternativeExplanations: j(a.alternativeExplanations),
   literatureSynthesis: a.literatureSynthesis,
   residualUncertainty: a.residualUncertainty,
   evidenceStrength: a.evidenceStrength,
@@ -128,7 +133,7 @@ export async function persistCaseReasoning(caseId: string, firmId: string, opts:
         await prisma.clinicalReasoningAssessment.create({ data: { ...toRow(a), ...lineage, caseId, firmId, recommendationId: it.id } });
         continue;
       }
-      if (prior.materialHash === a.materialHash && prior.status !== "ERROR") continue; // version-aware cache hit
+      if (prior.materialHash === a.materialHash && prior.status !== "ERROR" && prior.reasoningChain != null) continue; // cache hit (recompute once for rows predating the reliability payload)
 
       // Material change (§17): supersede the prior row (preserve it), create a
       // new one, and — when the item was physician-approved — force re-review

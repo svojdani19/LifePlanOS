@@ -72,6 +72,68 @@ export interface UnknownItem {
 
 export interface RejectedCitation { title: string; pmid?: string; reason: string }
 
+// ── Reasoning Reliability sprint ─────────────────────────────────────────────
+// Everything below exists to answer one physician question: "WHY did the AI
+// reach this conclusion?" — with facts, inferences, and assumptions never
+// blurred, and insufficiency stated instead of papered over.
+
+/** One node of the immutable reasoning chain. `basis` separates what the
+ *  record DOCUMENTS from what the engine INFERRED or ASSUMED. `rationale` is
+ *  the edge explanation: why this node follows from the previous one. */
+export interface ChainNode {
+  stage: string;
+  content: string | null; // null = honestly absent (never fabricated)
+  source: string | null;
+  basis: "documented_fact" | "inference" | "assumption" | "workflow";
+  rationale: string;
+}
+
+/** Per-dimension evidence sufficiency with an explicit threshold verdict. */
+export interface EvidenceSufficiency {
+  objectiveFindings: number; // count of independent objective items
+  imagingSupport: boolean;
+  examSupport: boolean;
+  recordSupport: number; // page-cited sources on the mapped diagnosis
+  providerConsensus: boolean; // treating documentation / physician action on file
+  chronologyConsistency: boolean; // events in the region's timeline support the course
+  conflictingEvidence: number;
+  score: number; // 0-100, deterministic
+  sufficient: boolean; // score >= threshold
+  threshold: number;
+  missing: string[]; // exactly what evidence is missing
+  explanation: string;
+}
+
+/** The engine's structured critique of its own recommendation (Phase 4). */
+export interface SelfCritique {
+  whyRecommended: string;
+  whyPossiblyWrong: string[];
+  evidenceAgainst: string[];
+  recordsThatWouldChangeConfidence: string[];
+  alternativeRecommendation: string | null;
+  assumptions: string[]; // required but not documented
+  inferredNotDocumented: string[]; // engine inferences vs explicit documentation
+}
+
+/** Ten independent confidence dimensions — never collapsed to one number. */
+export interface ConfidenceVector {
+  clinicalCertainty: number;
+  evidenceQuality: number;
+  objectiveEvidence: number;
+  literatureSupport: number;
+  guidelineSupport: number;
+  providerAgreement: number;
+  chronologyConsistency: number;
+  medicalNecessity: number;
+  contradictoryEvidence: number; // higher = MORE contradiction (a burden, not support)
+  physicianReview: number;
+}
+
+export interface AlternativeExplanation { name: string; relation: string; whyConsidered: string }
+
+export const SUFFICIENCY_THRESHOLD = 50; // configurable minimum evidence score
+
+
 // Set-level context computed across ALL of a case's recommendations, injected
 // into the per-item builder so one assessment can reason about its neighbours
 // (duplicates, staged replacements, alternatives) without a second model.
@@ -132,6 +194,11 @@ export interface ReasoningAssessment {
   supportingGuidelineAssessments: { title: string; claim: string }[];
   supportingLiteratureAssessments: LiteratureAssessment[];
   rejectedLiterature: RejectedCitation[];
+  reasoningChain: ChainNode[];
+  evidenceSufficiency: EvidenceSufficiency;
+  selfCritique: SelfCritique;
+  confidenceVector: ConfidenceVector;
+  alternativeExplanations: AlternativeExplanation[];
   literatureSynthesis: string;
   residualUncertainty: string;
   evidenceStrength: EvidenceStrength;
@@ -434,6 +501,141 @@ function durationOf(item: ReasoningItem, lifetimeWellSupported: boolean): { dura
   return { durationClass: "MULTI_YEAR", durationRationale: `A multi-year course (~${yrs} years) reflecting the expected treatment horizon for this condition.` };
 }
 
+
+// Standalone sufficiency pre-check used by the lifecycle gate (computed before
+// the full sufficiency object to keep derivation order stable).
+function evidenceSufficiencyStandalone(objectiveCount: number, se: { imaging: { text: string }[]; examination: { text: string }[]; physicianDocumentation: { text: string }[] }, physicianApproved: boolean): boolean {
+  let score = Math.min(30, objectiveCount * 10) + (se.imaging.length ? 15 : 0) + (se.examination.length ? 10 : 0) + (se.physicianDocumentation.length || physicianApproved ? 15 : 0);
+  return score >= 25; // conservative pre-gate; the persisted object carries the full verdict
+}
+
+// ── Reasoning Reliability builders (pure, deterministic) ─────────────────────
+
+/** Phase 2 — is there ENOUGH evidence, and if not, exactly what is missing? */
+export function assessEvidenceSufficiency(input: {
+  objectiveCount: number; imaging: boolean; exam: boolean; recordSources: number;
+  providerDoc: boolean; chronologyEvents: number; conflicts: number; region: string;
+  threshold?: number;
+}): EvidenceSufficiency {
+  const threshold = input.threshold ?? SUFFICIENCY_THRESHOLD;
+  let score = 0;
+  score += Math.min(30, input.objectiveCount * 10);
+  score += input.imaging ? 15 : 0;
+  score += input.exam ? 10 : 0;
+  score += Math.min(20, input.recordSources * 10);
+  score += input.providerDoc ? 15 : 0;
+  score += input.chronologyEvents > 0 ? 10 : 0;
+  score -= Math.min(20, input.conflicts * 10);
+  score = Math.max(0, Math.min(100, score));
+  const missing: string[] = [];
+  if (input.objectiveCount === 0) missing.push(`No independent objective finding for the ${input.region}.`);
+  if (!input.imaging) missing.push(`No imaging study of the ${input.region} on file.`);
+  if (!input.exam) missing.push("No documented physical examination findings.");
+  if (input.recordSources === 0) missing.push("No page-cited record sources on the mapped diagnosis.");
+  if (!input.providerDoc) missing.push("No treating-provider documentation or review on file.");
+  if (input.chronologyEvents === 0) missing.push(`No chronology events involving the ${input.region}.`);
+  const sufficient = score >= threshold;
+  return {
+    objectiveFindings: input.objectiveCount, imagingSupport: input.imaging, examSupport: input.exam,
+    recordSupport: input.recordSources, providerConsensus: input.providerDoc,
+    chronologyConsistency: input.chronologyEvents > 0, conflictingEvidence: input.conflicts,
+    score, sufficient, threshold, missing,
+    explanation: sufficient
+      ? `Evidence score ${score}/${threshold} required — sufficient to support a recommendation.`
+      : `Insufficient supporting evidence (score ${score}, threshold ${threshold}). Missing: ${missing.slice(0, 3).join(" ")}`,
+  };
+}
+
+/** Phase 6 — the immutable reasoning chain: each node cites its source and
+ *  declares its basis; each edge (rationale) explains WHY the next step
+ *  follows. Absent steps are recorded as null content, never invented. */
+export function buildChainNodes(a: {
+  service: string; diagnosis: string | null; region: string;
+  subjective: string | null; objective: string | null; imaging: string | null; exam: string | null;
+  functional: string | null; priorTreatment: string | null; response: string | null;
+  necessity: boolean; pv: number | null; physicianStatus: string; sources: number; conservativeExhausted: boolean;
+}): ChainNode[] {
+  const src = a.sources > 0 ? `${a.sources} page-cited record source${a.sources === 1 ? "" : "s"}` : null;
+  return [
+    { stage: "Complaint / symptoms", content: a.subjective, source: a.subjective ? "patient-reported, per record" : null, basis: "documented_fact", rationale: "The clinical course begins with the documented presenting complaints." },
+    { stage: "Objective findings", content: a.objective, source: src, basis: "documented_fact", rationale: "Independent findings corroborate (or fail to corroborate) the reported symptoms." },
+    { stage: "Imaging", content: a.imaging, source: src, basis: "documented_fact", rationale: "Imaging localizes the pathology to the region at issue." },
+    { stage: "Physical examination", content: a.exam, source: src, basis: "documented_fact", rationale: "Examination findings connect the pathology to clinical signs." },
+    { stage: "Diagnosis", content: a.diagnosis, source: a.diagnosis ? "case causation map" : null, basis: a.diagnosis ? "documented_fact" : "inference", rationale: a.diagnosis ? `The findings above support the mapped diagnosis in the ${a.region}.` : "No diagnosis in the relevant region maps to this recommendation." },
+    { stage: "Functional impairment", content: a.functional, source: a.functional ? "record / interview" : null, basis: a.functional ? "documented_fact" : "assumption", rationale: "The diagnosis matters clinically because of its documented effect on function." },
+    { stage: "Prior treatment & response", content: a.priorTreatment, source: src, basis: a.priorTreatment ? "documented_fact" : "assumption", rationale: a.response ?? "Prior treatment and its response calibrate what future care is reasonable." },
+    { stage: "Failed conservative care", content: a.conservativeExhausted ? "Documented conservative care has not resolved the impairment" : null, basis: a.conservativeExhausted ? "documented_fact" : "assumption", source: a.conservativeExhausted ? src : null, rationale: "Escalation is justified only after lower-intensity care is documented as insufficient." },
+    { stage: "Medical necessity", content: a.necessity ? "Structured necessity rationale assessed" : null, source: "reasoning assessment", basis: "inference", rationale: "Necessity is synthesized from the documented chain above — an engine inference, not a documented fact." },
+    { stage: "Recommendation", content: a.service, source: "care plan", basis: "inference", rationale: "The recommendation follows from necessity; it remains subject to physician authority." },
+    { stage: "Cost", content: a.pv != null ? `Present value ${Math.round(a.pv).toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 })}` : null, source: "cost engine", basis: "workflow", rationale: "Cost attaches only to a supportable recommendation, never the reverse." },
+    { stage: "Physician review", content: a.physicianStatus === "PENDING" ? null : a.physicianStatus.toLowerCase(), source: a.physicianStatus === "PENDING" ? null : "review ledger", basis: "workflow", rationale: "The physician's decision is the final authority over the chain." },
+  ];
+}
+
+/** Phase 4 — the engine critiques itself before physician review. */
+export function buildSelfCritique(a: {
+  service: string; diagnosis: string | null; weakening: WeakeningItem[]; unknowns: UnknownItem[];
+  lowerCostAlternative: string | null; frequencySupported: boolean; isLifetime: boolean;
+  lifetimeWellSupported: boolean; evidenceItems: ClassifiedEvidenceItem[]; necessity: string;
+}): SelfCritique {
+  const assumptions: string[] = [];
+  if (!a.frequencySupported) assumptions.push("The stated frequency assumes a treatment cadence that is not documented.");
+  if (a.isLifetime && !a.lifetimeWellSupported) assumptions.push("Lifetime duration assumes chronic progression beyond what the record establishes.");
+  const inferred = a.evidenceItems.filter((e) => e.epistemic !== "documented_fact").map((e) => `${e.category.replace(/_/g, " ")}: ${e.text.slice(0, 70)} (${e.epistemic.replace(/_/g, " ")})`);
+  return {
+    whyRecommended: a.necessity.slice(0, 300),
+    whyPossiblyWrong: a.weakening.filter((w) => w.materiality !== "LOW").map((w) => w.detail).slice(0, 4),
+    evidenceAgainst: a.weakening.filter((w) => w.source && w.source !== "case record").map((w) => `${w.detail} (${w.source})`).slice(0, 3),
+    recordsThatWouldChangeConfidence: a.unknowns.map((u) => u.suggestedAction).slice(0, 4),
+    alternativeRecommendation: a.lowerCostAlternative,
+    assumptions,
+    inferredNotDocumented: inferred.slice(0, 5),
+  };
+}
+
+/** Phase 7 — ten independent confidence dimensions. Displayed independently;
+ *  never collapsed into one number. */
+export function buildConfidenceVector(a: {
+  sufficiency: EvidenceSufficiency; bestLiteratureLevel: number | null; guideline: boolean;
+  providerDoc: boolean; weakeningCount: number; unknownsBlocking: boolean; physicianStatus: string;
+  necessityComplete: boolean; confidenceScore: number;
+}): ConfidenceVector {
+  const cap = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
+  return {
+    clinicalCertainty: cap(a.confidenceScore),
+    evidenceQuality: cap(a.sufficiency.score),
+    objectiveEvidence: cap(a.sufficiency.objectiveFindings * 25 + (a.sufficiency.imagingSupport ? 25 : 0)),
+    literatureSupport: cap(a.bestLiteratureLevel == null ? 0 : (11 - a.bestLiteratureLevel) * 10),
+    guidelineSupport: a.guideline ? 100 : 0,
+    providerAgreement: a.providerDoc ? 100 : 0,
+    chronologyConsistency: a.sufficiency.chronologyConsistency ? 100 : 0,
+    medicalNecessity: a.necessityComplete ? cap(60 + a.sufficiency.score * 0.4) : 30,
+    contradictoryEvidence: cap(a.weakeningCount * 20),
+    physicianReview: a.physicianStatus === "APPROVED" || a.physicianStatus === "MODIFIED" ? 100 : a.physicianStatus === "REJECTED" ? 0 : 50,
+  };
+}
+
+/** Phase 3 — competing diagnoses / alternative explanations, drawn ONLY from
+ *  the case's own causation map and pre-existing history (never invented). */
+export function deriveAlternativeExplanations(
+  region: string,
+  mappedId: string | null,
+  conditions: { id: string; name: string; relatedness?: string }[],
+): AlternativeExplanation[] {
+  return conditions
+    .filter((c) => c.id !== mappedId && bodyRegion(c.name) === region)
+    .map((c) => ({
+      name: c.name,
+      relation: (c.relatedness ?? "UNCLEAR").replace(/_/g, " ").toLowerCase(),
+      whyConsidered: `Same body region (${region.replace(/_/g, "/")}); ${
+        c.relatedness === "PREEXISTING_UNRELATED" || c.relatedness === "SUBSEQUENT_UNRELATED"
+          ? "an unrelated condition that could explain some or all of the symptoms attributed to the injury"
+          : "a related condition that could account for overlapping symptoms"
+      }.`,
+    }))
+    .slice(0, 4);
+}
+
 /** Build the structured reasoning assessment for one recommendation (pure). */
 export function buildReasoningAssessment(
   item: ReasoningItem,
@@ -548,9 +750,64 @@ export function buildReasoningAssessment(
   const structuralDefect = !mapping.matched || lateralityMismatch || codeCritical;
   const lifecycleStatus: AssessmentLifecycleStatus = structuralDefect
     ? "INVALID"
-    : !frequencySupported || (durationClass === "LIFETIME" && !lifetimeWellSupported) || blockingUnknowns || probabilityClassification === "INSUFFICIENTLY_SUPPORTED"
+    : !frequencySupported || (durationClass === "LIFETIME" && !lifetimeWellSupported) || blockingUnknowns || probabilityClassification === "INSUFFICIENTLY_SUPPORTED" || !evidenceSufficiencyStandalone(objectiveItems.length, se, physicianApproved)
       ? "NEEDS_REVIEW"
       : "VALIDATED";
+
+  // ── Reasoning Reliability payload ──────────────────────────────────────────
+  const regionEvents = chronology.filter((e) => bodyRegion(`${e.diagnosis ?? ""} ${e.procedure ?? ""} ${e.imagingFindings ?? ""}`) === region).length;
+  const sources = Array.isArray(condition?.evidenceSources) ? (condition!.evidenceSources as unknown[]).length : 0;
+  const evidenceSufficiencyObj = assessEvidenceSufficiency({
+    objectiveCount: objectiveItems.length,
+    imaging: se.imaging.length > 0,
+    exam: se.examination.length > 0,
+    recordSources: sources,
+    providerDoc: se.physicianDocumentation.length > 0 || physicianApproved,
+    chronologyEvents: regionEvents,
+    conflicts: dossier.contradictoryEvidence.length,
+    region,
+  });
+  const reasoningChain = buildChainNodes({
+    service: item.service,
+    diagnosis: condition?.name ?? null,
+    region,
+    subjective: sum(subjectiveItems),
+    objective: sum(se.objectiveFindings),
+    imaging: sum(se.imaging),
+    exam: sum(se.examination),
+    functional: dossier.functionalLink ? `${dossier.functionalLink.domain} — ${dossier.functionalLink.limitation}` : sum(se.functionalLimitations),
+    priorTreatment: sum(se.priorTreatment),
+    response: se.priorTreatment.length ? "Documented treatment has not resolved the impairment." : null,
+    necessity: true,
+    pv: item.presentValue ?? null,
+    physicianStatus: item.physicianStatus ?? "PENDING",
+    sources,
+    conservativeExhausted: se.priorTreatment.length > 0,
+  });
+  const selfCritique = buildSelfCritique({
+    service: item.service,
+    diagnosis: condition?.name ?? null,
+    weakening: weakeningEvidence,
+    unknowns,
+    lowerCostAlternative: item.lowerCostAlternative ?? null,
+    frequencySupported,
+    isLifetime: !!item.isLifetime,
+    lifetimeWellSupported,
+    evidenceItems,
+    necessity: dossier.medicalNecessity,
+  });
+  const confidenceVector = buildConfidenceVector({
+    sufficiency: evidenceSufficiencyObj,
+    bestLiteratureLevel: bestLevel,
+    guideline: se.guidelines.length > 0,
+    providerDoc: se.physicianDocumentation.length > 0,
+    weakeningCount: weakeningEvidence.filter((w) => w.materiality !== "LOW").length,
+    unknownsBlocking: blockingUnknowns,
+    physicianStatus: item.physicianStatus ?? "PENDING",
+    necessityComplete: dossier.medicalNecessity.length > 120,
+    confidenceScore: dossier.confidence.score,
+  });
+  const alternativeExplanations = deriveAlternativeExplanations(region, mapping.conditionId, conditions);
 
   const materialHash = hashStr([item.service, item.category ?? "", mapping.conditionId ?? "", region, laterality, purposeFor(item.category, !!item.isLifetime), freqN, durationClass, probabilityClassification, inclusionInTotalsStatus, item.startTrigger ?? "", item.replacesService ?? "", item.physicianStatus ?? "", evidenceStrength, setContext.conflicts.map((c) => c.type + c.otherService).sort().join(",")].join("|"));
 
@@ -593,6 +850,11 @@ export function buildReasoningAssessment(
     supportingGuidelineAssessments: se.guidelines.map((g) => ({ title: g.text.slice(0, 140), claim: "supports the diagnosis and the intervention" })),
     supportingLiteratureAssessments: literatureAssessments,
     rejectedLiterature,
+    reasoningChain,
+    evidenceSufficiency: evidenceSufficiencyObj,
+    selfCritique,
+    confidenceVector,
+    alternativeExplanations,
     literatureSynthesis,
     residualUncertainty,
     evidenceStrength,

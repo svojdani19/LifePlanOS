@@ -1116,6 +1116,13 @@ model ClinicalReasoningAssessment {
   unknowns                Json? // §14
   missingEvidenceRequests Json?
 
+  // Reasoning Reliability sprint — the full explainability payload:
+  reasoningChain          Json? // ordered nodes complaint→…→approval, each with source, basis (fact/inference/assumption) and per-edge rationale
+  evidenceSufficiency     Json? // per-dimension scores + threshold verdict + exactly what evidence is missing
+  selfCritique            Json? // why recommended / why possibly wrong / assumptions / inferred-vs-documented
+  confidenceVector        Json? // 10 independent confidence dimensions — never collapsed to one number
+  alternativeExplanations Json? // competing diagnoses / alternative explanations from the case's own causation map
+
   supportingGuidelineAssessments  Json? // §15 — thin refs to existing guidelines
   supportingLiteratureAssessments Json? // §15 — thin refs to existing citations (ACCEPTED after the relevance re-filter)
   rejectedLiterature              Json? // CRE v1 — citations excluded at assessment time: { title, pmid?, reason }[]
