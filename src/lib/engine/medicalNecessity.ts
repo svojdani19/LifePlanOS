@@ -17,7 +17,7 @@
 // and the client (Future Care panel) and is fully unit-testable.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { bodyRegion } from "./integrity";
+import { bodyRegion, anatomyCompatible } from "./integrity";
 import { citationCompatible, evidenceTier, selectPrimary, structuredConfidence, type ConfidenceLevel } from "./citationQuality";
 import { specialtyLens } from "./specialtyReasoning";
 
@@ -259,10 +259,17 @@ export function buildRecommendationDossier(
   // diagnosis just because both mention "fracture". Functional status is
   // whole-person and stays ungated.
   const dxRegion = bodyRegion(`${item.service} ${dxName}`);
+  const dxAnatomy = `${item.service} ${dxName}`;
   const regionOk = (text: string): boolean => {
     if (dxRegion === "general") return true;
     const r = bodyRegion(text);
-    return r === "general" || r === dxRegion;
+    if (r !== "general" && r !== dxRegion) return false;
+    // Within-region specificity for every anatomic region: spinal level
+    // (cervical/thoracic/lumbar/sacral) for spine, stated side for paired
+    // structures (knee, hip, shoulder, elbow, wrist/hand, ankle/foot).
+    // Unstated levels/sides get the benefit of the doubt.
+    if (r === dxRegion) return anatomyCompatible(dxRegion, dxAnatomy, text);
+    return true;
   };
 
   if (condition?.objectiveEvidence && regionOk(condition.objectiveEvidence)) objectiveFindings.push({ text: condition.objectiveEvidence, source: "causation analysis" });

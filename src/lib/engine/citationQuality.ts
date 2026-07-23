@@ -17,7 +17,7 @@
 //     literature quality, consistency, and missing information.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { bodyRegion, type BodyRegion } from "./integrity";
+import { bodyRegion, type BodyRegion, anatomyCompatible } from "./integrity";
 
 // ── Evidence hierarchy (sprint order, 1 = strongest) ─────────────────────────
 export const EVIDENCE_HIERARCHY: { level: number; label: string; re: RegExp }[] = [
@@ -116,6 +116,12 @@ export function citationCompatible(article: ArticleLike, ctx: ClinicalContext): 
   // 1 — region: when both sides are region-specific they must agree.
   if (artRegion !== "general" && ctxRegion !== "general" && artRegion !== ctxRegion) {
     return { compatible: false, reason: `body-region mismatch (article: ${artRegion.replace(/_/g, "/")}, recommendation: ${ctxRegion.replace(/_/g, "/")})` };
+  }
+  // 1b — within-region specificity: a cervical article cannot support a lumbar
+  // recommendation; a left-shoulder study cannot support right-shoulder care.
+  if (artRegion !== "general" && artRegion === ctxRegion && !anatomyCompatible(ctxRegion, `${ctx.service} ${ctx.diagnosis}`, hay)) {
+    const why = ctxRegion === "spine" ? "spinal-level mismatch (article and recommendation address different spinal regions)" : "laterality mismatch (article and recommendation address opposite sides)";
+    return { compatible: false, reason: why };
   }
   // 2 — procedure family: when both declare families, they must INTERSECT (a
   // combined service like "decompression / fusion" spans two families and is

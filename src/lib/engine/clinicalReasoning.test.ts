@@ -539,3 +539,80 @@ describe("Reliability — anatomy gate (cross-region evidence leakage)", () => {
     expect(a.lifecycleStatus).not.toBe("INVALID"); // knee dx itself is fine
   });
 });
+
+describe("Reliability — spine level specificity", () => {
+  it("parses sub-regions from words and level tokens, ignoring MRI signal terms", async () => {
+    const { spineSubRegions, spineCompatible } = await import("./integrity");
+    expect(spineSubRegions("C6-C7 disc herniation with cervical radiculitis")).toEqual(["cervical"]);
+    expect(spineSubRegions("L1 burst fracture with retropulsion")).toEqual(["lumbar"]);
+    expect(spineSubRegions("T12 compression fracture")).toEqual(["thoracic"]);
+    expect(spineSubRegions("thoracolumbar junction injury").sort()).toEqual(["lumbar", "thoracic"]);
+    // MRI signal terms are NOT thoracic levels.
+    expect(spineSubRegions("T1 hyperintense signal on T2-weighted images of the lumbar spine")).toEqual(["lumbar"]);
+    expect(spineCompatible("lumbar fusion L4-L5", "L1 burst fracture")).toBe(true);
+    expect(spineCompatible("cervical discectomy C5-C6", "L1 burst fracture")).toBe(false);
+    expect(spineCompatible("spinal surgery", "L1 burst fracture")).toBe(true); // unknown level → benefit of the doubt
+  });
+
+  it("keeps lumbar evidence out of a cervical recommendation's narrative and buckets", () => {
+    const cervicalDx: typeof kneeStrong = {
+      id: "cond-cerv", name: "Cervical disc herniation C6-C7 with radiculitis", relatedness: "RELATED",
+      supportingRecords: "records",
+      objectiveEvidence: "L1 burst fracture with retropulsion and canal compromise", // wrong level stored upstream
+      evidenceSources: [{ filename: "ct.pdf", page: 9, quote: "L1 burst fracture with retropulsion" }],
+      missingInfo: null, reasoning: "Attributed.", physicianConfirmed: false,
+    };
+    const a = buildReasoningAssessment(
+      tka({ service: "Cervical epidural steroid injection", category: "INJECTION" }),
+      [cervicalDx], [], kase,
+    );
+    expect(a.medicalNecessityRationale).not.toMatch(/L1 burst/i);
+    expect(a.evidenceItems.filter((e) => /L1 burst/i.test(e.text) && e.category !== "functional_limitation").length).toBe(0);
+  });
+
+  it("rejects literature addressing a different spinal level", () => {
+    const { rejected, accepted } = filterLiterature(
+      [
+        { title: "Outcomes of anterior cervical discectomy and fusion at C5-C6", supports: "x", applicability: "", evidenceLevel: 5, limitations: null },
+        { title: "Lumbar interbody fusion outcomes at L4-L5: a systematic review", supports: "x", applicability: "", evidenceLevel: 3, limitations: null },
+      ],
+      { service: "Lumbar decompression / fusion", diagnosis: "Lumbar stenosis L4-L5", adult: true },
+    );
+    expect(rejected.some((r) => /cervical/i.test(r.title))).toBe(true);
+    expect(rejected.find((r) => /cervical/i.test(r.title))?.reason).toMatch(/spinal-level mismatch/i);
+    expect(accepted.some((a2) => /lumbar interbody/i.test(a2.title))).toBe(true);
+  });
+});
+
+describe("Reliability — laterality across all paired regions", () => {
+  it("keeps left-knee evidence out of a right-knee recommendation", () => {
+    const rightKnee: typeof kneeStrong = {
+      ...kneeStrong, id: "cond-rk", name: "Post-traumatic osteoarthritis of the right knee",
+      objectiveEvidence: "Left knee: high-grade chondral loss on MRI", // wrong side stored upstream
+      evidenceSources: [{ filename: "mri.pdf", page: 4, quote: "left knee chondral loss, medial compartment" }],
+    };
+    const a = buildReasoningAssessment(tka({ service: "Right total knee arthroplasty" }), [rightKnee], [], kase);
+    expect(a.medicalNecessityRationale).not.toMatch(/left knee/i);
+    expect(a.evidenceItems.filter((e) => /left knee/i.test(e.text) && e.category !== "functional_limitation").length).toBe(0);
+  });
+
+  it("rejects literature addressing the opposite side of a paired structure", () => {
+    const { rejected, accepted } = filterLiterature(
+      [
+        { title: "Outcomes of left shoulder rotator cuff repair in manual laborers", supports: "x", applicability: "", evidenceLevel: 5, limitations: null },
+        { title: "Rotator cuff repair outcomes: a systematic review", supports: "x", applicability: "", evidenceLevel: 3, limitations: null },
+      ],
+      { service: "Right shoulder rotator cuff repair", diagnosis: "Right rotator cuff tear", adult: true },
+    );
+    expect(rejected.some((r) => /left shoulder/i.test(r.title))).toBe(true);
+    expect(rejected.find((r) => /left shoulder/i.test(r.title))?.reason).toMatch(/laterality mismatch/i);
+    expect(accepted.some((a2) => /systematic review/i.test(a2.title))).toBe(true); // side-neutral literature stays
+  });
+
+  it("gives bilateral and unstated sides the benefit of the doubt", async () => {
+    const { sideCompatible } = await import("./integrity");
+    expect(sideCompatible("right knee arthroplasty", "bilateral knee osteoarthritis")).toBe(true);
+    expect(sideCompatible("right knee arthroplasty", "knee osteoarthritis")).toBe(true);
+    expect(sideCompatible("right knee arthroplasty", "left knee osteoarthritis")).toBe(false);
+  });
+});

@@ -37,6 +37,76 @@ const REGION_PATTERNS: { region: BodyRegion; re: RegExp }[] = [
   { region: "elbow", re: /\b(elbow|olecranon|epicondyl|radial head)\b/i },
 ];
 
+// ── Spine sub-regions ────────────────────────────────────────────────────────
+// "Spine" alone is too coarse: cervical evidence must not anchor a lumbar
+// diagnosis. Sub-regions derive from both words (cervical/thoracic/lumbar/
+// sacral, incl. junctional terms) and level tokens (C1-C8, T1-T12, L1-L5,
+// S1-S5). MRI signal terms ("T1-weighted", "T2 hyperintense") are NOT levels.
+export type SpineSubRegion = "cervical" | "thoracic" | "lumbar" | "sacral";
+
+const MRI_SIGNAL = /\bT[12][- ]?(?:weighted|signal|hyperintens\w*|hypointens\w*|sequence|imag\w*|flair)\b/i;
+
+export function spineSubRegions(text: string | null | undefined): SpineSubRegion[] {
+  if (!text) return [];
+  // Strip MRI signal phrases so "T1 hyperintense" never reads as thoracic T1.
+  const t = text.replace(new RegExp(MRI_SIGNAL.source, "gi"), " ");
+  const out = new Set<SpineSubRegion>();
+  if (/\bcervic\w+\b|\bC[1-8]\b|cervicothoracic/i.test(t)) out.add("cervical");
+  if (/\bthorac\w+\b|\bT(?:[1-9]|1[0-2])\b|cervicothoracic/i.test(t)) out.add("thoracic");
+  if (/\blumb\w+\b|\bL[1-5]\b|\blumbago\b|thoracolumbar/i.test(t)) out.add("lumbar");
+  if (/\bsacr\w+\b|\bS[1-5]\b|\bcoccy\w+\b|lumbosacral/i.test(t)) out.add("sacral");
+  return [...out];
+}
+
+/** Two spine texts are level-compatible when either names no sub-region
+ *  (unknown → benefit of the doubt) or their sub-regions intersect. */
+export function spineCompatible(a: string | null | undefined, b: string | null | undefined): boolean {
+  const ra = spineSubRegions(a);
+  const rb = spineSubRegions(b);
+  if (ra.length === 0 || rb.length === 0) return true;
+  return ra.some((x) => rb.includes(x));
+}
+
+// ── Laterality (all paired anatomic regions) ─────────────────────────────────
+// Left-side evidence must never anchor a right-side diagnosis (and vice
+// versa) for any paired structure: knee, hip, shoulder, elbow, wrist/hand,
+// ankle/foot. "Bilateral" (or an unstated side) is compatible with either.
+export const PAIRED_REGIONS: ReadonlySet<BodyRegion> = new Set(["knee", "hip", "shoulder", "elbow", "wrist_hand", "ankle_foot"] as BodyRegion[]);
+
+export type Side = "left" | "right" | "bilateral" | "unstated";
+
+export function sideOf(text: string | null | undefined): Side {
+  const t = (text ?? "").toLowerCase();
+  if (/\bbilateral\b|\bboth\b/.test(t)) return "bilateral";
+  const left = /\bleft\b|\blt\.?\b/.test(t);
+  const right = /\bright\b|\brt\.?\b/.test(t);
+  if (left && right) return "bilateral";
+  if (left) return "left";
+  if (right) return "right";
+  return "unstated";
+}
+
+/** Sides are compatible unless both are stated, unilateral, and different. */
+export function sideCompatible(a: string | null | undefined, b: string | null | undefined): boolean {
+  const sa = sideOf(a);
+  const sb = sideOf(b);
+  if (sa === "unstated" || sb === "unstated" || sa === "bilateral" || sb === "bilateral") return true;
+  return sa === sb;
+}
+
+/**
+ * Full anatomy compatibility between a diagnosis/service text and a piece of
+ * evidence text, given the diagnosis's coarse region:
+ *   • spine → spinal level (cervical/thoracic/lumbar/sacral) must intersect;
+ *   • paired limb regions → stated sides must not conflict;
+ *   • everything else → coarse region agreement (checked by the caller).
+ */
+export function anatomyCompatible(region: BodyRegion, dxText: string, evidenceText: string): boolean {
+  if (region === "spine") return spineCompatible(dxText, evidenceText);
+  if (PAIRED_REGIONS.has(region)) return sideCompatible(dxText, evidenceText);
+  return true;
+}
+
 /** The dominant body region named in a piece of clinical text. */
 export function bodyRegion(text: string | null | undefined): BodyRegion {
   const s = text || "";

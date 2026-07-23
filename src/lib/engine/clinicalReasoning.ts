@@ -1,5 +1,5 @@
 import { buildRecommendationDossier, type DossierItem, type DossierCondition, type DossierChronoEvent, type DossierCase, type DossierInterview } from "@/lib/engine/medicalNecessity";
-import { mapRecommendationToCondition, validateCode, validatePricing, classifyRecommendation, hasPatientRecordSupport, bodyRegion, type RecInput, type CondInput } from "@/lib/engine/integrity";
+import { mapRecommendationToCondition, validateCode, validatePricing, classifyRecommendation, hasPatientRecordSupport, bodyRegion, anatomyCompatible, type RecInput, type CondInput } from "@/lib/engine/integrity";
 import { citationCompatible } from "@/lib/engine/citationQuality";
 import { specialtyLens } from "@/lib/engine/specialtyReasoning";
 
@@ -750,7 +750,11 @@ export function buildReasoningAssessment(
   const crossRegionEvidence = evidenceItems.filter((e) => {
     if (region === "general" || e.category === "functional_limitation" || e.category === "symptom" || e.category === "guideline" || e.category === "treating_provider_recommendation") return false;
     const r = bodyRegion(e.text);
-    return r !== "general" && r !== region;
+    if (r !== "general" && r !== region) return true;
+    // Within-region specificity for EVERY anatomic region: spinal level for
+    // spine, stated side for paired limb structures.
+    if (r === region) return !anatomyCompatible(region, `${item.service} ${condition?.name ?? ""}`, e.text);
+    return false;
   });
   for (const e of crossRegionEvidence) {
     weakeningEvidence.push({ claim: "anatomic evidence match", detail: `Cited ${e.category.replace(/_/g, " ")} evidence ("${e.text.slice(0, 60)}…") maps to a different body region than this ${region.replace(/_/g, "/")} recommendation.`, source: e.source, page: e.page, materiality: "HIGH", reducesConfidence: true, changesInclusion: true, requiresReview: true });
