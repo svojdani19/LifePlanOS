@@ -508,3 +508,34 @@ describe("Reliability — alternative explanations (Phase 3)", () => {
     expect(solo.alternativeExplanations.length).toBe(0);
   });
 });
+
+describe("Reliability — anatomy gate (cross-region evidence leakage)", () => {
+  // Reproduces the David Chen defect: a knee (tibial plateau) condition whose
+  // stored objective evidence is an L1 BURST FRACTURE quote. The narrative
+  // must never anchor the knee diagnosis on lumbar evidence.
+  const kneeWithLumbarEvidence: typeof kneeStrong = {
+    id: "cond-tp",
+    name: "Fracture of tibial plateau",
+    relatedness: "RELATED",
+    supportingRecords: "records",
+    objectiveEvidence: "L1 burst fracture with retropulsion and canal compromise",
+    evidenceSources: [{ filename: "ct.pdf", page: 9, quote: "L1 burst fracture with retropulsion and canal compromise" }],
+    missingInfo: null,
+    reasoning: "Attributed to the incident.",
+    physicianConfirmed: false,
+  };
+
+  it("excludes cross-region evidence from the narrative and evidence buckets", () => {
+    const a = buildReasoningAssessment(tka({ service: "Attendant / home care (hours per physiatry)", category: "ATTENDANT_CARE", isLifetime: true }), [kneeWithLumbarEvidence], [], kase);
+    expect(a.medicalNecessityRationale).not.toMatch(/L1 burst/i);
+    expect(a.evidenceItems.filter((e) => /L1 burst/i.test(e.text) && e.category !== "functional_limitation").length).toBe(0);
+  });
+
+  it("flags any cross-region evidence that reaches the assessment and never validates it", () => {
+    // Chronology carrying lumbar imaging against a knee assessment.
+    const lumbarChrono: typeof chronology = [{ eventDate: "2024-08-01", imagingFindings: "CT lumbar spine: L1 burst fracture with retropulsion", diagnosis: "knee pain", sourcePage: 9 }];
+    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], lumbarChrono, kase);
+    expect(a.medicalNecessityRationale).not.toMatch(/L1 burst/i);
+    expect(a.lifecycleStatus).not.toBe("INVALID"); // knee dx itself is fine
+  });
+});

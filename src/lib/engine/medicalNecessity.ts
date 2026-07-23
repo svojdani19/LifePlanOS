@@ -253,16 +253,28 @@ export function buildRecommendationDossier(
   const priorTreatment: EvidenceItem[] = [];
   const physicianDocumentation: EvidenceItem[] = [];
 
-  if (condition?.objectiveEvidence) objectiveFindings.push({ text: condition.objectiveEvidence, source: "causation analysis" });
-  for (const s of sources) if (s.quote) objectiveFindings.push({ text: `“${s.quote}”`, source: `${s.filename ?? "record"}${s.page ? `, p. ${s.page}` : ""}` });
+  // ANATOMY GATE: a piece of evidence may only support this dossier when its
+  // own text maps to the diagnosis's body region (or is region-neutral). This
+  // is what prevents an L1 burst-fracture finding from "anchoring" a knee
+  // diagnosis just because both mention "fracture". Functional status is
+  // whole-person and stays ungated.
+  const dxRegion = bodyRegion(`${item.service} ${dxName}`);
+  const regionOk = (text: string): boolean => {
+    if (dxRegion === "general") return true;
+    const r = bodyRegion(text);
+    return r === "general" || r === dxRegion;
+  };
+
+  if (condition?.objectiveEvidence && regionOk(condition.objectiveEvidence)) objectiveFindings.push({ text: condition.objectiveEvidence, source: "causation analysis" });
+  for (const s of sources) if (s.quote && regionOk(s.quote)) objectiveFindings.push({ text: `“${s.quote}”`, source: `${s.filename ?? "record"}${s.page ? `, p. ${s.page}` : ""}` });
   for (const e of pertinent) {
     const src = `${mdY(e.eventDate)}${e.provider ? ` · ${e.provider}` : ""}${e.sourcePage ? ` (p. ${e.sourcePage})` : ""}`;
-    if (e.imagingFindings && isCleanFinding(e.imagingFindings)) imaging.push({ text: cleanClause(e.imagingFindings, 180), source: src });
-    if (e.objectiveFindings && isCleanFinding(e.objectiveFindings)) examination.push({ text: cleanClause(e.objectiveFindings, 180), source: src });
+    if (e.imagingFindings && isCleanFinding(e.imagingFindings) && regionOk(e.imagingFindings)) imaging.push({ text: cleanClause(e.imagingFindings, 180), source: src });
+    if (e.objectiveFindings && isCleanFinding(e.objectiveFindings) && regionOk(e.objectiveFindings)) examination.push({ text: cleanClause(e.objectiveFindings, 180), source: src });
     if (e.functionalStatus && isCleanFinding(e.functionalStatus)) functionalLimitations.push({ text: cleanClause(e.functionalStatus, 160), source: src });
     if (e.restrictions && isCleanFinding(e.restrictions)) functionalLimitations.push({ text: cleanClause(e.restrictions, 160), source: src });
-    if (e.procedure && isCleanFinding(e.procedure)) priorTreatment.push({ text: cleanClause(e.procedure, 160), source: src });
-    else if (e.treatment && isCleanFinding(e.treatment)) priorTreatment.push({ text: cleanClause(e.treatment, 160), source: src });
+    if (e.procedure && isCleanFinding(e.procedure) && regionOk(e.procedure)) priorTreatment.push({ text: cleanClause(e.procedure, 160), source: src });
+    else if (e.treatment && isCleanFinding(e.treatment) && regionOk(e.treatment)) priorTreatment.push({ text: cleanClause(e.treatment, 160), source: src });
   }
   if (item.physicianStatus === "APPROVED" || item.physicianStatus === "MODIFIED") {
     physicianDocumentation.push({ text: `Reviewing physician ${item.physicianStatus === "MODIFIED" ? "approved with modification" : "approved"} this recommendation${item.physicianNote ? `: “${item.physicianNote}”` : "."}`, source: "physician review" });

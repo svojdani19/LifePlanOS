@@ -745,12 +745,23 @@ export function buildReasoningAssessment(
     ...classifyBucket(se.guidelines, "guideline", false, "provider_opinion"),
   ];
 
+  // Backstop for the anatomy gate: if any cited evidence text maps to a
+  // DIFFERENT body region than this assessment, flag it and never validate.
+  const crossRegionEvidence = evidenceItems.filter((e) => {
+    if (region === "general" || e.category === "functional_limitation" || e.category === "symptom" || e.category === "guideline" || e.category === "treating_provider_recommendation") return false;
+    const r = bodyRegion(e.text);
+    return r !== "general" && r !== region;
+  });
+  for (const e of crossRegionEvidence) {
+    weakeningEvidence.push({ claim: "anatomic evidence match", detail: `Cited ${e.category.replace(/_/g, " ")} evidence ("${e.text.slice(0, 60)}…") maps to a different body region than this ${region.replace(/_/g, "/")} recommendation.`, source: e.source, page: e.page, materiality: "HIGH", reducesConfidence: true, changesInclusion: true, requiresReview: true });
+  }
+
   // CRE v1 lifecycle verdict — VALIDATED only when every gate passes.
   const blockingUnknowns = unknowns.some((u) => u.blocksInclusion);
   const structuralDefect = !mapping.matched || lateralityMismatch || codeCritical;
   const lifecycleStatus: AssessmentLifecycleStatus = structuralDefect
     ? "INVALID"
-    : !frequencySupported || (durationClass === "LIFETIME" && !lifetimeWellSupported) || blockingUnknowns || probabilityClassification === "INSUFFICIENTLY_SUPPORTED" || !evidenceSufficiencyStandalone(objectiveItems.length, se, physicianApproved)
+    : !frequencySupported || (durationClass === "LIFETIME" && !lifetimeWellSupported) || blockingUnknowns || crossRegionEvidence.length > 0 || probabilityClassification === "INSUFFICIENTLY_SUPPORTED" || !evidenceSufficiencyStandalone(objectiveItems.length, se, physicianApproved)
       ? "NEEDS_REVIEW"
       : "VALIDATED";
 
