@@ -94,17 +94,102 @@ export function sideCompatible(a: string | null | undefined, b: string | null | 
   return sa === sb;
 }
 
+// ── Within-joint sub-structures ──────────────────────────────────────────────
+// The finest anatomy layer: disjoint structures INSIDE one joint (rotator
+// cuff vs. labrum; lateral vs. medial malleolus; ACL vs. meniscus). Two
+// texts conflict only when BOTH name specific sub-structures that do not
+// intersect AND neither speaks to the joint as a whole — a whole-joint
+// intervention or diagnosis (arthroplasty, osteoarthritis, joint imaging,
+// arthroscopy, therapy) is legitimately supported by any of its parts.
+const SUBSTRUCTURES: Partial<Record<BodyRegion, { key: string; re: RegExp }[]>> = {
+  knee: [
+    { key: "acl", re: /\bacl\b|anterior cruciate/i },
+    { key: "pcl", re: /\bpcl\b|posterior cruciate/i },
+    { key: "collateral_ligament", re: /\bmcl\b|\blcl\b|(?:medial|lateral|tibial|fibular) collateral/i },
+    { key: "meniscus", re: /menisc/i },
+    { key: "patellofemoral", re: /patell/i },
+    { key: "extensor_mechanism", re: /quadriceps tendon|patellar tendon/i },
+  ],
+  shoulder: [
+    { key: "rotator_cuff", re: /rotator cuff|supraspinatus|infraspinatus|subscapularis|teres minor/i },
+    { key: "labrum", re: /labr(?:um|al)|\bslap\b|bankart/i },
+    { key: "biceps_tendon", re: /\bbiceps\b/i },
+    { key: "ac_joint", re: /acromioclavicular|\bac joint\b|distal clavicle/i },
+  ],
+  ankle_foot: [
+    { key: "lateral_malleolus", re: /lateral malleol/i },
+    { key: "medial_malleolus", re: /medial malleol/i },
+    { key: "posterior_malleolus", re: /posterior malleol/i },
+    { key: "achilles", re: /achilles/i },
+    { key: "plantar_fascia", re: /plantar fasci/i },
+    { key: "syndesmosis", re: /syndesmo/i },
+    { key: "lateral_ligaments", re: /\batfl\b|\bcfl\b|anterior talofibular|calcaneofibular/i },
+    { key: "deltoid_ligament", re: /deltoid ligament/i },
+    { key: "talus", re: /\btalus\b|\btalar\b/i },
+    { key: "calcaneus", re: /calcane/i },
+    { key: "midfoot", re: /midfoot|lisfranc|navicular|cuboid|cuneiform/i },
+    { key: "metatarsal", re: /metatars|\bhallux\b|bunion/i },
+  ],
+  hip: [
+    { key: "labrum", re: /labr(?:um|al)/i },
+    { key: "femoral_head_neck", re: /femoral (?:head|neck)/i },
+    { key: "acetabulum", re: /acetabul/i },
+    { key: "trochanteric", re: /trochanter/i },
+    { key: "gluteal_tendon", re: /\bglute(?:us|al)\b/i },
+  ],
+  elbow: [
+    { key: "lateral_epicondyle", re: /lateral epicondyl|tennis elbow/i },
+    { key: "medial_epicondyle", re: /medial epicondyl|golfer'?s elbow/i },
+    { key: "ucl", re: /\bucl\b|ulnar collateral/i },
+    { key: "radial_head", re: /radial head/i },
+    { key: "olecranon", re: /olecranon/i },
+    { key: "distal_biceps", re: /distal biceps/i },
+  ],
+  wrist_hand: [
+    { key: "carpal_tunnel", re: /carpal tunnel|median nerve/i },
+    { key: "tfcc", re: /\btfcc\b|triangular fibrocartilage/i },
+    { key: "scaphoid", re: /scaphoid/i },
+    { key: "distal_radius", re: /distal radius|colles/i },
+    { key: "cmc", re: /\bcmc\b|carpometacarpal|basal joint/i },
+    { key: "finger_tendon", re: /trigger finger|flexor tendon|extensor tendon|mallet finger/i },
+  ],
+};
+
+// Whole-joint concepts: a text about the joint as a whole is compatible with
+// any of its parts. Imaging modality words are deliberately NOT here — an
+// "x-ray of the medial malleolus" is structure-specific, not whole-joint.
+const WHOLE_JOINT = /arthroplast|joint replacement|\btka\b|\btha\b|osteoarthr|degenerat\w+ joint|\barthritis\b|arthrofibrosis|arthrocentesis|joint injection|effusion|physical therapy|physiotherapy|rehabilitat|manipulation under anesthesia/i;
+
+export function subStructuresOf(region: BodyRegion, text: string | null | undefined): string[] {
+  const defs = SUBSTRUCTURES[region];
+  if (!defs || !text) return [];
+  return defs.filter((d) => d.re.test(text)).map((d) => d.key);
+}
+
+/** Sub-structures conflict only when both texts are structure-specific and
+ *  the structure sets are disjoint. A whole-joint text has its OWN structure
+ *  mentions ignored (whole-joint disease encompasses its parts); an unstated
+ *  structure gets the benefit of the doubt. */
+export function subStructureCompatible(region: BodyRegion, a: string, b: string): boolean {
+  if (!SUBSTRUCTURES[region]) return true;
+  const sa = WHOLE_JOINT.test(a) ? [] : subStructuresOf(region, a);
+  const sb = WHOLE_JOINT.test(b) ? [] : subStructuresOf(region, b);
+  if (sa.length === 0 || sb.length === 0) return true;
+  return sa.some((x) => sb.includes(x));
+}
+
 /**
  * Full anatomy compatibility between a diagnosis/service text and a piece of
  * evidence text, given the diagnosis's coarse region:
  *   • spine → spinal level (cervical/thoracic/lumbar/sacral) must intersect;
- *   • paired limb regions → stated sides must not conflict;
+ *   • paired limb regions → stated sides must not conflict AND named
+ *     within-joint sub-structures must not be disjoint;
  *   • everything else → coarse region agreement (checked by the caller).
  */
 export function anatomyCompatible(region: BodyRegion, dxText: string, evidenceText: string): boolean {
   if (region === "spine") return spineCompatible(dxText, evidenceText);
-  if (PAIRED_REGIONS.has(region)) return sideCompatible(dxText, evidenceText);
-  return true;
+  if (PAIRED_REGIONS.has(region)) return sideCompatible(dxText, evidenceText) && subStructureCompatible(region, dxText, evidenceText);
+  return subStructureCompatible(region, dxText, evidenceText);
 }
 
 /** The dominant body region named in a piece of clinical text. */

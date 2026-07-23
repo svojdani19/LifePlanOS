@@ -616,3 +616,49 @@ describe("Reliability — laterality across all paired regions", () => {
     expect(sideCompatible("right knee arthroplasty", "left knee osteoarthritis")).toBe(false);
   });
 });
+
+describe("Reliability — within-joint sub-structure specificity (all joints)", () => {
+  it("parses sub-structures and honors the whole-joint rule", async () => {
+    const { subStructuresOf, subStructureCompatible } = await import("./integrity");
+    expect(subStructuresOf("ankle_foot", "displaced fracture of the lateral malleolus")).toEqual(["lateral_malleolus"]);
+    expect(subStructuresOf("shoulder", "full-thickness supraspinatus tear")).toEqual(["rotator_cuff"]);
+    // Disjoint specific structures conflict…
+    expect(subStructureCompatible("ankle_foot", "ORIF lateral malleolus fracture", "medial malleolus fracture on x-ray")).toBe(false);
+    expect(subStructureCompatible("shoulder", "rotator cuff repair", "SLAP labral tear on MR arthrogram")).toBe(false);
+    expect(subStructureCompatible("knee", "ACL reconstruction", "medial meniscus tear")).toBe(false);
+    // …but whole-joint concepts accept any part of the joint:
+    expect(subStructureCompatible("knee", "total knee arthroplasty", "medial meniscus tear with chondral loss")).toBe(true);
+    expect(subStructureCompatible("knee", "post-traumatic osteoarthritis of the knee", "meniscal degeneration")).toBe(true);
+    // Unstated structures get the benefit of the doubt.
+    expect(subStructureCompatible("shoulder", "shoulder pain program", "supraspinatus tendinosis")).toBe(true);
+  });
+
+  it("keeps disjoint sub-structure evidence out of a structure-specific narrative", () => {
+    const cuffDx: typeof kneeStrong = {
+      id: "cond-cuff", name: "Right rotator cuff tear (supraspinatus)", relatedness: "RELATED",
+      supportingRecords: "records",
+      objectiveEvidence: "SLAP labral tear on MR arthrogram", // wrong structure stored upstream
+      evidenceSources: [{ filename: "mra.pdf", page: 3, quote: "superior labral tear from anterior to posterior" }],
+      missingInfo: null, reasoning: "Attributed.", physicianConfirmed: false,
+    };
+    const a = buildReasoningAssessment(
+      tka({ service: "Right rotator cuff repair", category: "ORTHOPEDIC_SURGERY" }),
+      [cuffDx], [], kase,
+    );
+    expect(a.medicalNecessityRationale).not.toMatch(/labral|slap/i);
+    expect(a.evidenceItems.filter((e) => /labral|slap/i.test(e.text) && e.category !== "functional_limitation").length).toBe(0);
+  });
+
+  it("rejects literature addressing a different structure within the same joint", () => {
+    const { rejected, accepted } = filterLiterature(
+      [
+        { title: "Arthroscopic SLAP labral repair outcomes in overhead athletes", supports: "x", applicability: "", evidenceLevel: 5, limitations: null },
+        { title: "Rotator cuff repair: a systematic review of functional outcomes", supports: "x", applicability: "", evidenceLevel: 3, limitations: null },
+      ],
+      { service: "Rotator cuff repair", diagnosis: "Rotator cuff tear, supraspinatus", adult: true },
+    );
+    expect(rejected.some((r) => /slap/i.test(r.title))).toBe(true);
+    expect(rejected.find((r) => /slap/i.test(r.title))?.reason).toMatch(/sub-structure mismatch/i);
+    expect(accepted.some((a2) => /rotator cuff repair/i.test(a2.title))).toBe(true);
+  });
+});

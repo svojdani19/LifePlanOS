@@ -17,7 +17,7 @@
 //     literature quality, consistency, and missing information.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { bodyRegion, type BodyRegion, anatomyCompatible } from "./integrity";
+import { bodyRegion, type BodyRegion, anatomyCompatible, sideCompatible } from "./integrity";
 
 // ── Evidence hierarchy (sprint order, 1 = strongest) ─────────────────────────
 export const EVIDENCE_HIERARCHY: { level: number; label: string; re: RegExp }[] = [
@@ -120,7 +120,11 @@ export function citationCompatible(article: ArticleLike, ctx: ClinicalContext): 
   // 1b — within-region specificity: a cervical article cannot support a lumbar
   // recommendation; a left-shoulder study cannot support right-shoulder care.
   if (artRegion !== "general" && artRegion === ctxRegion && !anatomyCompatible(ctxRegion, `${ctx.service} ${ctx.diagnosis}`, hay)) {
-    const why = ctxRegion === "spine" ? "spinal-level mismatch (article and recommendation address different spinal regions)" : "laterality mismatch (article and recommendation address opposite sides)";
+    const why = ctxRegion === "spine"
+      ? "spinal-level mismatch (article and recommendation address different spinal regions)"
+      : !sideCompatible(`${ctx.service} ${ctx.diagnosis}`, hay)
+        ? "laterality mismatch (article and recommendation address opposite sides)"
+        : "sub-structure mismatch (article addresses a different structure within the same joint)";
     return { compatible: false, reason: why };
   }
   // 2 — procedure family: when both declare families, they must INTERSECT (a
