@@ -2,6 +2,7 @@ import { buildRecommendationDossier, type DossierItem, type DossierCondition, ty
 import { mapRecommendationToCondition, validateCode, validatePricing, classifyRecommendation, hasPatientRecordSupport, bodyRegion, anatomyCompatible, type RecInput, type CondInput } from "@/lib/engine/integrity";
 import { citationCompatible } from "@/lib/engine/citationQuality";
 import { specialtyLens } from "@/lib/engine/specialtyReasoning";
+import { lintAssessmentNarratives } from "@/lib/engine/narrativeSanity";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Clinical Reasoning Engine — Phase A.
@@ -954,6 +955,21 @@ export function reasoningFindings(
     // Low recommendation confidence on a totaled line — advisory.
     if (inTotals && (a.recommendationConfidence === "LOW" || a.recommendationConfidence === "INDETERMINATE")) {
       out.push({ service: it.service, result: "Low recommendation confidence", issue: `"${it.service}" is in totals with ${a.recommendationConfidence.toLowerCase()} confidence.`, severity: "Moderate", suggestion: "Strengthen the patient-specific record support before finalizing.", exportBlocking: false });
+    }
+    // Narrative sanity (does this make sense to say in this situation?): every
+    // generated narrative field is linted against the item's structured state —
+    // anatomy coherence, state/numeric contradictions, broken citations,
+    // garbled text. Anatomy incoherence on a totaled line blocks final export.
+    const lint = lintAssessmentNarratives(a as unknown as Record<string, unknown> & { recommendationService: string; bodyRegion?: string | null }, {
+      physicianStatus: it.physicianStatus,
+      isLifetime: !!it.isLifetime,
+      durationYears: it.durationYears ?? null,
+      frequencyPerYear: it.frequencyPerYear,
+      inclusionInTotalsStatus: a.inclusionInTotalsStatus,
+      diagnosis: conditions.find((c) => c.id === a.supportingDiagnosisIds[0])?.name ?? null,
+    });
+    for (const li of lint) {
+      out.push({ service: it.service, result: "Narrative coherence", issue: `[${li.rule}] ${li.explanation} — "${li.excerpt}"`, severity: li.severity === "High" ? "High" : "Moderate", suggestion: "Regenerate or edit the narrative — reader-facing text must match the structured clinical facts.", exportBlocking: li.rule === "anatomy_incoherence" && inTotals });
     }
     // Advisory: an included line the reasoning rates insufficiently supported.
     if (inTotals && a.probabilityClassification === "INSUFFICIENTLY_SUPPORTED") {

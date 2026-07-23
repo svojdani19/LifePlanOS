@@ -76,7 +76,7 @@ const toRow = (a: ReasoningAssessment) => ({
   physicianReviewStatus: a.physicianReviewStatus,
   validationStatus: a.validationStatus,
   materialHash: a.materialHash,
-  generatedByModel: "deterministic-reasoning-v5",
+  generatedByModel: "deterministic-reasoning-v6",
 });
 
 // The material fields compared to report WHAT changed when approval is invalidated.
@@ -133,7 +133,7 @@ export async function persistCaseReasoning(caseId: string, firmId: string, opts:
         await prisma.clinicalReasoningAssessment.create({ data: { ...toRow(a), ...lineage, caseId, firmId, recommendationId: it.id } });
         continue;
       }
-      if (prior.materialHash === a.materialHash && prior.status !== "ERROR" && prior.reasoningChain != null && prior.generatedByModel === "deterministic-reasoning-v5") continue; // cache hit (recompute once per methodology version)
+      if (prior.materialHash === a.materialHash && prior.status !== "ERROR" && prior.reasoningChain != null && prior.generatedByModel === "deterministic-reasoning-v6") continue; // cache hit (recompute once per methodology version)
 
       // Material change (§17): supersede the prior row (preserve it), create a
       // new one, and — when the item was physician-approved — force re-review

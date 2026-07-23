@@ -195,6 +195,16 @@ const SECTION_LABEL = /^(?:findings?|impression|procedure(?: performed)?|assessm
 // leading section label and surrounding quotes, take the first clause, trim.
 function cleanClause(text: string, maxLen = 130): string {
   let s = String(text).replace(/^["“]|["”]$/g, "").replace(SECTION_LABEL, "").replace(/\s+/g, " ").trim();
+  // Extracted quotes sometimes embed their own citation — "(file.pdf, p. 3)" —
+  // or arrive truncated mid-citation ("(file.pdf, p."). Strip closed citation
+  // parentheticals, any unclosed paren tail, and the orphan quote they leave.
+  s = s
+    .replace(/\s*\(\s*[^()]*?\.(?:pdf|docx?|txt)\b[^()]*?\)/gi, " ")
+    .replace(/\s*\(\s*[^()]*$/, "")
+    .replace(/\s+/g, " ")
+    .replace(/^["“]|["”]$/g, "")
+    .trim();
+  if (((s.match(/["“”]/g) ?? []).length % 2) !== 0) s = s.replace(/(^|\s)["“”]|["“”](\s|$)/g, "$1$2");
   s = s.split(/(?<=[.!?;])\s+/)[0].replace(/[.;,]+$/, "").trim();
   if (s.length > maxLen) s = s.slice(0, maxLen - 1).trimEnd() + "…";
   return s;
