@@ -2542,7 +2542,17 @@ function EvidencePanel({ data }: { data: AnyRec }) {
             const craForChain = assessments.find((x) => x.recommendationId === selId && x.status !== "SUPERSEDED");
             const recordLinks = [...own, ...inherited].filter((l) => l.kind === "DIAGNOSIS_EVIDENCE");
             const objective = selType === "futureCareItem" ? mappedCond?.objectiveEvidence : null;
-            const chain: { label: string; value: string | null; kind: "source" | "derived" | "workflow" }[] = [
+            // Prefer the PERSISTED immutable reasoning chain (per-edge rationale,
+            // fact/inference/assumption basis); fall back to the computed strip.
+            const persistedChain = (Array.isArray(craForChain?.reasoningChain) ? craForChain!.reasoningChain : null) as { stage: string; content: string | null; source: string | null; basis: string; rationale: string }[] | null;
+            const chain: { label: string; value: string | null; kind: "source" | "derived" | "workflow" | "assumption"; tip?: string }[] = persistedChain
+              ? persistedChain.map((n) => ({
+                  label: n.stage,
+                  value: n.content ? String(n.content).slice(0, 60) : null,
+                  kind: n.basis === "documented_fact" ? "source" : n.basis === "inference" ? "derived" : n.basis === "assumption" ? "assumption" : "workflow",
+                  tip: `${n.rationale}${n.source ? ` — Source: ${n.source}` : ""}`,
+                }))
+              : [
               { label: "Source records", value: recordLinks.length ? `${recordLinks.length} page-cited source${recordLinks.length === 1 ? "" : "s"}` : null, kind: "source" },
               { label: "Objective finding", value: objective ? String(objective).slice(0, 60) : null, kind: "source" },
               { label: "Diagnosis", value: mappedCond?.name ?? null, kind: "source" },
@@ -2561,14 +2571,16 @@ function EvidencePanel({ data }: { data: AnyRec }) {
                     <li key={n.label} className="flex items-center">
                       {i > 0 && <span aria-hidden className="mx-1 text-ink-300">→</span>}
                       <div
-                        title={n.value ?? "Not documented in the current record"}
+                        title={n.tip ?? n.value ?? "Not documented in the current record"}
                         className={cn(
                           "max-w-[11rem] rounded-md border px-2 py-1",
                           n.value === null
                             ? "border-dashed border-amber-300 bg-amber-50"
                             : n.kind === "derived"
                               ? "border-violet-200 bg-violet-50"
-                              : "border-ink-200 bg-white",
+                              : n.kind === "assumption"
+                                ? "border-dashed border-amber-300 bg-white"
+                                : "border-ink-200 bg-white",
                         )}
                       >
                         <p className="text-[10px] font-semibold uppercase tracking-wide text-ink-500">{n.label}</p>
@@ -2635,6 +2647,62 @@ function EvidencePanel({ data }: { data: AnyRec }) {
                   <div className="mt-2">
                     <p className="text-[11px] font-semibold uppercase tracking-wide text-red-700">Rejected literature</p>
                     <ul className="mt-0.5 space-y-0.5">{rejected.slice(0, 4).map((r, i) => <li key={i} className="text-xs text-red-800">{r.title} — {r.reason}</li>)}</ul>
+                  </div>
+                )}
+                {/* Multi-dimensional confidence — ten independent dimensions, never one number */}
+                {cra.confidenceVector && (
+                  <div className="mt-3">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">Confidence dimensions <span className="font-normal normal-case text-ink-400">(independent — deliberately not combined)</span></p>
+                    <div className="mt-1 grid gap-x-4 gap-y-1 sm:grid-cols-2">
+                      {([
+                        ["clinicalCertainty", "Clinical certainty"], ["evidenceQuality", "Evidence quality"],
+                        ["objectiveEvidence", "Objective evidence"], ["literatureSupport", "Literature support"],
+                        ["guidelineSupport", "Guideline support"], ["providerAgreement", "Provider agreement"],
+                        ["chronologyConsistency", "Chronology consistency"], ["medicalNecessity", "Medical necessity"],
+                        ["contradictoryEvidence", "Contradiction burden"], ["physicianReview", "Physician review"],
+                      ] as [string, string][]).map(([k, label]) => {
+                        const v = Number((cra.confidenceVector as AnyRec)[k] ?? 0);
+                        const burden = k === "contradictoryEvidence";
+                        return (
+                          <div key={k} className="flex items-center gap-2 text-[11px]">
+                            <span className="w-40 shrink-0 text-ink-600">{label}</span>
+                            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-ink-100">
+                              <div className={cn("h-full rounded-full", burden ? "bg-amber-500" : v >= 70 ? "bg-emerald-500" : v >= 40 ? "bg-brand-500" : "bg-ink-300")} style={{ width: `${v}%` }} />
+                            </div>
+                            <span className="w-7 text-right tabular-nums text-ink-500">{v}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+                {/* Self-critique — the engine argues against itself before the physician does */}
+                {cra.selfCritique && (() => {
+                  const sc = cra.selfCritique as AnyRec;
+                  return (
+                    <div className="mt-3 rounded-md border border-ink-200 bg-white p-2.5">
+                      <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">Self-critique</p>
+                      {Array.isArray(sc.whyPossiblyWrong) && sc.whyPossiblyWrong.length > 0 && (
+                        <div className="mt-1"><p className="text-[11px] font-medium text-amber-700">Why this could be wrong</p><ul className="mt-0.5 space-y-0.5">{sc.whyPossiblyWrong.map((x: string, i: number) => <li key={i} className="text-xs text-ink-700">{x}</li>)}</ul></div>
+                      )}
+                      {Array.isArray(sc.assumptions) && sc.assumptions.length > 0 && (
+                        <div className="mt-1.5"><p className="text-[11px] font-medium text-ink-500">Assumptions required</p><ul className="mt-0.5 space-y-0.5">{sc.assumptions.map((x: string, i: number) => <li key={i} className="text-xs text-ink-700">{x}</li>)}</ul></div>
+                      )}
+                      {Array.isArray(sc.recordsThatWouldChangeConfidence) && sc.recordsThatWouldChangeConfidence.length > 0 && (
+                        <div className="mt-1.5"><p className="text-[11px] font-medium text-ink-500">Records that would change confidence</p><ul className="mt-0.5 space-y-0.5">{sc.recordsThatWouldChangeConfidence.map((x: string, i: number) => <li key={i} className="text-xs text-ink-700">{x}</li>)}</ul></div>
+                      )}
+                      {Array.isArray(sc.inferredNotDocumented) && sc.inferredNotDocumented.length > 0 && (
+                        <div className="mt-1.5"><p className="text-[11px] font-medium text-violet-700">Inferred rather than documented</p><ul className="mt-0.5 space-y-0.5">{sc.inferredNotDocumented.map((x: string, i: number) => <li key={i} className="text-xs text-ink-600">{x}</li>)}</ul></div>
+                      )}
+                      {sc.alternativeRecommendation && <p className="mt-1.5 text-xs text-ink-700"><span className="font-medium text-ink-500">Alternative considered:</span> {sc.alternativeRecommendation}</p>}
+                    </div>
+                  );
+                })()}
+                {/* Competing diagnoses from the case's own causation map */}
+                {Array.isArray(cra.alternativeExplanations) && (cra.alternativeExplanations as AnyRec[]).length > 0 && (
+                  <div className="mt-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">Alternative explanations on the causation map</p>
+                    <ul className="mt-0.5 space-y-0.5">{(cra.alternativeExplanations as AnyRec[]).map((x, i) => <li key={i} className="text-xs text-ink-700"><span className="font-medium">{x.name}</span> ({x.relation}) — {x.whyConsidered}</li>)}</ul>
                   </div>
                 )}
                 <p className="mt-2 text-[11px] text-ink-500">{cra.residualUncertainty}</p>
