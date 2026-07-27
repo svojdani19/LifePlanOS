@@ -23,6 +23,18 @@ describe("findConditionsInRecords — prior-history scoping", () => {
     expect(findConditionsInRecords("Back pain after a motor vehicle collision.")).not.toContain("Prior motor vehicle collision injury");
   });
 
+  it("does NOT flag family history as the patient's pre-existing condition", () => {
+    const found = findConditionsInRecords("FAMILY HISTORY: Family history of diabetes mellitus and hypertension in the father.");
+    expect(found).not.toContain("Diabetes mellitus, Type 2");
+    expect(found).not.toContain("Hypertension");
+  });
+
+  it("still detects the patient's own documented history alongside family history", () => {
+    const found = findConditionsInRecords("Family history of diabetes mellitus. The patient has a history of hypertension.");
+    expect(found).not.toContain("Diabetes mellitus, Type 2");
+    expect(found).toContain("Hypertension");
+  });
+
   it("returns nothing for empty input", () => {
     expect(findConditionsInRecords("")).toHaveLength(0);
     expect(findConditionsInRecords(null)).toHaveLength(0);

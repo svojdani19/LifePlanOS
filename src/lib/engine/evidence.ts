@@ -7,7 +7,8 @@
 // diagnosis. Deterministic — quotes only what is in the record.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import { EXCLUDED_TYPES, documentsDiagnosis, hasTerm, sigTerms } from "./chronology";
+import { DX_GENERIC, EXCLUDED_TYPES, hasTerm, sigTerms } from "./chronology";
+import { isCitableEvidence } from "@/lib/documents/assertion";
 import { pageForOffset, pageMarks } from "@/lib/documents/meta";
 
 export interface EvidenceSource {
@@ -17,6 +18,11 @@ export interface EvidenceSource {
   page: number | null;
   /** verbatim excerpt from the record containing the supporting content */
   quote: string;
+  /** character span of the (untrimmed) quoted sentence within extractedText */
+  startOffset?: number;
+  endOffset?: number;
+  /** term-overlap score the sentence won on (higher = stronger match) */
+  matchScore?: number;
 }
 
 interface DocLike {
@@ -76,7 +82,7 @@ export function locateConditionEvidence(docs: DocLike[], conditionName: string, 
 
     // Walk sentences with their offsets; keep the best-matching sentence.
     // Boilerplate lines are excluded; clinically labeled lines score higher.
-    let best: { offset: number; sentence: string; score: number } | null = null;
+    let best: { start: number; end: number; sentence: string; score: number } | null = null;
     const re = /[^.!?\n]+[.!?]?/g;
     let m: RegExpExecArray | null;
     while ((m = re.exec(text))) {
@@ -84,9 +90,19 @@ export function locateConditionEvidence(docs: DocLike[], conditionName: string, 
       if (sentence.length < 15 || /^[A-Z0-9 :/,\-]+$/.test(sentence)) continue; // headers
       if (BOILERPLATE.test(sentence)) continue;
       const lower = expandSentence(sentence.toLowerCase());
-      if (!documentsDiagnosis(lower, name)) continue;
-      const score = terms.filter((t) => hasTerm(lower, t)).length + (CLINICAL_LABEL.test(sentence) ? 2 : 0);
-      if (!best || score > best.score) best = { offset: m.index, sentence, score };
+      // A matching term only makes the sentence a candidate when the sentence
+      // actually ASSERTS it — a negated/hypothetical/family mention ("no cord
+      // signal abnormality") must never be quoted as supporting evidence.
+      // (Terms injected by expandSentence aren't in the raw sentence and pass
+      // through as affirmed, which is intended.) The candidate rule mirrors
+      // documentsDiagnosis: a distinctive shared term is required.
+      const citable = terms.filter((t) => hasTerm(lower, t) && isCitableEvidence(sentence, t));
+      const distinctive = citable.filter((t) => !DX_GENERIC.has(t));
+      if (!distinctive.length || (!distinctive.some((t) => t.length >= 5) && citable.length < 2)) continue;
+      const score = citable.length + (CLINICAL_LABEL.test(sentence) ? 2 : 0);
+      // Exact character span of the trimmed sentence within extractedText.
+      const start = m.index + (m[0].length - m[0].trimStart().length);
+      if (!best || score > best.score) best = { start, end: start + sentence.length, sentence, score };
     }
     if (!best) continue;
 
@@ -95,8 +111,11 @@ export function locateConditionEvidence(docs: DocLike[], conditionName: string, 
         documentId: doc.id,
         filename: doc.filename,
         // Single-page records are cited as p. 1 even without page markers.
-        page: pageForOffset(best.offset, marks) ?? (doc.pageCount === 1 ? 1 : null),
+        page: pageForOffset(best.start, marks) ?? (doc.pageCount === 1 ? 1 : null),
         quote: trimQuote(best.sentence),
+        startOffset: best.start,
+        endOffset: best.end,
+        matchScore: best.score,
       },
       score: best.score,
     });

@@ -54,7 +54,7 @@ export interface SpecialtyPack {
 }
 
 // Baseline items every catastrophic/serious case tends to include.
-const GENERAL_CARE: CareTemplate[] = [
+export const GENERAL_CARE: CareTemplate[] = [
   {
     category: "PRIMARY_CARE",
     service: "Primary care coordination visits",

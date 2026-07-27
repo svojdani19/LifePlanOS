@@ -1,3 +1,5 @@
+import { assertionOf } from "@/lib/documents/assertion";
+
 // Comprehensive catalog of pre-existing conditions commonly relevant to injury /
 // life-care-planning cases (causation & apportionment). Grouped for the intake
 // picker; users can also add custom entries.
@@ -174,13 +176,33 @@ function pmhScope(text: string): string {
   return out.join("\n");
 }
 
+// The full sentence (or line) containing the given character index.
+function sentenceAround(text: string, index: number): string {
+  const start =
+    Math.max(
+      text.lastIndexOf(".", index - 1),
+      text.lastIndexOf("!", index - 1),
+      text.lastIndexOf("?", index - 1),
+      text.lastIndexOf("\n", index - 1),
+    ) + 1;
+  const stop = text.slice(index).search(/[.!?\n]/);
+  return text.slice(start, stop >= 0 ? index + stop + 1 : text.length);
+}
+
 // True if the term appears anywhere in the text explicitly framed as prior.
+// Family-scoped mentions are excluded: "family history of diabetes" is a
+// relative's history, not the patient's pre-existing condition.
 function contextuallyPrior(text: string, re: RegExp): boolean {
   const g = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
   let m: RegExpExecArray | null;
   while ((m = g.exec(text))) {
     const before = text.slice(Math.max(0, m.index - 45), m.index);
-    if (SELF_PRIOR.test(m[0]) || PRIOR_QUALIFIER.test(before)) return true;
+    if (
+      (SELF_PRIOR.test(m[0]) || PRIOR_QUALIFIER.test(before)) &&
+      assertionOf(sentenceAround(text, m.index), re) !== "family"
+    ) {
+      return true;
+    }
     if (m.index === g.lastIndex) g.lastIndex++;
   }
   return false;

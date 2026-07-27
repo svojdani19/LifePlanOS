@@ -324,7 +324,7 @@ const CARE_GENERIC = new Set([
 ]);
 // Pathology words too common to establish a SPECIFIC diagnosis match on their own
 // ("fracture" appears in many diagnoses); a real match needs a distinctive term.
-const DX_GENERIC = new Set(["fracture", "fractures", "injury", "injuries", "pain", "disorder", "syndrome", "disease", "deficit", "dysfunction", "residual"]);
+export const DX_GENERIC = new Set(["fracture", "fractures", "injury", "injuries", "pain", "disorder", "syndrome", "disease", "deficit", "dysfunction", "residual"]);
 
 export function sigTerms(s: string): string[] {
   return [...new Set((s.toLowerCase().match(/[a-z][a-z-]{3,}/g) ?? []).filter((w) => !SIG_STOP.has(w)))];

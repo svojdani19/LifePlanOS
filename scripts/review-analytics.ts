@@ -6,7 +6,7 @@ import { prisma } from "../src/lib/db";
 
 async function main() {
   const transitions = await prisma.recommendationTransition.findMany({
-    select: { newStatus: true, priorStatus: true, comment: true, modifiedFields: true, materialChange: true, itemId: true },
+    select: { newStatus: true, priorStatus: true, comment: true, reasonCode: true, modifiedFields: true, materialChange: true, itemId: true },
   });
   const items = await prisma.futureCareItem.findMany({ select: { id: true, category: true, service: true } });
   const catOf = new Map(items.map((i) => [i.id, i.category]));
@@ -14,11 +14,17 @@ async function main() {
 
   const rejectionsByCategory = new Map<string, number>();
   const modifiedFieldCounts = new Map<string, number>();
+  const reasonCodeCounts = new Map<string, number>();
   let approvals = 0, rejections = 0, modifications = 0, reopens = 0, invalidations = 0;
   for (const t of transitions) {
     if (t.newStatus === "PHYSICIAN_APPROVED") approvals++;
     if (t.newStatus === "PHYSICIAN_REJECTED") { rejections++; count(rejectionsByCategory, catOf.get(t.itemId) ?? "UNKNOWN"); }
-    if (t.newStatus === "PHYSICIAN_MODIFIED") { modifications++; for (const f of (t.modifiedFields as string[] | null) ?? []) count(modifiedFieldCounts, f); }
+    if (t.newStatus === "PHYSICIAN_MODIFIED") {
+      modifications++;
+      // Both ledger shapes: legacy string[] of names, structured {field,from,to}[].
+      for (const f of (t.modifiedFields as unknown[] | null) ?? []) count(modifiedFieldCounts, typeof f === "string" ? f : ((f as { field?: string })?.field ?? "unknown"));
+    }
+    if (t.reasonCode) count(reasonCodeCounts, t.reasonCode);
     if (t.priorStatus?.startsWith("PHYSICIAN") && t.newStatus === "AI_DRAFT") reopens++;
   }
   invalidations = await prisma.auditLog.count({ where: { action: "reasoning.approval_invalidated" } });
@@ -29,6 +35,9 @@ async function main() {
   console.log(`Approval invalidations (material change after sign-off): ${invalidations}`);
   console.log("Most-corrected parameters:", top(modifiedFieldCounts).map(([k, v]) => `${k}×${v}`).join(", ") || "(none)");
   console.log("Most-rejected categories:", top(rejectionsByCategory).map(([k, v]) => `${k}×${v}`).join(", ") || "(none)");
+  console.log("Correction reasons:", top(reasonCodeCounts).map(([k, v]) => `${k}×${v}`).join(", ") || "(none)");
+  const decidedTotal = approvals + modifications + rejections;
+  if (decidedTotal) console.log(`Rates: rejection ${Math.round((rejections / decidedTotal) * 100)}% · modification ${Math.round((modifications / decidedTotal) * 100)}% of ${decidedTotal} decisions`);
   const mods = transitions.filter((t) => t.comment).slice(-5);
   console.log("Recent documented reasons:"); for (const m of mods) console.log("  •", m.comment!.slice(0, 90));
 }

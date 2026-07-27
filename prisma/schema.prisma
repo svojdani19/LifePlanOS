@@ -557,6 +557,14 @@ enum Vulnerability {
   HIGH
 }
 
+enum RecommendationOrigin {
+  TEMPLATE_CONDITION // matched condition bucket in the care library
+  TEMPLATE_BASELINE // baseline add-on templates
+  TEMPLATE_SPECIALTY // specialty fallback pack
+  PHYSICIAN_ADDED // authored by a reviewing physician
+  GOLD_IMPORT // imported from a reference/gold case
+}
+
 enum PhysicianStatus {
   PENDING
   APPROVED
@@ -799,6 +807,11 @@ model FutureCareItem {
   contingencyOnly Boolean @default(false) // disclosed as a contingency; never entered into totals
 
   // Physician review (Module 12).
+  // Provenance: which generator path and template rule produced this item.
+  origin          RecommendationOrigin @default(TEMPLATE_CONDITION)
+  templateRuleId  String? // stable id of the care-library template row
+  conditionKey    String? // careLibrary condition bucket that matched
+
   physicianStatus  PhysicianStatus @default(PENDING)
   physicianNote    String?
   physicianSummary String? // paraphrased summary of the medical-necessity point (auto-updated on modify)
@@ -854,7 +867,8 @@ model RecommendationTransition {
   priorStatus    String
   newStatus      String
   comment        String?
-  modifiedFields Json? // string[] of changed field names
+  reasonCode     String? // structured correction taxonomy (CorrectionReason)
+  modifiedFields Json? // legacy: string[] of names; new: [{field, from, to}]
   materialChange Boolean @default(false)
   caseVersion    Int? // populated from CaseSnapshot once available
 
@@ -1371,5 +1385,51 @@ model UserCredential {
   createdAt   DateTime @default(now())
 
   @@index([userId])
+  @@index([firmId])
+}
+
+// ── Clinical-validation readiness: metrics history, learning, gold cases ─────
+
+// One row per clinical-validation scorecard run — the prospective metrics
+// ledger. Enables per-engine-version and over-time comparison.
+model ValidationRun {
+  id            String   @id @default(uuid())
+  engineVersion String // e.g. deterministic-reasoning-v6
+  metrics       Json // full scorecard payload
+  createdAt     DateTime @default(now())
+
+  @@index([engineVersion, createdAt])
+}
+
+// Deterministic learned prior for one template-scoped parameter, aggregated
+// from physician corrections and gold-case diffs. Applied at generation time
+// with provenance; never overrides a physician decision.
+model LearnedPrior {
+  id            String   @id @default(uuid())
+  firmId        String // learning is firm-scoped; corrections never cross tenants
+  scopeKey      String // `${conditionKey}::${service}`
+  field         String // frequencyPerYear | durationYears | probability | rejectionRate
+  templateValue Float?
+  learnedValue  Float?
+  sampleSize    Int
+  support       Json? // e.g. {corrections: [...], rejected: n, total: n}
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([firmId, scopeKey, field])
+  @@index([firmId])
+}
+
+// A reference case with a known-correct output report — the gold corpus the
+// harness scores generation against.
+model GoldCase {
+  id           String   @id @default(uuid())
+  firmId       String
+  name         String   @unique
+  sourceCaseId String? // live case this fixture was captured from
+  fixture      Json // {expectedItems: [...], expectedExclusions: [...], totals}
+  notes        String?
+  capturedAt   DateTime @default(now())
+
   @@index([firmId])
 }

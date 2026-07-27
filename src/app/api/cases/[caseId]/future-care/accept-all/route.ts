@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit } from "@/lib/tenant";
 import { generateReviews } from "@/lib/engine/generate";
+import { lifecycleFor } from "@/lib/engine/lifecycle";
 import { ok, handleError } from "@/lib/api";
 
 // Bulk physician sign-off (Module 12): approve every still-pending future-care
@@ -12,10 +13,32 @@ export async function POST(_req: Request, { params }: { params: { caseId: string
     requirePermission(ctx, "physician.review");
     await requireCase(ctx, params.caseId);
 
-    const res = await prisma.futureCareItem.updateMany({
+    // Snapshot the pending set first so the batch writes a per-item ledger
+    // row — bulk approval must be as auditable as an individual decision.
+    const pending = await prisma.futureCareItem.findMany({
       where: { caseId: params.caseId, physicianStatus: "PENDING", supersededAt: null },
+      select: { id: true, lineageId: true, lifecycleStatus: true },
+    });
+    const res = await prisma.futureCareItem.updateMany({
+      where: { id: { in: pending.map((p) => p.id) } },
       data: { physicianStatus: "APPROVED" },
     });
+    if (pending.length > 0) {
+      await prisma.recommendationTransition.createMany({
+        data: pending.map((p) => ({
+          caseId: params.caseId,
+          firmId: ctx.firm.id,
+          lineageId: p.lineageId,
+          itemId: p.id,
+          userId: ctx.user.id,
+          role: ctx.user.role,
+          priorStatus: p.lifecycleStatus,
+          newStatus: lifecycleFor("APPROVED"),
+          comment: "Bulk approval (accept-all)",
+          reasonCode: "ACCEPT_ALL",
+        })),
+      });
+    }
 
     // Reviews reference physician status, so refresh them once after the batch.
     await generateReviews(params.caseId);

@@ -10,6 +10,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { prisma } from "@/lib/db";
+import { checkIndication } from "@/lib/engine/indications";
 import {
   runIntegrityCheck,
   hasPatientRecordSupport,
@@ -93,7 +94,57 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
     lifetimePresentValue: lifetimeIncluded.reduce((s, it) => s + ((it as { presentValue?: number }).presentValue ?? 0), 0),
     lifetimeItemCount: lifetimeIncluded.length,
   });
+  // Indication checklists — the record must document each service's clinical
+  // prerequisite. Unmet checklists are advisory findings, never silent drops.
+  const evidenceQuotes = conditions
+    .flatMap((c) => (Array.isArray((c as { evidenceSources?: unknown }).evidenceSources) ? ((c as { evidenceSources?: unknown }).evidenceSources as { quote?: string }[]) : []))
+    .map((e) => e.quote ?? "");
+  const corpus = [
+    ...conditions.map((c) => (c as { name?: string; diagnosis?: string }).name ?? (c as { diagnosis?: string }).diagnosis ?? ""),
+    ...evidenceQuotes,
+    ...chronology.map((e) => (e as { description?: string | null }).description ?? ""),
+  ].join(" \n ");
+  const indicationFindings = items.flatMap((it) => {
+    const r = checkIndication((it as { service: string }).service, corpus);
+    if (!r || r.met) return [];
+    return [{
+      service: (it as { service: string }).service,
+      result: "Indication checklist",
+      issue: `The record does not document the clinical prerequisite for this service: ${r.requirement}.`,
+      severity: "Moderate",
+      suggestion: "Document the indication in the record, attach supporting evidence, or have the physician confirm/reject the item.",
+      exportBlocking: false,
+    }];
+  });
+  // Claim-level re-verification — every stored evidence quote must still exist
+  // verbatim in its source document's extracted text (guards against stale or
+  // drifted citations surviving re-ingestion).
+  const docTexts = new Map(
+    (await prisma.document.findMany({ where: { caseId }, select: { id: true, extractedText: true } })).map((d) => [d.id, d.extractedText ?? ""]),
+  );
+  const claimFindings = conditions.flatMap((c) => {
+    const sources = Array.isArray((c as { evidenceSources?: unknown }).evidenceSources)
+      ? ((c as { evidenceSources?: unknown }).evidenceSources as { documentId?: string; filename?: string; quote?: string }[])
+      : [];
+    return sources.flatMap((src) => {
+      if (!src.quote || !src.documentId) return [];
+      const text = docTexts.get(src.documentId);
+      if (text == null) return [];
+      const normalize = (x: string) => x.replace(/\s+/g, " ").trim();
+      if (normalize(text).includes(normalize(src.quote).replace(/…$/, ""))) return [];
+      return [{
+        service: (c as { name?: string }).name ?? "condition evidence",
+        result: "Evidence citation drift",
+        issue: `A stored evidence quote no longer appears in its source document (${src.filename ?? src.documentId}): "${src.quote.slice(0, 80)}".`,
+        severity: "High",
+        suggestion: "Re-run evidence location for this condition; the source document changed since the quote was captured.",
+        exportBlocking: false,
+      }];
+    });
+  });
   const findings = [
+    ...indicationFindings,
+    ...claimFindings,
     ...report.findings.map((f) => ({
       service: f.recommendation,
       result: f.result,

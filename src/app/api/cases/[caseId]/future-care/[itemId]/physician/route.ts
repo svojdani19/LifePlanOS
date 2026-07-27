@@ -15,6 +15,10 @@ const schema = z.object({
   probability: z.enum(["PROBABLE", "POSSIBLE", "SPECULATIVE", "NOT_SUPPORTED"]).optional(),
   frequencyPerYear: z.number().min(0).optional(),
   durationYears: z.number().min(0).nullable().optional(),
+  // Structured correction taxonomy — why the physician rejected or modified.
+  reasonCode: z
+    .enum(["WRONG_INDICATION", "NOT_CAUSALLY_RELATED", "FREQUENCY_EXCESSIVE", "FREQUENCY_INSUFFICIENT", "DURATION_WRONG", "DUPLICATIVE", "COST_WRONG", "INSUFFICIENT_EVIDENCE", "OTHER"])
+    .optional(),
 });
 
 // Physician review workflow (Module 12): approve / reject / modify an item and
@@ -67,10 +71,13 @@ export async function POST(req: Request, { params }: { params: { caseId: string;
         priorStatus: item.lifecycleStatus,
         newStatus: newLifecycle,
         comment: input.note ?? null,
+        reasonCode: input.reasonCode ?? null,
+        // Field-level before→after diff: the physician's correction signal the
+        // learning loop consumes. (Legacy rows hold bare field-name arrays.)
         modifiedFields: [
-          ...(input.probability !== undefined && input.probability !== item.probability ? ["probability"] : []),
-          ...(input.frequencyPerYear !== undefined && input.frequencyPerYear !== item.frequencyPerYear ? ["frequencyPerYear"] : []),
-          ...(input.durationYears !== undefined && input.durationYears !== item.durationYears ? ["durationYears"] : []),
+          ...(input.probability !== undefined && input.probability !== item.probability ? [{ field: "probability", from: item.probability, to: input.probability }] : []),
+          ...(input.frequencyPerYear !== undefined && input.frequencyPerYear !== item.frequencyPerYear ? [{ field: "frequencyPerYear", from: item.frequencyPerYear, to: input.frequencyPerYear }] : []),
+          ...(input.durationYears !== undefined && input.durationYears !== item.durationYears ? [{ field: "durationYears", from: item.durationYears, to: input.durationYears }] : []),
         ],
       },
     });

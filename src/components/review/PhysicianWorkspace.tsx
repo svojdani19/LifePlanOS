@@ -24,6 +24,7 @@ export function PhysicianWorkspace({ queue }: { queue: ReviewQueueItem[] }) {
   const [modifying, setModifying] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [note, setNote] = useState("");
+  const [reasonCode, setReasonCode] = useState("");
   const [freq, setFreq] = useState<number | "">("");
   const [dur, setDur] = useState<number | "">("");
   const listRef = useRef<HTMLUListElement>(null);
@@ -34,6 +35,7 @@ export function PhysicianWorkspace({ queue }: { queue: ReviewQueueItem[] }) {
     setBusy(item.itemId);
     const body: Record<string, unknown> = { status };
     if (status === "MODIFIED" || note.trim()) body.note = note.trim() || undefined;
+    if ((status === "MODIFIED" || status === "REJECTED") && reasonCode) body.reasonCode = reasonCode;
     if (status === "MODIFIED") {
       if (freq !== "") body.frequencyPerYear = freq;
       if (dur !== "") body.durationYears = dur;
@@ -168,6 +170,18 @@ export function PhysicianWorkspace({ queue }: { queue: ReviewQueueItem[] }) {
                   </div>
                   {modifying === item.itemId && (
                     <div className="mt-3 flex flex-wrap items-end gap-2 border-t border-ink-100 pt-3">
+                      <select className="input w-full text-sm sm:w-96" value={reasonCode} onChange={(e) => setReasonCode(e.target.value)} aria-label="Correction reason">
+                        <option value="">Correction reason (select)…</option>
+                        <option value="WRONG_INDICATION">Indication not supported</option>
+                        <option value="NOT_CAUSALLY_RELATED">Not causally related to injury</option>
+                        <option value="FREQUENCY_EXCESSIVE">Frequency excessive</option>
+                        <option value="FREQUENCY_INSUFFICIENT">Frequency insufficient</option>
+                        <option value="DURATION_WRONG">Duration wrong</option>
+                        <option value="DUPLICATIVE">Duplicative of another item</option>
+                        <option value="COST_WRONG">Cost basis wrong</option>
+                        <option value="INSUFFICIENT_EVIDENCE">Insufficient record evidence</option>
+                        <option value="OTHER">Other (explain in note)</option>
+                      </select>
                       <textarea className="input h-16 w-full sm:w-96" placeholder="Physician note (required context for the modification)" value={note} onChange={(e) => setNote(e.target.value)} />
                       <div>
                         <label className="label">Frequency /yr</label>

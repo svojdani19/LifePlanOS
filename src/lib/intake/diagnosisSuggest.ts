@@ -7,6 +7,8 @@
 // diagnosis corpus on the next run.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { assertionOf } from "@/lib/documents/assertion";
+
 export interface DiagnosisSuggestion {
   diagnosis: string;
   icd10Code: string;
@@ -70,8 +72,15 @@ export function suggestDiagnoses(
   for (const d of docs) {
     const text = clinicalOnly(String(d.extractedText ?? ""));
     if (text.length < 30) continue;
+    // Patterns are checked sentence-by-sentence so assertion status can be
+    // classified: a diagnosis is only suggested when at least one mentioning
+    // sentence AFFIRMS it. Negated ("no concussion"), hypothetical ("rule out
+    // concussion"), and family-history mentions never become suggestions; a
+    // historical mention is also excluded because a prior condition must not
+    // become an injury diagnosis (consistent with clinicalOnly()'s intent).
+    const sentences = text.split(/(?<=[.!?])\s+/);
     for (const p of DIAGNOSIS_PATTERNS) {
-      if (!p.re.test(text)) continue;
+      if (!sentences.some((s) => p.re.test(s) && assertionOf(s, p.re) === "affirmed")) continue;
       const e = found.get(p.icd10) ?? { diagnosis: p.diagnosis, icd10Code: p.icd10, sources: [] };
       if (!e.sources.includes(d.filename)) e.sources.push(d.filename);
       found.set(p.icd10, e);

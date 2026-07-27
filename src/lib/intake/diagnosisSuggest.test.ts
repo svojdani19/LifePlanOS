@@ -32,6 +32,30 @@ describe("suggestDiagnoses", () => {
     expect(s.map((x) => x.diagnosis)).not.toContain("Burst fracture of first lumbar vertebra");
   });
 
+  it("does NOT suggest a diagnosis mentioned only as a rule-out", () => {
+    const s = suggestDiagnoses(
+      [{ filename: "ed.pdf", extractedText: "ASSESSMENT: Rule out concussion. Patient alert and oriented, neurologic exam intact and nonfocal today." }],
+      [],
+    );
+    expect(s.map((x) => x.diagnosis)).not.toContain("Concussion / mild traumatic brain injury");
+  });
+
+  it("does NOT suggest a diagnosis mentioned only as negated", () => {
+    const s = suggestDiagnoses(
+      [{ filename: "ed.pdf", extractedText: "EXAM: Alert and oriented. CT head shows no evidence of concussion or intracranial injury today." }],
+      [],
+    );
+    expect(s.map((x) => x.diagnosis)).not.toContain("Concussion / mild traumatic brain injury");
+  });
+
+  it("still suggests when an affirmed mention coexists with a negated one", () => {
+    const s = suggestDiagnoses(
+      [{ filename: "ed.pdf", extractedText: "IMPRESSION: Concussion sustained in the collision. No evidence of intracranial hemorrhage." }],
+      [],
+    );
+    expect(s.map((x) => x.diagnosis)).toContain("Concussion / mild traumatic brain injury");
+  });
+
   it("returns nothing for empty/near-empty records", () => {
     expect(suggestDiagnoses([{ filename: "x.pdf", extractedText: "[illegible]" }], [])).toHaveLength(0);
   });

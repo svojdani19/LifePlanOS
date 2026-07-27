@@ -47,4 +47,27 @@ describe("locateConditionEvidence", () => {
   it("returns [] when the records do not document the condition", () => {
     expect(locateConditionEvidence(docs, "Rotator cuff tear of the shoulder")).toHaveLength(0);
   });
+
+  it("never cites a sentence whose only support is a negated finding", () => {
+    const negDocs = [
+      {
+        id: "n1",
+        filename: "mri2.pdf",
+        type: "IMAGING_REPORT",
+        extractedText: "FINDINGS: No cord signal abnormality. Vertebral alignment is anatomic.",
+      },
+    ];
+    expect(locateConditionEvidence(negDocs, "Spinal cord signal abnormality")).toHaveLength(0);
+  });
+
+  it("carries startOffset/endOffset/matchScore locating the quoted sentence", () => {
+    const s = locateConditionEvidence(docs, "Fracture of tibial plateau");
+    expect(s.length).toBeGreaterThan(0);
+    const src = s[0];
+    expect(typeof src.startOffset).toBe("number");
+    expect(typeof src.endOffset).toBe("number");
+    const slice = docs[1].extractedText.slice(src.startOffset, src.endOffset);
+    expect(slice.toLowerCase()).toContain("tibial plateau");
+    expect(src.matchScore).toBeGreaterThan(0);
+  });
 });

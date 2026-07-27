@@ -9,6 +9,7 @@ import { mapRecommendationToCondition, type CondInput } from "@/lib/engine/integ
 import { planRegeneration } from "@/lib/engine/lifecycle";
 import { baselineLifeExpectancy } from "@/lib/engine/lifeExpectancy";
 import { resolveUnitCost } from "@/lib/references/pricingProvider";
+import { applyPriors, priorProvenanceNote, scopeKeyOf } from "@/lib/engine/learning";
 import { rebuildEvidenceGraph } from "@/lib/engine/evidenceGraph";
 import { citationCompatible, evaluateArticle, selectPrimary, isManagementService } from "@/lib/engine/citationQuality";
 import { findCandidates, literatureReachable, activeSources, type Article } from "@/lib/literature";
@@ -169,11 +170,29 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
   const corpus = [c.diagnosis, ...additionalDx.map((d) => d?.diagnosis), ...injuryRelated.map((pc) => pc.name)].filter(Boolean).join(" ; ");
   const matchedKeys = resolveConditionKeys(corpus);
   let care: CareTemplate[] = [];
+  // Provenance: record which generator path + template rule supplies each
+  // service so every item carries a persistent origin classification.
+  const originOf = new Map<string, { origin: "TEMPLATE_CONDITION" | "TEMPLATE_BASELINE" | "TEMPLATE_SPECIALTY"; conditionKey: string | null; templateRuleId: string }>();
+  const ruleId = (scope: string, svc: string) => `${scope}:${svc.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+  const tagOrigin = (t: CareTemplate, origin: "TEMPLATE_CONDITION" | "TEMPLATE_BASELINE" | "TEMPLATE_SPECIALTY", conditionKey: string | null, scope: string) => {
+    const key = t.service.trim().toLowerCase();
+    if (!originOf.has(key)) originOf.set(key, { origin, conditionKey, templateRuleId: ruleId(scope, t.service) });
+  };
   if (matchedKeys.length > 0) {
-    for (const k of matchedKeys) care.push(...CONDITION_CARE[k]);
-    care.push(...BASELINE_CARE);
+    for (const k of matchedKeys) for (const t of CONDITION_CARE[k]) { care.push(t); tagOrigin(t, "TEMPLATE_CONDITION", k, k); }
+    for (const t of BASELINE_CARE) { care.push(t); tagOrigin(t, "TEMPLATE_BASELINE", null, "baseline"); }
   } else {
     care = pack.care;
+    for (const t of pack.care) tagOrigin(t, "TEMPLATE_SPECIALTY", null, "specialty");
+  }
+  // Learned priors (firm-scoped): physician-correction history adjusts the
+  // draft's starting values, always disclosed, always still reviewable.
+  const firmPriors = await prisma.learnedPrior.findMany({ where: { firmId: c.firmId } });
+  const priorsByScope = new Map<string, { field: string; learnedValue: number | null; sampleSize: number }[]>();
+  for (const lp of firmPriors) {
+    const arr = priorsByScope.get(lp.scopeKey) ?? [];
+    arr.push({ field: lp.field, learnedValue: lp.learnedValue, sampleSize: lp.sampleSize });
+    priorsByScope.set(lp.scopeKey, arr);
   }
   const seenService = new Set<string>();
   const careItems = care.filter((t) => {
@@ -261,6 +280,18 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
         pricingSource: priced?.live ? priced.source : p.pricingSource,
         pricedAt: priced?.live && priced.retrievedAt ? new Date(priced.retrievedAt) : null,
         pricingDetail: priced?.live && priced.detail ? (priced.detail as never) : Prisma.DbNull,
+        ...(originOf.get(t.service.trim().toLowerCase()) ?? {}),
+        ...(() => {
+          const tag = originOf.get(t.service.trim().toLowerCase());
+          const scoped = priorsByScope.get(scopeKeyOf(tag?.conditionKey ?? null, t.service)) ?? [];
+          const adj = applyPriors(t, scoped);
+          const note = priorProvenanceNote(adj.applied);
+          return {
+            ...(adj.frequencyPerYear !== undefined ? { frequencyPerYear: adj.frequencyPerYear } : {}),
+            ...(adj.durationYears !== undefined ? { durationYears: adj.durationYears } : {}),
+            ...(note || adj.cautionNote ? { missingSupport: [adj.cautionNote, note].filter(Boolean).join(" ") } : {}),
+          };
+        })(),
         evidenceStrength: t.evidenceStrength,
         literatureSupport: t.literatureSupport,
         lowerCostAlternative: t.lowerCostAlternative,

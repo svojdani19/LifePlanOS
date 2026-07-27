@@ -40,5 +40,32 @@ async function main() {
   console.log(`Narrative sanity: ${lintTotal} issue(s) across ${asmts.length} assessments (${lintHigh} high) — ${[...ruleCounts.entries()].map(([k, v]) => `${k}×${v}`).join(", ") || "clean"}`);
   console.log(`Physician review: ${reviewed}/${items} decided · rejection rate ${items ? Math.round((statusOf("REJECTED") / items) * 100) : 0}% · modification rate ${items ? Math.round((statusOf("MODIFIED") / items) * 100) : 0}%`);
   console.log(`Statuses: ${[...new Set(asmts.map((a) => a.status))].map((s) => `${s}×${asmts.filter((a) => a.status === s).length}`).join(" · ")}`);
+
+  // Persist the run — the prospective metrics ledger. Every scorecard becomes
+  // a dated, engine-versioned row so accuracy can be compared across versions
+  // and over time instead of existing only as console output.
+  const engineVersion = asmts[0]?.generatedByModel ?? "unknown";
+  const run = await prisma.validationRun.create({
+    data: {
+      engineVersion,
+      metrics: {
+        assessments: asmts.length,
+        items,
+        chainComplete,
+        sufficiencyPresent: has("evidenceSufficiency"),
+        critiquePresent: has("selfCritique"),
+        confidenceVectorPresent: has("confidenceVector"),
+        anatomyMismatches: anatomy,
+        literatureFindings: badLit,
+        unsupportedFindings: unsupported,
+        blockingFindings: findings.filter((f) => f.exportBlocking).length,
+        insufficientVerdicts: insufficient,
+        narrativeLint: { total: lintTotal, high: lintHigh, byRule: Object.fromEntries(ruleCounts) },
+        review: { decided: reviewed, approved: statusOf("APPROVED"), modified: statusOf("MODIFIED"), rejected: statusOf("REJECTED") },
+      },
+    },
+  });
+  const history = await prisma.validationRun.count();
+  console.log(`Run persisted: ${run.id.slice(0, 8)} (engine ${engineVersion}) — ${history} run(s) in the metrics ledger.`);
 }
 main().catch((e) => { console.error(e); process.exitCode = 1; }).finally(() => prisma.$disconnect());
