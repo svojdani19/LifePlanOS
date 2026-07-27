@@ -3208,13 +3208,8 @@ function ValidationCard({ caseId, scope }: { caseId: string; scope?: ReportSelec
 }
 
 function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians = [] }: { data: AnyRec; canExport: boolean; canEdit: boolean; call: any; busy: string | null; totals: AnyRec; physicians?: AnyRec[] }) {
-  const [template, setTemplate] = useState(data.side ?? "PLAINTIFF");
   const [preparing, setPreparing] = useState<string>(data.preparingPhysicianId ?? "");
   const [reportSel, setReportSel] = useState<ReportSelection | null>(null);
-  async function exportReport(format: string) {
-    const r = await call(`/api/cases/${data.id}/export`, "POST", { format, template }, "export");
-    if (r?.export) window.open(`/api/cases/${data.id}/export/${r.export.id}/download`, "_blank");
-  }
   const chosen = physicians.find((p: AnyRec) => p.id === preparing);
   return (
     <div className="space-y-4">
@@ -3237,25 +3232,8 @@ function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians 
           {chosen && !chosen.credentialSummary && <span className="text-xs text-amber-600">No credential summary on this seat — add one under Team &amp; Seats → Credentials.</span>}
         </div>
       </div>
-      <div className="card p-5">
-        <h3 className="text-sm font-semibold text-ink-900">Generate Report</h3>
-        <p className="text-xs text-ink-500">Present value {formatMoney(totals.totalPresentValue)} across {data.futureCareItems.length} items.</p>
-        <div className="mt-3 flex flex-wrap items-center gap-3">
-          <select className="input w-48" value={template} onChange={(e) => setTemplate(e.target.value)}>
-            <option value="PLAINTIFF">Plaintiff template</option>
-            <option value="DEFENSE">Defense template</option>
-            <option value="NEUTRAL">Neutral template</option>
-          </select>
-          {canExport ? (
-            <>
-              <button className="btn-primary" disabled={busy === "export" || data.futureCareItems.length === 0} onClick={() => exportReport("DOCX")}>
-                {busy === "export" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileOutput className="h-4 w-4" />} Export DOCX
-              </button>
-              <button className="btn-outline" disabled={busy === "export" || data.futureCareItems.length === 0} title="The canonical DOCX converted to PDF on the server (requires LibreOffice on the app host)." onClick={() => exportReport("PDF")}>Export PDF</button>
-            </>
-          ) : <span className="text-sm text-ink-500">Your role cannot export reports.</span>}
-        </div>
-      </div>
+      {/* The selected report's generation controls render here (portal from ReportLibrary). */}
+      <div id="report-generate-slot" className="space-y-4" />
       <details className="card p-5">
         <summary className="cursor-pointer text-sm font-semibold text-ink-900">Compare Versions</summary>
         <div className="mt-3"><VersionCompareCard caseId={data.id} embedded /></div>

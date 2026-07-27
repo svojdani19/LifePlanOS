@@ -7,6 +7,7 @@
 // the Generate Report card below, which is unchanged.
 
 import { useCallback, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
 import VocationalWorkspace from "@/components/case/VocationalWorkspace";
 import EconomistWorkspace from "@/components/case/EconomistWorkspace";
 
@@ -69,6 +70,9 @@ export default function ReportLibrary({ caseId, canExport, onSelect }: { caseId:
   const [config, setConfig] = useState<Record<string, unknown>>({});
   const [mode, setMode] = useState<"final" | "draft">("final");
   const [previewHtml, setPreviewHtml] = useState<string | null>(null);
+  const [slot, setSlot] = useState<HTMLElement | null>(null);
+  const [lcpTemplate, setLcpTemplate] = useState("PLAINTIFF");
+  useEffect(() => { setSlot(document.getElementById("report-generate-slot")); }, []);
   const [changes, setChanges] = useState<{ diff: Record<string, unknown>; material: boolean; prior: { version: number; draft: boolean; createdAt: string } } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -136,7 +140,7 @@ export default function ReportLibrary({ caseId, canExport, onSelect }: { caseId:
 
   const coreReports = reports.filter((r) => r.serviceTier === "core");
 
-  return (
+  const selector = (
     <div className="card p-5">
       <div className="mb-1 text-sm font-semibold text-ink-900">Injury Valuation Reports</div>
       <p className="mb-3 text-xs text-ink-500">
@@ -197,8 +201,17 @@ export default function ReportLibrary({ caseId, canExport, onSelect }: { caseId:
           </details>
         )}
 
-        {/* Selected report detail */}
-        <div className="rounded-lg border border-ink-100 p-4">
+      </div>
+    </div>
+  );
+
+  return (
+    <>
+      {selector}
+      {slot && createPortal(
+        <div className="card p-5">
+          <h3 className="mb-2 text-sm font-semibold text-ink-900">Generate Report{selected ? ` — ${selected.name}` : ""}</h3>
+
           {!selected ? (
             <p className="text-xs text-ink-400">Select a report type.</p>
           ) : (
@@ -244,7 +257,31 @@ export default function ReportLibrary({ caseId, canExport, onSelect }: { caseId:
                 </div>
               )}
               {selected.legacy ? (
-                selected.id === "TESTIMONY_PACK" ? (
+                selected.id === "LIFE_CARE_PLAN" ? (
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <select className="input w-44 text-xs" value={lcpTemplate} onChange={(e) => setLcpTemplate(e.target.value)}>
+                      <option value="PLAINTIFF">Plaintiff template</option>
+                      <option value="DEFENSE">Defense template</option>
+                      <option value="NEUTRAL">Neutral template</option>
+                    </select>
+                    {canExport ? (
+                      <>
+                        {["DOCX", "PDF"].map((f) => (
+                          <button key={f} className="btn-primary px-3 py-1.5 text-xs" disabled={busy !== null} onClick={async () => {
+                            setBusy(f); setError(null);
+                            try {
+                              const res = await fetch(`/api/cases/${caseId}/export`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ format: f, template: lcpTemplate }) });
+                              const body = await res.json();
+                              if (!res.ok) setError(body.error ?? "Export refused");
+                              else { window.open(`/api/cases/${caseId}/export/${body.export.id}/download`, "_blank"); void load(); }
+                            } finally { setBusy(null); }
+                          }}>{busy === f ? "Exporting…" : `Export ${f}`}</button>
+                        ))}
+                      </>
+                    ) : <span className="text-xs text-ink-400">Your role cannot export reports.</span>}
+                    {error && <p className="w-full text-xs text-red-600">{error}</p>}
+                  </div>
+                ) : selected.id === "TESTIMONY_PACK" ? (
                   <div className="mt-3">
                     {canExport ? (
                       <button
@@ -337,8 +374,9 @@ export default function ReportLibrary({ caseId, canExport, onSelect }: { caseId:
               )}
             </>
           )}
-        </div>
-      </div>
-    </div>
+        </div>,
+        slot,
+      )}
+    </>
   );
 }
