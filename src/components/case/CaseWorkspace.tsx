@@ -352,6 +352,7 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
     icd10Code: data.icd10Code ?? "",
     mechanism: data.mechanism ?? "",
     jurisdiction: data.jurisdiction ?? "",
+    zipCode: data.zipCode ?? "",
     specialty: data.specialty ?? "",
     currentWorkStatus: data.currentWorkStatus ?? "",
     disabilityReason: data.disabilityReason ?? "",
@@ -513,6 +514,9 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
           <datalist id="state-list">
             {US_STATES.map((s) => <option key={s} value={s} />)}
           </datalist>
+        </Field>
+        <Field label="ZIP Code (venue pricing)">
+          <input className="input" disabled={!canEdit} value={form.zipCode} placeholder="e.g. 92626" maxLength={10} onChange={(e) => set("zipCode", e.target.value)} />
         </Field>
 
         {/* Pre-existing conditions — pop-up multi-select with Complete/Incomplete status */}

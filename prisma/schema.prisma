@@ -292,6 +292,7 @@ model Case {
   caseType            CaseType  @default(PERSONAL_INJURY)
   side                CaseSide  @default(PLAINTIFF)
   jurisdiction        String?
+  zipCode             String? // patient/venue ZIP — drives geozip-specific live pricing
   dateOfInjury        DateTime?
   mechanism           String?
   diagnosis           String? // primary/current diagnosis description
@@ -758,6 +759,11 @@ model FutureCareItem {
   lowCost       Float   @default(0)
   highCost      Float   @default(0)
   pricingSource String? // Medicare / UCR / cash-pay benchmark note
+  // Live-pricing provenance (pricingProvider seam): when the figure came from a
+  // sourced venue-specific lookup, the retrieval date and the raw provider
+  // snapshot are persisted so the number can be re-derived and defended later.
+  pricedAt      DateTime?
+  pricingDetail Json?
 
   // Evidence (Module 9) — never fabricated; states when support is limited.
   evidenceStrength  String? // e.g. "Guideline-supported", "Limited — physician confirmation required"
