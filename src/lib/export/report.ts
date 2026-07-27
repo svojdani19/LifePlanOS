@@ -1212,3 +1212,50 @@ export async function buildCostCsv(caseId: string): Promise<string> {
   );
   return [header.join(","), ...rows].join("\n");
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Report Library (docs/22) — ADDITIVE export of the existing private design kit
+// so the neutral document renderer (src/lib/reports/doc.ts) can produce output
+// typeset identically to this report. Zero behavior change: this object only
+// re-exposes helpers and constants that already exist above, unmodified.
+// ─────────────────────────────────────────────────────────────────────────────
+export const reportKit = {
+  // Paragraph & heading builders
+  h1,
+  h2,
+  p,
+  caption,
+  labeled,
+  bullet,
+  sourceLine,
+  // Table builders
+  table,
+  td,
+  rowOf,
+  specGrid,
+  factTable,
+  tableBorders,
+  // Formatting helpers
+  money,
+  fmtDate,
+  mdY,
+  cap,
+  lc,
+  period,
+  // Design constants
+  FONT,
+  NAVY,
+  INK,
+  GREY,
+  RULE,
+  ALT,
+  SOFT,
+  BODY,
+  H1,
+  H2,
+  TBL,
+  CAPTION,
+  // Domain constants
+  CATEGORY_GROUPS,
+  ABBREVIATIONS,
+} as const;

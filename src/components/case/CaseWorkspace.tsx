@@ -1,5 +1,6 @@
 "use client";
 
+import ReportLibrary from "@/components/case/ReportLibrary";
 import { useState, useMemo, useRef, useEffect, Fragment } from "react";
 import { useRouter } from "next/navigation";
 import {
@@ -3171,6 +3172,7 @@ function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians 
           {chosen && !chosen.credentialSummary && <span className="text-xs text-amber-600">No credential summary on this seat — add one under Team &amp; Seats → Credentials.</span>}
         </div>
       </div>
+      <ReportLibrary caseId={data.id} canExport={canExport} />
       <ValidationCard caseId={data.id} />
       <VersionCompareCard caseId={data.id} />
       <div className="card p-5">

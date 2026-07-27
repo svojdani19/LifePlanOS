@@ -619,6 +619,7 @@ enum ExportFormat {
   XLSX
   CSV
   MEMO
+  HTML
 }
 
 model Document {
@@ -979,6 +980,10 @@ model ReportExport {
   format            ExportFormat
   template          CaseSide     @default(PLAINTIFF) // plaintiff/defense/neutral template
   draft             Boolean      @default(false) // CRE v1 — draft export (watermark + unresolved-issues appendix)
+  // Report Library (additive): which report type produced this export and the
+  // configuration used. Null on legacy rows (inferred: MEMO=testimony, else LCP).
+  reportType String?
+  config     Json?
   version           Int          @default(1)
   storageKey        String?
   generatedById     String?

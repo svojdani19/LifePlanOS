@@ -9,6 +9,7 @@ const CONTENT_TYPES: Record<string, string> = {
   pdf: "application/pdf",
   xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   memo: "text/plain",
+  html: "text/html; charset=utf-8",
 };
 
 // Authenticated, audited download of a generated report. PHI files are never
@@ -28,7 +29,11 @@ export async function GET(_req: Request, { params }: { params: { caseId: string;
     // .docx file); the format enum is the fallback for legacy rows.
     const storedExt = /\.([a-z0-9]+)$/i.exec(record.storageKey)?.[1]?.toLowerCase();
     const ext = storedExt ?? record.format.toLowerCase();
-    const kind = record.format === "MEMO" ? "testimony-prep" : "life-care-plan";
+    const kind = record.reportType
+      ? record.reportType.toLowerCase().replace(/_/g, "-")
+      : record.format === "MEMO"
+        ? "testimony-prep"
+        : "life-care-plan";
     const filename = `${c.caseNumber}-${kind}-v${record.version}.${ext}`;
     return new Response(new Uint8Array(buf), {
       headers: {
