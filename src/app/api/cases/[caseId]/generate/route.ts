@@ -2,6 +2,7 @@ import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit, recordUsage } from "@/lib/tenant";
 import { generatePlan } from "@/lib/engine/generate";
 import { persistCaseValidation } from "@/lib/engine/validation";
+import { refreshCaseAttestations } from "@/lib/engine/attestationService";
 import { persistCaseReasoning } from "@/lib/engine/clinicalReasoningPersist";
 import { ok, handleError } from "@/lib/api";
 
@@ -19,6 +20,9 @@ export async function POST(_req: Request, { params }: { params: { caseId: string
     // Clinical Reasoning Engine — reason first: assess every recommendation of
     // the fresh plan so the structured assessment backs the narrative. Best-effort.
     await persistCaseReasoning(params.caseId, ctx.firm.id).catch(() => {});
+    // Regeneration can materially change signed-over recommendations —
+    // re-verify active attestations (EPIC-005).
+    await refreshCaseAttestations(params.caseId).catch(() => {});
 
     await prisma.case.update({ where: { id: params.caseId }, data: { status: "FUTURE_CARE" } });
     await recordUsage(ctx, "AI_GENERATION", { caseId: params.caseId, meta: { module: "plan" } });

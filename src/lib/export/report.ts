@@ -23,6 +23,7 @@ import { buildRecommendationDossier, type DossierCondition, type DossierChronoEv
 import { buildReasoningAssessment, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningItem, type ReasoningAssessment } from "@/lib/engine/clinicalReasoning";
 import { referencesFor, guidelineSourcesFor } from "@/lib/references/sources";
 import { parseBasis, basisNarrative } from "@/lib/engine/lifeExpectancy";
+import { verifyAttestation, type AttestationScopeEntry, type AttestableItem } from "@/lib/engine/attestation";
 import { bodyRegion } from "@/lib/engine/integrity";
 import { project } from "@/lib/engine/cost";
 import { typeLabel } from "@/lib/documents/taxonomy";
@@ -253,6 +254,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
       documents: { orderBy: { createdAt: "asc" } },
       treatingProviders: { where: { status: "CONFIRMED" }, orderBy: { createdAt: "asc" } },
       interviewFindings: { orderBy: { createdAt: "asc" } },
+      attestations: { where: { status: "ACTIVE" }, orderBy: { signedAt: "desc" } },
     },
   });
 
@@ -998,6 +1000,33 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   body.push(new Paragraph({ children: [new TextRun({ text: preparer, bold: true, size: BODY, color: INK })] }));
   body.push(new Paragraph({ children: [new TextRun({ text: c.firm.name, size: BODY, color: INK })] }));
   body.push(new Paragraph({ spacing: { after: 40 }, children: [new TextRun({ text: fmtDate(new Date()), size: CAPTION, color: GREY })] }));
+
+  // ══ PHYSICIAN ATTESTATION (EPIC-005) ═════════════════════════════════════════
+  // Rendered ONLY for attestations that are ACTIVE and still verify against the
+  // CURRENT plan at render time — a signature the plan has drifted away from is
+  // never printed. The statement text is the immutable signed content; the
+  // content hash lets any reader confirm the printed statement is what was
+  // signed.
+  const validAttestations = c.attestations.filter(
+    (att) => verifyAttestation((att.scope as unknown as AttestationScopeEntry[]) ?? [], items as unknown as AttestableItem[]).valid,
+  );
+  if (validAttestations.length) {
+    body.push(h1("Physician Attestation", { pageBreak: true }));
+    for (const att of validAttestations) {
+      body.push(p(att.statementText));
+      if (att.physicianNote) body.push(p(`Qualification noted at signing: ${att.physicianNote}`, { italics: true }));
+      body.push(
+        p(
+          `Signed electronically by ${att.physicianName} on ${fmtDate(att.signedAt)}, covering ${att.itemCount} recommendation${att.itemCount === 1 ? "" : "s"} with a combined present value of ${money(att.totalPresentValue)}.`,
+        ),
+      );
+      const docs = (Array.isArray(att.credentialDocs) ? att.credentialDocs : []) as { type?: string; label?: string; filename?: string }[];
+      if (docs.length) {
+        body.push(caption(`Credentials on file at signing: ${docs.map((d) => d.label || d.filename || d.type).filter(Boolean).join("; ")}.`));
+      }
+      body.push(caption(`Attestation integrity hash (SHA-256): ${att.contentHash}`));
+    }
+  }
 
   // ══ APPENDIX A — REFERENCES ══════════════════════════════════════════════════
   body.push(h1("Appendix A — References Relied Upon", { pageBreak: true }));

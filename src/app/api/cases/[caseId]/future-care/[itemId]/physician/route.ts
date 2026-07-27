@@ -4,6 +4,7 @@ import { requireApiContext, requirePermission, requireCase, audit } from "@/lib/
 import { generateReviews, paraphraseSummary } from "@/lib/engine/generate";
 import { persistCaseValidation } from "@/lib/engine/validation";
 import { persistCaseReasoning } from "@/lib/engine/clinicalReasoningPersist";
+import { refreshCaseAttestations } from "@/lib/engine/attestationService";
 import { lifecycleFor } from "@/lib/engine/lifecycle";
 import { ok, handleError } from "@/lib/api";
 
@@ -80,6 +81,9 @@ export async function POST(req: Request, { params }: { params: { caseId: string;
     // field). Incremental: only the reviewed item is reassessed (§19).
     await persistCaseValidation(params.caseId, ctx.firm.id).catch(() => {});
     await persistCaseReasoning(params.caseId, ctx.firm.id, { recommendationIds: [params.itemId], actorUserId: ctx.user.id }).catch(() => {});
+    // A review action can materially change a signed-over item — re-verify any
+    // active attestations (EPIC-005; drifted signatures are invalidated).
+    await refreshCaseAttestations(params.caseId).catch(() => {});
     await audit(ctx, "physician.review", { type: "futureCareItem", id: item.id, caseId: params.caseId, meta: { status: input.status } });
     return ok({ item: updated });
   } catch (err) {

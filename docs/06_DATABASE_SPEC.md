@@ -57,6 +57,16 @@ connection's search_path targets `lifeplanos`) → `npx prisma migrate resolve
 
 ### Change log (schema)
 
+- **2026-07-27 (Electronic attestation)** New `Attestation` model +
+  `AttestationStatus` enum (migration `20260727130000_attestation`). Immutable
+  signed physician attestations: identity/role/credential summary + credential
+  documents snapshotted at signing, statement text, scope pinning the covered
+  recommendation versions (lineage + version + material fields), item count +
+  PV, case snapshot version, SHA-256 content hash. Never edited or deleted —
+  re-signing supersedes (`SUPERSEDED` + `supersededById`); material drift
+  invalidates (`INVALIDATED` + reason, audited). Verification is pure
+  (`engine/attestation.ts:verifyAttestation`).
+
 - **2026-07-27 (Life-expectancy basis)** `Case.lifeExpectancyBasis Json?`
   (migration `20260727100000_life_expectancy_basis`). Recorded provenance for
   the lifetime projection horizon: actuarial baseline (table + edition + age +

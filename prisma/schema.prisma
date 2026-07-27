@@ -142,6 +142,7 @@ model Firm {
   validationFindings ValidationFinding[]
   attentionItems     AttentionItem[]
   reasoningAssessments ClinicalReasoningAssessment[]
+  attestations       Attestation[]
 
   @@index([slug])
 }
@@ -244,6 +245,7 @@ model User {
   auditLogs      AuditLog[]
   usageRecords   UsageRecord[]
   credentials    UserCredential[]
+  attestations   Attestation[]    @relation("AttestationPhysician")
 
   @@index([firmId])
   @@index([inviteToken])
@@ -348,6 +350,7 @@ model Case {
   snapshots                 CaseSnapshot[]
   treatingProviders         TreatingProvider[]
   interviewFindings         InterviewFinding[]
+  attestations              Attestation[]
 
   @@unique([firmId, caseNumber])
   @@index([firmId])
@@ -1211,6 +1214,62 @@ model AttentionItem {
   @@index([firmId])
   @@index([caseId, status])
   @@index([caseId, validationRuleId])
+}
+
+// ── EPIC-005: electronic attestation ─────────────────────────────────────────
+
+enum AttestationStatus {
+  ACTIVE
+  SUPERSEDED // replaced by a newer signature from the same physician
+  INVALIDATED // a covered recommendation materially changed after signing
+}
+
+// A physician's signed, IMMUTABLE attestation of the plan: who signed, with
+// what credentials (snapshotted at signing — never looked up later), exactly
+// which recommendation versions were covered (pinned by lineage + version +
+// material fields), the statement text actually signed, and a content hash for
+// tamper evidence. Rows are never edited or deleted: a re-signing supersedes;
+// a material change to any covered recommendation invalidates (recorded with
+// the reason, audited). The report renders only a currently valid attestation.
+model Attestation {
+  id     String @id @default(uuid())
+  firmId String
+  firm   Firm   @relation(fields: [firmId], references: [id], onDelete: Cascade)
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  physicianId String
+  physician   User   @relation("AttestationPhysician", fields: [physicianId], references: [id])
+
+  // Snapshot at signing time.
+  physicianName     String
+  physicianRole     String
+  credentialSummary String?
+  credentialDocs    Json? // [{ type, label, filename }] — the credential documents on file when signed
+  statementText     String // the first-person attestation language actually signed
+  physicianNote     String? // optional free-text qualification added at signing
+
+  // What was attested: [{ lineageId, itemId, version, service, category,
+  // probability, frequencyPerYear, durationYears, isLifetime, unitCost,
+  // presentValue, physicianStatus }] — the material fields pinned so any later
+  // drift is detectable without reference to mutable rows.
+  scope             Json
+  itemCount         Int
+  totalPresentValue Float
+  caseVersion       Int? // latest CaseSnapshot version at signing
+  contentHash       String // sha-256 over canonical statement + scope
+
+  status            AttestationStatus @default(ACTIVE)
+  invalidatedAt     DateTime?
+  invalidatedReason String?
+  supersededById    String?
+
+  signedAt  DateTime @default(now())
+  createdAt DateTime @default(now())
+
+  @@index([caseId])
+  @@index([firmId])
+  @@index([caseId, status])
 }
 
 // ── EPIC-011: clinical interviews & reviewer credentials ─────────────────────

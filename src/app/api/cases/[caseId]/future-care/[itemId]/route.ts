@@ -4,6 +4,7 @@ import { requireApiContext, requirePermission, requireCase, audit } from "@/lib/
 import { project } from "@/lib/engine/cost";
 import { assumptionsFor, generateReviews } from "@/lib/engine/generate";
 import { materialChanges, changedFields, hasReviewHistory } from "@/lib/engine/lifecycle";
+import { refreshCaseAttestations } from "@/lib/engine/attestationService";
 import { ok, handleError } from "@/lib/api";
 
 const patchSchema = z.object({
@@ -137,6 +138,8 @@ export async function PATCH(req: Request, { params }: { params: { caseId: string
       }
     }
     await generateReviews(params.caseId);
+    // Material edits can break a signed attestation — re-verify (EPIC-005).
+    await refreshCaseAttestations(params.caseId).catch(() => {});
     await audit(ctx, "futurecare.edit", { type: "futureCareItem", id: item.id, caseId: params.caseId });
     return ok({ item: updated });
   } catch (err) {
@@ -168,6 +171,8 @@ export async function DELETE(_req: Request, { params }: { params: { caseId: stri
       await audit(ctx, "futurecare.delete", { type: "futureCareItem", id: params.itemId, caseId: params.caseId });
     }
     await generateReviews(params.caseId);
+    // Removing a signed-over item breaks its attestation — re-verify (EPIC-005).
+    await refreshCaseAttestations(params.caseId).catch(() => {});
     return ok({ ok: true });
   } catch (err) {
     return handleError(err);

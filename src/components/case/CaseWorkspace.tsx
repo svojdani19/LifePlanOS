@@ -2137,6 +2137,96 @@ function PhysicianReviewForm({ it, mode, onSubmit, onCancel }: { it: AnyRec; mod
   );
 }
 
+// ── Electronic attestation (EPIC-005) ────────────────────────────────────────
+// The formal signing ceremony: a physician signs an immutable attestation over
+// the SPECIFIC recommendation versions they have approved/modified, with their
+// credentials snapshotted at signing. A material change to any covered item
+// invalidates the signature (shown here with the reason); re-signing supersedes.
+function AttestationCard({ caseId, canReview, items }: { caseId: string; canReview: boolean; items: AnyRec[] }) {
+  const [state, setState] = useState<AnyRec[] | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  async function load() {
+    const res = await fetch(`/api/cases/${caseId}/attestation`);
+    if (res.ok) setState((await res.json()).attestations ?? []);
+  }
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [caseId]);
+  async function sign() {
+    setBusy(true);
+    setError(null);
+    const res = await fetch(`/api/cases/${caseId}/attestation`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: true, note: note.trim() || undefined }),
+    });
+    setBusy(false);
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      setError(e.error ?? "Signing failed");
+      return;
+    }
+    setConfirmed(false);
+    setNote("");
+    load();
+  }
+  const attestable = items.filter((i) => i.physicianStatus === "APPROVED" || i.physicianStatus === "MODIFIED").length;
+  const active = (state ?? []).filter((a) => a.status === "ACTIVE" && a.verification?.valid);
+  const invalidated = (state ?? []).find((a) => a.status === "INVALIDATED");
+  return (
+    <div className="card p-5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold text-ink-900">Physician Attestation</h3>
+        {state && (active.length ? <Badge tone="success">attested</Badge> : <Badge tone="warning">not attested</Badge>)}
+      </div>
+      {active.map((a) => (
+        <div key={a.id} className="mt-3 rounded-lg border border-emerald-200 bg-emerald-50/50 p-3 text-sm text-ink-700">
+          <p>
+            Signed by <span className="font-semibold">{a.physicianName}</span> on {formatDate(a.signedAt)} — covers {a.itemCount} recommendation{a.itemCount === 1 ? "" : "s"},{" "}
+            {formatMoney(a.totalPresentValue)} present value.
+          </p>
+          {a.physicianNote && <p className="mt-1 text-xs text-ink-600">Qualification: {a.physicianNote}</p>}
+          <p className="mt-1 font-mono text-[10px] text-ink-400" title="SHA-256 over the signed statement + pinned scope">hash {String(a.contentHash).slice(0, 16)}…</p>
+        </div>
+      ))}
+      {!active.length && invalidated && (
+        <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50/60 p-3 text-xs text-amber-800">
+          <p className="font-semibold">A prior attestation by {invalidated.physicianName} ({formatDate(invalidated.signedAt)}) was invalidated:</p>
+          <p className="mt-0.5">{invalidated.invalidatedReason}</p>
+          <p className="mt-0.5">Re-review the changed items and sign again.</p>
+        </div>
+      )}
+      {canReview && (
+        <div className="mt-3 border-t border-ink-100 pt-3">
+          {attestable === 0 ? (
+            <p className="text-xs text-ink-500">Nothing to attest yet — approve or modify recommendations below first. The attestation covers only items you have acted on.</p>
+          ) : (
+            <div className="space-y-2">
+              <label className="flex items-start gap-2 text-xs text-ink-700">
+                <input type="checkbox" className="mt-0.5" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
+                <span>
+                  I have personally reviewed each of the {attestable} approved/modified recommendation{attestable === 1 ? "" : "s"} and attest, to a reasonable degree of medical
+                  probability, that each is medically necessary at its stated frequency and duration. My credentials on file will be snapshotted with this signature; a material
+                  change to any covered item will invalidate it.
+                </span>
+              </label>
+              <div className="flex flex-wrap items-center gap-2">
+                <input className="input w-80 py-1.5 text-xs" placeholder="Optional qualification (recorded verbatim on the attestation)" value={note} onChange={(e) => setNote(e.target.value)} />
+                <button className="btn-primary py-1.5 text-sm" disabled={!confirmed || busy} onClick={sign}>
+                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />} Sign attestation
+                </button>
+              </div>
+              {active.length > 0 && <p className="text-[11px] text-ink-400">Signing again supersedes your current attestation with one covering today&apos;s approved set.</p>}
+              {error && <p className="text-xs text-red-600">{error}</p>}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function PhysicianPanel({ data, canReview, call }: { data: AnyRec; canReview: boolean; call: any }) {
   const [open, setOpen] = useState<string | null>(null);
   const [form, setForm] = useState<{ id: string; mode: "approve" | "modify" | "reject" } | null>(null);
@@ -2158,6 +2248,7 @@ function PhysicianPanel({ data, canReview, call }: { data: AnyRec; canReview: bo
 
   return (
     <div className="space-y-3">
+      <AttestationCard caseId={data.id} canReview={canReview} items={data.futureCareItems} />
       <div className="card flex flex-wrap items-center justify-between gap-3 p-4 text-sm text-ink-600">
         <span className="min-w-0 flex-1">
           Physician review packet — {canReview ? "every item stays Pending until you designate it. Review the paraphrased summary, then approve, modify (adjust probability, frequency, or duration), or reject with a documented reason. A decided item can be reopened." : "read-only: your role cannot sign off on medical necessity."}

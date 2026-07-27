@@ -2,6 +2,45 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-27 — Electronic attestation (EPIC-005 complete)
+
+The physician's approval is no longer just a status flag — it is a signed,
+immutable record with evidentiary weight.
+
+- **`engine/attestation.ts`** (pure, 9 tests): the scope pins the SPECIFIC
+  recommendation versions covered (lineage + version + the P2.R1 material
+  fields); the first-person statement covers only physician-approved/modified
+  items (modifications disclosed, never "all recommendations"); a canonical
+  SHA-256 content hash gives tamper evidence; `verifyAttestation` detects
+  material drift against the current plan — a changed frequency, duration,
+  probability, unit cost, category, or service identity invalidates, naming
+  the field; a vanished or review-regressed covered item invalidates; items
+  ADDED after signing do not (they are simply not covered); present-value
+  drift alone does not (it moves with economic assumptions — the attestation
+  is a medical opinion, not an economic one).
+- **`Attestation` model** (migration `20260727130000`): physician identity,
+  role, credential summary AND credential documents snapshotted at signing —
+  never looked up later; statement text; pinned scope; item count + PV; case
+  snapshot version; content hash. Rows are never edited or deleted: re-signing
+  SUPERSEDES the signer's prior attestation; drift INVALIDATES with the
+  recorded reason (audited `attestation.invalidated`).
+- **Invalidation hooks**: physician review actions, per-item material edits,
+  item removal, and plan regeneration all re-verify active attestations;
+  GET re-verifies before reporting state so the UI can never show a stale
+  "attested" badge.
+- **API**: `GET/POST /api/cases/:id/attestation` — signing requires
+  `physician.review` and an explicit confirmation flag (an attestation is
+  never a side effect); refuses to sign over zero reviewed items; audited
+  `attestation.sign` with the hash.
+- **UI**: Physician tab signing ceremony — confirmation language, optional
+  verbatim qualification note, active-attestation card with signer/date/
+  coverage/hash, and the invalidation reason with "re-review and sign again"
+  when a signature broke.
+- **Report**: a "Physician Attestation" section after the signature block,
+  rendered ONLY when the attestation still verifies against the current plan
+  at render time — statement, signing date, coverage, credential snapshot,
+  and the integrity hash. Suite 415 → 425.
+
 ## 2026-07-27 — Defensibility & commercial-readiness sprint
 
 Five builds closing the largest remaining gaps between the reasoning engine
