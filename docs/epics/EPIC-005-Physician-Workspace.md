@@ -1,6 +1,6 @@
 # EPIC-005 — Physician Workspace
 
-**Status:** Partially shipped (2026-07-12) — dashboard review queue + existing Physician tab (approve/reject/modify with ledgered transitions). Full PRD still required for attestation & dedicated workspace.
+**Status:** Core shipped (2026-07-27) — dedicated `/review` workspace: cross-case queue ordered by export-blocking status → assessment validity → dollars at stake (`engine/reviewQueue.ts`), per-item sufficiency verdict + weakest confidence dimensions + necessity rationale, one-keystroke approve/modify/reject through the existing ledgered physician route, case deep links. Earlier (2026-07-12): dashboard review queue + Physician tab. Remaining for full PRD: electronic attestation & sign-off document.
 
 ## Scope pointer
 Role-scoped review view: queue of items awaiting review with evidence, rationale, frequency/duration; approve/reject/modify/comment; electronic attestation. Roadmap P3.

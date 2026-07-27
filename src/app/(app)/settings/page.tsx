@@ -61,7 +61,9 @@ export default async function SettingsPage() {
           primaryColor: ctx.firm.primaryColor ?? "#0891b2",
           letterhead: ctx.firm.letterhead ?? "",
           logoUrl: ctx.firm.logoUrl ?? "",
+          dataRetentionDays: ctx.firm.dataRetentionDays ?? null,
         }}
+        enterprise={ctx.subscription?.tier === "ENTERPRISE"}
       />
 
       <div className="mt-8">

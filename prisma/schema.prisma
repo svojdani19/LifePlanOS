@@ -124,6 +124,13 @@ model Firm {
   primaryColor String? @default("#0891b2")
   letterhead   String? // free-text letterhead block for generated reports
 
+  // Data retention (Enterprise): PHI held for a CLOSED/ARCHIVED case is purged
+  // this many days after the case last changed. Null = retain indefinitely.
+  // Enforcement (scripts/enforce-retention.ts) purges stored record files and
+  // extracted text while preserving the case shell, findings, exports metadata,
+  // and the append-only audit trail. Every purge is audited.
+  dataRetentionDays Int?
+
   subscription       Subscription?
   users              User[]
   cases              Case[]

@@ -51,19 +51,24 @@ function setupError(name: OcrProviderName, detail: string): Error {
 }
 
 /**
- * The cloud adapter is intentionally a guarded stub: the moment the SDK is added
- * and credentials + BAA ack are present, implement the call here (render/submit
- * the PDF, map the provider's blocks to page-marked text + confidence like
- * readPdf does) and it flows through automatically. Until then it refuses to run.
+ * Cloud adapters. Textract is IMPLEMENTED (documents/ocrTextract.ts): once the
+ * BAA ack + AWS credentials are present it reads scanned pages through
+ * DetectDocumentText and maps them to the same page-marked contract as the
+ * local pipeline. Document AI / Azure remain guarded stubs. Every path checks
+ * the BAA ack and credentials FIRST, so no PHI can leave by accident.
  */
 function cloudProvider(name: Exclude<OcrProviderName, "local">): OcrProvider {
   return {
     name,
-    async readPdf(): Promise<OcrResult> {
+    async readPdf(buffer: Buffer, onProgress?: (p: OcrProgress) => void | Promise<void>): Promise<OcrResult> {
       if (process.env.OCR_BAA_ACK !== "true") throw setupError(name, "OCR_BAA_ACK is not set to true (no BAA acknowledged)");
       const missing = missingCreds(name);
       if (missing.length) throw setupError(name, `missing credentials: ${missing.join(", ")}`);
-      // Credentials + BAA present but the adapter isn't implemented/installed yet.
+      if (name === "textract") {
+        const { textractReadPdf } = await import("@/lib/documents/ocrTextract");
+        return textractReadPdf(buffer, onProgress);
+      }
+      // Credentials + BAA present but this provider's adapter isn't implemented yet.
       throw setupError(name, "its SDK/adapter is not installed — implement cloudProvider() and add the SDK dependency");
     },
   };

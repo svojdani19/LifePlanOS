@@ -16,6 +16,8 @@ in-process with a small worker pool.
 | `SEMANTIC_SCHOLAR_API_KEY` | optional third literature source |
 | `ANTHROPIC_API_KEY` | optional; LLM seam only (deterministic mock without it) |
 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET` | billing (mock mode without them) |
+| `PRICING_PROVIDER`, `FAIRHEALTH_API_URL`, `FAIRHEALTH_API_KEY` | live venue-specific pricing (licensed feed; static reference without them) |
+| `PDF_CONVERTER` | path/name of the LibreOffice binary for PDF export (default `soffice`) |
 
 No secrets in the repo; `.env` is gitignored.
 
@@ -59,7 +61,11 @@ sends PHI to a third party and therefore requires, all together:
   with that vendor (a legal precondition for transmitting PHI)
 - the provider's credentials (e.g. `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`
   / `AWS_REGION`) in the env
-- the provider SDK added and the adapter in `cloudProvider()` implemented
+
+The **Textract adapter is implemented** (`documents/ocrTextract.ts`): scanned
+pages are rendered locally and read via `DetectDocumentText`; pages with a
+digital text layer never leave the machine. Document AI / Azure remain guarded
+stubs (`cloudProvider()`).
 
 If a cloud provider is selected but any of these is missing, ingestion throws a
 clear setup error and **no PHI is sent** — it never silently falls back to local
@@ -78,9 +84,35 @@ The References appendix lists only the sources a plan actually relied upon.
 A **live pricing provider** (`lib/references/pricingProvider.ts`) can supply
 venue-specific, sourced figures. These are LICENSED data feeds, so a live lookup
 runs only when `PRICING_PROVIDER` (`fairhealth` | `goodrx` | `genworth`) is set
-AND the provider's credentials are present (e.g. `FAIRHEALTH_API_KEY`) AND the
-adapter is implemented; otherwise it throws a clear setup error rather than
-inventing or silently falling back. Default (`static`) does no network.
+AND the provider's credentials are present; otherwise it throws a clear setup
+error rather than inventing or silently falling back. Default (`static`) does no
+network.
+
+The **FAIR Health adapter is implemented**: set `PRICING_PROVIDER=fairhealth`,
+`FAIRHEALTH_API_URL` (the licensed tenant endpoint), and `FAIRHEALTH_API_KEY`.
+Plan generation then prices every coded service at the 80th percentile for the
+case's geozip (first three digits of the intake ZIP), and each line item
+persists its retrieval date and provider snapshot (`pricedAt`,
+`pricingDetail`). Uncoded bundled categories stay on the labeled static
+reference. GoodRx / Genworth remain guarded stubs.
+
+## PDF export (ATD-7)
+
+DOCX is the canonical report; PDF export converts that exact DOCX through
+headless LibreOffice on the app host (`lib/export/pdf.ts`). Install LibreOffice
+(or set `PDF_CONVERTER` to the binary path). Without it, PDF export fails with
+a clear setup error — it never re-typesets through a different renderer.
+
+## Data retention (Enterprise)
+
+Firms on the Enterprise plan may set **Data Retention (days)** in Firm
+Management (minimum 30; blank = retain indefinitely). Enforcement is
+`npm run retention:enforce` (add `-- --dry` to preview): for CLOSED/ARCHIVED
+cases inactive past the window it deletes stored record files and clears
+extracted text/segments/source quotes, while retaining the case shell, plan,
+findings, export metadata, and the append-only audit trail. Every purge writes
+a `retention.purge` audit event. Schedule it (cron/scheduled task) in
+production.
 
 ## Operational notes
 

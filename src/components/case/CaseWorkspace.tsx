@@ -3096,6 +3096,7 @@ function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians 
               <button className="btn-primary" disabled={busy === "export" || data.futureCareItems.length === 0} onClick={() => exportReport("DOCX")}>
                 {busy === "export" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileOutput className="h-4 w-4" />} Export DOCX
               </button>
+              <button className="btn-outline" disabled={busy === "export" || data.futureCareItems.length === 0} title="The canonical DOCX converted to PDF on the server (requires LibreOffice on the app host)." onClick={() => exportReport("PDF")}>Export PDF</button>
               <button className="btn-outline" disabled={data.futureCareItems.length === 0} onClick={() => exportReport("CSV")}>Export Cost CSV</button>
               <button
                 className="btn-outline"

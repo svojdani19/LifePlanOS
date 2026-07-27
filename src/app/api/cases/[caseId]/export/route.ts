@@ -2,6 +2,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit, recordUsage } from "@/lib/tenant";
 import { buildReportDocx, buildCostCsv } from "@/lib/export/report";
+import { convertDocxToPdf } from "@/lib/export/pdf";
 import { persistCaseValidation } from "@/lib/engine/validation";
 import { persistCaseReasoning } from "@/lib/engine/clinicalReasoningPersist";
 import { buildSnapshotPayload } from "@/lib/engine/snapshot";
@@ -22,7 +23,9 @@ export async function GET(_req: Request, { params }: { params: { caseId: string 
 }
 
 const schema = z.object({
-  format: z.enum(["DOCX", "CSV"]),
+  // PDF is the canonical DOCX converted through LibreOffice (ATD-7) — same
+  // content, same gates; a missing converter fails loudly, never re-typesets.
+  format: z.enum(["DOCX", "PDF", "CSV"]),
   template: z.enum(["PLAINTIFF", "DEFENSE", "NEUTRAL"]).default("PLAINTIFF"),
   // CRE v1 §18 — FINAL export is blocked while any totaled recommendation
   // carries an unresolved export-blocking finding; DRAFT is always available
@@ -44,7 +47,7 @@ export async function POST(req: Request, { params }: { params: { caseId: string 
       persistCaseReasoning(params.caseId, ctx.firm.id, { actorUserId: ctx.user.id }).catch(() => null),
       persistCaseValidation(params.caseId, ctx.firm.id),
     ]);
-    if (format === "DOCX" && mode === "final" && validation.blocking) {
+    if ((format === "DOCX" || format === "PDF") && mode === "final" && validation.blocking) {
       const defects = validation.findings.filter((f) => f.exportBlocking).slice(0, 10);
       return ok(
         {
@@ -64,9 +67,9 @@ export async function POST(req: Request, { params }: { params: { caseId: string 
     let totalPresentValue = 0;
     let itemCount = 0;
 
-    if (format === "DOCX") {
+    if (format === "DOCX" || format === "PDF") {
       const r = await buildReportDocx(params.caseId, template, { draft: mode === "draft" });
-      key = await putObject(r.buffer, ".docx");
+      key = format === "PDF" ? await putObject(await convertDocxToPdf(r.buffer), ".pdf") : await putObject(r.buffer, ".docx");
       totalLifetime = r.totalLifetime;
       totalPresentValue = r.totalPresentValue;
       itemCount = r.itemCount;

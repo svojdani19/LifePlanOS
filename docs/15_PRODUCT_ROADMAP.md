@@ -93,7 +93,9 @@ lineage (P2.R1)".
       converter when a customer requires it)
 - [x] Object-storage GC on document deletion; auth rate limiting (per-IP +
       per-email)
-- [ ] Retention policies (per-firm) — open
+- [x] Retention policies (per-firm) — Enterprise `dataRetentionDays` + settings
+      field + `npm run retention:enforce` (2026-07-27; audited purges, active
+      cases never touched)
 
 ## Standing constraints
 
