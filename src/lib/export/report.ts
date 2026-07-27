@@ -1053,7 +1053,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
 
   // ══ APPENDIX D — EVIDENCE TRACEABILITY ═══════════════════════════════════════
   body.push(h1("Appendix D — Evidence Traceability", { pageBreak: true }));
-  body.push(p(`Each recommendation in this plan traces to its supporting diagnosis, the records that establish it, the governing literature, and its cost basis, so that no conclusion stands unsupported.`));
+  body.push(p(`Each recommendation in this plan is presented with its supporting diagnosis, the records relied upon, the governing literature where identified, and its cost basis. Source-supported factual statements should be reviewed through the accompanying citations; analytical conclusions, projections, and classifications are separately identified and remain subject to the review and approval requirements stated in this report.`));
   const traceRows: TableRow[] = [
     rowOf([
       td("Recommendation", { header: true, width: 24 }),

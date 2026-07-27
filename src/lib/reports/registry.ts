@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { ReportData, RDFutureCareItem } from "./data";
 import type { Block, ReportDoc } from "./doc";
+import { UNRESOLVED_BANNER } from "./doc";
 import * as S from "./sections";
 import type { RDValidationFinding } from "./sections";
 
@@ -36,6 +37,10 @@ export interface ReportDefinition {
   gate: ReportGate;
   formats: ReportFormat[];
   legacy?: boolean;
+  /** Commercial placement: core = the four public service lines. */
+  serviceTier: "core" | "supporting" | "beta";
+  /** Expert whose approval finalizes this report (report-level, P2+). */
+  requiredExpert?: "physician" | "vocational" | "economist";
   /** PHYSICIAN_REVIEW_REPORT: refuse when no recommendation has been decided. */
   requiresDecided?: boolean;
   configSchema: z.ZodTypeAny;
@@ -65,7 +70,28 @@ const strOf = (v: unknown): string => {
 const caseLabelOf = (data: ReportData) => `${data.case.clientName} · File ${data.case.caseNumber}`;
 
 const BASE_DISCLOSURE =
-  "This report is generated from the structured case record; every statement traces to a documented source, and nothing herein is invented or inferred beyond that record.";
+  "This report was generated from structured case data derived from the available records and user-supplied information. Source-supported factual statements should be reviewed through the accompanying citations. Analytical conclusions, projections, classifications, and professional opinions are separately identified and remain subject to the review and approval requirements stated in this report.";
+
+// Report-specific disclosure language — each definition may override or extend
+// the base. Never an absolute guarantee of traceability.
+const TYPE_DISCLOSURE: Record<string, string> = {
+  MEDICAL_CHRONOLOGY:
+    "This chronology reports events extracted from the medical records with their source citations. It states no medical opinion. Extraction issues, where present, are disclosed in the Unresolved Issues section.",
+  MEDICAL_RECORD_SUMMARY:
+    "Factual content in this summary derives from the records cited. Any characterization of clinical significance is a system-generated classification identified as such, not an expert conclusion.",
+  MEDICAL_COST_PROJECTION:
+    "Projected services derive from the case's future-care recommendations and physician-review dispositions; costs reflect the stated pricing sources and assumptions. Record-derived facts, treating-provider recommendations, system-generated classifications, and physician-reviewed conclusions are separately identified.",
+  MEDICAL_NECESSITY:
+    "System-generated analysis, treating-provider recommendations, life-care-planner analysis, and physician-reviewer opinions are separately labeled throughout. No analytical conclusion herein is an expert opinion unless approved by the identified reviewing physician.",
+  CAUSATION_ANALYSIS:
+    "Temporal relationships and record findings derive from the cited records. Causation conclusions require and are attributed to the reviewing physician; absent that approval this document is a review-support package, not an expert opinion.",
+  DEFENSE_REBUTTAL:
+    "Item-level evidence assessments are system-generated from the case record and identified as such. Physician conclusions appear only where a reviewing physician has approved the item.",
+  VOCATIONAL_ASSESSMENT:
+    "Medical restrictions are attributed to their clinical sources; client-reported work history, vocational testing, and labor-market data are attributed to their sources. Vocational conclusions require and are attributed to the qualified vocational expert.",
+  FORENSIC_ECONOMIST_REPORT:
+    "Source financial data, vocational assumptions, medical-cost inputs, economist-supplied assumptions, calculations, and expert conclusions are separately identified. Every economic assumption is explicitly entered, sourced, and versioned. Final conclusions require economist approval and attestation.",
+};
 const WORKSHEET_DISCLOSURE =
   "ANALYST WORKSHEET — the analyses herein are system-generated from the case record and are pending physician review; they are not expert opinion until approved by the reviewing physician.";
 
@@ -74,7 +100,9 @@ const WORKSHEET_DISCLOSURE =
  *  standard-gated drafts carry them the same way. */
 function withUnresolved(blocks: Block[], findings: RDValidationFinding[]): Block[] {
   if (!findings.some((f) => f.exportBlocking)) return blocks;
-  return [...blocks, { kind: "h1", text: "Unresolved Issues" }, ...S.unresolvedIssues(findings)];
+  // Lead with the unresolved issues — recipients must see them before the
+  // content they qualify, not in an appendix (docs/23 §unresolved-issues).
+  return [{ kind: "h1", text: "Unresolved Issues" }, ...S.unresolvedIssues(findings), ...blocks];
 }
 
 function makeDoc(
@@ -88,7 +116,7 @@ function makeDoc(
   extraDisclosures: string[] = [],
 ): ReportDoc {
   const draft = opts?.draft ?? false;
-  const disclosures = [BASE_DISCLOSURE, ...extraDisclosures];
+  const disclosures = [TYPE_DISCLOSURE[def.id] ?? BASE_DISCLOSURE, ...extraDisclosures];
   if (draft && def.approval === "physician_required") disclosures.push(WORKSHEET_DISCLOSURE);
   return {
     reportId: def.id,
@@ -97,6 +125,7 @@ function makeDoc(
     caseLabel: caseLabelOf(data),
     blocks: withUnresolved(blocks, findings),
     draft,
+    banner: !draft && findings.some((f) => f.exportBlocking) ? UNRESOLVED_BANNER : undefined,
     disclosures,
   };
 }
@@ -172,6 +201,7 @@ type Def = ReportDefinition;
 
 const MEDICAL_CHRONOLOGY: Def = {
   id: "MEDICAL_CHRONOLOGY",
+  serviceTier: "supporting",
   name: "Medical Chronology",
   description: "Chronological account of the documented encounters, filterable by date range and encounter type.",
   category: "Record review",
@@ -194,6 +224,7 @@ const MEDICAL_CHRONOLOGY: Def = {
 
 const MEDICAL_RECORD_SUMMARY: Def = {
   id: "MEDICAL_RECORD_SUMMARY",
+  serviceTier: "supporting",
   name: "Medical Record Summary",
   description: "Narrative summary of the record at a selectable level of detail.",
   category: "Record review",
@@ -220,8 +251,9 @@ const MEDICAL_RECORD_SUMMARY: Def = {
 };
 
 const COST_PROJECTION: Def = {
-  id: "COST_PROJECTION",
-  name: "Cost Projection",
+  id: "MEDICAL_COST_PROJECTION",
+  serviceTier: "core",
+  name: "Medical Cost Projection",
   description: "Cost schedule for the projected future care, totals drawn only from included items.",
   category: "Damages",
   permission: "report.export",
@@ -239,6 +271,7 @@ const COST_PROJECTION: Def = {
 
 const MEDICAL_NECESSITY: Def = {
   id: "MEDICAL_NECESSITY",
+  serviceTier: "beta",
   name: "Medical Necessity Report",
   description: "Per-recommendation medical-necessity analysis with evidence sufficiency, weaknesses, and unknowns.",
   category: "Clinical analysis",
@@ -262,6 +295,7 @@ const MEDICAL_NECESSITY: Def = {
 
 const PROVIDER_MATRIX: Def = {
   id: "PROVIDER_MATRIX",
+  serviceTier: "supporting",
   name: "Provider Recommendation Matrix",
   description: "Treating providers and their documented recommendations, with each recommendation's plan disposition.",
   category: "Record review",
@@ -279,6 +313,7 @@ const PROVIDER_MATRIX: Def = {
 
 const FUTURE_CARE_SUMMARY: Def = {
   id: "FUTURE_CARE_SUMMARY",
+  serviceTier: "supporting",
   name: "Future Care Summary",
   description: "Every current recommendation with provenance, review status, and cost fields.",
   category: "Damages",
@@ -296,6 +331,7 @@ const FUTURE_CARE_SUMMARY: Def = {
 
 const DEFENSE_REBUTTAL: Def = {
   id: "DEFENSE_REBUTTAL",
+  serviceTier: "beta",
   name: "Defense Rebuttal / Audit",
   description: "Adversarial audit of each included recommendation: support, weaknesses, gaps, overlaps, and alternatives.",
   category: "Clinical analysis",
@@ -353,6 +389,7 @@ const DEFENSE_REBUTTAL: Def = {
 
 const CAUSATION_ANALYSIS: Def = {
   id: "CAUSATION_ANALYSIS",
+  serviceTier: "beta",
   name: "Causation Analysis",
   description: "Pre-existing versus injury-related conditions, temporal relationship, aggravation, and alternative causes.",
   category: "Clinical analysis",
@@ -425,6 +462,7 @@ const CAUSATION_ANALYSIS: Def = {
 
 const PHYSICIAN_REVIEW_REPORT: Def = {
   id: "PHYSICIAN_REVIEW_REPORT",
+  serviceTier: "supporting",
   name: "Physician Review Report",
   description: "The complete physician-review ledger: every decision, change, reason code, and attestation.",
   category: "Governance",
@@ -443,6 +481,7 @@ const PHYSICIAN_REVIEW_REPORT: Def = {
 
 const DAMAGES_SUMMARY: Def = {
   id: "DAMAGES_SUMMARY",
+  serviceTier: "beta",
   name: "Damages Executive Summary",
   description: "The damages picture at a glance: major diagnoses, largest cost drivers, structure, and open uncertainty.",
   category: "Damages",
@@ -504,6 +543,7 @@ const DAMAGES_SUMMARY: Def = {
 
 const CUSTOM: Def = {
   id: "CUSTOM",
+  serviceTier: "beta",
   name: "Custom Report",
   description: "Compose a report from any combination of the library's sections, in your order.",
   category: "Custom",
@@ -543,6 +583,7 @@ const CUSTOM: Def = {
 
 const LIFE_CARE_PLAN: Def = {
   id: "LIFE_CARE_PLAN",
+  serviceTier: "core",
   name: "Life Care Plan",
   description: "The full physician-grade Life Care Plan & Future Medical Cost Analysis (existing pipeline).",
   category: "Core",
@@ -558,6 +599,7 @@ const LIFE_CARE_PLAN: Def = {
 
 const TESTIMONY_PACK: Def = {
   id: "TESTIMONY_PACK",
+  serviceTier: "supporting",
   name: "Testimony Preparation Pack",
   description: "Deposition/testimony preparation memorandum (existing pipeline).",
   category: "Core",
@@ -573,12 +615,58 @@ const TESTIMONY_PACK: Def = {
 
 // ── Registry ─────────────────────────────────────────────────────────────────
 
+
+// ── Core service-line placeholders (P4/P5 build the workflows) ───────────────
+// These exist so the four public service lines are always visible with honest
+// readiness. compose() is unreachable until the expert workflow ships —
+// the API refuses generation with an "expert workflow not yet available" error.
+
+const VOCATIONAL_ASSESSMENT: ReportDefinition = {
+  id: "VOCATIONAL_ASSESSMENT",
+  serviceTier: "core",
+  name: "Vocational Assessment",
+  description:
+    "Expert-reviewed analysis of employability, work capacity, transferable skills, vocational limitations, and earning implications. Requires structured vocational intake and a qualified vocational expert's approval.",
+  category: "Core",
+  permission: "report.export",
+  approval: "physician_required",
+  requiredExpert: "vocational",
+  gate: "standard",
+  formats: [],
+  configSchema: z.object({}).strict(),
+  defaultConfig: {},
+  compose() {
+    throw new Error("Vocational Assessment requires the expert workflow (not yet available). No document can be generated.");
+  },
+};
+
+const FORENSIC_ECONOMIST_REPORT: ReportDefinition = {
+  id: "FORENSIC_ECONOMIST_REPORT",
+  serviceTier: "core",
+  name: "Forensic Economist Report",
+  description:
+    "Expert-reviewed economic analysis of claimed financial losses, future earning capacity, benefits, household services, and present value. Every assumption must be explicitly entered and sourced; requires economist approval and attestation.",
+  category: "Core",
+  permission: "report.export",
+  approval: "physician_required",
+  requiredExpert: "economist",
+  gate: "standard",
+  formats: [],
+  configSchema: z.object({}).strict(),
+  defaultConfig: {},
+  compose() {
+    throw new Error("Forensic Economist Report requires the expert workflow (not yet available). No document can be generated.");
+  },
+};
+
 export const REPORTS: ReportDefinition[] = [
   LIFE_CARE_PLAN,
   TESTIMONY_PACK,
   MEDICAL_CHRONOLOGY,
   MEDICAL_RECORD_SUMMARY,
   COST_PROJECTION,
+  VOCATIONAL_ASSESSMENT,
+  FORENSIC_ECONOMIST_REPORT,
   MEDICAL_NECESSITY,
   PROVIDER_MATRIX,
   FUTURE_CARE_SUMMARY,
@@ -600,6 +688,9 @@ export const FINDING_RELEVANCE: Record<string, string> = {
   MEDICAL_CHRONOLOGY: "citation drift|chronolog|record|document",
   MEDICAL_RECORD_SUMMARY: "citation drift|diagnosis|record|document|support",
   COST_PROJECTION: "pricing|code|bundled|cost|life-expectancy|inclusion|duplicate|double-count",
+  MEDICAL_COST_PROJECTION: "pricing|code|bundled|cost|life-expectancy|inclusion|duplicate|double-count",
+  VOCATIONAL_ASSESSMENT: "vocational|work|function|restriction|employ|capacity",
+  FORENSIC_ECONOMIST_REPORT: "pricing|cost|life-expectancy|econom|discount|inflation|assumption",
   FUTURE_CARE_SUMMARY: "support|review|inclusion|frequency|duration|indication|duplicate|replaced",
   DAMAGES_SUMMARY: "pricing|code|bundled|life-expectancy|support|duplicate|inclusion",
   MEDICAL_NECESSITY: "necessity|support|evidence|literature|citation|indication|narrative|laterality|frequency|duration",
@@ -613,7 +704,11 @@ export function findingRelevance(id: string): string {
   return FINDING_RELEVANCE[id] ?? ".*";
 }
 
+// Legacy stored id → current id (rows are never rewritten).
+const ID_ALIASES: Record<string, string> = { COST_PROJECTION: "MEDICAL_COST_PROJECTION" };
+
 export function getReport(id: string): ReportDefinition | undefined {
+  id = ID_ALIASES[id] ?? id;
   return REPORTS.find((r) => r.id === id);
 }
 

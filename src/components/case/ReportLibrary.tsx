@@ -13,6 +13,8 @@ interface LibraryReport {
   name: string;
   description: string;
   category: string;
+  serviceTier: "core" | "supporting" | "beta";
+  requiredExpert: string | null;
   legacy: boolean;
   approval: "none" | "standard" | "physician_required";
   formats: string[];
@@ -42,6 +44,8 @@ const STATUS_DOT: Record<string, string> = {
   "Physician review required": "bg-amber-500",
   Blocked: "bg-red-500",
   "Not enough information": "bg-slate-300",
+  "Expert input required": "bg-amber-500",
+  "Not enabled": "bg-slate-300",
 };
 
 const CATEGORY_ORDER = ["Core", "Record review", "Damages", "Clinical analysis", "Governance", "Custom"];
@@ -115,15 +119,36 @@ export default function ReportLibrary({ caseId, canExport, onSelect }: { caseId:
 
   const set = (k: string, v: unknown) => setConfig((c) => ({ ...c, [k]: v }));
 
-  const categories = CATEGORY_ORDER.filter((c) => reports.some((r) => r.category === c))
-    .concat([...new Set(reports.map((r) => r.category))].filter((c) => !CATEGORY_ORDER.includes(c)));
+  const TIER_LABEL: Record<string, string> = {
+    core: "Core Reports — Injury Valuation Services",
+    supporting: "Supporting Work Products",
+    beta: "Supervised Beta / Internal Analysis",
+  };
+  const tiers = (["core", "supporting", "beta"] as const).filter((t) => reports.some((r) => r.serviceTier === t));
+  const coreReports = reports.filter((r) => r.serviceTier === "core");
 
   return (
     <div className="card p-5">
-      <div className="mb-1 text-sm font-semibold text-ink-900">Report Library</div>
-      <p className="mb-4 text-xs text-ink-500">
+      <div className="mb-1 text-sm font-semibold text-ink-900">Injury Valuation Reports</div>
+      <p className="mb-3 text-xs text-ink-500">
         One reporting system, multiple outputs — every report draws from the same case data, evidence, costs, and physician decisions.
       </p>
+      {/* The four service lines — always visible, honest readiness. */}
+      <div className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        {coreReports.map((r) => (
+          <button
+            key={r.id}
+            onClick={() => pick(r)}
+            className={`rounded-lg border p-3 text-left transition ${selectedId === r.id ? "border-brand-600 ring-1 ring-brand-600" : "border-ink-200 hover:border-ink-300"}`}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-semibold text-ink-900">{r.name}</span>
+              <span className={`h-2 w-2 shrink-0 rounded-full ${STATUS_DOT[r.status] ?? "bg-slate-300"}`} title={r.status} />
+            </div>
+            <div className="mt-1 text-[10px] text-ink-500">{r.status}{r.requiredExpert ? ` · ${r.requiredExpert} expert` : ""}</div>
+          </button>
+        ))}
+      </div>
       <div className="space-y-3">
         {/* Report-type dropdown, grouped by category */}
         <div className="flex flex-wrap items-center gap-3">
@@ -132,9 +157,9 @@ export default function ReportLibrary({ caseId, canExport, onSelect }: { caseId:
             value={selectedId}
             onChange={(e) => { const r = reports.find((x) => x.id === e.target.value); if (r) pick(r); }}
           >
-            {categories.map((cat) => (
-              <optgroup key={cat} label={cat}>
-                {reports.filter((r) => r.category === cat).map((r) => (
+            {tiers.map((t) => (
+              <optgroup key={t} label={TIER_LABEL[t]}>
+                {reports.filter((r) => r.serviceTier === t).map((r) => (
                   <option key={r.id} value={r.id}>{r.name}{r.status === "Ready" || r.status === "Previously exported" ? "" : ` — ${r.status}`}</option>
                 ))}
               </optgroup>

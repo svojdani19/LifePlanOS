@@ -7,7 +7,9 @@ const ALL_IDS = [
   "TESTIMONY_PACK",
   "MEDICAL_CHRONOLOGY",
   "MEDICAL_RECORD_SUMMARY",
-  "COST_PROJECTION",
+  "MEDICAL_COST_PROJECTION",
+  "VOCATIONAL_ASSESSMENT",
+  "FORENSIC_ECONOMIST_REPORT",
   "MEDICAL_NECESSITY",
   "PROVIDER_MATRIX",
   "FUTURE_CARE_SUMMARY",
@@ -19,20 +21,23 @@ const ALL_IDS = [
 ];
 
 describe("report registry", () => {
-  it("registers all 13 report definitions and resolves each by id", () => {
-    expect(REPORTS).toHaveLength(13);
+  it("registers all 15 report definitions and resolves each by id", () => {
+    expect(REPORTS).toHaveLength(15);
     for (const id of ALL_IDS) {
       const def = getReport(id);
       expect(def, id).toBeDefined();
       expect(def!.id).toBe(id);
     }
+    // Legacy stored id resolves to the renamed definition (rows never rewritten).
+    expect(getReport("COST_PROJECTION")!.id).toBe("MEDICAL_COST_PROJECTION");
     expect(getReport("NOT_A_REPORT")).toBeUndefined();
   });
 
   it("declares only valid formats and the report.export permission", () => {
     const valid = new Set(["DOCX", "PDF", "CSV", "HTML"]);
     for (const def of REPORTS) {
-      expect(def.formats.length).toBeGreaterThan(0);
+      // Expert-workflow placeholders (P4/P5) declare no generatable formats yet.
+      if (!def.requiredExpert) expect(def.formats.length, def.id).toBeGreaterThan(0);
       for (const f of def.formats) expect(valid.has(f), `${def.id}: ${f}`).toBe(true);
       expect(def.permission).toBe("report.export");
     }
@@ -174,13 +179,20 @@ describe("gateReport matrix", () => {
 
   it("non-legacy composes produce a well-formed ReportDoc for the fixture", () => {
     const data = buildFixture();
-    for (const def of REPORTS.filter((r) => !r.legacy)) {
+    for (const def of REPORTS.filter((r) => !r.legacy && !r.requiredExpert)) {
       const doc = def.compose(data, def.defaultConfig, [], { draft: false });
       expect(doc.reportId).toBe(def.id);
       expect(doc.title.length).toBeGreaterThan(0);
       expect(doc.caseLabel).toContain("James Holloway");
       expect(doc.blocks.length).toBeGreaterThan(0);
       expect(doc.disclosures.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("expert-workflow placeholders refuse to compose until their workflow ships", () => {
+    const data = buildFixture();
+    for (const def of REPORTS.filter((r) => r.requiredExpert)) {
+      expect(() => def.compose(data, def.defaultConfig, [], { draft: false })).toThrow(/expert workflow/);
     }
   });
 });

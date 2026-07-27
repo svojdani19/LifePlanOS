@@ -144,6 +144,10 @@ model Firm {
   reasoningAssessments ClinicalReasoningAssessment[]
   attestations       Attestation[]
 
+  // Tenant feature flags (pilot hardening P1): {"report.vocational_assessment": true, ...}
+  // Null = defaults from src/lib/flags.ts. Additive; never required.
+  features Json?
+
   @@index([slug])
 }
 

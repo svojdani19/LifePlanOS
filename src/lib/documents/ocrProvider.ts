@@ -18,6 +18,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { readPdf, type OcrResult, type OcrProgress } from "@/lib/documents/ocr";
+import { OCR_CLOUD_CREDS } from "@/lib/envCheck";
 
 export type { OcrResult, OcrProgress };
 
@@ -31,12 +32,10 @@ export interface OcrProvider {
 
 const localProvider: OcrProvider = { name: "local", readPdf };
 
-// Credentials each cloud provider needs before it may run.
-const CLOUD_CREDS: Record<Exclude<OcrProviderName, "local">, string[]> = {
-  textract: ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION"],
-  documentai: ["GOOGLE_APPLICATION_CREDENTIALS", "GCP_PROJECT_ID", "DOCUMENTAI_PROCESSOR_ID"],
-  azure: ["AZURE_DOCINTEL_ENDPOINT", "AZURE_DOCINTEL_KEY"],
-};
+// Credentials each cloud provider needs before it may run. The matrix lives in
+// envCheck.ts (import-light) so startup validation shares the same source of
+// truth without pulling this module's native OCR dependencies.
+const CLOUD_CREDS: Record<Exclude<OcrProviderName, "local">, string[]> = OCR_CLOUD_CREDS;
 
 function missingCreds(name: Exclude<OcrProviderName, "local">): string[] {
   return CLOUD_CREDS[name].filter((k) => !process.env[k]);

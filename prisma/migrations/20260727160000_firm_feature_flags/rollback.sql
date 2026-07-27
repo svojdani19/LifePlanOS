@@ -1,0 +1,1 @@
+ALTER TABLE "Firm" DROP COLUMN IF EXISTS "features";

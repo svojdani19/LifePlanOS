@@ -10,6 +10,7 @@ import {
   PageNumber,
   AlignmentType,
   BorderStyle,
+  ShadingType,
 } from "docx";
 import { reportKit } from "@/lib/export/report";
 
@@ -40,10 +41,13 @@ export interface ReportDoc {
   blocks: Block[];
   draft: boolean;
   disclosures: string[];
+  /** Prominent first-page warning (e.g. unresolved-issues banner). */
+  banner?: string;
 }
 
 // Same draft wording as the legacy Life Care Plan export (report.ts).
 export const DRAFT_BANNER = "DRAFT — NOT FOR SERVICE OR PRODUCTION";
+export const UNRESOLVED_BANNER = "FINAL RECORD-BASED REPORT — CONTAINS UNRESOLVED DATA OR VALIDATION ISSUES";
 
 // ── DOCX ─────────────────────────────────────────────────────────────────────
 
@@ -103,6 +107,17 @@ export async function renderDocx(doc: ReportDoc): Promise<Buffer> {
         alignment: AlignmentType.CENTER,
         spacing: { before: 200, after: 200 },
         children: [new TextRun({ text: DRAFT_BANNER, bold: true, size: 26, color: "B91C1C" })],
+      }),
+    );
+  }
+  // First-page warning banner — never an appendix a recipient can overlook.
+  if (doc.banner) {
+    body.push(
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { before: doc.draft ? 80 : 200, after: 200 },
+        shading: { type: ShadingType.SOLID, color: "FDECEC", fill: "FDECEC" },
+        children: [new TextRun({ text: doc.banner, bold: true, size: 24, color: "B91C1C" })],
       }),
     );
   }
@@ -231,6 +246,7 @@ function htmlBlock(b: Block): string {
 export function renderHtml(doc: ReportDoc): string {
   const parts: string[] = ['<div class="report">'];
   if (doc.draft) parts.push(`<div class="report-draft-banner">${escapeHtml(DRAFT_BANNER)}</div>`);
+  if (doc.banner) parts.push(`<div class="report-warning-banner">${escapeHtml(doc.banner)}</div>`);
   parts.push(`<h1 class="report-title">${escapeHtml(doc.title)}</h1>`);
   if (doc.subtitle) parts.push(`<p class="report-subtitle">${escapeHtml(doc.subtitle)}</p>`);
   parts.push(`<p class="report-case-label">${escapeHtml(doc.caseLabel)}</p>`);

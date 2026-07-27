@@ -1,0 +1,1 @@
+ALTER TABLE "Firm" ADD COLUMN "features" JSONB;

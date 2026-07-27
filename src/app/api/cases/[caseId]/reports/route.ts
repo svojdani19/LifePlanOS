@@ -8,6 +8,7 @@ import { renderDocx, renderHtml, renderCsv } from "@/lib/reports/doc";
 import { convertDocxToPdf } from "@/lib/export/pdf";
 import { putObject } from "@/lib/storage";
 import { ok, handleError } from "@/lib/api";
+import { reportEnabled } from "@/lib/flags";
 import type { RDValidationFinding } from "@/lib/reports/sections";
 
 // Report Library (docs/22): list, preview, and generate the non-legacy report
@@ -45,6 +46,8 @@ export async function GET(req: Request, { params }: { params: { caseId: string }
       requirePermission(ctx, "report.export");
       const def = getReport(previewId);
       if (!def || def.legacy) return ok({ error: "Unknown or legacy report type" }, 400);
+      if (!reportEnabled(ctx.firm.features, def.id)) return ok({ error: `${def.name} is not enabled for this firm.` }, 403);
+      if (def.requiredExpert && def.formats.length === 0) return ok({ error: `${def.name} requires the ${def.requiredExpert} expert workflow (not yet available).` }, 409);
       const rawConfig = url.searchParams.get("config");
       const config = def.configSchema.parse(rawConfig ? JSON.parse(rawConfig) : def.defaultConfig);
       const [data, findings] = await Promise.all([loadReportData(params.caseId), persistedFindings(params.caseId)]);
@@ -67,10 +70,15 @@ export async function GET(req: Request, { params }: { params: { caseId: string }
       const t = e.reportType ?? (e.format === "MEMO" ? "TESTIMONY_PACK" : "LIFE_CARE_PLAN");
       if (!lastByType.has(t)) lastByType.set(t, e.createdAt);
     }
-    const reports = REPORTS.map((def) => {
+    const reports = REPORTS.filter((def) => def.serviceTier === "core" || reportEnabled(ctx.firm.features, def.id)).map((def) => {
+      const enabled = reportEnabled(ctx.firm.features, def.id);
       const approval = effectiveApproval(def, def.defaultConfig);
       const gate = gateReport({ ...def, approval }, { mode: "final", blocking: blocking > 0, decidedCount: decided, includedUndecided: pendingIncluded });
-      const status = def.requiresDecided && decided === 0
+      const status = !enabled
+        ? "Not enabled"
+        : def.requiredExpert && def.formats.length === 0
+        ? "Expert input required"
+        : def.requiresDecided && decided === 0
         ? "Not enough information"
         : !gate.ok
           ? approval === "physician_required" && pendingIncluded > 0
@@ -84,6 +92,8 @@ export async function GET(req: Request, { params }: { params: { caseId: string }
         name: def.name,
         description: def.description,
         category: def.category,
+        serviceTier: def.serviceTier,
+        requiredExpert: def.requiredExpert ?? null,
         legacy: !!def.legacy,
         approval,
         formats: def.formats,
@@ -110,6 +120,9 @@ export async function POST(req: Request, { params }: { params: { caseId: string 
     const def = getReport(input.reportId);
     if (!def) return ok({ error: "Unknown report type" }, 400);
     if (def.legacy) return ok({ error: "This report type uses its original endpoint (/export or /export/testimony)." }, 400);
+    if (!reportEnabled(ctx.firm.features, def.id)) return ok({ error: `${def.name} is not enabled for this firm.` }, 403);
+    if (def.requiredExpert && def.formats.length === 0)
+      return ok({ error: `${def.name} requires the ${def.requiredExpert} expert workflow, which is not yet available. No document can be generated — an incomplete support package is never exported as an expert report.` }, 409);
     if (!def.formats.includes(input.format)) return ok({ error: `Format ${input.format} is not available for ${def.name}.` }, 400);
     const config = def.configSchema.parse(input.config ?? def.defaultConfig);
 
