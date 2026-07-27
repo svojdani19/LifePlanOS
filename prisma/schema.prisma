@@ -146,7 +146,9 @@ model Firm {
 
   // Tenant feature flags (pilot hardening P1): {"report.vocational_assessment": true, ...}
   // Null = defaults from src/lib/flags.ts. Additive; never required.
-  features Json?
+  features      Json?
+  // Bumped on any role/assignment/credential/flag change — cache key for authz.
+  authzRevision Int   @default(0)
 
   @@index([slug])
 }
@@ -1401,6 +1403,15 @@ model UserCredential {
   createdById String?
   createdAt   DateTime @default(now())
 
+  // Enterprise authz (docs/26): credential verification workflow. Additive;
+  // legacy rows read as SELF_REPORTED with no category (never auto-qualifies).
+  category     String? // PHYSICIAN | RN | CLCP | VOCATIONAL | ECONOMIST | OTHER
+  status       String    @default("SELF_REPORTED") // SELF_REPORTED | ORG_VERIFIED | EXTERNALLY_VERIFIED | EXPIRED | SUSPENDED | PENDING
+  expiresAt    DateTime?
+  verifiedById String?
+  verifiedAt   DateTime?
+  jurisdiction String?
+
   @@index([userId])
   @@index([firmId])
 }
@@ -1536,5 +1547,111 @@ model EconomicScenario {
   createdAt  DateTime  @default(now())
 
   @@index([caseId])
+  @@index([firmId])
+}
+
+// ── Enterprise authorization (docs/26) — all additive ────────────────────────
+
+model Office {
+  id         String    @id @default(uuid())
+  firmId     String
+  name       String
+  createdAt  DateTime  @default(now())
+  archivedAt DateTime?
+
+  @@index([firmId])
+}
+
+model CustomRole {
+  id                   String    @id @default(uuid())
+  firmId               String
+  name                 String
+  description          String?
+  status               String    @default("DRAFT") // DRAFT | ACTIVE | ARCHIVED
+  displayColor         String?
+  clonedFromSystemRole String? // built-in template key
+  isDefaultForNewUsers Boolean   @default(false)
+  isAssignable         Boolean   @default(true)
+  version              Int       @default(1)
+  createdById          String
+  updatedById          String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+  archivedAt           DateTime?
+
+  permissions CustomRolePermission[]
+
+  @@unique([firmId, name])
+  @@index([firmId])
+}
+
+model CustomRolePermission {
+  id            String     @id @default(uuid())
+  customRoleId  String
+  customRole    CustomRole @relation(fields: [customRoleId], references: [id], onDelete: Cascade)
+  permissionKey String
+  effect        String     @default("ALLOW") // ALLOW | DENY
+  scopeType     String     @default("ORGANIZATION") // ORGANIZATION | OFFICE | CASE | REPORT
+  scopeConfig   Json?
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  @@index([customRoleId])
+}
+
+model UserRoleAssignment {
+  id               String    @id @default(uuid())
+  userId           String
+  firmId           String
+  builtInRole      String? // template key; XOR customRoleId
+  customRoleId     String?
+  officeId         String?
+  caseId           String?
+  responsibility   String? // Primary Planner | QA Reviewer | …
+  effectiveFrom    DateTime  @default(now())
+  effectiveUntil   DateTime?
+  status           String    @default("ACTIVE") // ACTIVE | SCHEDULED | REVOKED | EXPIRED
+  assignedById     String
+  assignmentReason String?
+  createdAt        DateTime  @default(now())
+  revokedAt        DateTime?
+  revokedById      String?
+  revocationReason String?
+
+  @@index([userId, firmId])
+  @@index([firmId])
+  @@index([caseId])
+}
+
+model RoleVersion {
+  id                 String   @id @default(uuid())
+  firmId             String
+  customRoleId       String
+  version            Int
+  permissionSnapshot Json
+  changedById        String
+  changeReason       String?
+  createdAt          DateTime @default(now())
+
+  @@unique([customRoleId, version])
+  @@index([firmId])
+}
+
+model AccessGrant {
+  id             String    @id @default(uuid())
+  firmId         String
+  userId         String
+  scopeType      String // ORGANIZATION | OFFICE | CASE | REPORT
+  scopeId        String?
+  permissions    Json // permissionKey[]
+  effectiveFrom  DateTime  @default(now())
+  effectiveUntil DateTime // temporary access ALWAYS expires
+  grantedById    String
+  reason         String
+  status         String    @default("ACTIVE") // ACTIVE | REVOKED | EXPIRED
+  revokedAt      DateTime?
+  createdAt      DateTime  @default(now())
+
+  @@index([userId, firmId])
   @@index([firmId])
 }

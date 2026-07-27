@@ -55,11 +55,46 @@ export async function requireContext(): Promise<TenantContext> {
 export async function requireApiContext(): Promise<TenantContext> {
   const ctx = await getContext();
   if (!ctx) throw new TenantError("Not authenticated", "UNAUTHENTICATED", 401);
+  // Enterprise authz (docs/26): load the evaluation context once per request.
+  // Best-effort — a load failure degrades to legacy-only authorization.
+  try {
+    const { loadAuthzContext } = await import("@/lib/authz/context");
+    (ctx as TenantContext & { authz?: unknown }).authz = await loadAuthzContext(
+      ctx.user.id,
+      ctx.firm.id,
+      ctx.user.role,
+      (ctx.firm as { features?: unknown }).features,
+    );
+  } catch {
+    /* shadow stays silent; legacy path is authoritative */
+  }
   return ctx;
 }
 
 export function requirePermission(ctx: TenantContext, permission: Permission): void {
-  if (!can(ctx.user.role, permission)) {
+  const legacyAllowed = can(ctx.user.role, permission);
+  // Enterprise evaluator: shadow-compare always; enforce only when the firm
+  // has opted in via the authorization.enterprise feature flag (docs/26 P6).
+  const authz = (ctx as TenantContext & { authz?: import("@/lib/authz/evaluate").AuthzContext }).authz;
+  if (authz) {
+    try {
+      // Lazy import keeps the legacy path dependency-free at module load.
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { authorize } = require("@/lib/authz/evaluate") as typeof import("@/lib/authz/evaluate");
+      const { shadowCompare } = require("@/lib/authz/shadow") as typeof import("@/lib/authz/shadow");
+      const result = authorize({ userId: ctx.user.id, firmId: ctx.firm.id, permission }, authz);
+      shadowCompare(legacyAllowed, result, { permission, route: "requirePermission" });
+      const features = (ctx.firm as { features?: unknown }).features as Record<string, unknown> | null | undefined;
+      if (features && features["authorization.enterprise"] === true) {
+        if (!result.allowed) throw new TenantError(result.userSafeReason, "FORBIDDEN", 403);
+        return; // enterprise verdict is authoritative for opted-in firms
+      }
+    } catch (err) {
+      if (err instanceof TenantError) throw err;
+      /* evaluator failure never breaks legacy authorization */
+    }
+  }
+  if (!legacyAllowed) {
     throw new TenantError(`Your role cannot perform: ${permission}`, "FORBIDDEN", 403);
   }
 }

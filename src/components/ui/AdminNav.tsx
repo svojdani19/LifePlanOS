@@ -8,6 +8,7 @@ const PAGES = [
   { href: "/settings", label: "Firm" },
   { href: "/team", label: "Team & Seats" },
   { href: "/billing", label: "Billing" },
+  { href: "/roles", label: "Roles & Access" },
 ];
 
 export function AdminNav({ current }: { current: string }) {
