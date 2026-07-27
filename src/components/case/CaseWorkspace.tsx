@@ -3197,6 +3197,7 @@ function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians 
   return (
     <div className="space-y-4">
       <ReportLibrary caseId={data.id} canExport={canExport} onSelect={setReportSel} />
+      <ValidationCard caseId={data.id} scope={reportSel} />
       <div className="grid gap-4 lg:grid-cols-2">
       <div className="card p-5">
         <h3 className="text-sm font-semibold text-ink-900">Generate Report</h3>
@@ -3247,7 +3248,6 @@ function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians 
         </div>
       </div>
       </div>
-      <ValidationCard caseId={data.id} scope={reportSel} />
       <details className="card p-5">
         <summary className="cursor-pointer text-sm font-semibold text-ink-900">Compare Versions</summary>
         <div className="mt-3"><VersionCompareCard caseId={data.id} embedded /></div>
