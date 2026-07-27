@@ -131,18 +131,18 @@ model Firm {
   // and the append-only audit trail. Every purge is audited.
   dataRetentionDays Int?
 
-  subscription       Subscription?
-  users              User[]
-  cases              Case[]
-  auditLogs          AuditLog[]
-  usageRecords       UsageRecord[]
-  documents          Document[]
-  reports            ReportExport[]
-  precedents         PrecedentPlan[]
-  validationFindings ValidationFinding[]
-  attentionItems     AttentionItem[]
+  subscription         Subscription?
+  users                User[]
+  cases                Case[]
+  auditLogs            AuditLog[]
+  usageRecords         UsageRecord[]
+  documents            Document[]
+  reports              ReportExport[]
+  precedents           PrecedentPlan[]
+  validationFindings   ValidationFinding[]
+  attentionItems       AttentionItem[]
   reasoningAssessments ClinicalReasoningAssessment[]
-  attestations       Attestation[]
+  attestations         Attestation[]
 
   // Tenant feature flags (pilot hardening P1): {"report.vocational_assessment": true, ...}
   // Null = defaults from src/lib/flags.ts. Additive; never required.
@@ -775,12 +775,12 @@ model FutureCareItem {
   isLifetime       Boolean @default(false)
 
   // Cost projection (unit → lifetime → present value), low/expected/high.
-  unitCost      Float   @default(0)
-  annualCost    Float   @default(0)
-  lifetimeCost  Float   @default(0) // undiscounted
-  presentValue  Float   @default(0)
-  lowCost       Float   @default(0)
-  highCost      Float   @default(0)
+  unitCost      Float     @default(0)
+  annualCost    Float     @default(0)
+  lifetimeCost  Float     @default(0) // undiscounted
+  presentValue  Float     @default(0)
+  lowCost       Float     @default(0)
+  highCost      Float     @default(0)
   pricingSource String? // Medicare / UCR / cash-pay benchmark note
   // Live-pricing provenance (pricingProvider seam): when the figure came from a
   // sourced venue-specific lookup, the retrieval date and the raw provider
@@ -813,9 +813,9 @@ model FutureCareItem {
 
   // Physician review (Module 12).
   // Provenance: which generator path and template rule produced this item.
-  origin          RecommendationOrigin @default(TEMPLATE_CONDITION)
-  templateRuleId  String? // stable id of the care-library template row
-  conditionKey    String? // careLibrary condition bucket that matched
+  origin         RecommendationOrigin @default(TEMPLATE_CONDITION)
+  templateRuleId String? // stable id of the care-library template row
+  conditionKey   String? // careLibrary condition bucket that matched
 
   physicianStatus  PhysicianStatus @default(PENDING)
   physicianNote    String?
@@ -986,8 +986,8 @@ model ReportExport {
   draft             Boolean      @default(false) // CRE v1 — draft export (watermark + unresolved-issues appendix)
   // Report Library (additive): which report type produced this export and the
   // configuration used. Null on legacy rows (inferred: MEMO=testimony, else LCP).
-  reportType String?
-  config     Json?
+  reportType        String?
+  config            Json?
   version           Int          @default(1)
   storageKey        String?
   generatedById     String?
@@ -996,6 +996,14 @@ model ReportExport {
   itemCount         Int          @default(0)
 
   createdAt DateTime @default(now())
+
+  // P2 reproducibility (docs/23): every finalized report is reproducible.
+  contentSha256   String? // sha-256 of the stored bytes
+  templateVersion String? // report template version at generation
+  engineVersions  Json? // {reasoning, validation, pricing, lifeExpectancy, ...}
+  snapshotId      String? // CaseSnapshot captured for finals
+  lifecycle       String? // supporting | draft_expert | final_expert | superseded | amended
+  supersededById  String? // corrected/amended successor export
 
   @@index([caseId])
   @@index([firmId])
@@ -1177,15 +1185,15 @@ model ClinicalReasoningAssessment {
   recommendationConfidence RecommendationConfidence @default(INDETERMINATE)
   confidenceExplanation    String?
 
-  costEligibilityStatus  String? // §17
+  costEligibilityStatus   String? // §17
   inclusionInTotalsStatus String? // included | excluded | contingency
-  physicianReviewStatus  String?
-  validationStatus       String?
+  physicianReviewStatus   String?
+  validationStatus        String?
 
   // Material-change fingerprint (§18): a change here invalidates prior approval.
-  materialHash    String?
+  materialHash     String?
   generatedByModel String?
-  supersededById  String? // the assessment that replaced this one (lineage; prior rows are preserved)
+  supersededById   String? // the assessment that replaced this one (lineage; prior rows are preserved)
   reviewerMetadata Json? // CRE v1 — { invalidatedApproval?: bool, changedFields?: string[], priorPhysicianStatus?: string }
   errorDetail      String? // CRE v1 — populated when status = ERROR
 
@@ -1206,11 +1214,11 @@ model AttentionItem {
 
   caseVersionId String? // report/snapshot version the item was raised against
 
-  category     String // e.g. diagnosis_mismatch, recommendation_conflict, physician_review_pending
-  severity     AttentionSeverity
-  title        String
-  summary      String
-  whyItMatters String
+  category        String // e.g. diagnosis_mismatch, recommendation_conflict, physician_review_pending
+  severity        AttentionSeverity
+  title           String
+  summary         String
+  whyItMatters    String
   suggestedAction String
 
   // What the item concerns, for a direct link + source traceability.
@@ -1440,5 +1448,93 @@ model GoldCase {
   notes        String?
   capturedAt   DateTime @default(now())
 
+  @@index([firmId])
+}
+
+// ── Pilot hardening P2: report-level approval & attestation ──────────────────
+// Distinct from recommendation approval (FutureCareItem.physicianStatus) and
+// from item-scope Attestation. Binds to the exact exported content.
+model ReportApproval {
+  id             String   @id @default(uuid())
+  firmId         String
+  caseId         String
+  reportExportId String
+  kind           String // APPROVAL | ATTESTATION
+  expertRole     String // physician | vocational | economist | planner
+  reviewerId     String
+  reviewerName   String
+  credentials    String? // snapshot of reviewer credentials at signing
+  statementText  String
+  contentSha256  String // must equal ReportExport.contentSha256
+  caseRevision   Int?
+  status         String   @default("ACTIVE") // ACTIVE | STALE | INVALIDATED
+  invalidReason  String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([reportExportId])
+  @@index([caseId])
+  @@index([firmId])
+}
+
+// ── Pilot hardening P4: vocational domain (all rows carry provenance) ────────
+
+model VocationalEntry {
+  id               String    @id @default(uuid())
+  firmId           String
+  caseId           String
+  kind             String // employment | education | certification | military | job_demand | earnings | absence | rtw_attempt | restriction | functional_capacity | transferable_skill | test_result | labor_market | scenario | conclusion
+  title            String
+  detail           Json // kind-specific structured payload
+  startDate        DateTime?
+  endDate          DateTime?
+  source           String // document/interview/expert citation — never invented
+  sourceDocumentId String?
+  enteredById      String
+  verification     String    @default("UNVERIFIED") // UNVERIFIED | VERIFIED | DISPUTED
+  notes            String?
+  supersededById   String? // revision history via supersede-not-edit
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([caseId, kind])
+  @@index([firmId])
+}
+
+// ── Pilot hardening P5: forensic-economic domain ─────────────────────────────
+// No assumption is ever silently chosen: every row is explicitly entered,
+// sourced, versioned, and attributed to the responsible expert.
+
+model EconomicAssumption {
+  id             String    @id @default(uuid())
+  firmId         String
+  caseId         String
+  key            String // baseline_earnings | earnings_growth | benefits_rate | worklife_expectancy | loss_start | loss_end | discount_rate | inflation_rate | tax_treatment | household_services_hours | household_services_rate | mortality_basis | medical_cost_source | custom:*
+  value          String // stored as text; unit gives meaning
+  unit           String // USD/year | percent | years | date | text …
+  source         String // publication/table/record citation
+  effectiveDate  DateTime?
+  expertId       String
+  rationale      String?
+  origin         String    @default("USER") // USER | CALC
+  version        Int       @default(1)
+  supersededById String?
+  createdAt      DateTime  @default(now())
+
+  @@index([caseId, key])
+  @@index([firmId])
+}
+
+model EconomicScenario {
+  id         String    @id @default(uuid())
+  firmId     String
+  caseId     String
+  name       String // base | low | high | custom label
+  overrides  Json // {key: value} assumption overrides for this scenario
+  result     Json? // deterministic engine output {pastLoss, futureLoss, benefits, householdServices, medicalPV, total, inputsHash}
+  computedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([caseId])
   @@index([firmId])
 }

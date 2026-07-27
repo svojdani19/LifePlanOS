@@ -19,6 +19,10 @@ import type { RDValidationFinding } from "./sections";
 // and physician-required reports can never be finalized over undecided items.
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Version stamp of the report-library templates, stored on every export so a
+ *  document can be reproduced against the exact template that generated it. */
+export const REPORT_TEMPLATE_VERSION = "rl-1";
+
 export type ReportApproval = "none" | "standard" | "physician_required";
 export type ReportGate = "standard" | "disclose";
 export type ReportFormat = "DOCX" | "PDF" | "CSV" | "HTML";
@@ -632,7 +636,7 @@ const VOCATIONAL_ASSESSMENT: ReportDefinition = {
   approval: "physician_required",
   requiredExpert: "vocational",
   gate: "standard",
-  formats: [],
+  formats: ["DOCX", "HTML"],
   configSchema: z.object({}).strict(),
   defaultConfig: {},
   compose() {
@@ -651,7 +655,7 @@ const FORENSIC_ECONOMIST_REPORT: ReportDefinition = {
   approval: "physician_required",
   requiredExpert: "economist",
   gate: "standard",
-  formats: [],
+  formats: ["DOCX", "HTML"],
   configSchema: z.object({}).strict(),
   defaultConfig: {},
   compose() {

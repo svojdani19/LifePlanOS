@@ -35,12 +35,20 @@ export async function GET(_req: Request, { params }: { params: { caseId: string;
         ? "testimony-prep"
         : "life-care-plan";
     const filename = `${c.caseNumber}-${kind}-v${record.version}.${ext}`;
-    return new Response(new Uint8Array(buf), {
-      headers: {
-        "Content-Type": CONTENT_TYPES[ext] ?? "application/octet-stream",
-        "Content-Disposition": `attachment; filename="${filename}"`,
-      },
-    });
+    const contentType = CONTENT_TYPES[ext] ?? "application/octet-stream";
+    // PHI downloads: no MIME sniffing, no caching, no referrer leakage — and
+    // HTML reports get a strict CSP so a served document can run nothing.
+    const headers: Record<string, string> = {
+      "Content-Type": contentType,
+      "Content-Disposition": `attachment; filename="${filename}"`,
+      "X-Content-Type-Options": "nosniff",
+      "Cache-Control": "private, no-store",
+      "Referrer-Policy": "no-referrer",
+    };
+    if (contentType.startsWith("text/html")) {
+      headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'";
+    }
+    return new Response(new Uint8Array(buf), { headers });
   } catch (err) {
     return handleError(err);
   }

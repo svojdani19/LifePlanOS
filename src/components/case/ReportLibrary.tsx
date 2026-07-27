@@ -7,6 +7,8 @@
 // the Generate Report card below, which is unchanged.
 
 import { useCallback, useEffect, useState } from "react";
+import VocationalWorkspace from "@/components/case/VocationalWorkspace";
+import EconomistWorkspace from "@/components/case/EconomistWorkspace";
 
 interface LibraryReport {
   id: string;
@@ -183,6 +185,16 @@ export default function ReportLibrary({ caseId, canExport, onSelect }: { caseId:
               <p className="mt-1 text-[10px] text-ink-400">{APPROVAL_LABEL[selected.approval]} · {selected.formats.join(" / ")}</p>
               {selected.gateReason && <p className="mt-2 text-xs text-amber-700">{selected.gateReason}</p>}
 
+              {selected.id === "FORENSIC_ECONOMIST_REPORT" && (
+                <div className="mt-3">
+                  <EconomistWorkspace caseId={caseId} canEdit={canExport} />
+                </div>
+              )}
+              {selected.id === "VOCATIONAL_ASSESSMENT" && (
+                <div className="mt-3">
+                  <VocationalWorkspace caseId={caseId} canEdit={canExport} canReview={canExport} />
+                </div>
+              )}
               {selected.legacy ? (
                 <p className="mt-3 text-xs text-ink-500">Generated from the card below — the original workflow, unchanged.</p>
               ) : (

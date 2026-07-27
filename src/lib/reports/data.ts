@@ -185,6 +185,7 @@ export interface RDAssessment {
   evidenceStrength?: string;
   recommendationConfidence?: string;
   confidenceExplanation?: string | null;
+  generatedByModel?: string | null;
   supersededById?: string | null;
   createdAt?: Date;
   updatedAt?: Date;
@@ -224,6 +225,9 @@ export interface RDCase {
   preExistingConditions?: string | null;
   currentWorkStatus?: string | null;
   functionalLimitations?: string | null;
+  /** Last case mutation — drives the preview validation-freshness stamp. The
+   *  loader's full-row query always returns it; optional for test fixtures. */
+  updatedAt?: Date | null;
   firm: RDFirm;
   createdBy: RDPerson | null;
   preparingPhysician?: (RDPerson & { credentialSummary?: string | null }) | null;
