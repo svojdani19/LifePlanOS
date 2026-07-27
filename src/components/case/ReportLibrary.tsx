@@ -129,12 +129,7 @@ export default function ReportLibrary({ caseId, canExport, onSelect }: { caseId:
 
   const set = (k: string, v: unknown) => setConfig((c) => ({ ...c, [k]: v }));
 
-  const TIER_LABEL: Record<string, string> = {
-    core: "Core Reports — Injury Valuation Services",
-    supporting: "Supporting Work Products",
-    beta: "Supervised Beta / Internal Analysis",
-  };
-  const tiers = (["core", "supporting", "beta"] as const).filter((t) => reports.some((r) => r.serviceTier === t));
+
   const coreReports = reports.filter((r) => r.serviceTier === "core");
 
   return (
@@ -144,6 +139,7 @@ export default function ReportLibrary({ caseId, canExport, onSelect }: { caseId:
         One reporting system, multiple outputs — every report draws from the same case data, evidence, costs, and physician decisions.
       </p>
       {/* The four service lines — always visible, honest readiness. */}
+      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-ink-400">Core Reports — Injury Valuation Services</div>
       <div className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
         {coreReports.map((r) => (
           <button
@@ -160,23 +156,42 @@ export default function ReportLibrary({ caseId, canExport, onSelect }: { caseId:
         ))}
       </div>
       <div className="space-y-3">
-        {/* Report-type dropdown, grouped by category */}
-        <div className="flex flex-wrap items-center gap-3">
-          <select
-            className="input w-full sm:w-96"
-            value={selectedId}
-            onChange={(e) => { const r = reports.find((x) => x.id === e.target.value); if (r) pick(r); }}
-          >
-            {tiers.map((t) => (
-              <optgroup key={t} label={TIER_LABEL[t]}>
-                {reports.filter((r) => r.serviceTier === t).map((r) => (
-                  <option key={r.id} value={r.id}>{r.name}{r.status === "Ready" || r.status === "Previously exported" ? "" : ` — ${r.status}`}</option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
-          {selected && <span className={`h-2 w-2 rounded-full ${STATUS_DOT[selected.status] ?? "bg-slate-300"}`} title={selected.status} />}
-        </div>
+        {/* Supporting work products — deliberately separate from the four
+            core service lines above (never mixed into one selector). */}
+        {reports.some((r) => r.serviceTier === "supporting") && (
+          <div>
+            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-ink-400">Supporting Work Products</div>
+            <div className="flex flex-wrap gap-1.5">
+              {reports.filter((r) => r.serviceTier === "supporting").map((r) => (
+                <button
+                  key={r.id}
+                  onClick={() => pick(r)}
+                  className={`inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition ${selectedId === r.id ? "border-brand-600 bg-brand-50 text-brand-800" : "border-ink-200 text-ink-700 hover:border-ink-300"}`}
+                >
+                  <span className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT[r.status] ?? "bg-slate-300"}`} title={r.status} />
+                  {r.name}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {reports.some((r) => r.serviceTier === "beta") && (
+          <details>
+            <summary className="cursor-pointer text-[10px] font-semibold uppercase tracking-wide text-ink-400">Supervised Beta / Internal Analysis</summary>
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              {reports.filter((r) => r.serviceTier === "beta").map((r) => (
+                <button
+                  key={r.id}
+                  onClick={() => pick(r)}
+                  className={`inline-flex items-center gap-1.5 rounded-md border border-dashed px-2 py-1 text-xs transition ${selectedId === r.id ? "border-brand-600 bg-brand-50 text-brand-800" : "border-ink-200 text-ink-500 hover:border-ink-300"}`}
+                >
+                  <span className={`h-1.5 w-1.5 rounded-full ${STATUS_DOT[r.status] ?? "bg-slate-300"}`} title={r.status} />
+                  {r.name}
+                </button>
+              ))}
+            </div>
+          </details>
+        )}
 
         {/* Selected report detail */}
         <div className="rounded-lg border border-ink-100 p-4">
