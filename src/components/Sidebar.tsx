@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard,
   FolderKanban,
+  Stethoscope,
   Users,
   CreditCard,
   Settings,
@@ -24,6 +25,7 @@ interface NavItem {
 const NAV: NavItem[] = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
   { href: "/cases", label: "Cases", icon: FolderKanban, perm: "case.view" },
+  { href: "/review", label: "Physician Review", icon: Stethoscope, perm: "physician.review" },
   { href: "/team", label: "Team & Seats", icon: Users, perm: "team.manage" },
   { href: "/billing", label: "Billing", icon: CreditCard, perm: "billing.manage" },
   { href: "/settings", label: "Firm Management", icon: Settings, perm: "firm.settings" },
