@@ -65,6 +65,7 @@ export default function ReportLibrary({ caseId, canExport, onSelect }: { caseId:
   const [config, setConfig] = useState<Record<string, unknown>>({});
   const [mode, setMode] = useState<"final" | "draft">("final");
   const [previewHtml, setPreviewHtml] = useState<string | null>(null);
+  const [changes, setChanges] = useState<{ diff: Record<string, unknown>; material: boolean; prior: { version: number; draft: boolean; createdAt: string } } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -88,6 +89,13 @@ export default function ReportLibrary({ caseId, canExport, onSelect }: { caseId:
     setConfig((r.defaultConfig as Record<string, unknown>) ?? {});
     setPreviewHtml(null);
     setError(null);
+    setChanges(null);
+    if (r.lastGenerated) {
+      fetch(`/api/cases/${caseId}/reports?changes=${r.id}`)
+        .then(async (res) => (res.ok ? res.json() : null))
+        .then((body) => setChanges(body?.changes ?? null))
+        .catch(() => {});
+    }
   }
 
   async function preview() {
@@ -184,6 +192,27 @@ export default function ReportLibrary({ caseId, canExport, onSelect }: { caseId:
               <p className="mt-1 text-xs text-ink-500">{selected.description}</p>
               <p className="mt-1 text-[10px] text-ink-400">{APPROVAL_LABEL[selected.approval]} · {selected.formats.join(" / ")}</p>
               {selected.gateReason && <p className="mt-2 text-xs text-amber-700">{selected.gateReason}</p>}
+              {changes && (
+                <div className={`mt-2 rounded-md border p-2 text-xs ${changes.material ? "border-amber-200 bg-amber-50/60" : "border-ink-100 bg-ink-50/50"}`}>
+                  <span className="font-semibold text-ink-800">
+                    {changes.material ? "Case has changed since " : "No material changes since "}
+                    v{changes.prior.version}{changes.prior.draft ? " (draft)" : ""} · {new Date(changes.prior.createdAt).toLocaleDateString()}
+                  </span>
+                  {changes.material && (
+                    <span className="text-ink-600">
+                      {" — "}
+                      {[
+                        (changes.diff.recordsAdded as string[]).length ? `${(changes.diff.recordsAdded as string[]).length} new record(s)` : "",
+                        (changes.diff.itemsAdded as string[]).length ? `${(changes.diff.itemsAdded as string[]).length} recommendation(s) added` : "",
+                        (changes.diff.itemsRemoved as string[]).length ? `${(changes.diff.itemsRemoved as string[]).length} removed` : "",
+                        (changes.diff.fieldChanges as unknown[]).length ? `${(changes.diff.fieldChanges as unknown[]).length} parameter change(s)` : "",
+                        (changes.diff.reviewChanges as unknown[]).length ? `${(changes.diff.reviewChanges as unknown[]).length} review change(s)` : "",
+                      ].filter(Boolean).join(" · ") || "details in the next version's Changes section"}
+                      . The next generated version will include a "Changes Since Prior Version" section.
+                    </span>
+                  )}
+                </div>
+              )}
 
               {selected.id === "FORENSIC_ECONOMIST_REPORT" && (
                 <div className="mt-3">

@@ -13,6 +13,8 @@ import { ok, handleError } from "@/lib/api";
 import { reportEnabled } from "@/lib/flags";
 import { composeVocational, vocationalReadiness, type VocEntry } from "@/lib/reports/vocational";
 import { composeEconomist, economistReadiness, type AssumptionRow, type ScenarioRow } from "@/lib/reports/economist";
+import { changesSection, isMaterialDiff } from "@/lib/reports/versionDiff";
+import { diffSnapshots, type SnapshotPayload } from "@/lib/engine/snapshot";
 import type { RDValidationFinding } from "@/lib/reports/sections";
 import type { Case, ReportExport } from "@/generated/prisma";
 
@@ -39,6 +41,35 @@ const SEC_HEADERS = {
 async function persistedFindings(caseId: string): Promise<RDValidationFinding[]> {
   const rows = await prisma.validationFinding.findMany({ where: { caseId } });
   return rows.map((f) => ({ service: f.service, result: f.result, issue: f.issue, severity: f.severity, suggestion: f.suggestion, exportBlocking: f.exportBlocking }));
+}
+
+// The snapshot captured with the most recent snapshot-bearing export of this
+// report type (finals only carry snapshots). Legacy LCP rows have null
+// reportType — treated as LIFE_CARE_PLAN for comparison purposes.
+async function priorSnapshotFor(caseId: string, reportType: string) {
+  const exports_ = await prisma.reportExport.findMany({
+    where: {
+      caseId,
+      snapshotId: { not: null },
+      ...(reportType === "LIFE_CARE_PLAN" ? { OR: [{ reportType: "LIFE_CARE_PLAN" }, { reportType: null, format: { in: ["DOCX", "PDF"] } }] } : { reportType }),
+    },
+    orderBy: { createdAt: "desc" },
+    take: 1,
+  });
+  const prior = exports_[0];
+  if (!prior?.snapshotId) {
+    // Legacy exports link snapshots by reportExportId instead.
+    const legacySnap = await prisma.caseSnapshot.findFirst({
+      where: { caseId, reportExportId: { not: null } },
+      orderBy: { createdAt: "desc" },
+    });
+    if (!legacySnap) return null;
+    const exp = await prisma.reportExport.findUnique({ where: { id: legacySnap.reportExportId! } });
+    return { payload: legacySnap.payload as unknown as SnapshotPayload, version: exp?.version ?? 0, draft: exp?.draft ?? false, createdAt: legacySnap.createdAt };
+  }
+  const snap = await prisma.caseSnapshot.findUnique({ where: { id: prior.snapshotId } });
+  if (!snap) return null;
+  return { payload: snap.payload as unknown as SnapshotPayload, version: prior.version, draft: prior.draft, createdAt: prior.createdAt };
 }
 
 async function vocationalState(caseId: string) {
@@ -73,6 +104,26 @@ export async function GET(req: Request, { params }: { params: { caseId: string }
     await requireCase(ctx, params.caseId);
     const url = new URL(req.url);
     const previewId = url.searchParams.get("preview");
+    const changesId = url.searchParams.get("changes");
+
+    if (changesId) {
+      const def = getReport(changesId);
+      if (!def) return ok({ error: "Unknown report type" }, 400);
+      const prior = await priorSnapshotFor(params.caseId, def.id);
+      if (!prior) return ok({ changes: null });
+      const data = await loadReportData(params.caseId);
+      const included = data.case.futureCareItems.filter((i) => data.includedIds.has(i.id));
+      const current = buildSnapshotPayload(
+        data.case as never,
+        assumptionsFor(data.case as unknown as Case),
+        {
+          lifetime: included.reduce((sum, i) => sum + (i.lifetimeCost ?? 0), 0),
+          presentValue: included.reduce((sum, i) => sum + (i.presentValue ?? 0), 0),
+        },
+      );
+      const diff = diffSnapshots(prior.payload, current);
+      return ok({ changes: { diff, material: isMaterialDiff(diff), prior: { version: prior.version, draft: prior.draft, createdAt: prior.createdAt } } });
+    }
 
     if (previewId) {
       // Preview renders full clinical content — same grant as export.
@@ -235,6 +286,23 @@ export async function POST(req: Request, { params }: { params: { caseId: string 
     // Shared finish: render → hash+store (compensating) → snapshot for finals
     // → audit. Used by the standard compose path and the expert branches.
     const finish = async (doc: import("@/lib/reports/doc").ReportDoc, extras: { itemCount: number; totalLifetimeCost: number; totalPresentValue: number }) => {
+      // Version transparency: when a prior version of this report exists, the
+      // new version documents what changed since it (docs/23 addendum).
+      try {
+        const prior = await priorSnapshotFor(params.caseId, def.id);
+        if (prior) {
+          const current = buildSnapshotPayload(
+            data.case as never,
+            assumptionsFor(data.case as unknown as Case),
+            { lifetime: extras.totalLifetimeCost, presentValue: extras.totalPresentValue },
+          );
+          const diff = diffSnapshots(prior.payload, current);
+          const label = `v${prior.version}${prior.draft ? " (draft)" : " (final)"}, exported ${prior.createdAt.toISOString().slice(0, 10)}`;
+          doc.blocks.push(...changesSection(diff, label));
+        }
+      } catch {
+        /* change section is best-effort — never blocks an export */
+      }
       let buffer: Buffer;
       if (input.format === "DOCX") buffer = await renderDocx(doc);
       else if (input.format === "PDF") buffer = await convertDocxToPdf(await renderDocx(doc));
