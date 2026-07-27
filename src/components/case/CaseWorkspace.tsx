@@ -3022,7 +3022,7 @@ function EvidencePanel({ data }: { data: AnyRec }) {
 // Compare any two exported report versions: records, chronology, diagnoses,
 // recommendations, frequencies/durations/codes/pricing, literature, physician
 // review, totals, and assumptions.
-function VersionCompareCard({ caseId }: { caseId: string }) {
+function VersionCompareCard({ caseId, embedded = false }: { caseId: string; embedded?: boolean }) {
   const [snapshots, setSnapshots] = useState<AnyRec[]>([]);
   const [a, setA] = useState("");
   const [b, setB] = useState("");
@@ -3040,8 +3040,8 @@ function VersionCompareCard({ caseId }: { caseId: string }) {
     <p className="text-xs text-ink-700"><span className="font-medium text-ink-900">{label}:</span> {items.join("; ")}</p>
   );
   return (
-    <div className="card p-5">
-      <h3 className="text-sm font-semibold text-ink-900">Compare Versions</h3>
+    <div className={embedded ? "" : "card p-5"}>
+      {!embedded && <h3 className="text-sm font-semibold text-ink-900">Compare Versions</h3>}
       <div className="mt-2 flex items-center gap-2 text-sm">
         <select className="input w-36" value={a} onChange={(e) => setA(e.target.value)}>
           <option value="">From…</option>
@@ -3123,20 +3123,39 @@ function ValidationCard({ caseId }: { caseId: string }) {
           {state.counts.included} of {state.counts.proposed} items eligible for the damages total · {state.counts.physicianApproved} physician-approved · {state.counts.awaitingReview} awaiting review
         </p>
       )}
-      {findings.length > 0 && (
+      {/* Blocking findings stay on the face of the card; advisories collapse. */}
+      {findings.filter((f) => f.exportBlocking).length > 0 && (
         <ul className="mt-3 space-y-2">
-          {findings.map((f) => (
+          {findings.filter((f) => f.exportBlocking).map((f) => (
             <li key={f.id} className="rounded-lg bg-ink-50/70 p-3 text-xs">
               <div className="flex flex-wrap items-center gap-2">
                 <Badge tone={SEV_TONE[f.severity] ?? "neutral"}>{f.severity.toLowerCase()}</Badge>
                 <span className="font-semibold text-ink-900">{f.service}</span>
-                <span className="text-ink-500">— {f.result}{f.exportBlocking ? " (blocks final export)" : ""}</span>
+                <span className="text-ink-500">— {f.result} (blocks final export)</span>
               </div>
               <p className="mt-1 text-ink-700">{f.issue}</p>
               <p className="mt-0.5 text-ink-500"><span className="font-medium">Correction:</span> {f.suggestion}</p>
             </li>
           ))}
         </ul>
+      )}
+      {findings.filter((f) => !f.exportBlocking).length > 0 && (
+        <details className="mt-3">
+          <summary className="cursor-pointer text-xs font-medium text-ink-600">Show {findings.filter((f) => !f.exportBlocking).length} advisory finding{findings.filter((f) => !f.exportBlocking).length === 1 ? "" : "s"}</summary>
+          <ul className="mt-2 space-y-2">
+            {findings.filter((f) => !f.exportBlocking).map((f) => (
+              <li key={f.id} className="rounded-lg bg-ink-50/70 p-3 text-xs">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge tone={SEV_TONE[f.severity] ?? "neutral"}>{f.severity.toLowerCase()}</Badge>
+                  <span className="font-semibold text-ink-900">{f.service}</span>
+                  <span className="text-ink-500">— {f.result}</span>
+                </div>
+                <p className="mt-1 text-ink-700">{f.issue}</p>
+                <p className="mt-0.5 text-ink-500"><span className="font-medium">Correction:</span> {f.suggestion}</p>
+              </li>
+            ))}
+          </ul>
+        </details>
       )}
       {state && findings.length === 0 && (
         <p className="mt-2 text-xs text-emerald-700">Every recommendation is region-matched, consistently coded and priced, and supported for inclusion.</p>
@@ -3155,26 +3174,8 @@ function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians 
   const chosen = physicians.find((p: AnyRec) => p.id === preparing);
   return (
     <div className="space-y-4">
-      {/* Preparing physician — only this seat's name & credentials appear in the report. */}
-      <div className="card p-5">
-        <h3 className="text-sm font-semibold text-ink-900">Preparing Physician</h3>
-        <p className="text-xs text-ink-500">The physician deemed to be preparing this report. Their name, credentials, and signature appear in the report — and only theirs. Leave unset for a planner-prepared plan (no credentials rendered).</p>
-        <div className="mt-3 flex flex-wrap items-center gap-3">
-          <select
-            className="input w-72"
-            value={preparing}
-            disabled={!canEdit}
-            onChange={(e) => { setPreparing(e.target.value); call(`/api/cases/${data.id}`, "PATCH", { preparingPhysicianId: e.target.value || null }); }}
-          >
-            <option value="">— None (planner-prepared) —</option>
-            {physicians.map((p: AnyRec) => <option key={p.id} value={p.id}>{p.name} ({ROLE_LABEL_SHORT[p.role] ?? p.role.toLowerCase()})</option>)}
-          </select>
-          {chosen && !chosen.credentialSummary && <span className="text-xs text-amber-600">No credential summary on this seat — add one under Team &amp; Seats → Credentials.</span>}
-        </div>
-      </div>
       <ReportLibrary caseId={data.id} canExport={canExport} />
-      <ValidationCard caseId={data.id} />
-      <VersionCompareCard caseId={data.id} />
+      <div className="grid gap-4 lg:grid-cols-2">
       <div className="card p-5">
         <h3 className="text-sm font-semibold text-ink-900">Generate Report</h3>
         <p className="text-xs text-ink-500">Present value {formatMoney(totals.totalPresentValue)} across {data.futureCareItems.length} items.</p>
@@ -3206,9 +3207,32 @@ function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians 
           ) : <span className="text-sm text-ink-500">Your role cannot export reports.</span>}
         </div>
       </div>
-
+      {/* Preparing physician — only this seat's name & credentials appear in the report. */}
       <div className="card p-5">
-        <h3 className="text-sm font-semibold text-ink-900">Export History (Version Control)</h3>
+        <h3 className="text-sm font-semibold text-ink-900">Preparing Physician</h3>
+        <p className="text-xs text-ink-500">Their name, credentials, and signature appear in the report — and only theirs. Leave unset for a planner-prepared plan.</p>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <select
+            className="input w-72"
+            value={preparing}
+            disabled={!canEdit}
+            onChange={(e) => { setPreparing(e.target.value); call(`/api/cases/${data.id}`, "PATCH", { preparingPhysicianId: e.target.value || null }); }}
+          >
+            <option value="">— None (planner-prepared) —</option>
+            {physicians.map((p: AnyRec) => <option key={p.id} value={p.id}>{p.name} ({ROLE_LABEL_SHORT[p.role] ?? p.role.toLowerCase()})</option>)}
+          </select>
+          {chosen && !chosen.credentialSummary && <span className="text-xs text-amber-600">No credential summary on this seat — add one under Team &amp; Seats → Credentials.</span>}
+        </div>
+      </div>
+      </div>
+      <ValidationCard caseId={data.id} />
+      <details className="card p-5">
+        <summary className="cursor-pointer text-sm font-semibold text-ink-900">Compare Versions</summary>
+        <div className="mt-3"><VersionCompareCard caseId={data.id} embedded /></div>
+      </details>
+
+      <details className="card p-5">
+        <summary className="cursor-pointer text-sm font-semibold text-ink-900">Export History (Version Control){data.reports.length > 0 ? ` — ${data.reports.length}` : ""}</summary>
         {data.reports.length === 0 ? (
           <p className="mt-2 text-sm text-ink-500">No exports yet.</p>
         ) : (
@@ -3228,7 +3252,7 @@ function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians 
             </tbody>
           </table>
         )}
-      </div>
+      </details>
     </div>
   );
 }
