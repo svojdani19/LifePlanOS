@@ -2,6 +2,42 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-27 — Cross-case learning: the engine learns from every review
+
+Each physician review action now feeds back into future output —
+deterministically, firm-scoped, and advisory-only (the physician stays the
+arbiter; a learned insight annotates, it never edits a clinical value).
+
+- **`engine/learning.ts`** (pure, 9 tests): each recommendation lineage a
+  physician acted on is one observation — the lineage's FIRST version is what
+  the engine proposed, the latest is what the physician made final. Per
+  normalized service (case/whitespace/plural drift collapse; category
+  disambiguates): approval/modification/rejection counts, medians over
+  physician-FINAL frequencies, correction-direction consistency, recent
+  documented reasons. Calibration: how each probability class fares under the
+  firm's review (does PROBABLE actually survive?).
+- **Advisory insights at generation** (`insightFor`): a candidate matching a
+  service with ≥3 consistent observations gets a persisted
+  `FutureCareItem.learnedInsight` — "physicians settled this at a median
+  6×/yr in 4 prior cases (proposed here at 12×/yr); the proposal is
+  unchanged — flagging for review", or "rejected in 2 of 3 prior cases
+  (recent reason quoted); verify the necessity basis". A ≥50% rejection rate
+  outranks parameter history. Silent below the sample floor, when physicians
+  historically agree, and across unrelated services (no leakage; tested).
+- **Guardrails by design**: firm-scoped only — one firm's review patterns
+  never influence another's cases (tenant isolation applies to knowledge, not
+  just data); sample-gated (MIN 3, ≥70% direction consistency) so one loud
+  case cannot steer the engine; every insight carries its sample size and
+  provenance.
+- **`FirmLearningProfile`** (migration `20260727140000`): one row per firm,
+  recomputed after every physician review action and by
+  `npm run learning:refresh` (backfill; deterministic + idempotent).
+- **Surfaces**: `/review` shows an "Engine calibration — your firm's review
+  history" strip (per-probability survival rates, count of services with a
+  consistent correction pattern) and a violet "firm history" flag on matching
+  queue rows; the case Physician tab shows the same flag per item. Internal
+  analytics — nothing appears in the report document. Suite 425 → 434.
+
 ## 2026-07-27 — Electronic attestation (EPIC-005 complete)
 
 The physician's approval is no longer just a status flag — it is a signed,

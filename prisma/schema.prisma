@@ -143,6 +143,7 @@ model Firm {
   attentionItems     AttentionItem[]
   reasoningAssessments ClinicalReasoningAssessment[]
   attestations       Attestation[]
+  learningProfile    FirmLearningProfile?
 
   @@index([slug])
 }
@@ -775,6 +776,12 @@ model FutureCareItem {
   pricedAt      DateTime?
   pricingDetail Json?
 
+  // Cross-case learning (engine/learning.ts): the ADVISORY insight attached at
+  // generation from the firm's own review history with this service ("firm
+  // physicians settled this at 6×/yr in 4 prior cases"). Annotates only —
+  // never changes the proposed values; sample-gated; firm-scoped.
+  learnedInsight Json?
+
   // Evidence (Module 9) — never fabricated; states when support is limited.
   evidenceStrength  String? // e.g. "Guideline-supported", "Limited — physician confirmation required"
   literatureSupport String?
@@ -1214,6 +1221,26 @@ model AttentionItem {
   @@index([firmId])
   @@index([caseId, status])
   @@index([caseId, validationRuleId])
+}
+
+// ── Cross-case learning ──────────────────────────────────────────────────────
+
+// One row per firm: the deterministic aggregation of the firm's OWN physician
+// review history (engine/learning.ts payload — per-service outcomes, medians
+// over physician-final values, calibration by probability class). Recomputed
+// after review actions and by `npm run learning:refresh`. Firm-scoped by
+// construction: one firm's review patterns never influence another's cases.
+model FirmLearningProfile {
+  id     String @id @default(uuid())
+  firmId String @unique
+  firm   Firm   @relation(fields: [firmId], references: [id], onDelete: Cascade)
+
+  payload          Json // LearningProfile (services, calibration)
+  lineagesIncluded Int  @default(0)
+  casesIncluded    Int  @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 // ── EPIC-005: electronic attestation ─────────────────────────────────────────

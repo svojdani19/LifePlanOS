@@ -9,6 +9,8 @@ import { mapRecommendationToCondition, type CondInput } from "@/lib/engine/integ
 import { planRegeneration } from "@/lib/engine/lifecycle";
 import { baselineLifeExpectancy } from "@/lib/engine/lifeExpectancy";
 import { resolveUnitCost } from "@/lib/references/pricingProvider";
+import { insightFor } from "@/lib/engine/learning";
+import { firmLearningProfile } from "@/lib/engine/learningService";
 import { rebuildEvidenceGraph } from "@/lib/engine/evidenceGraph";
 import { citationCompatible, evaluateArticle, selectPrimary, isManagementService } from "@/lib/engine/citationQuality";
 import { findCandidates, literatureReachable, activeSources, type Article } from "@/lib/literature";
@@ -220,7 +222,12 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
   // provider snapshot. Misconfiguration is loud — generation fails rather than
   // quietly shipping unsourced numbers. Static mode does no network.
   const livePricing = (process.env.PRICING_PROVIDER ?? "static").toLowerCase() !== "static";
+  // Cross-case learning: the firm's OWN review history annotates matching
+  // candidates with an ADVISORY insight (sample-gated, provenance included).
+  // The proposed clinical values are never changed by it.
+  const learning = await firmLearningProfile(c.firmId).catch(() => null);
   for (const t of careItems) {
+    const insight = learning ? insightFor({ service: t.service, category: t.category, frequencyPerYear: t.frequencyPerYear, durationYears: t.durationYears, isLifetime: !!t.isLifetime }, learning) : null;
     const priced = livePricing
       ? await resolveUnitCost({ category: t.category, cpt: t.cptCode ?? null, zip: c.zipCode, percentile: 80 })
       : null;
@@ -268,6 +275,7 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
         missingSupport: t.probability === "SPECULATIVE" || t.confidence < 60 ? "Physician confirmation of medical necessity required." : null,
         plaintiffValue: t.probability === "PROBABLE" ? "Well-supported; core plan item." : "Supports comprehensive future care.",
         physicianSummary: paraphraseSummary(t),
+        ...(insight ? { learnedInsight: insight as never } : {}),
         ...(lineage ? { lineageId: lineage.lineageId, version: lineage.version + 1 } : {}),
       },
     });

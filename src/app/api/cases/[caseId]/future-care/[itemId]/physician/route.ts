@@ -5,6 +5,7 @@ import { generateReviews, paraphraseSummary } from "@/lib/engine/generate";
 import { persistCaseValidation } from "@/lib/engine/validation";
 import { persistCaseReasoning } from "@/lib/engine/clinicalReasoningPersist";
 import { refreshCaseAttestations } from "@/lib/engine/attestationService";
+import { refreshFirmLearning } from "@/lib/engine/learningService";
 import { lifecycleFor } from "@/lib/engine/lifecycle";
 import { ok, handleError } from "@/lib/api";
 
@@ -84,6 +85,9 @@ export async function POST(req: Request, { params }: { params: { caseId: string;
     // A review action can materially change a signed-over item — re-verify any
     // active attestations (EPIC-005; drifted signatures are invalidated).
     await refreshCaseAttestations(params.caseId).catch(() => {});
+    // Each review action is a learning observation — recompute the firm's
+    // profile so the next generated plan carries the updated history.
+    await refreshFirmLearning(ctx.firm.id).catch(() => {});
     await audit(ctx, "physician.review", { type: "futureCareItem", id: item.id, caseId: params.caseId, meta: { status: input.status } });
     return ok({ item: updated });
   } catch (err) {

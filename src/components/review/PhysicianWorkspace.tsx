@@ -146,6 +146,12 @@ export function PhysicianWorkspace({ queue }: { queue: ReviewQueueItem[] }) {
                 </div>
               )}
 
+              {item.learnedInsight && (
+                <p className="mt-2 rounded bg-violet-50 px-2 py-1 text-[11px] text-violet-800" title={`Advisory, from ${item.learnedInsight.sampleSize} prior reviewed cases at your firm. The proposal is unchanged.`}>
+                  {item.learnedInsight.message}
+                </p>
+              )}
+
               {isOpen && (
                 <div className="mt-3 border-t border-ink-100 pt-3 text-sm text-ink-700">
                   {item.necessityRationale ? (

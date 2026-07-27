@@ -4,6 +4,7 @@ import { ROLE_PERMISSIONS } from "@/lib/rbac";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { PhysicianWorkspace } from "@/components/review/PhysicianWorkspace";
 import { orderReviewQueue, weakestDimensions, sufficiencySummary, type ReviewQueueItem } from "@/lib/engine/reviewQueue";
+import { firmLearningProfile } from "@/lib/engine/learningService";
 import type { ConfidenceVector, EvidenceSufficiency } from "@/lib/engine/clinicalReasoning";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -76,8 +77,15 @@ export default async function ReviewPage() {
       weakestDimensions: weakestDimensions((a?.confidenceVector as unknown as ConfidenceVector) ?? null),
       necessityRationale: a?.medicalNecessityRationale ?? null,
       unknownCount: Array.isArray(a?.unknowns) ? (a!.unknowns as unknown[]).length : 0,
+      learnedInsight: (it.learnedInsight as { kind: string; message: string; sampleSize: number } | null) ?? null,
     };
   });
+
+  // Cross-case learning: how the engine's probability classes have fared under
+  // this firm's OWN review history — so reviewers can see where it runs hot.
+  const learning = await firmLearningProfile(ctx.firm.id).catch(() => null);
+  const calibration = (learning?.calibration ?? []).filter((c) => c.samples >= 3);
+  const correctedServices = (learning?.services ?? []).filter((s) => s.samples >= 3 && (s.rejected > 0 || s.frequencyDirection)).length;
 
   return (
     <div>
@@ -85,6 +93,21 @@ export default async function ReviewPage() {
         title="Physician Review"
         subtitle={`${queue.length} recommendation${queue.length === 1 ? "" : "s"} awaiting review across ${caseIds.length} case${caseIds.length === 1 ? "" : "s"} — weakest first`}
       />
+      {learning && (calibration.length > 0 || correctedServices > 0) && (
+        <div className="card mt-4 flex flex-wrap items-center gap-x-6 gap-y-2 p-4 text-sm text-ink-700">
+          <span className="text-label">Engine calibration — your firm&apos;s review history</span>
+          {calibration.map((c) => (
+            <span key={c.probability}>
+              <span className="font-medium">{c.probability.toLowerCase()}</span>: {c.approvedOrModified}/{c.samples} survived review
+            </span>
+          ))}
+          {correctedServices > 0 && (
+            <span className="text-xs text-ink-500">
+              {correctedServices} service{correctedServices === 1 ? "" : "s"} with a consistent correction pattern — matching new proposals carry a “firm history” flag below.
+            </span>
+          )}
+        </div>
+      )}
       <PhysicianWorkspace queue={orderReviewQueue(queue)} />
     </div>
   );

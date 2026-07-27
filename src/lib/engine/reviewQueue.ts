@@ -30,6 +30,8 @@ export interface ReviewQueueItem {
   weakestDimensions: { dimension: string; score: number }[];
   necessityRationale: string | null;
   unknownCount: number;
+  /** advisory cross-case insight from the firm's own review history (engine/learning.ts) */
+  learnedInsight: { kind: string; message: string; sampleSize: number } | null;
 }
 
 /** Priority class drives the sort: lower = reviewed first. */

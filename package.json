@@ -22,6 +22,7 @@
     "reasoning:backfill": "tsx scripts/backfill-reasoning.ts",
     "ocr:redo": "tsx scripts/ocr-redo.ts",
     "retention:enforce": "tsx scripts/enforce-retention.ts",
+    "learning:refresh": "tsx scripts/learning-refresh.ts",
     "setup": "prisma migrate deploy && tsx prisma/seed.ts"
   },
   "prisma": {

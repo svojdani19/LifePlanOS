@@ -2317,6 +2317,13 @@ function PhysicianPanel({ data, canReview, call }: { data: AnyRec; canReview: bo
             <PhysicianReviewForm key={`${form.id}:${form.mode}`} it={it} mode={form.mode} onSubmit={(body) => submit(it, body)} onCancel={() => setForm(null)} />
           )}
 
+          {/* Cross-case learning: advisory flag from the firm's own review
+              history with this service — annotates, never changes the proposal. */}
+          {it.learnedInsight?.message && (
+            <p className="mt-2 rounded bg-violet-50 px-2 py-1 text-[11px] text-violet-800" title={`Advisory, from ${it.learnedInsight.sampleSize} prior reviewed cases at your firm.`}>
+              {it.learnedInsight.message}
+            </p>
+          )}
           {/* Expandable paraphrased summary of the point being made */}
           {open === it.id && (
             <div className="mt-3 rounded-lg bg-ink-50 p-3">

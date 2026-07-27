@@ -57,6 +57,14 @@ connection's search_path targets `lifeplanos`) → `npx prisma migrate resolve
 
 ### Change log (schema)
 
+- **2026-07-27 (Cross-case learning)** New `FirmLearningProfile` (one row per
+  firm; deterministic aggregation of the firm's OWN review history — per-
+  service outcomes, physician-final medians, probability calibration) and
+  `FutureCareItem.learnedInsight Json?` (the advisory insight attached at
+  generation; annotates only, never changes proposed values). Migration
+  `20260727140000_firm_learning`. Recomputed after review actions and by
+  `npm run learning:refresh`.
+
 - **2026-07-27 (Electronic attestation)** New `Attestation` model +
   `AttestationStatus` enum (migration `20260727130000_attestation`). Immutable
   signed physician attestations: identity/role/credential summary + credential

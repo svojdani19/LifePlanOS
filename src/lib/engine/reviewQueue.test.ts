@@ -19,6 +19,7 @@ const base: ReviewQueueItem = {
   weakestDimensions: [],
   necessityRationale: null,
   unknownCount: 0,
+  learnedInsight: null,
 };
 
 describe("orderReviewQueue", () => {
