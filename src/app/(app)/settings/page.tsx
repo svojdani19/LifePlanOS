@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import { AdminNav } from "@/components/ui/AdminNav";
 import Link from "next/link";
 import { Library, ChevronRight, ScrollText, Download } from "lucide-react";
 import { requireContext } from "@/lib/tenant";
@@ -17,6 +18,7 @@ export default async function SettingsPage() {
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-ink-900">Firm Management</h1>
         <p className="mt-1 text-sm text-ink-600">Branding, report identity, and firm resources for {ctx.firm.name}.</p>
+        <AdminNav current="/settings" />
       </div>
 
       {/* Firm resources — links to firm-wide tools. */}

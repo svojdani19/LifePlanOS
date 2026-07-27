@@ -255,7 +255,8 @@ export function CaseWorkspace({
 
         {/* Full-width workflow pipeline — each stage a demarcated segment with
             its own progress rail, so the sequence reads as distinct steps. */}
-        <ol className="mt-3 flex w-full items-stretch overflow-x-auto" aria-label="Case workflow">
+        <div className="mt-3 text-[10px] font-semibold uppercase tracking-wide text-ink-400">Pipeline</div>
+        <ol className="mt-1 flex w-full items-stretch overflow-x-auto" aria-label="Case workflow">
           {FLOW.map((s, i) => {
             const sIdx = STAGES.indexOf(s.stage);
             const state = sIdx < stageIdx ? "done" : sIdx === stageIdx ? "current" : "next";
@@ -449,7 +450,7 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
       )}
 
       <div className="mt-4 grid gap-4 sm:grid-cols-2">
-        <Field label="Primary Diagnosis (ICD-10)" wide>
+        <Field label="Primary Diagnosis" wide>
           <Icd10Search
             value={form.diagnosis}
             code={form.icd10Code}
@@ -770,6 +771,16 @@ function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: bo
                           </button>
                           {d.flags && <span title={d.flags} className="shrink-0 text-sm text-amber-500">⚠</span>}
                         </div>
+                        {/* At-a-glance metadata: what this record is without opening it. */}
+                        <div className="mt-0.5 truncate text-xs text-ink-500">
+                          {[
+                            d.serviceDate ? `${formatDate(new Date(d.serviceDate))}${d.serviceDateEnd && d.serviceDateEnd !== d.serviceDate ? ` – ${formatDate(new Date(d.serviceDateEnd))}` : ""}` : null,
+                            d.provider || null,
+                            d.facility || null,
+                            d.pageCount ? `${d.pageCount} pp.` : null,
+                          ].filter(Boolean).join(" · ") || "No metadata extracted yet"}
+                        </div>
+                        {d.flags && <div className="mt-0.5 text-xs text-amber-600">{d.flags}</div>}
 
                         {open && (() => {
                           // Prefer persisted sub-documents (segmented at ingest);
@@ -1675,7 +1686,7 @@ function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: Any
               <div className="flex flex-wrap items-center gap-2">
                 <span className={cn("font-semibold text-ink-900", compact && "text-sm")}>{it.service}</span>
                 <Badge tone={PROB_TONE[it.probability]}>{it.probability.toLowerCase()}</Badge>
-                {!compact && <Badge tone={VULN_TONE[it.defenseVulnerability]}>{it.defenseVulnerability.toLowerCase()} vuln</Badge>}
+                {!compact && <Badge tone={VULN_TONE[it.defenseVulnerability]} title="How exposed this item is to defense challenge, from the engine's weakening-evidence analysis">defense vulnerability: {it.defenseVulnerability.toLowerCase()}</Badge>}
                 <Badge tone={PHYS_TONE[it.physicianStatus]}>MD: {it.physicianStatus.toLowerCase()}</Badge>
                 {!compact && it.edited && <Badge tone="amber">edited</Badge>}
               </div>

@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import { AdminNav } from "@/components/ui/AdminNav";
 import { requireContext, seatCount } from "@/lib/tenant";
 import { can } from "@/lib/rbac";
 import { effectiveLimits } from "@/lib/subscription/plans";
@@ -18,6 +19,7 @@ export default async function TeamPage() {
         <p className="mt-1 text-sm text-ink-600">
           {seats} of {limits.seatLimit} seats used · roles govern what each teammate can do.
         </p>
+        <AdminNav current="/team" />
       </div>
       <TeamManager currentUserId={ctx.user.id} />
     </div>

@@ -44,6 +44,33 @@ function DashboardTabs({ view }: { view: "firm" | "me" }) {
   );
 }
 
+
+// Human-readable labels for audit actions shown in dashboard activity feeds.
+// The raw action string remains in the Audit Log page; dashboards read plainly.
+const AUDIT_LABEL: Record<string, string> = {
+  "auth.login": "Logged in",
+  "auth.logout": "Logged out",
+  "export.report": "Exported a report",
+  "export.download": "Downloaded a report",
+  "export.testimony_pack": "Generated a testimony prep pack",
+  "report.preview": "Previewed a report",
+  "plan.generate": "Ran the AI pipeline",
+  "physician.review": "Reviewed a recommendation",
+  "validation.run": "Ran the plan integrity check",
+  "reasoning.run": "Refreshed clinical reasoning",
+  "attestation.sign": "Signed a physician attestation",
+  "attestation.invalidated": "Attestation invalidated by a material change",
+  "futurecare.edit": "Edited a future-care item",
+  "futurecare.delete": "Removed a future-care item",
+  "case.create": "Created a case",
+  "case.update": "Updated a case",
+  "document.upload": "Uploaded a record",
+  "evidence.rebuild": "Rebuilt the evidence graph",
+};
+function auditLabel(action: string): string {
+  return AUDIT_LABEL[action] ?? action.replace(/[._]/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+}
+
 export default async function DashboardPage({ searchParams }: { searchParams?: { view?: string } }) {
   const ctx = await requireContext();
   const firmId = ctx.firm.id;
@@ -78,6 +105,29 @@ export default async function DashboardPage({ searchParams }: { searchParams?: {
       }),
       prisma.auditLog.findMany({ where: { firmId, userId: uid }, orderBy: { createdAt: "desc" }, take: 6, select: { id: true, action: true, createdAt: true } }),
     ]);
+    // Cases elsewhere in the firm that need attention (blocking findings or
+    // pending physician review) — surfaced so "my" scoping never hides work.
+    const otherAttention = await prisma.case.findMany({
+      where: {
+        firmId,
+        id: { notIn: myCaseIds.length ? myCaseIds : ["-"] },
+        status: { notIn: ["CLOSED", "ARCHIVED"] },
+        OR: [
+          { validationFindings: { some: { exportBlocking: true } } },
+          { futureCareItems: { some: { physicianStatus: "PENDING", supersededAt: null } } },
+        ],
+      },
+      take: 4,
+      select: {
+        id: true, clientName: true, caseNumber: true,
+        _count: {
+          select: {
+            validationFindings: { where: { exportBlocking: true } },
+            futureCareItems: { where: { physicianStatus: "PENDING", supersededAt: null } },
+          },
+        },
+      },
+    });
     const mdByCase = new Map(pendingMd.map((p) => [p.caseId, p._count]));
     const blockingByCase = new Map(blocking.map((b) => [b.caseId, b._count]));
     const caseNameById = new Map(myCases.map((c) => [c.id, c.clientName]));
@@ -115,6 +165,22 @@ export default async function DashboardPage({ searchParams }: { searchParams?: {
 
         {/* My cases */}
         <h2 className="text-label mt-6">My Cases</h2>
+        {otherAttention.length > 0 && (
+          <div className="mt-4 card border-amber-200 bg-amber-50/60 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-sm font-semibold text-ink-900">Needs attention elsewhere in the firm</span>
+              <Link href="/dashboard?view=firm" className="text-xs text-brand-700 hover:underline">View firm dashboard</Link>
+            </div>
+            <ul className="mt-2 space-y-1">
+              {otherAttention.map((c) => (
+                <li key={c.id} className="text-sm">
+                  <Link href={`/cases/${c.id}`} className="font-medium text-ink-800 hover:underline">{c.clientName}</Link>
+                  <span className="text-ink-500"> {c.caseNumber} — {c._count.futureCareItems > 0 ? `${c._count.futureCareItems} items awaiting physician review` : ""}{c._count.futureCareItems > 0 && c._count.validationFindings > 0 ? " · " : ""}{c._count.validationFindings > 0 ? `${c._count.validationFindings} blocking finding${c._count.validationFindings === 1 ? "" : "s"}` : ""}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         {myCases.length === 0 ? (
           <div className="card mt-2 p-5 text-sm text-ink-500">No cases are assigned to you yet — cases you create, or where you are the preparing physician, appear here.</div>
         ) : (
@@ -163,7 +229,7 @@ export default async function DashboardPage({ searchParams }: { searchParams?: {
               {myActivity.length === 0 && <li className="text-sm text-ink-500">No activity yet.</li>}
               {myActivity.map((log) => (
                 <li key={log.id} className="flex items-center justify-between gap-2 text-sm">
-                  <span className="text-ink-600">{log.action}</span>
+                  <span className="text-ink-600">{auditLabel(log.action)}</span>
                   <span className="shrink-0 text-xs text-ink-400">{formatDate(log.createdAt)}</span>
                 </li>
               ))}
@@ -251,10 +317,11 @@ export default async function DashboardPage({ searchParams }: { searchParams?: {
       where: { firmId, format: "DOCX" },
       orderBy: { createdAt: "desc" },
       take: 12,
-      select: { caseId: true, totalPresentValue: true, version: true },
+      select: { caseId: true, totalPresentValue: true, version: true, itemCount: true },
     });
     const seen = new Set<string>();
-    const latest = latestExports.filter((e) => (seen.has(e.caseId) ? false : (seen.add(e.caseId), true))).slice(0, 6);
+    // Empty drafts (zero items) say nothing about damages posture — skip them.
+    const latest = latestExports.filter((e) => (e.itemCount ?? 0) > 0 && (seen.has(e.caseId) ? false : (seen.add(e.caseId), true))).slice(0, 6);
     const approvedByCase = await prisma.futureCareItem.groupBy({
       by: ["caseId", "physicianStatus"],
       where: { supersededAt: null, caseId: { in: latest.map((l) => l.caseId) } },
@@ -414,7 +481,7 @@ export default async function DashboardPage({ searchParams }: { searchParams?: {
               <li key={log.id} className="flex items-center justify-between gap-2 text-sm">
                 <div className="min-w-0">
                   <span className="font-medium text-ink-800">{log.user?.name ?? "System"}</span>{" "}
-                  <span className="text-ink-500">{log.action}</span>
+                  <span className="text-ink-500">{auditLabel(log.action)}</span>
                 </div>
                 <span className="shrink-0 text-xs text-ink-400">{formatDate(log.createdAt)}</span>
               </li>

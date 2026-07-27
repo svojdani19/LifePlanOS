@@ -12,10 +12,25 @@ export default async function CasesPage() {
     prisma.case.findMany({
       where: { firmId: ctx.firm.id },
       orderBy: { updatedAt: "desc" },
-      select: { id: true, caseNumber: true, clientName: true, caseType: true, side: true, status: true, updatedAt: true },
+      select: {
+        id: true, caseNumber: true, clientName: true, caseType: true, side: true, status: true, updatedAt: true,
+        _count: {
+          select: {
+            documents: true,
+            futureCareItems: { where: { physicianStatus: "PENDING", supersededAt: null } },
+            validationFindings: { where: { exportBlocking: true } },
+          },
+        },
+      },
     }),
     activeCaseCount(ctx.firm.id),
   ]);
+  const pvSums = await prisma.futureCareItem.groupBy({
+    by: ["caseId"],
+    where: { caseId: { in: cases.map((c) => c.id) }, supersededAt: null },
+    _sum: { presentValue: true },
+  });
+  const pvByCase = new Map(pvSums.map((p) => [p.caseId, p._sum.presentValue ?? 0]));
   const limits = effectiveLimits(ctx.subscription?.tier ?? "SOLO", ctx.subscription ?? undefined);
   const atLimit = limits.caseLimit !== null && active >= limits.caseLimit;
 
@@ -34,7 +49,16 @@ export default async function CasesPage() {
         </div>
       )}
 
-      <CasesTable rows={cases.map((c) => ({ ...c, updatedAt: c.updatedAt.toISOString() }))} />
+      <CasesTable
+        rows={cases.map((c) => ({
+          id: c.id, caseNumber: c.caseNumber, clientName: c.clientName, caseType: c.caseType, side: c.side, status: c.status,
+          updatedAt: c.updatedAt.toISOString(),
+          presentValue: pvByCase.get(c.id) ?? 0,
+          mdPending: c._count.futureCareItems,
+          blockingFindings: c._count.validationFindings,
+          documentCount: c._count.documents,
+        }))}
+      />
     </div>
   );
 }

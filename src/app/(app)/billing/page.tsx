@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import { AdminNav } from "@/components/ui/AdminNav";
 import { requireContext } from "@/lib/tenant";
 import { can } from "@/lib/rbac";
 import { BillingManager } from "@/components/BillingManager";
@@ -12,6 +13,7 @@ export default async function BillingPage() {
       <div className="mb-6">
         <h1 className="text-2xl font-bold text-ink-900">Billing & Subscription</h1>
         <p className="mt-1 text-sm text-ink-600">Manage your firm's plan, seats, and usage limits.</p>
+        <AdminNav current="/billing" />
       </div>
       <BillingManager />
     </div>

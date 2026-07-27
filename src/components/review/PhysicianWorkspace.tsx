@@ -110,9 +110,9 @@ export function PhysicianWorkspace({ queue }: { queue: ReviewQueueItem[] }) {
                       <Badge tone="danger"><ShieldAlert className="mr-1 h-3 w-3" />blocks export</Badge>
                     )}
                     {item.assessmentStatus === "INVALID" && <Badge tone="danger">invalid</Badge>}
-                    {item.assessmentStatus === "NEEDS_REVIEW" && <Badge tone="warning">gated</Badge>}
+                    {item.assessmentStatus === "NEEDS_REVIEW" && <Badge tone="warning" title="The reasoning engine could not validate this item on the record alone — it is held for your review">needs review</Badge>}
                     {item.sufficiency && !item.sufficiency.sufficient && (
-                      <Badge tone="warning">evidence {item.sufficiency.score}/{item.sufficiency.threshold}</Badge>
+                      <Badge tone="warning" title={`Documented evidence scores ${item.sufficiency.score} of 100; this item's threshold for standing on its own is ${item.sufficiency.threshold}`}>evidence {item.sufficiency.score} of {item.sufficiency.threshold} needed</Badge>
                     )}
                   </div>
                   <p className="mt-0.5 text-xs text-ink-500">
@@ -140,8 +140,8 @@ export function PhysicianWorkspace({ queue }: { queue: ReviewQueueItem[] }) {
                     <span key={f} className="rounded bg-red-50 px-1.5 py-0.5 text-[11px] font-medium text-red-700">{f}</span>
                   ))}
                   {item.weakestDimensions.map((d) => (
-                    <span key={d.dimension} className="rounded bg-ink-100 px-1.5 py-0.5 text-[11px] text-ink-600">
-                      weakest: {d.dimension} {d.score}
+                    <span key={d.dimension} className="rounded bg-ink-100 px-1.5 py-0.5 text-[11px] text-ink-600" title={`Confidence dimension scored 0–100 from the record; this is one of the item's weakest`}>
+                      weak point: {String(d.dimension).replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase()} ({d.score}/100)
                     </span>
                   ))}
                   {item.unknownCount > 0 && <span className="rounded bg-ink-100 px-1.5 py-0.5 text-[11px] text-ink-600">{item.unknownCount} unknown{item.unknownCount === 1 ? "" : "s"}</span>}

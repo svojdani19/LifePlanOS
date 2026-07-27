@@ -4,7 +4,7 @@ import { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ArrowUpDown, Search } from "lucide-react";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
-import { cn, formatDate } from "@/lib/utils";
+import { cn, formatDate, formatMoney } from "@/lib/utils";
 import { filterSortCases, type CaseListRow, type CaseSortKey } from "@/lib/uiFilters";
 
 const CASE_TYPE_LABELS: Record<string, string> = {
@@ -98,6 +98,8 @@ export function CasesTable({ rows }: { rows: CaseListRow[] }) {
                   </button>
                 </th>
               ))}
+              <th className="px-4 py-2.5 text-right font-medium">Present Value</th>
+              <th className="px-4 py-2.5 font-medium">Needs Attention</th>
             </tr>
           </thead>
           <tbody
@@ -110,7 +112,7 @@ export function CasesTable({ rows }: { rows: CaseListRow[] }) {
           >
             {shown.length === 0 && (
               <tr>
-                <td colSpan={6} className="px-4 py-10 text-center text-ink-500">
+                <td colSpan={8} className="px-4 py-10 text-center text-ink-500">
                   {rows.length === 0 ? "No cases yet. Create your first case to begin an intake." : "No cases match the current filters."}
                 </td>
               </tr>
@@ -135,6 +137,13 @@ export function CasesTable({ rows }: { rows: CaseListRow[] }) {
                   <td className="px-4 py-2.5"><Badge tone={SIDE_TONE[c.side] ?? "neutral"}>{c.side.toLowerCase()}</Badge></td>
                   <td className="px-4 py-2.5"><Badge tone={closed ? "neutral" : "info"}>{c.status.toLowerCase().replace(/_/g, " ")}</Badge></td>
                   <td className="px-4 py-2.5 text-ink-500">{formatDate(new Date(c.updatedAt))}</td>
+                  <td className="px-4 py-2.5 text-right tabular-nums text-ink-700">{c.presentValue ? formatMoney(c.presentValue) : "—"}</td>
+                  <td className="px-4 py-2.5">
+                    {(c.blockingFindings ?? 0) > 0 && <Badge tone="red">{c.blockingFindings} blocking</Badge>}{" "}
+                    {(c.mdPending ?? 0) > 0 && <Badge tone="amber">{c.mdPending} MD pending</Badge>}
+                    {(c.documentCount ?? 0) === 0 && !closed && <Badge tone="neutral">no records</Badge>}
+                    {(c.blockingFindings ?? 0) === 0 && (c.mdPending ?? 0) === 0 && (c.documentCount ?? 0) > 0 && <span className="text-xs text-ink-400">—</span>}
+                  </td>
                 </tr>
               );
             })}

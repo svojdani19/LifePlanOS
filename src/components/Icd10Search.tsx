@@ -157,7 +157,7 @@ export function Icd10Search({
         </div>
       )}
       {committed && query === value && !disabled && (
-        <p className="mt-1 flex items-center gap-1 text-[11px] text-emerald-600"><Check className="h-3 w-3" /> ICD-10 code linked</p>
+        <p className="mt-1 flex items-center gap-1 text-[11px] text-emerald-600"><Check className="h-3 w-3" /> Linked to ICD-10 <span className="rounded bg-emerald-50 px-1 font-mono font-semibold">{code}</span></p>
       )}
     </div>
   );

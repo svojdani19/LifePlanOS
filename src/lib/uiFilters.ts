@@ -9,6 +9,11 @@ export interface CaseListRow {
   side: string;
   status: string;
   updatedAt: string; // ISO
+  // Work-queue columns (optional; list pages may omit them)
+  presentValue?: number;
+  mdPending?: number;
+  blockingFindings?: number;
+  documentCount?: number;
 }
 
 export type CaseSortKey = "caseNumber" | "clientName" | "caseType" | "side" | "status" | "updatedAt";
