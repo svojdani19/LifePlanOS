@@ -244,7 +244,30 @@ export default function ReportLibrary({ caseId, canExport, onSelect }: { caseId:
                 </div>
               )}
               {selected.legacy ? (
-                <p className="mt-3 text-xs text-ink-500">Generated from the card below — the original workflow, unchanged.</p>
+                selected.id === "TESTIMONY_PACK" ? (
+                  <div className="mt-3">
+                    {canExport ? (
+                      <button
+                        className="btn-primary px-3 py-1.5 text-xs"
+                        disabled={busy !== null}
+                        onClick={async () => {
+                          setBusy("TESTIMONY"); setError(null);
+                          try {
+                            const res = await fetch(`/api/cases/${caseId}/export/testimony`, { method: "POST" });
+                            const body = await res.json();
+                            if (!res.ok) setError(body.error ?? "Export failed");
+                            else { window.open(`/api/cases/${caseId}/export/${body.export.id}/download`, "_blank"); void load(); }
+                          } finally { setBusy(null); }
+                        }}
+                      >
+                        {busy === "TESTIMONY" ? "Generating…" : "Generate Testimony Prep Pack"}
+                      </button>
+                    ) : <span className="text-xs text-ink-400">Your role cannot export reports.</span>}
+                    {error && <p className="mt-2 text-xs text-red-600">{error}</p>}
+                  </div>
+                ) : (
+                  <p className="mt-3 text-xs text-ink-500">Generated from the card below — the original workflow, unchanged.</p>
+                )
               ) : (
                 <>
                   <div className="mt-3 flex flex-wrap items-end gap-3 text-xs">

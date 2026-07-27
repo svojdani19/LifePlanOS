@@ -3252,18 +3252,6 @@ function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians 
                 {busy === "export" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileOutput className="h-4 w-4" />} Export DOCX
               </button>
               <button className="btn-outline" disabled={busy === "export" || data.futureCareItems.length === 0} title="The canonical DOCX converted to PDF on the server (requires LibreOffice on the app host)." onClick={() => exportReport("PDF")}>Export PDF</button>
-              <button className="btn-outline" disabled={data.futureCareItems.length === 0} onClick={() => exportReport("CSV")}>Export Cost CSV</button>
-              <button
-                className="btn-outline"
-                disabled={busy === "testimony" || data.futureCareItems.length === 0}
-                title="Deposition-prep DOCX: anticipated cross-examination per recommendation, record-cited responses, honest concessions — projected from the persisted assessments and defense review."
-                onClick={async () => {
-                  const r = await call(`/api/cases/${data.id}/export/testimony`, "POST", {}, "testimony");
-                  if (r?.export) window.open(`/api/cases/${data.id}/export/${r.export.id}/download`, "_blank");
-                }}
-              >
-                {busy === "testimony" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Gavel className="h-4 w-4" />} Testimony Prep Pack
-              </button>
             </>
           ) : <span className="text-sm text-ink-500">Your role cannot export reports.</span>}
         </div>
