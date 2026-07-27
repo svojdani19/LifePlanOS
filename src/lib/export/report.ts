@@ -22,6 +22,7 @@ import { runIntegrityCheck, reviewLabel, evaluateCitation, functionalFinding, ha
 import { buildRecommendationDossier, type DossierCondition, type DossierChronoEvent, type DossierCase, type EvidenceItem } from "@/lib/engine/medicalNecessity";
 import { buildReasoningAssessment, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningItem, type ReasoningAssessment } from "@/lib/engine/clinicalReasoning";
 import { referencesFor, guidelineSourcesFor } from "@/lib/references/sources";
+import { parseBasis, basisNarrative } from "@/lib/engine/lifeExpectancy";
 import { bodyRegion } from "@/lib/engine/integrity";
 import { project } from "@/lib/engine/cost";
 import { typeLabel } from "@/lib/documents/taxonomy";
@@ -300,6 +301,12 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   const sexNoun = c.sex === "FEMALE" ? "woman" : c.sex === "MALE" ? "man" : "individual";
   const age = ageFrom(c.dateOfBirth);
   const life = a.lifeExpectancyYears;
+  const leBasis = parseBasis((c as { lifeExpectancyBasis?: unknown }).lifeExpectancyBasis);
+  const leBasisShort = leBasis
+    ? leBasis.method === "PHYSICIAN_DETERMINED"
+      ? " — physician-determined"
+      : ` — ${leBasis.baselineLabel ?? "actuarial basis"}${leBasis.adjustments.length ? ", adjusted" : ""}`
+    : "";
   const preExisting = parseConditions(c.preExistingConditions);
   const addlDx = (Array.isArray(c.additionalDiagnoses) ? c.additionalDiagnoses : []) as { diagnosis?: string; icd10Code?: string }[];
   const primaryDx = [c.diagnosis, ...addlDx.map((d) => d?.diagnosis)].filter(Boolean).join("; ") || "the injuries at issue";
@@ -539,7 +546,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
       ["Date & mechanism of injury", `${fmtDate(c.dateOfInjury)}${c.mechanism ? ` — ${lc(c.mechanism)}` : ""}`],
       ["Diagnoses at issue", `${primaryDx}${c.icd10Code ? ` (ICD-10 ${c.icd10Code})` : ""}`],
       ["Current functional status", c.functionalLimitations || (c.currentWorkStatus ? c.currentWorkStatus.toLowerCase() : "as documented in the treating records")],
-      ["Remaining life expectancy", `${life.toFixed(1)} years (projection horizon)`],
+      ["Remaining life expectancy", `${life.toFixed(1)} years (projection horizon${leBasis ? leBasisShort : " — basis not yet recorded"})`],
       ["Categories of future care", `${reportItems.length}, across ${catCount} domain${catCount === 1 ? "" : "s"}`],
       ["Future medical cost — undiscounted", money(totalLifetime)],
       ["Future medical cost — present value", `${money(totalPresentValue)} (range ${money(totalLow)}–${money(totalHigh)})`],
@@ -920,7 +927,10 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   // ══ ASSUMPTIONS ══════════════════════════════════════════════════════════════
   body.push(h1("Assumptions", { pageBreak: true }));
   body.push(p(`The projections in this plan rest on the following assumptions, each stated so that the reader may test them.`));
-  body.push(bullet(`A remaining life expectancy of ${life.toFixed(1)} years is applied as the projection horizon for all lifetime care, drawn from the United States Social Security Administration actuarial tables.`));
+  // The life-expectancy bullet states the RECORDED basis (table + edition +
+  // documented adjustments + approval) — or honestly that none is recorded.
+  // It never asserts an actuarial source that was not actually applied.
+  for (const line of basisNarrative(leBasis, life)) body.push(bullet(line));
   body.push(bullet(`Future costs are grown at a medical-inflation rate of ${(a.medicalInflation * 100).toFixed(1)}% per year and discounted to present value at ${(a.discountRate * 100).toFixed(1)}% per year.`));
   body.push(bullet(`A geographic cost factor of ${a.geographicFactor.toFixed(2)} is applied to reflect regional pricing.`));
   body.push(bullet(`Only care that is more likely than not to be required is included in the totals; foreseeable but less-than-probable care is disclosed separately in the Limitations.`));

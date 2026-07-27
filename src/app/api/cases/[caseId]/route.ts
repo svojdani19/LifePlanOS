@@ -11,6 +11,7 @@ const patchSchema = z.object({
   caseType: z.enum(["PERSONAL_INJURY", "MED_MAL", "WORKERS_COMP", "PRODUCT_LIABILITY", "CATASTROPHIC"]).optional(),
   side: z.enum(["PLAINTIFF", "DEFENSE", "NEUTRAL"]).optional(),
   jurisdiction: z.string().nullable().optional(),
+  zipCode: z.string().max(10).nullable().optional(),
   dateOfInjury: z.string().nullable().optional(),
   mechanism: z.string().nullable().optional(),
   diagnosis: z.string().nullable().optional(),

@@ -8,12 +8,14 @@ import {
   recordUsage,
 } from "@/lib/tenant";
 import { ok, handleError } from "@/lib/api";
+import { geographicFactorFor } from "@/lib/references/geoFactors";
 
 const createSchema = z.object({
   clientName: z.string().min(1),
   caseType: z.enum(["PERSONAL_INJURY", "MED_MAL", "WORKERS_COMP", "PRODUCT_LIABILITY", "CATASTROPHIC"]).optional(),
   side: z.enum(["PLAINTIFF", "DEFENSE", "NEUTRAL"]).optional(),
   jurisdiction: z.string().optional(),
+  zipCode: z.string().max(10).optional(),
   dateOfInjury: z.string().optional(),
   mechanism: z.string().optional(),
   diagnosis: z.string().optional(),
@@ -49,6 +51,11 @@ export async function POST(req: Request) {
     const count = await prisma.case.count({ where: { firmId: ctx.firm.id } });
     const caseNumber = `LCP-${year}-${String(count + 1).padStart(4, "0")}`;
 
+    // Seed the geographic factor from the recognized venue instead of leaving
+    // the national 1.00 silently in place; the value stays editable and the
+    // derivation is ledgered like any other assumption change.
+    const geo = geographicFactorFor(input.jurisdiction);
+
     const created = await prisma.case.create({
       data: {
         firmId: ctx.firm.id,
@@ -58,12 +65,19 @@ export async function POST(req: Request) {
         caseType: input.caseType ?? "PERSONAL_INJURY",
         side: input.side ?? "PLAINTIFF",
         jurisdiction: input.jurisdiction,
+        zipCode: input.zipCode,
         dateOfInjury: input.dateOfInjury ? new Date(input.dateOfInjury) : null,
         mechanism: input.mechanism,
         diagnosis: input.diagnosis,
         icd10Code: input.icd10Code,
+        geographicFactor: geo.factor,
       },
     });
+    if (geo.factor !== 1.0) {
+      await prisma.assumptionChange.create({
+        data: { caseId: created.id, firmId: ctx.firm.id, field: "geographicFactor", originalValue: 1.0, revisedValue: geo.factor, reason: geo.label, userId: ctx.user.id },
+      });
+    }
 
     await recordUsage(ctx, "CASE_CREATED", { caseId: created.id });
     await audit(ctx, "case.create", { type: "case", id: created.id, caseId: created.id, meta: { caseNumber } });

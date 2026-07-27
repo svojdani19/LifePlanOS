@@ -7,6 +7,8 @@ import { locateConditionEvidence } from "@/lib/engine/evidence";
 import { generateStandardOfCare } from "@/lib/engine/standardOfCare";
 import { mapRecommendationToCondition, type CondInput } from "@/lib/engine/integrity";
 import { planRegeneration } from "@/lib/engine/lifecycle";
+import { baselineLifeExpectancy } from "@/lib/engine/lifeExpectancy";
+import { resolveUnitCost } from "@/lib/references/pricingProvider";
 import { rebuildEvidenceGraph } from "@/lib/engine/evidenceGraph";
 import { citationCompatible, evaluateArticle, selectPrimary, isManagementService } from "@/lib/engine/citationQuality";
 import { findCandidates, literatureReachable, activeSources, type Article } from "@/lib/literature";
@@ -43,8 +45,11 @@ export function assumptionsFor(c: Case): CaseAssumptions {
   let life = c.lifeExpectancyYears ?? undefined;
   if (life === undefined) {
     if (c.dateOfBirth) {
+      // No figure entered: default to the actuarial baseline for the patient's
+      // age and sex rather than an arbitrary horizon. The basis still needs to
+      // be RECORDED (engine/lifeExpectancy.ts) to clear the validation finding.
       const age = (Date.now() - c.dateOfBirth.getTime()) / (365.25 * 24 * 3600 * 1000);
-      life = Math.max(1, 82 - age);
+      life = baselineLifeExpectancy(age, c.sex ?? "UNKNOWN").years;
     } else {
       life = 40;
     }
@@ -209,9 +214,20 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
 
   let totalLifetime = 0;
   let totalPresentValue = 0;
+  // Live pricing (pricingProvider seam): when a provider is configured, each
+  // coded service is priced from a sourced venue-specific lookup (FAIR Health
+  // by geozip, 80th percentile) and the figure carries its retrieval date and
+  // provider snapshot. Misconfiguration is loud — generation fails rather than
+  // quietly shipping unsourced numbers. Static mode does no network.
+  const livePricing = (process.env.PRICING_PROVIDER ?? "static").toLowerCase() !== "static";
   for (const t of careItems) {
+    const priced = livePricing
+      ? await resolveUnitCost({ category: t.category, cpt: t.cptCode ?? null, zip: c.zipCode, percentile: 80 })
+      : null;
     const p = project(
-      { category: t.category, unitCost: t.unitCost, frequencyPerYear: t.frequencyPerYear, durationYears: t.durationYears, isLifetime: !!t.isLifetime },
+      priced?.live
+        ? { category: t.category, unitCost: priced.unit, unitIsVenueFinal: true, frequencyPerYear: t.frequencyPerYear, durationYears: t.durationYears, isLifetime: !!t.isLifetime }
+        : { category: t.category, unitCost: t.unitCost, frequencyPerYear: t.frequencyPerYear, durationYears: t.durationYears, isLifetime: !!t.isLifetime },
       a,
     );
     totalLifetime += p.lifetimeCost;
@@ -242,7 +258,9 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
         presentValue: p.presentValue,
         lowCost: p.lowCost,
         highCost: p.highCost,
-        pricingSource: p.pricingSource,
+        pricingSource: priced?.live ? priced.source : p.pricingSource,
+        pricedAt: priced?.live && priced.retrievedAt ? new Date(priced.retrievedAt) : null,
+        pricingDetail: priced?.live && priced.detail ? (priced.detail as never) : Prisma.DbNull,
         evidenceStrength: t.evidenceStrength,
         literatureSupport: t.literatureSupport,
         lowerCostAlternative: t.lowerCostAlternative,
@@ -756,8 +774,11 @@ export async function recomputeCosts(caseId: string): Promise<{ totalLifetime: n
   let totalLifetime = 0;
   let totalPresentValue = 0;
   for (const it of items) {
+    // The stored unitCost is venue-final (the geographic factor was applied at
+    // creation, or the figure was live geozip-priced) — recomputing must not
+    // apply the factor a second time.
     const p = project(
-      { category: it.category, unitCost: it.unitCost, frequencyPerYear: it.frequencyPerYear, durationYears: it.durationYears, isLifetime: it.isLifetime },
+      { category: it.category, unitCost: it.unitCost, unitIsVenueFinal: true, frequencyPerYear: it.frequencyPerYear, durationYears: it.durationYears, isLifetime: it.isLifetime },
       a,
     );
     totalLifetime += p.lifetimeCost;

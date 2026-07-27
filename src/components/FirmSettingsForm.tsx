@@ -5,11 +5,15 @@ import { useRouter } from "next/navigation";
 
 export function FirmSettingsForm({
   initial,
+  enterprise = false,
 }: {
-  initial: { name: string; state: string; primaryColor: string; letterhead: string; logoUrl: string };
+  initial: { name: string; state: string; primaryColor: string; letterhead: string; logoUrl: string; dataRetentionDays?: number | null };
+  enterprise?: boolean;
 }) {
   const router = useRouter();
-  const [form, setForm] = useState(initial);
+  const { dataRetentionDays, ...branding } = initial;
+  const [form, setForm] = useState(branding);
+  const [retention, setRetention] = useState(dataRetentionDays != null ? String(dataRetentionDays) : "");
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -26,7 +30,10 @@ export function FirmSettingsForm({
     const res = await fetch("/api/firm", {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(form),
+      body: JSON.stringify({
+        ...form,
+        ...(enterprise ? { dataRetentionDays: retention.trim() === "" ? null : Number(retention) } : {}),
+      }),
     });
     const data = await res.json();
     setBusy(false);
@@ -75,6 +82,24 @@ export function FirmSettingsForm({
           placeholder="Appears at the top of firm-branded reports"
         />
       </div>
+      {enterprise && (
+        <div>
+          <label className="label">Data Retention (days)</label>
+          <input
+            className="input w-48"
+            type="number"
+            min={30}
+            value={retention}
+            onChange={(e) => { setRetention(e.target.value); setSaved(false); }}
+            placeholder="retain indefinitely"
+          />
+          <p className="mt-1 text-xs text-ink-500">
+            Enterprise. Stored record files and extracted text of closed/archived cases are purged after this many days of
+            inactivity (minimum 30). The case shell, plan, findings, and audit trail are retained. Leave blank to retain
+            indefinitely. Enforced by <code>npm run retention:enforce</code>; every purge is audited.
+          </p>
+        </div>
+      )}
       {error && <p className="text-sm text-red-600">{error}</p>}
       <div className="flex items-center gap-3">
         <button className="btn-primary" disabled={busy}>

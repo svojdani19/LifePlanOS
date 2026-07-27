@@ -69,4 +69,14 @@ describe("project", () => {
     expect(p.lifetimeCost).toBe(0);
     expect(p.presentValue).toBe(0);
   });
+
+  it("a venue-final unit cost is never re-multiplied by the geographic factor", () => {
+    const a = { lifeExpectancyYears: 30, discountRate: 0, medicalInflation: 0, geographicFactor: 1.18 };
+    // A geozip-priced (or previously stored) figure is already venue-final…
+    const live = project({ category: "IMAGING", unitCost: 1000, unitIsVenueFinal: true, frequencyPerYear: 1, durationYears: 1, isLifetime: false }, a);
+    expect(live.unitCost).toBe(1000);
+    // …while the national reference and plain overrides still take the factor.
+    const stat = project({ category: "IMAGING", unitCost: 1000, frequencyPerYear: 1, durationYears: 1, isLifetime: false }, a);
+    expect(stat.unitCost).toBe(1180);
+  });
 });

@@ -4,11 +4,11 @@ import { getObject } from "@/lib/storage";
 import { handleError } from "@/lib/api";
 
 const CONTENT_TYPES: Record<string, string> = {
-  DOCX: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-  CSV: "text/csv",
-  PDF: "application/pdf",
-  XLSX: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-  MEMO: "text/plain",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  csv: "text/csv",
+  pdf: "application/pdf",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  memo: "text/plain",
 };
 
 // Authenticated, audited download of a generated report. PHI files are never
@@ -24,11 +24,15 @@ export async function GET(_req: Request, { params }: { params: { caseId: string;
     const buf = await getObject(record.storageKey);
     await audit(ctx, "export.download", { type: "reportExport", id: record.id, caseId: params.caseId });
 
-    const ext = record.format.toLowerCase();
-    const filename = `${c.caseNumber}-life-care-plan-v${record.version}.${ext}`;
+    // The stored object's own extension wins (a MEMO-format testimony pack is a
+    // .docx file); the format enum is the fallback for legacy rows.
+    const storedExt = /\.([a-z0-9]+)$/i.exec(record.storageKey)?.[1]?.toLowerCase();
+    const ext = storedExt ?? record.format.toLowerCase();
+    const kind = record.format === "MEMO" ? "testimony-prep" : "life-care-plan";
+    const filename = `${c.caseNumber}-${kind}-v${record.version}.${ext}`;
     return new Response(new Uint8Array(buf), {
       headers: {
-        "Content-Type": CONTENT_TYPES[record.format] ?? "application/octet-stream",
+        "Content-Type": CONTENT_TYPES[ext] ?? "application/octet-stream",
         "Content-Disposition": `attachment; filename="${filename}"`,
       },
     });

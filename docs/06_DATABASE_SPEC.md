@@ -57,6 +57,28 @@ connection's search_path targets `lifeplanos`) → `npx prisma migrate resolve
 
 ### Change log (schema)
 
+- **2026-07-27 (Life-expectancy basis)** `Case.lifeExpectancyBasis Json?`
+  (migration `20260727100000_life_expectancy_basis`). Recorded provenance for
+  the lifetime projection horizon: actuarial baseline (table + edition + age +
+  sex), documented adjustments (reason + source + author), or a physician
+  determination, plus approval metadata. Parsed/validated by
+  `engine/lifeExpectancy.ts:parseBasis`; the determined figure is synced onto
+  `lifeExpectancyYears` and ledgered as an `AssumptionChange`.
+
+- **2026-07-27 (Live-pricing provenance)** `Case.zipCode`,
+  `FutureCareItem.pricedAt DateTime?`, `FutureCareItem.pricingDetail Json?`
+  (migration `20260727110000_live_pricing_provenance`). When a figure comes
+  from a live venue-specific lookup (FAIR Health geozip benchmark), the
+  retrieval date and raw provider snapshot persist with the item so the number
+  can be re-derived and defended later.
+
+- **2026-07-27 (Data retention)** `Firm.dataRetentionDays Int?` (migration
+  `20260727120000_firm_data_retention`). Enterprise retention window in days
+  for CLOSED/ARCHIVED cases' stored PHI; null = retain indefinitely. Enforced
+  by `scripts/enforce-retention.ts` (purges storage objects + extracted text +
+  segments + source quotes; case shell/findings/audit retained; every purge
+  audited as `retention.purge`).
+
 - **2026-07-12 (Staged/conditional care)** `FutureCareItem.prerequisite`,
   `earliestTiming`, `replacesService`, `contingencyOnly` (migration
   `20260712180000_add_staged_conditional_fields`). Complete the staged-care

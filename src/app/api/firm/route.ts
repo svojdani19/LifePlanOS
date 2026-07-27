@@ -9,6 +9,9 @@ const patchSchema = z.object({
   primaryColor: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
   letterhead: z.string().max(2000).optional(),
   logoUrl: z.string().url().optional().or(z.literal("")),
+  // Enterprise data retention: days of inactivity after which a CLOSED/ARCHIVED
+  // case's stored PHI is purged (min 30). Null = retain indefinitely.
+  dataRetentionDays: z.number().int().min(30).max(36500).nullable().optional(),
 });
 
 export async function PATCH(req: Request) {
@@ -16,6 +19,9 @@ export async function PATCH(req: Request) {
     const ctx = await requireApiContext();
     requirePermission(ctx, "firm.settings");
     const input = patchSchema.parse(await req.json());
+    if (input.dataRetentionDays !== undefined && ctx.subscription?.tier !== "ENTERPRISE") {
+      return ok({ error: "Data-retention policies are configurable on the Enterprise plan." }, 403);
+    }
     const firm = await prisma.firm.update({
       where: { id: ctx.firm.id },
       data: { ...input, logoUrl: input.logoUrl || null },

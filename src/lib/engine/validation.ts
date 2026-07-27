@@ -20,6 +20,7 @@ import {
 import { validateEvidenceQuality } from "./citationQuality";
 import { buildRecommendationDossier, validateRecommendationCompleteness, type DossierChronoEvent, type DossierCondition } from "./medicalNecessity";
 import { reasoningFindings, type ReasoningItem } from "./clinicalReasoning";
+import { baselineLifeExpectancy, lifeExpectancyFindings, parseBasis, type BasisSex } from "./lifeExpectancy";
 import type { CondInput as ReasoningCond } from "./integrity";
 
 export interface CaseValidation {
@@ -40,7 +41,10 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
   const [items, conditions, kase, chronology] = await Promise.all([
     prisma.futureCareItem.findMany({ where: { caseId, supersededAt: null }, include: { condition: true } }),
     prisma.condition.findMany({ where: { caseId } }),
-    prisma.case.findUnique({ where: { id: caseId }, select: { dateOfBirth: true } }),
+    prisma.case.findUnique({
+      where: { id: caseId },
+      select: { dateOfBirth: true, sex: true, lifeExpectancyYears: true, lifeExpectancyBasis: true },
+    }),
     prisma.chronologyEvent.findMany({ where: { caseId } }),
   ]);
   const adult = !kase?.dateOfBirth || (Date.now() - kase.dateOfBirth.getTime()) / (365.25 * 24 * 3600 * 1000) >= 18;
@@ -74,6 +78,21 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
     dossierCase,
     includedIds,
   );
+  // Life-expectancy basis — the projection horizon every totaled lifetime line
+  // multiplies through must have a recorded, internally consistent basis
+  // (actuarial baseline, documented adjustments, or physician determination).
+  const ageYears = kase?.dateOfBirth ? (Date.now() - kase.dateOfBirth.getTime()) / (365.25 * 24 * 3600 * 1000) : null;
+  const currentBaseline = ageYears != null ? baselineLifeExpectancy(ageYears, (kase?.sex ?? "UNKNOWN") as BasisSex) : null;
+  const lifetimeIncluded = items.filter(
+    (it) => includedIds.has((it as { id: string }).id) && (it as { isLifetime?: boolean }).isLifetime,
+  );
+  const leFindings = lifeExpectancyFindings({
+    basis: parseBasis(kase?.lifeExpectancyBasis),
+    yearsInUse: kase?.lifeExpectancyYears ?? currentBaseline?.years ?? 40,
+    currentBaseline,
+    lifetimePresentValue: lifetimeIncluded.reduce((s, it) => s + ((it as { presentValue?: number }).presentValue ?? 0), 0),
+    lifetimeItemCount: lifetimeIncluded.length,
+  });
   const findings = [
     ...report.findings.map((f) => ({
       service: f.recommendation,
@@ -100,6 +119,14 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
       exportBlocking: f.exportBlocking,
     })),
     ...reasoning.map((f) => ({
+      service: f.service,
+      result: f.result,
+      issue: f.issue,
+      severity: f.severity as string,
+      suggestion: f.suggestion,
+      exportBlocking: f.exportBlocking,
+    })),
+    ...leFindings.map((f) => ({
       service: f.service,
       result: f.result,
       issue: f.issue,

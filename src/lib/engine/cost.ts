@@ -63,6 +63,10 @@ export interface CaseAssumptions {
 export interface ProjectionInput {
   category: CareCategory;
   unitCost?: number; // override the reference
+  /** The unitCost override is already venue-final — a live geozip-priced figure
+   *  or a previously derived/stored amount — so the geographic factor must NOT
+   *  be applied on top of it (it would double-adjust). */
+  unitIsVenueFinal?: boolean;
   frequencyPerYear: number;
   durationYears?: number | null;
   isLifetime: boolean;
@@ -85,7 +89,8 @@ const HIGH = 1.25;
 
 export function project(input: ProjectionInput, a: CaseAssumptions): Projection {
   const ref = UNIT_COSTS[input.category];
-  const unit = (input.unitCost ?? ref.unit) * a.geographicFactor;
+  const unit =
+    input.unitCost != null && input.unitIsVenueFinal ? input.unitCost : (input.unitCost ?? ref.unit) * a.geographicFactor;
   const annual = unit * input.frequencyPerYear;
   const years = input.isLifetime ? Math.max(0, a.lifeExpectancyYears) : Math.max(0, input.durationYears ?? 0);
 

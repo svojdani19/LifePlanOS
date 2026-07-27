@@ -328,7 +328,7 @@ export function CaseWorkspace({
         {tab === "providers" && <TreatingProvidersPanel data={data} canEdit={can("case.edit") || can("physician.review")} call={call} />}
         {tab === "evidence" && <EvidencePanel data={data} />}
         {tab === "futurecare" && <FutureCarePanel data={data} canEdit={can("futurecare.edit")} call={call} focusId={focusId} focusCat={focusCat} />}
-        {tab === "costs" && <CostsPanel data={data} assumptions={assumptions} totals={totals} canEdit={can("case.edit")} call={call} focusId={focusId} />}
+        {tab === "costs" && <CostsPanel data={data} assumptions={assumptions} totals={totals} canEdit={can("case.edit")} canApprove={can("physician.review")} call={call} focusId={focusId} />}
         {tab === "reviews" && <ReviewsPanel points={data.reviewFindings} hasPlan={hasPlan} />}
         {tab === "physician" && <PhysicianPanel data={data} canReview={can("physician.review")} call={call} />}
         {tab === "precedents" && <PrecedentsPanel precedents={precedents} data={data} />}
@@ -352,6 +352,7 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
     icd10Code: data.icd10Code ?? "",
     mechanism: data.mechanism ?? "",
     jurisdiction: data.jurisdiction ?? "",
+    zipCode: data.zipCode ?? "",
     specialty: data.specialty ?? "",
     currentWorkStatus: data.currentWorkStatus ?? "",
     disabilityReason: data.disabilityReason ?? "",
@@ -513,6 +514,9 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
           <datalist id="state-list">
             {US_STATES.map((s) => <option key={s} value={s} />)}
           </datalist>
+        </Field>
+        <Field label="ZIP Code (venue pricing)">
+          <input className="input" disabled={!canEdit} value={form.zipCode} placeholder="e.g. 92626" maxLength={10} onChange={(e) => set("zipCode", e.target.value)} />
         </Field>
 
         {/* Pre-existing conditions — pop-up multi-select with Complete/Incomplete status */}
@@ -1767,7 +1771,106 @@ function InlineItemEdit({ item, caseId, call }: { item: AnyRec; caseId: string; 
 }
 
 // ── Costs ────────────────────────────────────────────────────────────────────
-function CostsPanel({ data, assumptions, totals, canEdit, call, focusId }: { data: AnyRec; assumptions: AnyRec; totals: AnyRec; canEdit: boolean; call: any; focusId?: string | null }) {
+// ── Life-expectancy basis (sourced projection horizon) ───────────────────────
+// Shows WHERE the lifetime projection horizon comes from: an actuarial table
+// baseline for the patient's age and sex, documented adjustments with reason +
+// source, or a physician determination — with physician sign-off. When no basis
+// is recorded, the validation layer raises a finding (blocking above $100k of
+// lifetime present value), and this card is where it gets resolved.
+function LifeExpectancyBasisCard({ data, canEdit, canApprove, call }: { data: AnyRec; canEdit: boolean; canApprove: boolean; call: any }) {
+  const basis = data.lifeExpectancyBasis as AnyRec | null;
+  const [adj, setAdj] = useState({ deltaYears: 0, reason: "", source: "" });
+  const [phys, setPhys] = useState({ years: 0, source: "", reason: "" });
+  const [showPhys, setShowPhys] = useState(false);
+  const put = (body: AnyRec) => call(`/api/cases/${data.id}/life-expectancy`, "PUT", body, "lebasis");
+  const methodLabel =
+    basis?.method === "PHYSICIAN_DETERMINED" ? "Physician-determined" : basis?.method === "ADJUSTED" ? "Actuarial baseline, adjusted" : basis?.method === "ACTUARIAL_BASELINE" ? "Actuarial baseline" : "Unstated";
+  return (
+    <div className="card p-5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold text-ink-900">Life-Expectancy Basis</h3>
+        <Badge tone={basis ? (basis.approvedAt ? "success" : "brand") : "warning"}>{basis ? (basis.approvedAt ? "approved" : methodLabel.toLowerCase()) : "not recorded"}</Badge>
+      </div>
+      {!basis ? (
+        <div className="mt-3 space-y-3">
+          <p className="text-sm text-ink-600">
+            The {Number(data.lifeExpectancyYears ?? 0) > 0 ? `${Number(data.lifeExpectancyYears).toFixed(1)}-year` : ""} projection horizon every lifetime item multiplies through has no recorded basis. Derive it from the actuarial table, or record a physician determination.
+          </p>
+          {canEdit && (
+            <div className="flex flex-wrap gap-2">
+              <button className="btn-primary py-1.5 text-sm" onClick={() => put({ mode: "actuarial", adjustments: [] })} disabled={!data.dateOfBirth} title={!data.dateOfBirth ? "Requires the patient's date of birth on intake" : undefined}>
+                Use actuarial baseline (SSA table)
+              </button>
+              <button className="btn-outline py-1.5 text-sm" onClick={() => setShowPhys((s) => !s)}>Record physician determination…</button>
+            </div>
+          )}
+        </div>
+      ) : (
+        <div className="mt-3 space-y-2 text-sm text-ink-700">
+          {basis.baselineLabel && (
+            <p><span className="font-medium text-ink-500">Baseline:</span> {basis.baselineYears?.toFixed?.(1) ?? basis.baselineYears} yrs — {basis.baselineLabel}</p>
+          )}
+          {(basis.adjustments ?? []).map((a: AnyRec, i: number) => (
+            <p key={i} className="pl-3 text-xs text-ink-600">
+              {a.deltaYears >= 0 ? "+" : ""}{Number(a.deltaYears).toFixed(1)} yrs — {a.reason || <span className="text-amber-700">no reason recorded</span>}
+              {" "}<span className="text-ink-400">({a.source || "no source"}{a.enteredByName ? ` · ${a.enteredByName}` : ""})</span>
+            </p>
+          ))}
+          <p><span className="font-medium text-ink-500">Determined:</span> <span className="font-semibold text-ink-900">{Number(basis.determinedYears).toFixed(1)} years</span>{basis.approvedByName ? ` · approved by ${basis.approvedByName}` : ""}</p>
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            {canApprove && !basis.approvedAt && (
+              <button className="btn-primary py-1 text-xs" onClick={() => put({ mode: "approve" })}>Approve determination</button>
+            )}
+            {canEdit && basis.method !== "PHYSICIAN_DETERMINED" && data.dateOfBirth && (
+              <button className="btn-outline py-1 text-xs" onClick={() => put({ mode: "actuarial", adjustments: (basis.adjustments ?? []).map((a: AnyRec) => ({ deltaYears: a.deltaYears, reason: a.reason, source: a.source })) })}>
+                Re-derive at current age
+              </button>
+            )}
+            {canEdit && <button className="btn-outline py-1 text-xs" onClick={() => setShowPhys((s) => !s)}>Physician determination…</button>}
+            {canEdit && <button className="btn-outline py-1 text-xs text-ink-500" onClick={() => put({ mode: "clear" })}>Clear</button>}
+          </div>
+        </div>
+      )}
+      {canEdit && basis && basis.method !== "PHYSICIAN_DETERMINED" && (
+        <div className="mt-3 flex flex-wrap items-end gap-2 border-t border-ink-100 pt-3">
+          <NumField label="Adjustment (± yrs)" value={adj.deltaYears} step={0.5} onChange={(v) => setAdj({ ...adj, deltaYears: v })} />
+          <input className="input w-56 py-1.5 text-sm" placeholder="Clinical reason" aria-label="Adjustment reason" value={adj.reason} onChange={(e) => setAdj({ ...adj, reason: e.target.value })} />
+          <input className="input w-56 py-1.5 text-sm" placeholder="Source (report / literature)" aria-label="Adjustment source" value={adj.source} onChange={(e) => setAdj({ ...adj, source: e.target.value })} />
+          <button
+            className="btn-outline py-1.5 text-sm"
+            disabled={!adj.deltaYears || !adj.reason.trim() || !adj.source.trim()}
+            onClick={() => {
+              put({ mode: "actuarial", adjustments: [...(basis.adjustments ?? []).map((a: AnyRec) => ({ deltaYears: a.deltaYears, reason: a.reason, source: a.source })), { deltaYears: adj.deltaYears, reason: adj.reason.trim(), source: adj.source.trim() }] });
+              setAdj({ deltaYears: 0, reason: "", source: "" });
+            }}
+          >
+            Add adjustment
+          </button>
+        </div>
+      )}
+      {canEdit && showPhys && (
+        <div className="mt-3 flex flex-wrap items-end gap-2 border-t border-ink-100 pt-3">
+          <NumField label="Determined yrs" value={phys.years} step={0.5} onChange={(v) => setPhys({ ...phys, years: v })} />
+          <input className="input w-56 py-1.5 text-sm" placeholder="Source (e.g. IME of Dr. …)" aria-label="Determination source" value={phys.source} onChange={(e) => setPhys({ ...phys, source: e.target.value })} />
+          <input className="input w-56 py-1.5 text-sm" placeholder="Clinical rationale" aria-label="Determination rationale" value={phys.reason} onChange={(e) => setPhys({ ...phys, reason: e.target.value })} />
+          <button
+            className="btn-primary py-1.5 text-sm"
+            disabled={!phys.years || !phys.source.trim() || !phys.reason.trim()}
+            onClick={() => {
+              put({ mode: "physician", years: phys.years, source: phys.source.trim(), reason: phys.reason.trim() });
+              setShowPhys(false);
+              setPhys({ years: 0, source: "", reason: "" });
+            }}
+          >
+            Record determination
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CostsPanel({ data, assumptions, totals, canEdit, canApprove, call, focusId }: { data: AnyRec; assumptions: AnyRec; totals: AnyRec; canEdit: boolean; canApprove: boolean; call: any; focusId?: string | null }) {
   const [a, setA] = useState({
     lifeExpectancyYears: Number(assumptions.lifeExpectancyYears.toFixed(1)),
     discountRate: assumptions.discountRate,
@@ -1835,6 +1938,7 @@ function CostsPanel({ data, assumptions, totals, canEdit, call, focusId }: { dat
           </div>
         )}
       </div>
+      <LifeExpectancyBasisCard data={data} canEdit={canEdit} canApprove={canApprove} call={call} />
       {/* Cost table controls (Phase 12) — filter + sort are view-only; the
           Total row always reflects the SERVER-computed case totals so a
           filtered view can never misstate the damages figure. */}
@@ -2992,7 +3096,19 @@ function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians 
               <button className="btn-primary" disabled={busy === "export" || data.futureCareItems.length === 0} onClick={() => exportReport("DOCX")}>
                 {busy === "export" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileOutput className="h-4 w-4" />} Export DOCX
               </button>
+              <button className="btn-outline" disabled={busy === "export" || data.futureCareItems.length === 0} title="The canonical DOCX converted to PDF on the server (requires LibreOffice on the app host)." onClick={() => exportReport("PDF")}>Export PDF</button>
               <button className="btn-outline" disabled={data.futureCareItems.length === 0} onClick={() => exportReport("CSV")}>Export Cost CSV</button>
+              <button
+                className="btn-outline"
+                disabled={busy === "testimony" || data.futureCareItems.length === 0}
+                title="Deposition-prep DOCX: anticipated cross-examination per recommendation, record-cited responses, honest concessions — projected from the persisted assessments and defense review."
+                onClick={async () => {
+                  const r = await call(`/api/cases/${data.id}/export/testimony`, "POST", {}, "testimony");
+                  if (r?.export) window.open(`/api/cases/${data.id}/export/${r.export.id}/download`, "_blank");
+                }}
+              >
+                {busy === "testimony" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Gavel className="h-4 w-4" />} Testimony Prep Pack
+              </button>
             </>
           ) : <span className="text-sm text-ink-500">Your role cannot export reports.</span>}
         </div>

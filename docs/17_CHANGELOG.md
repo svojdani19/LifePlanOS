@@ -2,6 +2,69 @@
 
 Newest first. Entries reference commits on `main`.
 
+## 2026-07-27 — Defensibility & commercial-readiness sprint
+
+Five builds closing the largest remaining gaps between the reasoning engine
+and a real courtroom / a real customer contract.
+
+- **Life-expectancy basis** (`engine/lifeExpectancy.ts`, 16 tests). The
+  projection horizon — the single most leveraged number in the plan — now has
+  recorded provenance: an SSA period-life-table baseline by exact age + sex
+  (interpolated; sex-averaged when undocumented), documented adjustments each
+  carrying a reason + source + author, or a physician determination; physician
+  approval is recorded on the basis. `Case.lifeExpectancyBasis` (migration
+  `20260727100000`), `PUT /api/cases/:id/life-expectancy` (figure always
+  recomputed server-side, synced to `lifeExpectancyYears`, AssumptionChange
+  ledgered, costs recomputed). Validation: unstated basis on totaled lifetime
+  care = High (Critical + export-blocking ≥ $100k lifetime PV);
+  basis/figure mismatch blocks export; undocumented adjustments and stale
+  baselines flagged. The report's Assumptions bullet now states the RECORDED
+  basis or honestly that none exists — the previous unconditional "drawn from
+  SSA actuarial tables" claim over an unsourced number is gone. `assumptionsFor`
+  defaults from the actuarial table (age + sex) instead of `82 − age`.
+  Costs tab gains a Life-Expectancy Basis card (derive / adjust / physician
+  determination / approve / re-derive at current age).
+- **Physician Workspace (EPIC-005)** — `/review` + nav entry: every
+  recommendation awaiting physician review across the firm's open cases in one
+  queue ordered by what blocks export (blocking findings → INVALID → gated →
+  dollars at stake; `engine/reviewQueue.ts`, 8 tests), each row surfacing the
+  persisted sufficiency verdict, weakest confidence dimensions (contradiction
+  burden inverted), unknown count, and necessity rationale. One-keystroke
+  dispositions (j/k, A, R, M) through the EXISTING physician route — ledgered,
+  validation-refreshing, reassessing — plus case deep links.
+- **Testimony Preparation Pack** (`export/testimonyPack.ts`, 10 tests;
+  `POST /api/cases/:id/export/testimony`; Report-tab button). Deposition prep
+  projected from persisted analysis only: defense findings become anticipated
+  cross-examination answered ONLY by their recorded counter-arguments (none
+  recorded = "do not improvise", flagged); material weakening evidence, pending
+  review, contingency status, and failed sufficiency each get their guaranteed
+  question with an honest answer; unknowns/assumptions/inferences become
+  "concede honestly" lists; objective documented facts render as page-cited
+  record support. Plan-level questions cover the life-expectancy basis,
+  discount-vs-inflation, and pricing methodology. Versioned in export history
+  as MEMO; no answer ever asserts physician approval that has not occurred
+  (tested).
+- **Live pricing** — the FAIR Health adapter is implemented behind the seam
+  (`PRICING_PROVIDER=fairhealth` + endpoint + key): coded services priced at
+  the 80th percentile for the case geozip (new intake ZIP field), each line
+  persisting `pricedAt` + `pricingDetail` (migration `20260727110000`); pure
+  tested response mapper; failures loud, bundled categories stay honestly
+  static. `references/geoFactors.ts` seeds the case's geographic factor from
+  the recognized venue at creation (ledgered); `unitIsVenueFinal` in the cost
+  engine keeps live/stored figures from being re-multiplied by the factor —
+  also fixing a latent double-application on every recompute.
+- **Commercial readiness** — per-firm **data retention** (Enterprise):
+  `Firm.dataRetentionDays` (migration `20260727120000`), settings field,
+  pure candidate logic (never touches active cases; 30-day floor;
+  `security/retention.ts`, 6 tests) and `npm run retention:enforce` (`--dry`
+  preview) purging stored files/extracted text of closed/archived cases past
+  the window with `retention.purge` audits. **PDF export** (ATD-7): canonical
+  DOCX converted via headless LibreOffice (`PDF_CONVERTER`), loud setup error
+  when absent, export-gate parity with DOCX. **Cloud OCR**: the Textract
+  adapter is implemented behind the BAA-gated seam (BAA ack checked BEFORE
+  credentials; digital-text pages never leave the machine). Stripe live mode
+  (checkout + webhook) verified already wired. Suite 356 → 415; tsc clean.
+
 ## 2026-07-17 — Clinical-workstation UX refinement (sprint 1)
 
 Design tokens (semantic badge tones incl. AI-purple; typography/metric/label
