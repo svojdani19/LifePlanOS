@@ -2,7 +2,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit, recordUsage } from "@/lib/tenant";
 import { persistCaseValidation } from "@/lib/engine/validation";
-import { REPORTS, getReport, gateReport, type ReportDefinition } from "@/lib/reports/registry";
+import { REPORTS, getReport, gateReport, findingRelevance, type ReportDefinition } from "@/lib/reports/registry";
 import { loadReportData } from "@/lib/reports/data";
 import { renderDocx, renderHtml, renderCsv } from "@/lib/reports/doc";
 import { convertDocxToPdf } from "@/lib/export/pdf";
@@ -91,6 +91,7 @@ export async function GET(req: Request, { params }: { params: { caseId: string }
         status,
         gateReason: gate.ok ? null : gate.reason,
         blockingCount: blocking,
+        findingRelevance: findingRelevance(def.id),
         lastGenerated: lastByType.get(def.id) ?? null,
       };
     });

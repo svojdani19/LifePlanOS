@@ -589,6 +589,30 @@ export const REPORTS: ReportDefinition[] = [
   CUSTOM,
 ];
 
+// Which validation findings are RELEVANT to each report type — case-insensitive
+// regex tested against `result` + `issue`. The integrity check scopes its
+// display to the selected report; the export gates are unaffected (blocking is
+// blocking regardless of which findings a reader chose to look at).
+export const FINDING_RELEVANCE: Record<string, string> = {
+  LIFE_CARE_PLAN: ".*",
+  TESTIMONY_PACK: ".*",
+  CUSTOM: ".*",
+  MEDICAL_CHRONOLOGY: "citation drift|chronolog|record|document",
+  MEDICAL_RECORD_SUMMARY: "citation drift|diagnosis|record|document|support",
+  COST_PROJECTION: "pricing|code|bundled|cost|life-expectancy|inclusion|duplicate|double-count",
+  FUTURE_CARE_SUMMARY: "support|review|inclusion|frequency|duration|indication|duplicate|replaced",
+  DAMAGES_SUMMARY: "pricing|code|bundled|life-expectancy|support|duplicate|inclusion",
+  MEDICAL_NECESSITY: "necessity|support|evidence|literature|citation|indication|narrative|laterality|frequency|duration",
+  DEFENSE_REBUTTAL: "necessity|support|evidence|literature|citation|duplicate|double-count|narrative|laterality",
+  CAUSATION_ANALYSIS: "diagnosis|causation|laterality|support|evidence|pre-existing",
+  PROVIDER_MATRIX: "provider|recommendation|citation drift",
+  PHYSICIAN_REVIEW_REPORT: "review|approval|physician",
+};
+
+export function findingRelevance(id: string): string {
+  return FINDING_RELEVANCE[id] ?? ".*";
+}
+
 export function getReport(id: string): ReportDefinition | undefined {
   return REPORTS.find((r) => r.id === id);
 }

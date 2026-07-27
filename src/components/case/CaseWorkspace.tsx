@@ -1,6 +1,6 @@
 "use client";
 
-import ReportLibrary from "@/components/case/ReportLibrary";
+import ReportLibrary, { type ReportSelection } from "@/components/case/ReportLibrary";
 import { useState, useMemo, useRef, useEffect, Fragment } from "react";
 import { useRouter } from "next/navigation";
 import {
@@ -3085,9 +3085,10 @@ function VersionCompareCard({ caseId, embedded = false }: { caseId: string; embe
 
 // Persisted integrity findings for the case (diagnosis mapping, coding/pricing,
 // inclusion eligibility). Critical findings mean the DOCX exports as a DRAFT.
-function ValidationCard({ caseId }: { caseId: string }) {
+function ValidationCard({ caseId, scope }: { caseId: string; scope?: ReportSelection | null }) {
   const [state, setState] = useState<AnyRec | null>(null);
   const [running, setRunning] = useState(false);
+  const [showAll, setShowAll] = useState(false);
   async function load(method: "GET" | "POST" = "GET") {
     if (method === "POST") setRunning(true);
     try {
@@ -3098,18 +3099,31 @@ function ValidationCard({ caseId }: { caseId: string }) {
     }
   }
   useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [caseId]);
-  const findings: AnyRec[] = state?.findings ?? [];
+  const allFindings: AnyRec[] = state?.findings ?? [];
+  // Scope the DISPLAY to findings relevant to the report selected in the
+  // library dropdown. Export gating is unaffected — blocking is computed over
+  // every finding regardless of the reader's current lens.
+  const scoping = !showAll && scope && scope.findingRelevance !== ".*";
+  let relevant: AnyRec[] = allFindings;
+  if (scoping) {
+    try {
+      const re = new RegExp(scope.findingRelevance, "i");
+      relevant = allFindings.filter((f) => re.test(`${f.result} ${f.issue}`));
+    } catch { relevant = allFindings; }
+  }
+  const findings = relevant;
+  const hiddenCount = allFindings.length - findings.length;
   const SEV_TONE: Record<string, "red" | "amber" | "neutral"> = { Critical: "red", High: "amber", Moderate: "neutral", Low: "neutral" };
   return (
     <div className="card p-5">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <h3 className="text-sm font-semibold text-ink-900">Plan Integrity Check</h3>
-          {state && (findings.length === 0
+          {state && (allFindings.length === 0
             ? <Badge tone="green">clean</Badge>
             : state.blocking
-              ? <Badge tone="red">{findings.filter((f) => f.exportBlocking).length} export-blocking</Badge>
-              : <Badge tone="amber">{findings.length} to review</Badge>)}
+              ? <Badge tone="red">{allFindings.filter((f) => f.exportBlocking).length} export-blocking</Badge>
+              : <Badge tone="amber">{allFindings.length} to review</Badge>)}
         </div>
         <button className="btn-outline px-3 py-1.5 text-xs" disabled={running} onClick={() => load("POST")}>
           {running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null} Re-run check
@@ -3118,6 +3132,13 @@ function ValidationCard({ caseId }: { caseId: string }) {
       <p className="mt-1 text-xs text-ink-500">
         Deterministic validation of every recommendation — diagnosis/region mapping, CPT &amp; pricing consistency, record support, and inclusion eligibility. Critical findings export the report as a DRAFT until resolved.
       </p>
+      {scope && scope.findingRelevance !== ".*" && (
+        <p className="mt-2 text-xs text-ink-600">
+          Showing findings relevant to <span className="font-semibold">{scope.name}</span>
+          {scoping && hiddenCount > 0 ? ` — ${hiddenCount} other finding${hiddenCount === 1 ? "" : "s"} hidden` : ""}.{" "}
+          <button className="text-brand-700 hover:underline" onClick={() => setShowAll((v) => !v)}>{showAll ? "Scope to this report" : "Show all"}</button>
+        </p>
+      )}
       {state && state.counts && (
         <p className="mt-2 text-xs text-ink-600">
           {state.counts.included} of {state.counts.proposed} items eligible for the damages total · {state.counts.physicianApproved} physician-approved · {state.counts.awaitingReview} awaiting review
@@ -3167,6 +3188,7 @@ function ValidationCard({ caseId }: { caseId: string }) {
 function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians = [] }: { data: AnyRec; canExport: boolean; canEdit: boolean; call: any; busy: string | null; totals: AnyRec; physicians?: AnyRec[] }) {
   const [template, setTemplate] = useState(data.side ?? "PLAINTIFF");
   const [preparing, setPreparing] = useState<string>(data.preparingPhysicianId ?? "");
+  const [reportSel, setReportSel] = useState<ReportSelection | null>(null);
   async function exportReport(format: string) {
     const r = await call(`/api/cases/${data.id}/export`, "POST", { format, template }, "export");
     if (r?.export) window.open(`/api/cases/${data.id}/export/${r.export.id}/download`, "_blank");
@@ -3174,7 +3196,7 @@ function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians 
   const chosen = physicians.find((p: AnyRec) => p.id === preparing);
   return (
     <div className="space-y-4">
-      <ReportLibrary caseId={data.id} canExport={canExport} />
+      <ReportLibrary caseId={data.id} canExport={canExport} onSelect={setReportSel} />
       <div className="grid gap-4 lg:grid-cols-2">
       <div className="card p-5">
         <h3 className="text-sm font-semibold text-ink-900">Generate Report</h3>
@@ -3225,7 +3247,7 @@ function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians 
         </div>
       </div>
       </div>
-      <ValidationCard caseId={data.id} />
+      <ValidationCard caseId={data.id} scope={reportSel} />
       <details className="card p-5">
         <summary className="cursor-pointer text-sm font-semibold text-ink-900">Compare Versions</summary>
         <div className="mt-3"><VersionCompareCard caseId={data.id} embedded /></div>

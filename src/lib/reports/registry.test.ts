@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { REPORTS, getReport, gateReport, customApproval, SECTION_MENU, type GateContext } from "./registry";
+import { REPORTS, getReport, gateReport, customApproval, SECTION_MENU, FINDING_RELEVANCE, findingRelevance, type GateContext } from "./registry";
 import { buildFixture, buildFindings } from "./fixtures";
 
 const ALL_IDS = [
@@ -182,5 +182,30 @@ describe("gateReport matrix", () => {
       expect(doc.blocks.length).toBeGreaterThan(0);
       expect(doc.disclosures.length).toBeGreaterThan(0);
     }
+  });
+});
+
+describe("finding relevance map", () => {
+  it("covers every registered report with a compilable regex", () => {
+    for (const def of REPORTS) {
+      const src = findingRelevance(def.id);
+      expect(typeof src).toBe("string");
+      expect(() => new RegExp(src, "i")).not.toThrow();
+      expect(FINDING_RELEVANCE[def.id]).toBeDefined();
+    }
+  });
+
+  it("scopes cost findings to cost reports and citation drift to chronology", () => {
+    const cost = new RegExp(findingRelevance("COST_PROJECTION"), "i");
+    expect(cost.test("Pricing mismatch — unit cost differs")).toBe(true);
+    expect(cost.test("Narrative coherence issue")).toBe(false);
+    const chrono = new RegExp(findingRelevance("MEDICAL_CHRONOLOGY"), "i");
+    expect(chrono.test("Evidence citation drift")).toBe(true);
+    expect(chrono.test("Pricing mismatch")).toBe(false);
+  });
+
+  it("full-scope reports use match-all", () => {
+    expect(findingRelevance("LIFE_CARE_PLAN")).toBe(".*");
+    expect(findingRelevance("UNKNOWN_ID")).toBe(".*");
   });
 });

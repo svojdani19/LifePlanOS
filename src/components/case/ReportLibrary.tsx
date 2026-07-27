@@ -20,7 +20,14 @@ interface LibraryReport {
   status: string;
   gateReason: string | null;
   blockingCount: number;
+  findingRelevance: string;
   lastGenerated: string | null;
+}
+
+export interface ReportSelection {
+  id: string;
+  name: string;
+  findingRelevance: string;
 }
 
 const APPROVAL_LABEL: Record<string, string> = {
@@ -46,7 +53,7 @@ const CUSTOM_SECTIONS = [
   "missingEvidence", "literature", "physicianReview", "citations",
 ];
 
-export default function ReportLibrary({ caseId, canExport }: { caseId: string; canExport: boolean }) {
+export default function ReportLibrary({ caseId, canExport, onSelect }: { caseId: string; canExport: boolean; onSelect?: (sel: ReportSelection) => void }) {
   const [reports, setReports] = useState<LibraryReport[]>([]);
   const [selectedId, setSelectedId] = useState<string>("LIFE_CARE_PLAN");
   const [config, setConfig] = useState<Record<string, unknown>>({});
@@ -59,7 +66,10 @@ export default function ReportLibrary({ caseId, canExport }: { caseId: string; c
     const res = await fetch(`/api/cases/${caseId}/reports`);
     if (res.ok) {
       const body = await res.json();
-      setReports(body.reports ?? []);
+      const list: LibraryReport[] = body.reports ?? [];
+      setReports(list);
+      const cur = list.find((r) => r.id === selectedId);
+      if (cur) onSelect?.({ id: cur.id, name: cur.name, findingRelevance: cur.findingRelevance });
     }
   }, [caseId]);
   useEffect(() => { void load(); }, [load]);
@@ -68,6 +78,7 @@ export default function ReportLibrary({ caseId, canExport }: { caseId: string; c
 
   function pick(r: LibraryReport) {
     setSelectedId(r.id);
+    onSelect?.({ id: r.id, name: r.name, findingRelevance: r.findingRelevance });
     setConfig((r.defaultConfig as Record<string, unknown>) ?? {});
     setPreviewHtml(null);
     setError(null);
@@ -113,29 +124,26 @@ export default function ReportLibrary({ caseId, canExport }: { caseId: string; c
       <p className="mb-4 text-xs text-ink-500">
         One reporting system, multiple outputs — every report draws from the same case data, evidence, costs, and physician decisions.
       </p>
-      <div className="grid gap-4 lg:grid-cols-[16rem,1fr]">
-        {/* Left: grouped report list */}
-        <div className="space-y-3">
-          {categories.map((cat) => (
-            <div key={cat}>
-              <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-ink-400">{cat}</div>
-              <div className="space-y-0.5">
+      <div className="space-y-3">
+        {/* Report-type dropdown, grouped by category */}
+        <div className="flex flex-wrap items-center gap-3">
+          <select
+            className="input w-full sm:w-96"
+            value={selectedId}
+            onChange={(e) => { const r = reports.find((x) => x.id === e.target.value); if (r) pick(r); }}
+          >
+            {categories.map((cat) => (
+              <optgroup key={cat} label={cat}>
                 {reports.filter((r) => r.category === cat).map((r) => (
-                  <button
-                    key={r.id}
-                    onClick={() => pick(r)}
-                    className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs transition ${selectedId === r.id ? "bg-brand-50 font-semibold text-brand-800 ring-1 ring-brand-200" : "text-ink-700 hover:bg-ink-50"}`}
-                  >
-                    <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${STATUS_DOT[r.status] ?? "bg-slate-300"}`} title={r.status} />
-                    <span className="truncate">{r.name}</span>
-                  </button>
+                  <option key={r.id} value={r.id}>{r.name}{r.status === "Ready" || r.status === "Previously exported" ? "" : ` — ${r.status}`}</option>
                 ))}
-              </div>
-            </div>
-          ))}
+              </optgroup>
+            ))}
+          </select>
+          {selected && <span className={`h-2 w-2 rounded-full ${STATUS_DOT[selected.status] ?? "bg-slate-300"}`} title={selected.status} />}
         </div>
 
-        {/* Right: selected report detail */}
+        {/* Selected report detail */}
         <div className="rounded-lg border border-ink-100 p-4">
           {!selected ? (
             <p className="text-xs text-ink-400">Select a report type.</p>
