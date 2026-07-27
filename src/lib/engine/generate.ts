@@ -7,6 +7,7 @@ import { locateConditionEvidence } from "@/lib/engine/evidence";
 import { generateStandardOfCare } from "@/lib/engine/standardOfCare";
 import { mapRecommendationToCondition, type CondInput } from "@/lib/engine/integrity";
 import { planRegeneration } from "@/lib/engine/lifecycle";
+import { baselineLifeExpectancy } from "@/lib/engine/lifeExpectancy";
 import { rebuildEvidenceGraph } from "@/lib/engine/evidenceGraph";
 import { citationCompatible, evaluateArticle, selectPrimary, isManagementService } from "@/lib/engine/citationQuality";
 import { findCandidates, literatureReachable, activeSources, type Article } from "@/lib/literature";
@@ -43,8 +44,11 @@ export function assumptionsFor(c: Case): CaseAssumptions {
   let life = c.lifeExpectancyYears ?? undefined;
   if (life === undefined) {
     if (c.dateOfBirth) {
+      // No figure entered: default to the actuarial baseline for the patient's
+      // age and sex rather than an arbitrary horizon. The basis still needs to
+      // be RECORDED (engine/lifeExpectancy.ts) to clear the validation finding.
       const age = (Date.now() - c.dateOfBirth.getTime()) / (365.25 * 24 * 3600 * 1000);
-      life = Math.max(1, 82 - age);
+      life = baselineLifeExpectancy(age, c.sex ?? "UNKNOWN").years;
     } else {
       life = 40;
     }

@@ -300,6 +300,11 @@ model Case {
 
   // Life-expectancy & economic assumptions (editable, drive the cost engine).
   lifeExpectancyYears Float? // remaining years used for lifetime projections
+  // Recorded provenance for lifeExpectancyYears (engine/lifeExpectancy.ts):
+  // actuarial baseline (table + edition + age + sex), documented adjustments
+  // with reason + source, or a physician determination — plus approval. Null =
+  // unstated (a validation finding when lifetime care is totaled).
+  lifeExpectancyBasis Json?
   discountRate        Float  @default(0.03) // present-value discount rate
   medicalInflation    Float  @default(0.032) // annual medical inflation
   geographicFactor    Float  @default(1.0) // regional cost multiplier
