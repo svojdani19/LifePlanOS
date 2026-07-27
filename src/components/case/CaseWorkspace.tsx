@@ -3220,7 +3220,23 @@ function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians 
     <div className="space-y-4">
       <ReportLibrary caseId={data.id} canExport={canExport} onSelect={setReportSel} />
       <ValidationCard caseId={data.id} scope={reportSel} />
-      <div className="grid gap-4 lg:grid-cols-2">
+      {/* Preparing physician — only this seat's name & credentials appear in the report. */}
+      <div className="card p-5">
+        <h3 className="text-sm font-semibold text-ink-900">Preparing Physician</h3>
+        <p className="text-xs text-ink-500">Their name, credentials, and signature appear in the report — and only theirs. Leave unset for a planner-prepared plan.</p>
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <select
+            className="input w-72"
+            value={preparing}
+            disabled={!canEdit}
+            onChange={(e) => { setPreparing(e.target.value); call(`/api/cases/${data.id}`, "PATCH", { preparingPhysicianId: e.target.value || null }); }}
+          >
+            <option value="">— None (planner-prepared) —</option>
+            {physicians.map((p: AnyRec) => <option key={p.id} value={p.id}>{p.name} ({ROLE_LABEL_SHORT[p.role] ?? p.role.toLowerCase()})</option>)}
+          </select>
+          {chosen && !chosen.credentialSummary && <span className="text-xs text-amber-600">No credential summary on this seat — add one under Team &amp; Seats → Credentials.</span>}
+        </div>
+      </div>
       <div className="card p-5">
         <h3 className="text-sm font-semibold text-ink-900">Generate Report</h3>
         <p className="text-xs text-ink-500">Present value {formatMoney(totals.totalPresentValue)} across {data.futureCareItems.length} items.</p>
@@ -3251,24 +3267,6 @@ function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians 
             </>
           ) : <span className="text-sm text-ink-500">Your role cannot export reports.</span>}
         </div>
-      </div>
-      {/* Preparing physician — only this seat's name & credentials appear in the report. */}
-      <div className="card p-5">
-        <h3 className="text-sm font-semibold text-ink-900">Preparing Physician</h3>
-        <p className="text-xs text-ink-500">Their name, credentials, and signature appear in the report — and only theirs. Leave unset for a planner-prepared plan.</p>
-        <div className="mt-3 flex flex-wrap items-center gap-3">
-          <select
-            className="input w-72"
-            value={preparing}
-            disabled={!canEdit}
-            onChange={(e) => { setPreparing(e.target.value); call(`/api/cases/${data.id}`, "PATCH", { preparingPhysicianId: e.target.value || null }); }}
-          >
-            <option value="">— None (planner-prepared) —</option>
-            {physicians.map((p: AnyRec) => <option key={p.id} value={p.id}>{p.name} ({ROLE_LABEL_SHORT[p.role] ?? p.role.toLowerCase()})</option>)}
-          </select>
-          {chosen && !chosen.credentialSummary && <span className="text-xs text-amber-600">No credential summary on this seat — add one under Team &amp; Seats → Credentials.</span>}
-        </div>
-      </div>
       </div>
       <details className="card p-5">
         <summary className="cursor-pointer text-sm font-semibold text-ink-900">Compare Versions</summary>
