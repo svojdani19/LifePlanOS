@@ -229,6 +229,7 @@ export async function GET(req: Request, { params }: { params: { caseId: string }
         description: def.description,
         category: def.category,
         serviceTier: def.serviceTier,
+        gate: def.gate,
         requiredExpert: def.requiredExpert ?? null,
         legacy: !!def.legacy,
         approval,

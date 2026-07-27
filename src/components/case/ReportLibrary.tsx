@@ -16,6 +16,7 @@ interface LibraryReport {
   description: string;
   category: string;
   serviceTier: "core" | "supporting" | "beta";
+  gate: "standard" | "disclose";
   requiredExpert: string | null;
   legacy: boolean;
   approval: "none" | "standard" | "physician_required";
@@ -32,6 +33,9 @@ export interface ReportSelection {
   id: string;
   name: string;
   findingRelevance: string;
+  gate: "standard" | "disclose";
+  status: string;
+  gateReason: string | null;
 }
 
 const APPROVAL_LABEL: Record<string, string> = {
@@ -76,7 +80,7 @@ export default function ReportLibrary({ caseId, canExport, onSelect }: { caseId:
       const list: LibraryReport[] = body.reports ?? [];
       setReports(list);
       const cur = list.find((r) => r.id === selectedId);
-      if (cur) onSelect?.({ id: cur.id, name: cur.name, findingRelevance: cur.findingRelevance });
+      if (cur) onSelect?.({ id: cur.id, name: cur.name, findingRelevance: cur.findingRelevance, gate: cur.gate, status: cur.status, gateReason: cur.gateReason });
     }
   }, [caseId]);
   useEffect(() => { void load(); }, [load]);
@@ -85,7 +89,7 @@ export default function ReportLibrary({ caseId, canExport, onSelect }: { caseId:
 
   function pick(r: LibraryReport) {
     setSelectedId(r.id);
-    onSelect?.({ id: r.id, name: r.name, findingRelevance: r.findingRelevance });
+    onSelect?.({ id: r.id, name: r.name, findingRelevance: r.findingRelevance, gate: r.gate, status: r.status, gateReason: r.gateReason });
     setConfig((r.defaultConfig as Record<string, unknown>) ?? {});
     setPreviewHtml(null);
     setError(null);

@@ -3109,7 +3109,9 @@ function ValidationCard({ caseId, scope }: { caseId: string; scope?: ReportSelec
       setRunning(false);
     }
   }
-  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [caseId]);
+  // Reload whenever the selected report changes so the card always reflects
+  // the CURRENT findings for the document the user is looking at.
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [caseId, scope?.id]);
   const allFindings: AnyRec[] = state?.findings ?? [];
   // Scope the DISPLAY to findings relevant to the report selected in the
   // library dropdown. Export gating is unaffected — blocking is computed over
@@ -3129,11 +3131,13 @@ function ValidationCard({ caseId, scope }: { caseId: string; scope?: ReportSelec
     <div className="card p-5">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <h3 className="text-sm font-semibold text-ink-900">Plan Integrity Check</h3>
+          <h3 className="text-sm font-semibold text-ink-900">Report Integrity Check</h3>
           {state && (allFindings.length === 0
             ? <Badge tone="green">clean</Badge>
             : state.blocking
-              ? <Badge tone="red">{allFindings.filter((f) => f.exportBlocking).length} export-blocking</Badge>
+              ? scope?.gate === "disclose"
+                ? <Badge tone="amber">{allFindings.filter((f) => f.exportBlocking).length} disclosed on export</Badge>
+                : <Badge tone="red">{allFindings.filter((f) => f.exportBlocking).length} export-blocking</Badge>
               : <Badge tone="amber">{allFindings.length} to review</Badge>)}
         </div>
         <button className="btn-outline px-3 py-1.5 text-xs" disabled={running} onClick={() => load("POST")}>
@@ -3143,6 +3147,13 @@ function ValidationCard({ caseId, scope }: { caseId: string; scope?: ReportSelec
       <p className="mt-1 text-xs text-ink-500">
         Deterministic validation of every recommendation — diagnosis/region mapping, CPT &amp; pricing consistency, record support, and inclusion eligibility. Critical findings export the report as a DRAFT until resolved.
       </p>
+      {scope && (
+        <p className={`mt-2 rounded-md px-2 py-1.5 text-xs ${scope.status === "Blocked" ? "bg-red-50 text-red-700" : scope.status === "Ready" || scope.status === "Previously exported" ? "bg-emerald-50 text-emerald-800" : "bg-amber-50 text-amber-800"}`}>
+          <span className="font-semibold">{scope.name}:</span> {scope.status}
+          {scope.gate === "disclose" && state?.blocking ? " — open findings are disclosed on the face of this document; they do not block its export." : ""}
+          {scope.gateReason ? ` — ${scope.gateReason}` : ""}
+        </p>
+      )}
       {scope && scope.findingRelevance !== ".*" && (
         <p className="mt-2 text-xs text-ink-600">
           Showing findings relevant to <span className="font-semibold">{scope.name}</span>
