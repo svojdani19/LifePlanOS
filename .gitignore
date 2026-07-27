@@ -9,3 +9,5 @@ next-env.d.ts
 uploads/
 .next*/
 .ocr-cache
+LCP-*-v[0-9]*.csv
+FJ-LifePlanOS-*.docx
