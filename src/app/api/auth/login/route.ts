@@ -48,7 +48,13 @@ export async function POST(req: Request) {
     await prisma.auditLog.create({
       data: { firmId: user.firmId, userId: user.id, action: "auth.login" },
     });
-    return ok({ id: user.id });
+    const assignment = await prisma.userRoleAssignment.findFirst({
+      where: { userId: user.id, firmId: user.firmId, status: "ACTIVE" },
+      orderBy: { createdAt: "asc" },
+      select: { builtInRole: true },
+    });
+    const { workspaceHrefForRole } = await import("@/lib/workspaces");
+    return ok({ id: user.id, redirectTo: workspaceHrefForRole(user.preferredWorkspace ?? assignment?.builtInRole) });
   } catch (err) {
     return handleError(err);
   }

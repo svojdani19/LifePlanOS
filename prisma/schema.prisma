@@ -150,6 +150,10 @@ model Firm {
   // Bumped on any role/assignment/credential/flag change — cache key for authz.
   authzRevision Int   @default(0)
 
+  // MDIP (docs/28): demo tenant flag — the /demo experience and demo reset act
+  // ONLY on firms where this is true. Matches migration 20260728010000_mdip.
+  isDemo Boolean @default(false)
+
   @@index([slug])
 }
 
@@ -226,7 +230,9 @@ model User {
   role         UserRole   @default(PLANNER)
   status       UserStatus @default(ACTIVE)
   passwordHash String? // null while INVITED (set on invite acceptance)
-
+  // Role workspace selected by the user. The value is a key from
+  // src/lib/workspaces.ts and is validated against active assignments.
+  preferredWorkspace String?
   // Two-factor authentication (TOTP). Secret is stored server-side; codes are
   // never persisted. Backup codes are stored as one-way hashes.
   mfaEnabled     Boolean @default(false)
@@ -236,7 +242,7 @@ model User {
   // Invitation flow.
   inviteToken     String?   @unique
   inviteExpiresAt DateTime?
-  invitedById     String?
+  invitedById        String?
 
   // Cached "board certified in …" summary rendered in report Qualifications.
   credentialSummary String?
@@ -1654,5 +1660,81 @@ model AccessGrant {
   createdAt      DateTime  @default(now())
 
   @@index([userId, firmId])
+  @@index([firmId])
+}
+
+// ── MDIP (docs/28): damages evaluation, engagements, notifications ───────────
+
+model FutureDamagesEvaluation {
+  id                            String   @id @default(uuid())
+  firmId                        String
+  caseId                        String
+  caseRevision                  Int?
+  logicVersion                  String
+  evaluatedAt                   DateTime @default(now())
+  evaluatedById                 String
+  overallOutcome                String
+  recommendedPrimaryProduct     String?
+  recommendedAdditionalProducts Json
+  readinessState                String
+  supportingFactors             Json
+  weakeningFactors              Json
+  missingInformation            Json
+  unresolvedValidationIssues    Int      @default(0)
+  estimatedMedicalRange         Json?
+  confidenceDimensions          Json?
+  nextActions                   Json
+  sourceFactIds                 Json
+  isStale                       Boolean  @default(false)
+
+  @@index([caseId, evaluatedAt])
+  @@index([firmId])
+}
+
+model CaseEngagement {
+  id                         String    @id @default(uuid())
+  firmId                     String
+  caseId                     String
+  requestedById              String
+  authorizedById             String?
+  reportType                 String
+  serviceType                String?
+  status                     String    @default("RECOMMENDED")
+  scope                      String?
+  configuration              Json?
+  feeEstimate                Float?
+  feeCurrency                String    @default("USD")
+  feeStructure               String?
+  estimatedCompletionDate    DateTime?
+  authorizedAt               DateTime?
+  assignedPlannerId          String?
+  assignedPhysicianId        String?
+  assignedVocationalExpertId String?
+  assignedEconomistId        String?
+  assignedQaReviewerId       String?
+  missingRequirements        Json?
+  approvalRequirements       Json?
+  cancellationStatus         String?
+  completedAt                DateTime?
+  cancelledAt                DateTime?
+  createdAt                  DateTime  @default(now())
+  updatedAt                  DateTime  @updatedAt
+
+  @@index([caseId])
+  @@index([firmId, status])
+}
+
+model Notification {
+  id        String    @id @default(uuid())
+  firmId    String
+  userId    String
+  kind      String
+  title     String
+  body      String?
+  caseId    String?
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, readAt])
   @@index([firmId])
 }

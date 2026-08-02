@@ -80,6 +80,12 @@ npm run dev
 **Demo login:** `demo@lifeplanos.app` / `password123` (firm admin).
 Other seeded roles share the same password (`planner@`, `physician@`, `para@`).
 
+**Guarded demo environment:** set `ENABLE_DEMO_MODE=true`, run
+`npx tsx --env-file=.env scripts/demo-seed.ts`, then open `/demo` for one-click
+sign-in as any of 13 role personas (`@demo.lifeplanos.com`), each landing in a
+role-specific workspace over 8 synthetic cases. Reset with
+`scripts/demo-reset.ts --confirm`. Details in `docs/29_MDIP_DEMO.md`.
+
 ## Architecture notes
 
 - **Tenant isolation** — `src/lib/tenant.ts` is the *only* sanctioned way server

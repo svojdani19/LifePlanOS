@@ -122,6 +122,15 @@ export function CaseWorkspace({
   const [focusCat, setFocusCat] = useState<string | null>(null);
   const can = (p: Permission) => permissions.includes(p);
 
+  // Deep-link support: /cases/{id}?tab=records (used by the case-manager and
+  // records workspaces) opens the named tab directly. Runs once after mount so
+  // the server-rendered HTML stays stable (no hydration mismatch).
+  useEffect(() => {
+    const t = new URLSearchParams(window.location.search).get("tab");
+    const valid = ["overview", "records", "chronology", "causation", "providers", "evidence", "futurecare", "costs", "reviews", "physician", "precedents", "report"];
+    if (t && valid.includes(t)) setTab(t);
+  }, []);
+
   // Deep-link from the Case Assistant: switch to the right tab, scroll to the
   // exact item, auto-expand its details, and highlight the specific section the
   // finding is about (the target panel maps focusCat → section).

@@ -11,8 +11,10 @@ import {
   Settings,
   Activity,
   LogOut,
+  BriefcaseBusiness,
 } from "lucide-react";
 import { cn, initials } from "@/lib/utils";
+import { NotificationBell } from "@/components/NotificationBell";
 import type { Permission } from "@/lib/rbac";
 
 interface NavItem {
@@ -35,10 +37,12 @@ export function Sidebar({
   user,
   firm,
   permissions,
+  workspaces,
 }: {
   user: { name: string; email: string; roleLabel: string };
   firm: { name: string; tier: string };
   permissions: Permission[];
+  workspaces: { href: string; label: string }[];
 }) {
   const pathname = usePathname();
   const router = useRouter();
@@ -68,6 +72,16 @@ export function Sidebar({
       </div>
 
       <nav aria-label="Main" className="flex-1 space-y-0.5 px-2 py-2 lg:px-3">
+        {workspaces.map((workspace) => {
+          const active = pathname === workspace.href;
+          return (
+            <Link key={workspace.href} href={workspace.href} title={`${workspace.label} workspace`} aria-current={active ? "page" : undefined} className={cn("focusable relative flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors", active ? "bg-brand-50 font-semibold text-brand-800" : "font-medium text-ink-500 hover:bg-ink-50 hover:text-ink-900")}>
+              <BriefcaseBusiness className="h-[18px] w-[18px] shrink-0" aria-hidden />
+              <span className="hidden truncate lg:inline">{workspace.label}</span>
+            </Link>
+          );
+        })}
+        {workspaces.length > 0 && <div className="my-2 border-t border-ink-100" />}
         {items.map((item) => {
           const active = pathname === item.href || pathname.startsWith(item.href + "/");
           return (
@@ -101,6 +115,9 @@ export function Sidebar({
               <p className="truncate text-xs text-ink-500">{user.roleLabel}</p>
             </div>
           </Link>
+          <span className="hidden lg:block">
+            <NotificationBell />
+          </span>
           <button onClick={logout} title="Log out" aria-label="Log out" className="focusable hidden rounded-md p-1.5 text-ink-400 hover:bg-ink-100 hover:text-ink-700 lg:block">
             <LogOut className="h-4 w-4" aria-hidden />
           </button>

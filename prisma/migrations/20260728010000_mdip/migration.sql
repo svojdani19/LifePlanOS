@@ -1,0 +1,12 @@
+-- MDIP (docs/28): additive — workspaces, damages evaluation, engagements, notifications.
+ALTER TABLE "Firm" ADD COLUMN "isDemo" BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE "User" ADD COLUMN "preferredWorkspace" TEXT;
+CREATE TABLE "FutureDamagesEvaluation" ("id" TEXT PRIMARY KEY,"firmId" TEXT NOT NULL,"caseId" TEXT NOT NULL,"caseRevision" INTEGER,"logicVersion" TEXT NOT NULL,"evaluatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,"evaluatedById" TEXT NOT NULL,"overallOutcome" TEXT NOT NULL,"recommendedPrimaryProduct" TEXT,"recommendedAdditionalProducts" JSONB NOT NULL,"readinessState" TEXT NOT NULL,"supportingFactors" JSONB NOT NULL,"weakeningFactors" JSONB NOT NULL,"missingInformation" JSONB NOT NULL,"unresolvedValidationIssues" INTEGER NOT NULL DEFAULT 0,"estimatedMedicalRange" JSONB,"confidenceDimensions" JSONB,"nextActions" JSONB NOT NULL,"sourceFactIds" JSONB NOT NULL,"isStale" BOOLEAN NOT NULL DEFAULT false);
+CREATE INDEX "FutureDamagesEvaluation_caseId_evaluatedAt_idx" ON "FutureDamagesEvaluation"("caseId","evaluatedAt");
+CREATE INDEX "FutureDamagesEvaluation_firmId_idx" ON "FutureDamagesEvaluation"("firmId");
+CREATE TABLE "CaseEngagement" ("id" TEXT PRIMARY KEY,"firmId" TEXT NOT NULL,"caseId" TEXT NOT NULL,"requestedById" TEXT NOT NULL,"authorizedById" TEXT,"reportType" TEXT NOT NULL,"serviceType" TEXT,"status" TEXT NOT NULL DEFAULT 'RECOMMENDED',"scope" TEXT,"configuration" JSONB,"feeEstimate" DOUBLE PRECISION,"feeCurrency" TEXT NOT NULL DEFAULT 'USD',"feeStructure" TEXT,"estimatedCompletionDate" TIMESTAMP(3),"authorizedAt" TIMESTAMP(3),"assignedPlannerId" TEXT,"assignedPhysicianId" TEXT,"assignedVocationalExpertId" TEXT,"assignedEconomistId" TEXT,"assignedQaReviewerId" TEXT,"missingRequirements" JSONB,"approvalRequirements" JSONB,"cancellationStatus" TEXT,"completedAt" TIMESTAMP(3),"cancelledAt" TIMESTAMP(3),"createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,"updatedAt" TIMESTAMP(3) NOT NULL);
+CREATE INDEX "CaseEngagement_caseId_idx" ON "CaseEngagement"("caseId");
+CREATE INDEX "CaseEngagement_firmId_status_idx" ON "CaseEngagement"("firmId","status");
+CREATE TABLE "Notification" ("id" TEXT PRIMARY KEY,"firmId" TEXT NOT NULL,"userId" TEXT NOT NULL,"kind" TEXT NOT NULL,"title" TEXT NOT NULL,"body" TEXT,"caseId" TEXT,"readAt" TIMESTAMP(3),"createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX "Notification_userId_readAt_idx" ON "Notification"("userId","readAt");
+CREATE INDEX "Notification_firmId_idx" ON "Notification"("firmId");

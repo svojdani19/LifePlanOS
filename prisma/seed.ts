@@ -47,6 +47,16 @@ async function main() {
           { email: "planner@lifeplanos.app", name: "Jordan Blake, RN CLCP", role: "PLANNER", status: "ACTIVE", passwordHash },
           { email: "physician@lifeplanos.app", name: "Dr. Sam Okafor, MD", role: "PHYSICIAN_REVIEWER", status: "ACTIVE", passwordHash },
           { email: "para@lifeplanos.app", name: "Casey Nguyen", role: "PARALEGAL", status: "ACTIVE", passwordHash },
+          { email: "attorney@lifeplanos.app", name: "Morgan Lee, Esq.", role: "ATTORNEY_REVIEWER", status: "ACTIVE", passwordHash, preferredWorkspace: "ATTORNEY_CLIENT" },
+          { email: "records@lifeplanos.app", name: "Avery Patel, RHIA", role: "PARALEGAL", status: "ACTIVE", passwordHash, preferredWorkspace: "MEDICAL_RECORD_ANALYST" },
+          { email: "vocational@lifeplanos.app", name: "Riley Brooks, CRC", role: "ATTORNEY_REVIEWER", status: "ACTIVE", passwordHash, preferredWorkspace: "VOCATIONAL_EXPERT" },
+          { email: "economist@lifeplanos.app", name: "Cameron Price, PhD", role: "ATTORNEY_REVIEWER", status: "ACTIVE", passwordHash, preferredWorkspace: "FORENSIC_ECONOMIST" },
+          { email: "qa@lifeplanos.app", name: "Drew Wilson, RN", role: "ATTORNEY_REVIEWER", status: "ACTIVE", passwordHash, preferredWorkspace: "QUALITY_ASSURANCE_REVIEWER" },
+          { email: "billing@lifeplanos.app", name: "Jamie Ortiz", role: "BILLING_USER", status: "ACTIVE", passwordHash, preferredWorkspace: "LEGACY_BILLING" },
+          { email: "platform@lifeplanos.app", name: "Robin System Admin", role: "ADMIN", status: "ACTIVE", passwordHash, preferredWorkspace: "PLATFORM_SYSTEM_ADMINISTRATOR" },
+          { email: "expert@lifeplanos.app", name: "Dr. Leslie Grant", role: "ATTORNEY_REVIEWER", status: "ACTIVE", passwordHash, preferredWorkspace: "EXTERNAL_EXPERT" },
+          { email: "observer@lifeplanos.app", name: "Sydney Moore", role: "ATTORNEY_REVIEWER", status: "ACTIVE", passwordHash, preferredWorkspace: "READ_ONLY_OBSERVER" },
+          { email: "insurance@lifeplanos.app", name: "Alexis Kim", role: "ATTORNEY_REVIEWER", status: "ACTIVE", passwordHash, preferredWorkspace: "INSURANCE_CLIENT" },
           { email: "invited@lifeplanos.app", name: "Taylor Reed", role: "PLANNER", status: "INVITED", inviteToken: "demo-invite-token", inviteExpiresAt },
         ],
       },
@@ -56,6 +66,38 @@ async function main() {
 
   const admin = firm.users.find((u) => u.email === DEMO_EMAIL)!;
   const planner = firm.users.find((u) => u.role === "PLANNER" && u.status === "ACTIVE")!;
+
+  const roleByEmail: Record<string, string> = {
+    [DEMO_EMAIL]: "FIRM_ADMINISTRATOR",
+    "planner@lifeplanos.app": "LIFE_CARE_PLANNER",
+    "physician@lifeplanos.app": "PHYSICIAN_REVIEWER",
+    "para@lifeplanos.app": "CASE_MANAGER",
+    "attorney@lifeplanos.app": "ATTORNEY_CLIENT",
+    "records@lifeplanos.app": "MEDICAL_RECORD_ANALYST",
+    "vocational@lifeplanos.app": "VOCATIONAL_EXPERT",
+    "economist@lifeplanos.app": "FORENSIC_ECONOMIST",
+    "qa@lifeplanos.app": "QUALITY_ASSURANCE_REVIEWER",
+    "billing@lifeplanos.app": "LEGACY_BILLING",
+    "platform@lifeplanos.app": "PLATFORM_SYSTEM_ADMINISTRATOR",
+    "expert@lifeplanos.app": "EXTERNAL_EXPERT",
+    "observer@lifeplanos.app": "READ_ONLY_OBSERVER",
+    "insurance@lifeplanos.app": "INSURANCE_CLIENT",
+  };
+  await prisma.userRoleAssignment.createMany({
+    data: firm.users.filter((u) => roleByEmail[u.email]).map((u) => ({
+      userId: u.id, firmId: firm.id, builtInRole: roleByEmail[u.email], assignedById: admin.id,
+      responsibility: roleByEmail[u.email].replace(/_/g, " "), assignmentReason: "Synthetic demo persona",
+    })),
+  });
+
+  const physician = firm.users.find((u) => u.email === "physician@lifeplanos.app")!;
+  const vocational = firm.users.find((u) => u.email === "vocational@lifeplanos.app")!;
+  const economist = firm.users.find((u) => u.email === "economist@lifeplanos.app")!;
+  await prisma.userCredential.createMany({ data: [
+    { firmId: firm.id, userId: physician.id, type: "LICENSE", category: "PHYSICIAN", label: "California Physician and Surgeon License (DEMO-A12345)", filename: "synthetic-physician-license.txt", storageKey: "demo/credentials/physician-license", status: "ORG_VERIFIED", verifiedAt: now, verifiedById: admin.id, createdById: admin.id, jurisdiction: "CA" },
+    { firmId: firm.id, userId: vocational.id, type: "OTHER", category: "VOCATIONAL", label: "Certified Rehabilitation Counselor (DEMO-CRC-1024)", filename: "synthetic-crc.txt", storageKey: "demo/credentials/vocational", status: "ORG_VERIFIED", verifiedAt: now, verifiedById: admin.id, createdById: admin.id },
+    { firmId: firm.id, userId: economist.id, type: "OTHER", category: "ECONOMIST", label: "PhD Economics (DEMO-PHD-88)", filename: "synthetic-economics-degree.txt", storageKey: "demo/credentials/economist", status: "ORG_VERIFIED", verifiedAt: now, verifiedById: admin.id, createdById: admin.id },
+  ] });
 
   const seedCases = [
     { clientName: "Maria Gonzalez", caseType: "MED_MAL", side: "PLAINTIFF", status: "RECORDS", injurySpecialty: "ORTHOPEDIC_TRAUMA", dateOfBirth: new Date("1986-04-12"), jurisdiction: "CA — Los Angeles County", mechanism: "Delayed diagnosis of compartment syndrome", diagnosis: "Left lower extremity Volkmann's contracture", createdById: planner.id },
@@ -122,6 +164,7 @@ async function main() {
 
   console.log("✔ Seeded firm:", firm.name);
   console.log("  Login →", DEMO_EMAIL, "/", DEMO_PASSWORD);
+  console.log("  All active demo personas use password:", DEMO_PASSWORD);
 }
 
 main()
