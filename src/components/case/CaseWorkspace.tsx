@@ -3516,25 +3516,32 @@ function AttorneyReportPanel({ caseId, exports, physicians = [] }: { caseId: str
       <div className="card p-5">
         <h3 className="text-sm font-semibold text-ink-900">Request Report</h3>
         <p className="text-xs text-ink-500">Choose the report you want prepared. Barriers below must be resolved by the clinical team before a final can be released.</p>
-        <div className="mt-3 grid gap-2 sm:grid-cols-2">
-          {reports.filter((r: AnyRec) => !r.legacy).map((r: AnyRec) => (
-            <button
-              key={r.id}
-              onClick={() => { setSelectedId(r.id); setPicked(new Set()); setSpecialty(""); setMsg(null); }}
-              className={cn(
-                "focusable rounded-lg border p-3 text-left transition-colors",
-                selectedId === r.id ? "border-brand-400 bg-brand-50/60" : "border-ink-200 hover:border-ink-300 hover:bg-ink-50",
-              )}
-            >
-              <span className="flex items-center gap-2">
-                <span className={cn("h-2 w-2 shrink-0 rounded-full", STATUS_DOT_ATTORNEY[r.status] ?? "bg-slate-300")} />
-                <span className="text-sm font-semibold text-ink-900">{r.name}</span>
-              </span>
-              <span className="mt-0.5 block text-xs text-ink-500">{r.description}</span>
-              {r.gateReason && <span className="mt-1 block text-xs text-amber-700">Barrier: {r.gateReason}</span>}
-            </button>
-          ))}
-        </div>
+        {/* The exact same report library as the clinical view, grouped by the
+            same categories — only the action differs (order, not generate). */}
+        {ATTORNEY_CATEGORY_ORDER.filter((cat) => reports.some((r: AnyRec) => r.category === cat)).map((cat) => (
+          <div key={cat} className="mt-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">{cat}</p>
+            <div className="mt-1.5 grid gap-2 sm:grid-cols-2">
+              {reports.filter((r: AnyRec) => r.category === cat).map((r: AnyRec) => (
+                <button
+                  key={r.id}
+                  onClick={() => { setSelectedId(r.id); setPicked(new Set()); setSpecialty(""); setMsg(null); }}
+                  className={cn(
+                    "focusable rounded-lg border p-3 text-left transition-colors",
+                    selectedId === r.id ? "border-brand-400 bg-brand-50/60" : "border-ink-200 hover:border-ink-300 hover:bg-ink-50",
+                  )}
+                >
+                  <span className="flex items-center gap-2">
+                    <span className={cn("h-2 w-2 shrink-0 rounded-full", STATUS_DOT_ATTORNEY[r.status] ?? "bg-slate-300")} />
+                    <span className="text-sm font-semibold text-ink-900">{r.name}</span>
+                  </span>
+                  <span className="mt-0.5 block text-xs text-ink-500">{r.description}</span>
+                  {r.gateReason && <span className="mt-1 block text-xs text-amber-700">Barrier: {r.gateReason}</span>}
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
       </div>
 
       {/* Integrity check — barriers to completion; no pricing values. */}
@@ -3625,6 +3632,8 @@ function AttorneyReportPanel({ caseId, exports, physicians = [] }: { caseId: str
     </div>
   );
 }
+
+const ATTORNEY_CATEGORY_ORDER = ["Core", "Record review", "Damages", "Clinical analysis", "Governance", "Custom"];
 
 const STATUS_DOT_ATTORNEY: Record<string, string> = {
   Ready: "bg-emerald-500",
