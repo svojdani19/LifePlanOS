@@ -102,8 +102,12 @@ export interface PricingEntry {
   turnaroundDays?: number;
 }
 
+/** Sanity ceiling for any fee/pricing number — nothing in a per-report pricing
+ *  config or a fee estimate legitimately exceeds $10M. */
+export const MAX_FEE = 10_000_000;
+
 function nonNegNumber(v: unknown): number | undefined {
-  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : undefined;
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= MAX_FEE ? v : undefined;
 }
 
 /** Resolve the pricing entry for a report type from raw Firm.features. Pure. */
@@ -189,6 +193,17 @@ export interface CreateEngagementInput {
  * config unless explicitly provided.
  */
 export async function createEngagement(actor: EngagementActor, input: CreateEngagementInput): Promise<CaseEngagement> {
+  // Fee sanity: an explicit estimate must be a real, non-negative, bounded
+  // number — NaN/Infinity/negative values are rejected outright, never stored.
+  if (input.feeEstimate != null) {
+    if (typeof input.feeEstimate !== "number" || !Number.isFinite(input.feeEstimate) || input.feeEstimate < 0) {
+      throw new EngagementError("Fee estimate must be a non-negative finite number.", 400);
+    }
+    if (input.feeEstimate > MAX_FEE) {
+      throw new EngagementError(`Fee estimate exceeds the maximum of ${MAX_FEE.toLocaleString("en-US")}.`, 400);
+    }
+  }
+
   const c = await prisma.case.findFirst({
     where: { id: input.caseId, firmId: actor.firmId },
     select: { id: true, caseNumber: true },
@@ -385,6 +400,12 @@ export async function advanceStatus(actor: EngagementActor, engagementId: string
   }
   if (nextStatus === "CANCELLED") {
     throw new EngagementError("Cancellation requires a reason — use the cancel action.", 400);
+  }
+  // Authorization is a privileged act that must stamp authorizedById (the
+  // acting user, never client-supplied) and authorizedAt. Reaching AUTHORIZED
+  // or RECORDS_PENDING through the generic advance would skip both — refuse.
+  if (nextStatus === "AUTHORIZED" || nextStatus === "RECORDS_PENDING") {
+    throw new EngagementError("Authorization must go through the authorize action.", 400);
   }
   const engagement = await requireEngagement(actor, engagementId);
   const allowed = ENGAGEMENT_TRANSITIONS[engagement.status as EngagementStatus] ?? [];

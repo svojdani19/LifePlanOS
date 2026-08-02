@@ -13,12 +13,16 @@ import { ok, handleError } from "@/lib/api";
 // no Json-merge semantics, hence this dedicated route.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Every value must be a real number: finite() rejects Infinity (z.number()
+// already rejects NaN), nonnegative() rejects negatives, and the caps keep the
+// config sane — fees at $10M, turnaround at 10 years.
+const MAX_PRICE = 10_000_000;
 const entrySchema = z
   .object({
-    fixed: z.number().nonnegative().optional(),
-    hourly: z.number().nonnegative().optional(),
-    rush: z.number().nonnegative().optional(),
-    turnaroundDays: z.number().nonnegative().max(3650).optional(),
+    fixed: z.number().finite().nonnegative().max(MAX_PRICE).optional(),
+    hourly: z.number().finite().nonnegative().max(MAX_PRICE).optional(),
+    rush: z.number().finite().nonnegative().max(MAX_PRICE).optional(),
+    turnaroundDays: z.number().finite().nonnegative().max(3650).optional(),
   })
   .strict();
 
