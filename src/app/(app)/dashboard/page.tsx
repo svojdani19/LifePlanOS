@@ -169,7 +169,7 @@ export default async function DashboardPage({ searchParams: searchParamsPromise 
         <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {[
             { label: "My Active Cases", value: myCases.length, sub: "created or preparing" },
-            { label: "Awaiting My Physician Review", value: totalMd, sub: "items on my cases" },
+            { label: "Awaiting Physician Review", value: totalMd, sub: "items on my cases" },
             { label: "Blocking Findings", value: totalBlocking, sub: "on my cases" },
             { label: "Findings Assigned to Me", value: assignedToMe.length, sub: "open / in review" },
           ].map((k) => (
