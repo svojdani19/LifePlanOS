@@ -1538,7 +1538,7 @@ const HIGHLIGHT_SECTION: Record<string, "reasoning" | "evidence" | "literature">
 };
 const HL = "rounded-md bg-amber-50 p-2 ring-2 ring-amber-400";
 
-function RecommendationDossierView({ dossier, assessment, highlight }: { dossier: RecommendationDossier; assessment?: ReasoningAssessment; highlight?: string | null }) {
+function RecommendationDossierView({ dossier, assessment, highlight, condensed = false }: { dossier: RecommendationDossier; assessment?: ReasoningAssessment; highlight?: string | null; condensed?: boolean }) {
   const se = dossier.supportingEvidence;
   const target = highlight ? HIGHLIGHT_SECTION[highlight] : undefined;
   return (
@@ -1565,6 +1565,9 @@ function RecommendationDossierView({ dossier, assessment, highlight }: { dossier
         <Badge tone={CONF_TONE_D[dossier.confidence.level]}>{dossier.confidence.level.toLowerCase()}</Badge>
       </div>
       <p className="text-ink-700">{dossier.probability.statement}</p>
+      {/* Attorney-condensed view ends at the probability statement — the
+          clinical evidence detail below is the clinical team's surface. */}
+      {condensed ? null : (<>
       <div data-focus-target={target === "evidence" ? "" : undefined} className={cn(target === "evidence" && HL)}>
         <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Supporting clinical evidence</p>
         <div className="mt-1 grid gap-2 md:grid-cols-2">
@@ -1601,6 +1604,7 @@ function RecommendationDossierView({ dossier, assessment, highlight }: { dossier
       )}
       <div><p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Potential challenges</p><ul className="mt-0.5 space-y-0.5">{dossier.potentialChallenges.slice(0, 5).map((t, i) => <li key={i} className="text-ink-700">{t}</li>)}</ul></div>
       <p className="text-xs text-ink-500">{dossier.confidence.explanation}</p>
+      </>)}
     </div>
   );
 }
@@ -1809,7 +1813,7 @@ function FutureCarePanel({ data, canEdit, hidePricing = false, call, focusId, fo
           </div>
           {openIds.has(it.id) && (
             <div className="mt-3 border-t border-ink-100 pt-3">
-              <RecommendationDossierView dossier={dossierForItem(it, data)} assessment={assessmentForItem(it, data)} highlight={focusId === it.id ? focusCat : null} />
+              <RecommendationDossierView dossier={dossierForItem(it, data)} assessment={assessmentForItem(it, data)} highlight={focusId === it.id ? focusCat : null} condensed={hidePricing} />
               {!hidePricing && (
                 <div data-focus-target={focusId === it.id && focusCat && /cpt|pricing|duplicate_cost/.test(focusCat) ? "" : undefined} className={cn("mt-3 border-t border-ink-100 pt-2 text-sm text-ink-600", focusId === it.id && focusCat && /cpt|pricing|duplicate_cost/.test(focusCat) && "rounded-md bg-amber-50 p-2 ring-2 ring-amber-400")}>
                   <span className="text-xs font-medium text-ink-500">Cost basis: </span>{formatMoney(it.unitCost)}/unit · {it.pricingSource} · range {formatMoney(it.lowCost)}–{formatMoney(it.highCost)}
