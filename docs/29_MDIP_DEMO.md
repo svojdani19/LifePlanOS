@@ -52,3 +52,9 @@ Separately from the dev seed above, an env-guarded demo environment ships with t
 - **Data:** 8 synthetic cases spanning intake → records QA → chronology/causation → physician review → attorney decision → QA gate → released final report → vocational/economic work, plus engagements across their lifecycle and notifications.
 - **Seed / reset:** `npx tsx --env-file=.env scripts/demo-seed.ts` builds the tenant; `npx tsx --env-file=.env scripts/demo-reset.ts --confirm` deletes (demo tenant only — the delete refuses non-demo firms) and reseeds. `POST /api/demo/reset` performs the same reset for demo-tenant admins. Every reset is audited.
 - Demo users and data are never created in production without the explicit env acknowledgments; passwords are always stored hashed.
+
+> Note (2026-08-02): demo persona legacy roles were tightened on the
+> security-hardening branch — specialists no longer hold PHYSICIAN_REVIEWER
+> seats and the platform admin's authority comes from a
+> PLATFORM_SYSTEM_ADMINISTRATOR assignment, not an email check. See
+> docs/30_SECURITY_HARDENING.md for the current persona role table.
