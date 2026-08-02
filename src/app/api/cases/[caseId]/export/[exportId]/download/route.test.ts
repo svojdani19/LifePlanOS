@@ -15,14 +15,17 @@ vi.mock("@/lib/tenant", () => {
   return {
     TenantError,
     requireApiContext: vi.fn(async () => ({ user: { id: "user-1" }, firm: { id: "firm-1" }, subscription: null })),
-    requirePermission: vi.fn(),
+    requireCanonicalPermission: vi.fn(),
     requireCase: vi.fn(async () => ({ id: "case-1", caseNumber: "LCP-2026-0001" })),
     audit: vi.fn(async () => {}),
     recordUsage: vi.fn(async () => {}),
   };
 });
 vi.mock("@/lib/db", () => ({
-  prisma: { reportExport: { findFirst: vi.fn() } },
+  prisma: {
+    reportExport: { findFirst: vi.fn() },
+    userRoleAssignment: { count: vi.fn(async () => 0) },
+  },
 }));
 vi.mock("@/lib/storage", () => ({
   getObject: vi.fn(async () => Buffer.from("<p>report body</p>")),
@@ -32,8 +35,9 @@ import { prisma } from "@/lib/db";
 import { GET } from "./route";
 
 const findFirst = prisma.reportExport.findFirst as unknown as Mock;
+const assignmentCount = prisma.userRoleAssignment.count as unknown as Mock;
 
-const PARAMS = { params: { caseId: "case-1", exportId: "export-1" } };
+const PARAMS = { params: Promise.resolve({ caseId: "case-1", exportId: "export-1" }) };
 const req = () => new Request("http://localhost/api/cases/case-1/export/export-1/download");
 
 const exportRow = (over: Record<string, unknown> = {}) => ({
@@ -44,11 +48,16 @@ const exportRow = (over: Record<string, unknown> = {}) => ({
   version: 2,
   reportType: "MEDICAL_CHRONOLOGY",
   storageKey: "objects/abc.html",
+  draft: false,
+  lifecycle: "final_expert",
+  supersededById: null,
   ...over,
 });
 
 beforeEach(() => {
   findFirst.mockReset();
+  assignmentCount.mockReset();
+  assignmentCount.mockResolvedValue(0);
 });
 
 describe("export download route — security headers", () => {
@@ -82,5 +91,27 @@ describe("export download route — security headers", () => {
     findFirst.mockResolvedValue(null);
     const res = await GET(req(), PARAMS);
     expect(res.status).toBe(404);
+  });
+
+  it.each([
+    { draft: true, lifecycle: "draft_expert", supersededById: null },
+    { draft: false, lifecycle: "supporting", supersededById: null },
+    { draft: false, lifecycle: "final_expert", supersededById: "export-2" },
+  ])("does not disclose non-releasable report versions to external recipients", async (state) => {
+    assignmentCount.mockResolvedValue(1);
+    findFirst.mockResolvedValue(exportRow(state));
+
+    const res = await GET(req(), PARAMS);
+
+    expect(res.status).toBe(404);
+  });
+
+  it("allows an external recipient to download the current final report", async () => {
+    assignmentCount.mockResolvedValue(1);
+    findFirst.mockResolvedValue(exportRow());
+
+    const res = await GET(req(), PARAMS);
+
+    expect(res.status).toBe(200);
   });
 });

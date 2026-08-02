@@ -44,12 +44,14 @@ export const FDE_LOGIC_VERSION = "fde-1";
 // ── Input snapshot ───────────────────────────────────────────────────────────
 
 export interface FdeCondition {
+  id?: string;
   name: string;
   relatedness: string; // Relatedness enum value
   evidenceSourceCount: number; // count of cited evidence sources
 }
 
 export interface FdeItem {
+  id?: string;
   service: string;
   category: string; // CareCategory enum value
   probability: string; // Probability enum value
@@ -62,6 +64,7 @@ export interface FdeItem {
 }
 
 export interface FdeFinding {
+  id?: string;
   result: string;
   severity: string;
   exportBlocking: boolean;
@@ -79,6 +82,16 @@ export interface FdeInput {
   /** Finding texts mentioning missing records — derived by the caller from
    *  persisted findings; the engine never invents them. */
   missingRecordSignals: string[];
+  /** Immutable persisted identifiers behind count/presence signals. Optional
+   * for pure unit fixtures; production snapshots always provide these. */
+  sourceIds?: {
+    documents: string[];
+    chronologyEvents: string[];
+    vocationalEntries: string[];
+    economicAssumptions: string[];
+    interviewFindings: string[];
+    missingRecordFindings: string[];
+  };
 }
 
 // ── Result (matches the FutureDamagesEvaluation row shape) ───────────────────
@@ -174,6 +187,10 @@ function listNames(values: string[], max = 4): string {
   return shown.join(", ") + (extra > 0 ? ` (+${extra} more)` : "");
 }
 
+const conditionFact = (c: FdeCondition) => `condition:${c.id ?? `legacy-name:${c.name}`}`;
+const itemFact = (i: FdeItem) => `future-care-item:${i.id ?? `legacy-service:${i.service}`}`;
+const findingFact = (f: FdeFinding) => `validation-finding:${f.id ?? `legacy-result:${f.result}`}`;
+
 // ── Main evaluation ──────────────────────────────────────────────────────────
 
 export function evaluateFutureDamages(input: FdeInput): FdeResult {
@@ -217,7 +234,7 @@ export function evaluateFutureDamages(input: FdeInput): FdeResult {
       factor: "Causally related conditions documented",
       detail: `${relatedConditions.length} condition(s) marked related/aggravation: ${listNames(relatedConditions.map((c) => c.name))}`,
     });
-    relatedConditions.forEach((c) => sourceFactIds.push(`condition:${c.name}`));
+    relatedConditions.forEach((c) => sourceFactIds.push(conditionFact(c)));
   }
   if (evidencedConditions.length > 0) {
     supporting.push({
@@ -230,21 +247,21 @@ export function evaluateFutureDamages(input: FdeInput): FdeResult {
       factor: "Lifetime care recommended",
       detail: `${lifetimeItems.length} lifetime-duration item(s): ${listNames(lifetimeItems.map((i) => i.service))}`,
     });
-    lifetimeItems.forEach((i) => sourceFactIds.push(`item:${i.service}`));
+    lifetimeItems.forEach((i) => sourceFactIds.push(itemFact(i)));
   }
   if (attendantItems.length > 0) {
     supporting.push({
       factor: "Attendant/skilled care in the plan",
       detail: listNames(attendantItems.map((i) => `${i.service} (${i.category})`)),
     });
-    attendantItems.forEach((i) => sourceFactIds.push(`item:${i.service}`));
+    attendantItems.forEach((i) => sourceFactIds.push(itemFact(i)));
   }
   if (equipmentItems.length > 0) {
     supporting.push({
       factor: "Equipment/supply needs documented",
       detail: listNames(equipmentItems.map((i) => `${i.service} (${i.category})`)),
     });
-    equipmentItems.forEach((i) => sourceFactIds.push(`item:${i.service}`));
+    equipmentItems.forEach((i) => sourceFactIds.push(itemFact(i)));
   }
   if (categories.length >= 3) {
     supporting.push({
@@ -257,7 +274,7 @@ export function evaluateFutureDamages(input: FdeInput): FdeResult {
       factor: "Documented future procedure",
       detail: listNames(procedureItems.map((i) => i.service)),
     });
-    procedureItems.forEach((i) => sourceFactIds.push(`item:${i.service}`));
+    procedureItems.forEach((i) => sourceFactIds.push(itemFact(i)));
   }
   if (vocSignal) {
     supporting.push({
@@ -267,8 +284,8 @@ export function evaluateFutureDamages(input: FdeInput): FdeResult {
           ? `${input.vocationalEntryCount} vocational intake entr(ies) on file`
           : `Work-restriction finding(s): ${listNames(workRestrictionFindings.map((f) => f.result))}`,
     });
-    sourceFactIds.push(`count:vocationalEntries=${input.vocationalEntryCount}`);
-    workRestrictionFindings.forEach((f) => sourceFactIds.push(`finding:${f.result}`));
+    sourceFactIds.push(...(input.sourceIds?.vocationalEntries.map((id) => `vocational-entry:${id}`) ?? [`count:vocationalEntries=${input.vocationalEntryCount}`]));
+    workRestrictionFindings.forEach((f) => sourceFactIds.push(findingFact(f)));
   }
   if (econSignal) {
     supporting.push({
@@ -278,15 +295,15 @@ export function evaluateFutureDamages(input: FdeInput): FdeResult {
           ? `${input.econAssumptionCount} sourced economic assumption(s) entered`
           : `Earnings-related finding(s): ${listNames(earningsFindings.map((f) => f.result))}`,
     });
-    sourceFactIds.push(`count:econAssumptions=${input.econAssumptionCount}`);
-    earningsFindings.forEach((f) => sourceFactIds.push(`finding:${f.result}`));
+    sourceFactIds.push(...(input.sourceIds?.economicAssumptions.map((id) => `economic-assumption:${id}`) ?? [`count:econAssumptions=${input.econAssumptionCount}`]));
+    earningsFindings.forEach((f) => sourceFactIds.push(findingFact(f)));
   }
   if (input.interviews) {
     supporting.push({
       factor: "Interview findings on file",
       detail: "Structured patient/provider interview findings supplement the records",
     });
-    sourceFactIds.push("count:interviews=present");
+    sourceFactIds.push(...(input.sourceIds?.interviewFindings.map((id) => `interview-finding:${id}`) ?? ["count:interviews=present"]));
   }
 
   if (blocking.length > 0) {
@@ -294,7 +311,7 @@ export function evaluateFutureDamages(input: FdeInput): FdeResult {
       factor: "Export-blocking validation findings",
       detail: `${blocking.length} blocking finding(s): ${listNames(blocking.map((f) => f.result))}`,
     });
-    blocking.forEach((f) => sourceFactIds.push(`finding:${f.result}`));
+    blocking.forEach((f) => sourceFactIds.push(findingFact(f)));
   }
   if (pendingItems.length > 0) {
     weakening.push({
@@ -307,14 +324,14 @@ export function evaluateFutureDamages(input: FdeInput): FdeResult {
       factor: "Physician-rejected recommendations",
       detail: `${rejectedItems.length} item(s) rejected on review: ${listNames(rejectedItems.map((i) => i.service))}`,
     });
-    rejectedItems.forEach((i) => sourceFactIds.push(`item:${i.service}`));
+    rejectedItems.forEach((i) => sourceFactIds.push(itemFact(i)));
   }
   if (contingencyItems.length > 0) {
     weakening.push({
       factor: "Contingency-only items excluded",
       detail: `${contingencyItems.length} item(s) are disclosed contingencies and never totaled: ${listNames(contingencyItems.map((i) => i.service))}`,
     });
-    contingencyItems.forEach((i) => sourceFactIds.push(`item:${i.service}`));
+    contingencyItems.forEach((i) => sourceFactIds.push(itemFact(i)));
   }
   const unclearConditions = input.conditions.filter((c) => c.relatedness === "UNCLEAR");
   if (unclearConditions.length > 0) {
@@ -322,7 +339,7 @@ export function evaluateFutureDamages(input: FdeInput): FdeResult {
       factor: "Unresolved causation",
       detail: `${unclearConditions.length} condition(s) still marked UNCLEAR: ${listNames(unclearConditions.map((c) => c.name))}`,
     });
-    unclearConditions.forEach((c) => sourceFactIds.push(`condition:${c.name}`));
+    unclearConditions.forEach((c) => sourceFactIds.push(conditionFact(c)));
   }
 
   if (input.documentsCount === 0) {
@@ -330,7 +347,9 @@ export function evaluateFutureDamages(input: FdeInput): FdeResult {
   }
   for (const signal of input.missingRecordSignals) {
     missing.push({ factor: "Missing-record signal", detail: signal });
-    sourceFactIds.push(`signal:${signal}`);
+    const signalIndex = input.missingRecordSignals.indexOf(signal);
+    const findingId = input.sourceIds?.missingRecordFindings[signalIndex];
+    sourceFactIds.push(findingId ? `validation-finding:${findingId}` : `legacy-signal:${signal}`);
   }
   if (input.chronologyCount === 0) {
     missing.push({ factor: "No treatment chronology", detail: "0 chronology events — the treatment course has not been reconstructed" });
@@ -345,8 +364,8 @@ export function evaluateFutureDamages(input: FdeInput): FdeResult {
     missing.push({ factor: "No economic assumptions", detail: "0 sourced economic assumptions — no basis for an economic-loss opinion" });
   }
   sourceFactIds.push(
-    `count:documents=${input.documentsCount}`,
-    `count:chronology=${input.chronologyCount}`,
+    ...(input.sourceIds?.documents.map((id) => `document:${id}`) ?? [`count:documents=${input.documentsCount}`]),
+    ...(input.sourceIds?.chronologyEvents.map((id) => `chronology-event:${id}`) ?? [`count:chronology=${input.chronologyCount}`]),
   );
 
   // ── Outcome (rules 1–5, strictly ordered — see module header) ──────────────
@@ -436,7 +455,7 @@ export function evaluateFutureDamages(input: FdeInput): FdeResult {
   if (decidedItems.length > 0 && rangeBasis.length > 0) {
     const basePV = rangeBasis.reduce((s, i) => s + i.presentValue, 0);
     estimatedMedicalRange = { lowPV: 0.8 * basePV, basePV, highPV: 1.2 * basePV, label: RANGE_LABEL };
-    rangeBasis.forEach((i) => sourceFactIds.push(`range-item:${i.service}`));
+    rangeBasis.forEach((i) => sourceFactIds.push(itemFact(i)));
   }
 
   // ── Confidence dimensions (0–100, purely count-derived) ────────────────────

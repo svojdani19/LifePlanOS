@@ -154,10 +154,23 @@ describe("accessibleCaseIds", () => {
     expect(access.cases).toEqual(["c3"]);
   });
 
-  it("guest rule does not trigger for users holding any internal or org-wide grant", async () => {
+  it("does not let an organization-scoped external grant widen a guest seat", async () => {
     assignmentFindMany.mockResolvedValue([
       { caseId: "c3", builtInRole: "ATTORNEY_CLIENT" },
-      { caseId: null, builtInRole: "ATTORNEY_CLIENT" }, // org-wide → not a guest
+      { caseId: null, builtInRole: "ATTORNEY_CLIENT" },
+    ]);
+    const access = await accessibleCaseIds(ctx("ATTORNEY_REVIEWER"), {
+      firmWideRoles: ["ADMIN", "ATTORNEY_REVIEWER"],
+      assignmentTemplates: ["ATTORNEY_CLIENT"],
+      engagementSlots: [],
+    });
+    expect(access.cases).toEqual(["c3"]);
+  });
+
+  it("does not apply the guest rule when the user also holds an internal role", async () => {
+    assignmentFindMany.mockResolvedValue([
+      { caseId: "c3", builtInRole: "ATTORNEY_CLIENT" },
+      { caseId: null, builtInRole: "LIFE_CARE_PLANNER" },
     ]);
     const access = await accessibleCaseIds(ctx("ATTORNEY_REVIEWER"), {
       firmWideRoles: ["ADMIN", "ATTORNEY_REVIEWER"],
@@ -173,10 +186,18 @@ describe("externalOnlyCaseIds", () => {
     expect(await externalOnlyCaseIds(ctx("PLANNER"))).toBeNull();
   });
 
-  it("returns null when any assignment is internal or org-scoped", async () => {
+  it("keeps organization-scoped external grants restricted", async () => {
     assignmentFindMany.mockResolvedValue([
       { caseId: "c1", builtInRole: "READ_ONLY_OBSERVER" },
       { caseId: null, builtInRole: "READ_ONLY_OBSERVER" },
+    ]);
+    expect(await externalOnlyCaseIds(ctx("ATTORNEY_REVIEWER"))).toEqual(["c1"]);
+  });
+
+  it("returns null when any assignment is an internal role", async () => {
+    assignmentFindMany.mockResolvedValue([
+      { caseId: "c1", builtInRole: "READ_ONLY_OBSERVER" },
+      { caseId: null, builtInRole: "LIFE_CARE_PLANNER" },
     ]);
     expect(await externalOnlyCaseIds(ctx("ATTORNEY_REVIEWER"))).toBeNull();
   });

@@ -2,22 +2,29 @@ name: CI
 
 on:
   push:
-    branches: [main]
   pull_request:
-    branches: [main]
 
-# No live database is required anywhere in CI (verified locally): the test
-# suite is pure (no DB/network), and `next build` succeeds with an unreachable
-# DATABASE_URL because every DB-touching page is dynamic (ƒ) — only /login,
-# /signup, and static shells are prerendered. Prisma validate/generate and the
-# startup env check only need the vars to be PRESENT, so dummies suffice.
 env:
-  DATABASE_URL: "postgresql://ci:ci@127.0.0.1:5432/ci"
-  DIRECT_URL: "postgresql://ci:ci@127.0.0.1:5432/ci"
+  DATABASE_URL: "postgresql://ci:ci@127.0.0.1:5432/lifeplanos_ci?schema=public"
+  DIRECT_URL: "postgresql://ci:ci@127.0.0.1:5432/lifeplanos_ci?schema=public"
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: lifeplanos_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci -d lifeplanos_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -29,6 +36,8 @@ jobs:
         run: npx prisma validate
       - name: Prisma client generate
         run: npx prisma generate
+      - name: Apply migrations to clean PostgreSQL
+        run: npx prisma migrate deploy
       - name: Type-check
         run: npx tsc --noEmit
       - name: Lint
@@ -41,8 +50,5 @@ jobs:
         run: npx vitest run
       - name: Build
         run: npm run build
-      - name: Dependency audit (advisory)
-        # Non-blocking visibility into high/critical advisories in production
-        # deps — surfaced in the run log, never fails the build.
-        run: npm audit --audit-level=high --production
-        continue-on-error: true
+      - name: Dependency audit
+        run: npm audit --audit-level=high --omit=dev

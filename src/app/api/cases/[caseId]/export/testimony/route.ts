@@ -9,7 +9,8 @@ import { ok, handleError } from "@/lib/api";
 // (self-critique, weakening evidence, unknowns, sufficiency) and the defense-
 // vulnerability review into deposition-prep material. Versioned in the export
 // history as a MEMO so it is never confused with the Life Care Plan itself.
-export async function POST(_req: Request, { params }: { params: { caseId: string } }) {
+export async function POST(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "report.export");

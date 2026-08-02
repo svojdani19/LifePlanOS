@@ -3,7 +3,8 @@ import { requireApiContext, requirePermission, audit } from "@/lib/tenant";
 import { deleteObject } from "@/lib/storage";
 import { ok, handleError } from "@/lib/api";
 
-export async function DELETE(_req: Request, { params }: { params: { userId: string; credentialId: string } }) {
+export async function DELETE(_req: Request, { params: paramsPromise }: { params: Promise<{ userId: string; credentialId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     // Owner or team.manage; always firm-scoped.

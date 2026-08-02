@@ -1,5 +1,5 @@
-import { requireContext, activeCaseCount } from "@/lib/tenant";
-import { externalOnlyCaseIds } from "@/lib/authz/caseScope";
+import { redirect } from "next/navigation";
+import { requireContext, activeCaseCount, caseAccessFor } from "@/lib/tenant";
 import { prisma } from "@/lib/db";
 import { effectiveLimits } from "@/lib/subscription/plans";
 import { PageHeader } from "@/components/ui/PageHeader";
@@ -9,12 +9,12 @@ import { can } from "@/lib/rbac";
 
 export default async function CasesPage() {
   const ctx = await requireContext();
-  // Guests (case-scoped external-class assignments only) see ONLY the cases
-  // explicitly shared with them — never the firm-wide list (docs/28 MDIP).
-  const externalOnly = await externalOnlyCaseIds(ctx);
+  const access = await caseAccessFor(ctx);
+  if (!access.allowed) redirect("/dashboard");
+  const scoped = access.cases === "all" ? null : access.cases;
   const [cases, active] = await Promise.all([
     prisma.case.findMany({
-      where: { firmId: ctx.firm.id, ...(externalOnly ? { id: { in: externalOnly } } : {}) },
+      where: { firmId: ctx.firm.id, ...(scoped ? { id: { in: scoped } } : {}) },
       orderBy: { updatedAt: "desc" },
       select: {
         id: true, caseNumber: true, clientName: true, caseType: true, side: true, status: true, updatedAt: true,
@@ -27,7 +27,9 @@ export default async function CasesPage() {
         },
       },
     }),
-    activeCaseCount(ctx.firm.id),
+    scoped
+      ? prisma.case.count({ where: { firmId: ctx.firm.id, id: { in: scoped }, status: { notIn: ["CLOSED", "ARCHIVED"] } } })
+      : activeCaseCount(ctx.firm.id),
   ]);
   const pvSums = await prisma.futureCareItem.groupBy({
     by: ["caseId"],
@@ -43,7 +45,7 @@ export default async function CasesPage() {
       <PageHeader
         title="Cases"
         subtitle={`${active} active${limits.caseLimit === null ? "" : ` of ${limits.caseLimit}`} · ${cases.length} total`}
-        actions={can(ctx.user.role, "case.create") && externalOnly === null ? <NewCaseForm /> : undefined}
+        actions={can(ctx.user.role, "case.create") && scoped === null && !access.platformAdminReadOnly ? <NewCaseForm /> : undefined}
       />
 
       {atLimit && (

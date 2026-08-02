@@ -29,6 +29,7 @@ vi.mock("@/lib/db", () => {
         findFirst: async ({ where }: { where: { id: string; firmId: string } }) =>
           CASES.find((c) => c.id === where.id && c.firmId === where.firmId) ?? null,
       },
+      userRoleAssignment: { findMany: async () => [] },
     },
   };
 });

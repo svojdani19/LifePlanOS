@@ -39,7 +39,8 @@ const patchSchema = z.object({
 
 const ASSUMPTION_KEYS = ["lifeExpectancyYears", "discountRate", "medicalInflation", "geographicFactor"] as const;
 
-export async function PATCH(req: Request, { params }: { params: { caseId: string } }) {
+export async function PATCH(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.edit");

@@ -4,7 +4,8 @@ import { ok, handleError } from "@/lib/api";
 import { recomputeSocForCase } from "@/lib/engine/standardOfCare";
 
 // Remove a user-added Standard-of-Care note/source and recompute the assessment.
-export async function DELETE(_req: Request, { params }: { params: { caseId: string; inputId: string } }) {
+export async function DELETE(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string; inputId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.edit");

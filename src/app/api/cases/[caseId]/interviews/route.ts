@@ -6,7 +6,8 @@ import { ok, handleError } from "@/lib/api";
 // Interview findings (EPIC-011) — patient or treating-provider, categorized or
 // free-text, optionally linked to a diagnosis/recommendation. User-authored;
 // never fabricated. Physician reviewers may add provider findings.
-export async function GET(req: Request, { params }: { params: { caseId: string } }) {
+export async function GET(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.view");
@@ -32,7 +33,8 @@ const schema = z.object({
   conditionId: z.string().optional(),
   futureCareItemId: z.string().optional(),
 });
-export async function POST(req: Request, { params }: { params: { caseId: string } }) {
+export async function POST(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     // Planners/paralegals capture; physician reviewers may add provider opinions.

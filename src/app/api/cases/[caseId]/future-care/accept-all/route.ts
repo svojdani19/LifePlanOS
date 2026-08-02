@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db";
-import { requireApiContext, requirePermission, requireCase, audit } from "@/lib/tenant";
+import { requireApiContext, requireCanonicalPermission, requireCase, audit } from "@/lib/tenant";
 import { enforceReviewCredential } from "@/lib/authz/credentialGate";
 import { generateReviews } from "@/lib/engine/generate";
 import { lifecycleFor } from "@/lib/engine/lifecycle";
@@ -8,10 +8,11 @@ import { ok, handleError } from "@/lib/api";
 // Bulk physician sign-off (Module 12): approve every still-pending future-care
 // item in a single action. Explicit prior decisions (MODIFIED / REJECTED) are
 // left untouched so a reviewer's rejections are not silently reversed.
-export async function POST(_req: Request, { params }: { params: { caseId: string } }) {
+export async function POST(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
-    requirePermission(ctx, "physician.review");
+    requireCanonicalPermission(ctx, "physician.review", { caseId: params.caseId });
     // Bulk review decision: same credential boundary as a single decision —
     // enforced for enterprise/demo firms, logged as credential.gap otherwise.
     await enforceReviewCredential(ctx, "PHYSICIAN", { action: "futurecare.accept_all", caseId: params.caseId });

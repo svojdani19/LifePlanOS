@@ -10,7 +10,8 @@ import { assumptionsFor } from "@/lib/engine/generate";
 import { putObject } from "@/lib/storage";
 import { ok, handleError } from "@/lib/api";
 
-export async function GET(_req: Request, { params }: { params: { caseId: string } }) {
+export async function GET(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.view");
@@ -33,7 +34,8 @@ const schema = z.object({
   mode: z.enum(["final", "draft"]).default("final"),
 });
 
-export async function POST(req: Request, { params }: { params: { caseId: string } }) {
+export async function POST(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "report.export");

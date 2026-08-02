@@ -1,7 +1,7 @@
 "use client";
 
 import ReportLibrary, { type ReportSelection } from "@/components/case/ReportLibrary";
-import { useState, useMemo, useRef, useEffect, Fragment } from "react";
+import { useState, useMemo, useRef, useEffect, useCallback, Fragment } from "react";
 import { useRouter } from "next/navigation";
 import {
   Sparkles,
@@ -313,16 +313,20 @@ export function CaseWorkspace({
         </ol>
 
         {/* Secondary workspaces — a visually separate band of their own */}
-        <div className="-mx-6 flex items-center border-t border-ink-200 bg-ink-50/70 px-6 py-1" role="navigation" aria-label="Case workspaces">
-          <span className="text-label mr-4 shrink-0">Workspaces</span>
+        <div className="-mx-6 flex items-center gap-1.5 border-t border-ink-200 bg-ink-50/70 px-6 py-1.5" role="navigation" aria-label="Case workspaces">
+          <span className="text-label mr-2.5 shrink-0">Workspaces</span>
           {SECONDARY.map((t) => (
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
               aria-current={tab === t.id ? "page" : undefined}
               className={cn(
-                "focusable flex flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1 text-[13px] transition-colors",
-                tab === t.id ? "bg-white font-semibold text-brand-800 shadow-sm ring-1 ring-ink-200" : "text-ink-500 hover:bg-white/70 hover:text-ink-800",
+                // Every tab carries a visible outline so the band clearly reads
+                // as a row of clickable workspaces, not plain text.
+                "focusable flex flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-md border px-2.5 py-1 text-[13px] transition-colors",
+                tab === t.id
+                  ? "border-brand-300 bg-white font-semibold text-brand-800 shadow-sm"
+                  : "border-ink-200 bg-white/60 text-ink-600 hover:border-ink-300 hover:bg-white hover:text-ink-900",
               )}
             >
               <t.icon className="h-3.5 w-3.5" aria-hidden /> {t.label}
@@ -2256,11 +2260,11 @@ function AttestationCard({ caseId, canReview, items }: { caseId: string; canRevi
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  async function load() {
+  const load = useCallback(async () => {
     const res = await fetch(`/api/cases/${caseId}/attestation`);
     if (res.ok) setState((await res.json()).attestations ?? []);
-  }
-  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [caseId]);
+  }, [caseId]);
+  useEffect(() => { void load(); }, [load]);
   async function sign() {
     setBusy(true);
     setError(null);
@@ -2611,15 +2615,15 @@ function TreatingProvidersPanel({ data, canEdit, call }: { data: AnyRec; canEdit
   const [patient, setPatient] = useState<AnyRec[]>([]);
   const [openProvider, setOpenProvider] = useState<string | null>(null);
 
-  async function loadProviders(refresh = false) {
+  const loadProviders = useCallback(async (refresh = false) => {
     const res = await fetch(`/api/cases/${data.id}/providers${refresh ? "?refresh=1" : ""}`);
     if (res.ok) setProviders((await res.json()).providers ?? []);
-  }
-  async function loadPatient() {
+  }, [data.id]);
+  const loadPatient = useCallback(async () => {
     const res = await fetch(`/api/cases/${data.id}/interviews?subject=PATIENT`);
     if (res.ok) setPatient((await res.json()).findings ?? []);
-  }
-  useEffect(() => { loadProviders(true); loadPatient(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [data.id]);
+  }, [data.id]);
+  useEffect(() => { void loadProviders(true); void loadPatient(); }, [loadPatient, loadProviders]);
 
   async function addFinding(body: AnyRec, after: () => void) {
     const res = await fetch(`/api/cases/${data.id}/interviews`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -2736,7 +2740,7 @@ function EvidencePanel({ data }: { data: AnyRec }) {
   // report narrative renders from), never a recomputed variant.
   const [assessments, setAssessments] = useState<AnyRec[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
-  async function load(method: "GET" | "POST" = "GET") {
+  const load = useCallback(async (method: "GET" | "POST" = "GET") => {
     if (method === "POST") setRebuilding(true);
     try {
       const res = await fetch(`/api/cases/${data.id}/evidence`, { method });
@@ -2747,8 +2751,8 @@ function EvidencePanel({ data }: { data: AnyRec }) {
     } finally {
       setRebuilding(false);
     }
-  }
-  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [data.id]);
+  }, [data.id]);
+  useEffect(() => { void load(); }, [load]);
   useEffect(() => {
     // Failures are surfaced, never silent — an empty Explorer must say WHY.
     fetch(`/api/cases/${data.id}/reasoning`)
@@ -2759,8 +2763,8 @@ function EvidencePanel({ data }: { data: AnyRec }) {
       .catch(() => setLoadError("Couldn't load the reasoning assessments — refresh the page or log in again."));
   }, [data.id]);
 
-  const conditions: AnyRec[] = data.conditions ?? [];
-  const items: AnyRec[] = data.futureCareItems ?? [];
+  const conditions: AnyRec[] = useMemo(() => data.conditions ?? [], [data.conditions]);
+  const items: AnyRec[] = useMemo(() => data.futureCareItems ?? [], [data.futureCareItems]);
   const condById = useMemo(() => new Map(conditions.map((c: AnyRec) => [c.id, c])), [conditions]);
   const itemById = useMemo(() => new Map(items.map((i: AnyRec) => [i.id, i])), [items]);
   const [selType, selId] = sel ? sel.split(":") : [null, null];
@@ -3196,7 +3200,7 @@ function ValidationCard({ caseId, scope }: { caseId: string; scope?: ReportSelec
   const [state, setState] = useState<AnyRec | null>(null);
   const [running, setRunning] = useState(false);
   const [showAll, setShowAll] = useState(false);
-  async function load(method: "GET" | "POST" = "GET") {
+  const load = useCallback(async (method: "GET" | "POST" = "GET") => {
     if (method === "POST") setRunning(true);
     try {
       const res = await fetch(`/api/cases/${caseId}/validation`, { method });
@@ -3204,10 +3208,10 @@ function ValidationCard({ caseId, scope }: { caseId: string; scope?: ReportSelec
     } finally {
       setRunning(false);
     }
-  }
+  }, [caseId]);
   // Reload whenever the selected report changes so the card always reflects
   // the CURRENT findings for the document the user is looking at.
-  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [caseId, scope?.id]);
+  useEffect(() => { void load(); }, [load, scope?.id]);
   const allFindings: AnyRec[] = state?.findings ?? [];
   // Scope the DISPLAY to findings relevant to the report selected in the
   // library dropdown. Export gating is unaffected — blocking is computed over

@@ -2,7 +2,8 @@ import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit } from "@/lib/tenant";
 import { ok, handleError } from "@/lib/api";
 
-export async function DELETE(_req: Request, { params }: { params: { caseId: string; findingId: string } }) {
+export async function DELETE(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string; findingId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.edit");

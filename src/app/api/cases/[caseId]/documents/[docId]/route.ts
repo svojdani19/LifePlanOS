@@ -9,7 +9,8 @@ import { deleteObject } from "@/lib/storage";
 // known taxonomy so the enum can never receive an out-of-range value.
 const patchSchema = z.object({ type: z.string().refine((t) => t in TYPE_LABEL, "Unknown document type") });
 
-export async function PATCH(req: Request, { params }: { params: { caseId: string; docId: string } }) {
+export async function PATCH(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string; docId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "records.upload");
@@ -27,7 +28,8 @@ export async function PATCH(req: Request, { params }: { params: { caseId: string
   }
 }
 
-export async function DELETE(_req: Request, { params }: { params: { caseId: string; docId: string } }) {
+export async function DELETE(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string; docId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "records.upload");

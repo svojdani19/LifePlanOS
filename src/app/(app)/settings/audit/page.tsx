@@ -9,7 +9,7 @@ const fmt = (d: Date) => d.toLocaleString("en-US", { year: "numeric", month: "sh
 
 export default async function AuditPage() {
   const ctx = await requireContext();
-  if (!can(ctx.user.role, "audit.view")) redirect("/dashboard");
+  if (!can(ctx.user.role, "audit.view") && !ctx.supportMode) redirect("/dashboard");
   const logs = await prisma.auditLog.findMany({
     where: { firmId: ctx.firm.id },
     orderBy: { createdAt: "desc" },

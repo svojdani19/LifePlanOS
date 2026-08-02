@@ -30,7 +30,8 @@ function liveBaseline(kase: { dateOfBirth: Date | null; sex: string }) {
   return baselineLifeExpectancy(age, kase.sex as BasisSex);
 }
 
-export async function GET(_req: Request, { params }: { params: { caseId: string } }) {
+export async function GET(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.view");
@@ -63,7 +64,8 @@ const putSchema = z.discriminatedUnion("mode", [
   z.object({ mode: z.literal("clear") }),
 ]);
 
-export async function PUT(req: Request, { params }: { params: { caseId: string } }) {
+export async function PUT(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     const kase = await requireCase(ctx, params.caseId);

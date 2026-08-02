@@ -7,7 +7,8 @@ import { ok, handleError } from "@/lib/api";
 // Treating-provider roster (EPIC-011). GET returns the curated roster and, when
 // ?refresh=1, first seeds any NEW providers parsed from the records. POST adds a
 // user-entered provider.
-export async function GET(req: Request, { params }: { params: { caseId: string } }) {
+export async function GET(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.view");
@@ -39,7 +40,8 @@ export async function GET(req: Request, { params }: { params: { caseId: string }
 }
 
 const addSchema = z.object({ name: z.string().min(2), credentials: z.string().optional(), specialty: z.string().optional(), facility: z.string().optional(), contact: z.string().optional() });
-export async function POST(req: Request, { params }: { params: { caseId: string } }) {
+export async function POST(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.edit");

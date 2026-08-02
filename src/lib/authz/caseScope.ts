@@ -108,6 +108,7 @@ export async function isPlatformAdminAssignment(userId: string): Promise<boolean
       userId,
       status: "ACTIVE",
       builtInRole: "PLATFORM_SYSTEM_ADMINISTRATOR",
+      effectiveFrom: { lte: new Date() },
       OR: unexpired(new Date()),
     },
   });
@@ -116,17 +117,28 @@ export async function isPlatformAdminAssignment(userId: string): Promise<boolean
 
 type AssignmentRow = { caseId: string | null; builtInRole: string | null };
 
-function isExternalOnly(role: UserRole, assignments: AssignmentRow[]): boolean {
+/**
+ * True when every active assignment is deliberately case-scoped. This includes
+ * external-facing templates and internal specialist templates whose declared
+ * default scope is CASE (vocational/economist/external expert). The legacy enum
+ * carried by those users is an implementation compatibility detail and must not
+ * widen their access back to the whole firm.
+ */
+function isCaseRestrictedOnly(role: UserRole, assignments: AssignmentRow[]): boolean {
   return (
     role !== "ADMIN" &&
     assignments.length > 0 &&
-    assignments.every((a) => a.caseId != null && EXTERNAL_CLASS_TEMPLATES.includes(a.builtInRole ?? ""))
+    assignments.every((a) => {
+      if (!a.builtInRole) return false;
+      const template = getRoleTemplate(a.builtInRole);
+      return EXTERNAL_CLASS_TEMPLATES.includes(a.builtInRole) || template?.defaultScope === "CASE";
+    })
   );
 }
 
 async function activeAssignments(userId: string, firmId: string, now: Date): Promise<AssignmentRow[]> {
   return prisma.userRoleAssignment.findMany({
-    where: { userId, firmId, status: "ACTIVE", OR: unexpired(now) },
+    where: { userId, firmId, status: "ACTIVE", effectiveFrom: { lte: now }, OR: unexpired(now) },
     select: { caseId: true, builtInRole: true },
   });
 }
@@ -159,7 +171,7 @@ export async function accessibleCaseIds(
 ): Promise<CaseAccess> {
   const now = new Date();
   const assignments = await activeAssignments(ctx.user.id, ctx.firm.id, now);
-  const externalOnly = isExternalOnly(ctx.user.role, assignments);
+  const caseRestrictedOnly = isCaseRestrictedOnly(ctx.user.role, assignments);
 
   const templates = opts.assignmentTemplates ?? [];
   const relevant = assignments.filter(
@@ -167,7 +179,7 @@ export async function accessibleCaseIds(
   );
 
   // Firm-wide footing — never for guests whose grants are all case-scoped.
-  if (!externalOnly) {
+  if (!caseRestrictedOnly) {
     if (opts.firmWideRoles?.includes(ctx.user.role)) {
       return { allowed: true, cases: "all", platformAdminReadOnly: false };
     }
@@ -206,7 +218,7 @@ export async function accessibleCaseIds(
 export async function externalOnlyCaseIds(ctx: CaseScopeContext): Promise<string[] | null> {
   const now = new Date();
   const assignments = await activeAssignments(ctx.user.id, ctx.firm.id, now);
-  if (!isExternalOnly(ctx.user.role, assignments)) return null;
+  if (!isCaseRestrictedOnly(ctx.user.role, assignments)) return null;
   const engaged = await engagedCaseIds(ctx.user.id, ctx.firm.id, ALL_ENGAGEMENT_SLOTS);
   return [
     ...new Set([

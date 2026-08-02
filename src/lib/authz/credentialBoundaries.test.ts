@@ -23,6 +23,7 @@ vi.mock("@/lib/tenant", () => {
     TenantError,
     requireApiContext: vi.fn(),
     requirePermission: vi.fn(),
+    requireCanonicalPermission: vi.fn(),
     requireCase: vi.fn(async () => ({ id: "case-1" })),
     audit: vi.fn(async () => {}),
     recordUsage: vi.fn(async () => {}),
@@ -171,21 +172,12 @@ describe("enforceReviewCredential — review-class decisions", () => {
     ).rejects.toMatchObject({ status: 403 });
   });
 
-  it("logs a structured credential.gap (console + audit) instead of blocking for legacy firms", async () => {
+  it("logs a structured credential.gap and blocks legacy firms too", async () => {
     const ctx = ctxOf();
     await expect(
       enforceReviewCredential(ctx as never, "ECONOMIST", { action: "economics.assumption", caseId: "case-9" }),
-    ).resolves.toBeUndefined();
-    expect(warnSpy).toHaveBeenCalledTimes(1);
-    const logged = JSON.parse(String(warnSpy.mock.calls[0][0]));
-    expect(logged).toMatchObject({
-      event: "credential.gap",
-      userId: "user-1",
-      firmId: "firm-1",
-      requiredCredential: "ECONOMIST",
-      action: "economics.assumption",
-      caseId: "case-9",
-    });
+    ).rejects.toMatchObject({ status: 403 });
+    expect(warnSpy).not.toHaveBeenCalled();
     expect(auditMock).toHaveBeenCalledWith(
       ctx,
       "credential.gap",
@@ -211,7 +203,7 @@ const attestReq = () =>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ confirm: true }),
   });
-const ATTEST_PARAMS = { params: { caseId: "case-1" } };
+const ATTEST_PARAMS = { params: Promise.resolve({ caseId: "case-1" }) };
 
 describe("POST /attestation — always credential-gated", () => {
   it("(a) a vocational-credentialed user in a reviewer seat cannot physician-attest", async () => {
@@ -257,7 +249,7 @@ const approvalReq = (kind: "APPROVAL" | "ATTESTATION") =>
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ kind, statementText: "I attest.", confirm: true }),
   });
-const APPROVAL_PARAMS = { params: { caseId: "case-1", exportId: "export-1" } };
+const APPROVAL_PARAMS = { params: Promise.resolve({ caseId: "case-1", exportId: "export-1" }) };
 const exportRow = () => ({
   id: "export-1",
   caseId: "case-1",
@@ -312,7 +304,7 @@ const vocReq = (verification?: string) =>
       ...(verification ? { verification } : {}),
     }),
   });
-const VOC_PARAMS = { params: { caseId: "case-1" } };
+const VOC_PARAMS = { params: Promise.resolve({ caseId: "case-1" }) };
 
 describe("POST /vocational — VERIFIED marking is vocational sign-off", () => {
   it("(d) a physician-credentialed reviewer cannot mark entries VERIFIED without a VOCATIONAL credential", async () => {

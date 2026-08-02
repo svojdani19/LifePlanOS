@@ -26,7 +26,7 @@ const CREDENTIAL_TONE: Record<string, BadgeTone> = {
 
 export default async function FirmAdminPage() {
   const ctx = await requireContext();
-  if (ctx.user.role !== "ADMIN") {
+  if (ctx.user.role !== "ADMIN" && !ctx.supportMode) {
     const assignment = await prisma.userRoleAssignment.count({
       where: { userId: ctx.user.id, firmId: ctx.firm.id, status: "ACTIVE", builtInRole: "FIRM_ADMINISTRATOR" },
     });
@@ -60,7 +60,7 @@ export default async function FirmAdminPage() {
     <div>
       <PageHeader
         title="Firm Administration"
-        subtitle={`${ctx.firm.name} — team, roles, credentials, billing, and audit`}
+        subtitle={`${ctx.firm.name} — team, roles, credentials, billing, and audit${ctx.supportMode ? " · read-only platform support view" : ""}`}
         metrics={[
           { label: "Members", value: String(userCount) },
           { label: "Active Assignments", value: String(activeAssignments) },

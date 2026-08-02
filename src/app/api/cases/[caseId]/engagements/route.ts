@@ -5,7 +5,6 @@ import type { Permission } from "@/lib/rbac";
 import { ok, handleError } from "@/lib/api";
 import {
   EngagementError,
-  MAX_FEE,
   createEngagement,
   authorizeEngagement,
   assignExperts,
@@ -37,8 +36,6 @@ const postSchema = z.object({
     .min(1)
     .max(100)
     .refine((t) => VALID_REPORT_TYPES.has(t), { message: "Unknown report type — must be a registered report id." }),
-  // finite() rejects Infinity (z.number() already rejects NaN); MAX_FEE bounds it.
-  feeEstimate: z.number().finite().nonnegative().max(MAX_FEE).optional(),
   status: z.enum(["RECOMMENDED", "AWAITING_AUTHORIZATION"]).optional(),
 });
 
@@ -75,7 +72,8 @@ function engagementError(err: unknown) {
   return handleError(err);
 }
 
-export async function GET(_req: Request, { params }: { params: { caseId: string } }) {
+export async function GET(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.view");
@@ -90,7 +88,8 @@ export async function GET(_req: Request, { params }: { params: { caseId: string 
   }
 }
 
-export async function POST(req: Request, { params }: { params: { caseId: string } }) {
+export async function POST(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     // Attorney seats (report.export) and case-team editors may request engagements.
@@ -103,7 +102,6 @@ export async function POST(req: Request, { params }: { params: { caseId: string 
         caseId: params.caseId,
         reportType: input.reportType,
         requestedById: ctx.user.id,
-        feeEstimate: input.feeEstimate,
         status: input.status,
         firmFeatures: ctx.firm.features,
       },
@@ -114,7 +112,8 @@ export async function POST(req: Request, { params }: { params: { caseId: string 
   }
 }
 
-export async function PATCH(req: Request, { params }: { params: { caseId: string } }) {
+export async function PATCH(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     const url = new URL(req.url);

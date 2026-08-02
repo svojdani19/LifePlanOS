@@ -97,7 +97,8 @@ function effectiveApproval(def: ReportDefinition, config: unknown) {
   return def.deriveApproval ? def.deriveApproval(config) : def.approval;
 }
 
-export async function GET(req: Request, { params }: { params: { caseId: string } }) {
+export async function GET(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.view");
@@ -249,7 +250,8 @@ export async function GET(req: Request, { params }: { params: { caseId: string }
   }
 }
 
-export async function POST(req: Request, { params }: { params: { caseId: string } }) {
+export async function POST(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "report.export");

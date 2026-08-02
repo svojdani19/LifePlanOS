@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import type { Prisma } from "@/generated/prisma";
-import { requireApiContext, requirePermission, requireCase, audit, type TenantContext } from "@/lib/tenant";
+import { requireApiContext, requireCanonicalPermission, requireCase, audit, type TenantContext } from "@/lib/tenant";
 import { ok, handleError } from "@/lib/api";
 import { enforceReviewCredential } from "@/lib/authz/credentialGate";
 import {
@@ -43,13 +43,8 @@ import {
 // PHYSICIAN_REVIEWER seats for the pilot, docs/25) or futurecare.edit.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Economist seat: physician.review (expert seat) OR futurecare.edit. */
-function requireEconomistSeat(ctx: TenantContext): void {
-  try {
-    requirePermission(ctx, "physician.review");
-  } catch {
-    requirePermission(ctx, "futurecare.edit");
-  }
+function requireEconomistSeat(ctx: TenantContext, caseId: string): void {
+  requireCanonicalPermission(ctx, "economic.edit", { caseId });
 }
 
 async function loadCurrentAssumptions(caseId: string, firmId: string) {
@@ -66,11 +61,12 @@ async function loadCurrentAssumptions(caseId: string, firmId: string) {
   return rows.map((r) => ({ ...r, expertName: nameOf.get(r.expertId) ?? null }));
 }
 
-export async function GET(_req: Request, { params }: { params: { caseId: string } }) {
+export async function GET(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
-    requirePermission(ctx, "case.view");
     await requireCase(ctx, params.caseId);
+    requireCanonicalPermission(ctx, "economic.view", { caseId: params.caseId });
 
     const [assumptions, scenarios] = await Promise.all([
       loadCurrentAssumptions(params.caseId, ctx.firm.id),
@@ -116,11 +112,12 @@ const computeSchema = z.object({
     .optional(),
 });
 
-export async function POST(req: Request, { params }: { params: { caseId: string } }) {
+export async function POST(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
-    requireEconomistSeat(ctx);
     await requireCase(ctx, params.caseId);
+    requireEconomistSeat(ctx, params.caseId);
 
     const url = new URL(req.url);
     const isCompute = url.searchParams.get("compute") === "1";

@@ -7,7 +7,8 @@ import { ok, handleError } from "@/lib/api";
 // Explorer renders. GET returns the stored graph; POST rebuilds it from the
 // current structured data (no inference — see engine/evidenceGraph.ts).
 
-export async function GET(_req: Request, { params }: { params: { caseId: string } }) {
+export async function GET(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.view");
@@ -19,7 +20,8 @@ export async function GET(_req: Request, { params }: { params: { caseId: string 
   }
 }
 
-export async function POST(_req: Request, { params }: { params: { caseId: string } }) {
+export async function POST(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.view");

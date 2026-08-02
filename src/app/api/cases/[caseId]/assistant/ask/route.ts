@@ -7,7 +7,8 @@ import { ok, handleError } from "@/lib/api";
 // findings + readiness (never fabricates, never approves). Deterministic; an LLM
 // rephrasing layer can sit behind this once credentialed + BAA-acknowledged.
 
-export async function POST(req: Request, { params }: { params: { caseId: string } }) {
+export async function POST(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.view");

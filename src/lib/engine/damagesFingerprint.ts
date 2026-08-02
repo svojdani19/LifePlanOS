@@ -24,11 +24,16 @@ export interface FdeRowIds {
   conditionIds: string[];
   itemIds: string[];
   findingIds: string[];
+  /** Material snapshots of sources represented to the engine only as counts
+   * or presence flags. Content changes must invalidate the evaluation even
+   * when the row count is unchanged. */
+  sourceRecords?: Array<{ kind: string; id: string; material: unknown }>;
 }
 
 /** JSON.stringify with recursively sorted object keys — key order can never
  *  perturb the hash. Arrays keep their (pre-sorted) order. */
 function stableStringify(value: unknown): string {
+  if (value instanceof Date) return JSON.stringify(value.toISOString());
   if (Array.isArray(value)) {
     return `[${value.map(stableStringify).join(",")}]`;
   }
@@ -69,11 +74,22 @@ export function computeInputsHash(input: FdeInput, rows: FdeRowIds): string {
       econAssumptionCount: input.econAssumptionCount,
       interviews: input.interviews,
       missingRecordSignals: [...input.missingRecordSignals].sort(),
+      sourceIds: input.sourceIds
+        ? {
+            documents: [...input.sourceIds.documents].sort(),
+            chronologyEvents: [...input.sourceIds.chronologyEvents].sort(),
+            vocationalEntries: [...input.sourceIds.vocationalEntries].sort(),
+            economicAssumptions: [...input.sourceIds.economicAssumptions].sort(),
+            interviewFindings: [...input.sourceIds.interviewFindings].sort(),
+            missingRecordFindings: [...input.sourceIds.missingRecordFindings].sort(),
+          }
+        : undefined,
     },
     rows: {
       conditionIds: [...rows.conditionIds].sort(),
       itemIds: [...rows.itemIds].sort(),
       findingIds: [...rows.findingIds].sort(),
+      sourceRecords: canonicalSort(rows.sourceRecords ?? []),
     },
   };
   return createHash("sha256").update(stableStringify(payload)).digest("hex");

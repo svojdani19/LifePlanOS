@@ -6,9 +6,9 @@ import {
   assertCaseCapacity,
   audit,
   recordUsage,
+  caseAccessFor,
 } from "@/lib/tenant";
 import { ok, handleError } from "@/lib/api";
-import { externalOnlyCaseIds } from "@/lib/authz/caseScope";
 import { geographicFactorFor } from "@/lib/references/geoFactors";
 
 const createSchema = z.object({
@@ -30,9 +30,11 @@ export async function GET() {
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.view");
-    const externalOnly = await externalOnlyCaseIds(ctx);
+    const access = await caseAccessFor(ctx);
+    if (!access.allowed) return ok({ cases: [] });
+    const scoped = access.cases === "all" ? null : access.cases;
     const cases = await prisma.case.findMany({
-      where: { firmId: ctx.firm.id, ...(externalOnly ? { id: { in: externalOnly } } : {}) },
+      where: { firmId: ctx.firm.id, ...(scoped ? { id: { in: scoped } } : {}) },
       orderBy: { updatedAt: "desc" },
       include: { createdBy: { select: { name: true } } },
     });

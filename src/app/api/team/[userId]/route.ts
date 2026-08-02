@@ -10,7 +10,8 @@ const patchSchema = z.object({
 });
 
 // Guards below re-scope by firmId so one firm can never mutate another's users.
-export async function PATCH(req: Request, { params }: { params: { userId: string } }) {
+export async function PATCH(req: Request, { params: paramsPromise }: { params: Promise<{ userId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     const input = patchSchema.parse(await req.json());
@@ -31,7 +32,8 @@ export async function PATCH(req: Request, { params }: { params: { userId: string
 }
 
 // Revoke access (soft — retains the record for audit) rather than hard delete.
-export async function DELETE(_req: Request, { params }: { params: { userId: string } }) {
+export async function DELETE(_req: Request, { params: paramsPromise }: { params: Promise<{ userId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "team.manage");

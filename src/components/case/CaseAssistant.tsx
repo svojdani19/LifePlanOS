@@ -78,7 +78,11 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
 
   const focus = (it: Item) => { onFocus?.(it.entityType, it.entityId, it.category); setOpen(false); };
 
-  const patchAll = (ids: string[], action: string, note?: string) => Promise.all(ids.map((id) => fetch(`/api/cases/${caseId}/attention/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, note }) })));
+  const patchAll = useCallback(
+    (ids: string[], action: string, note?: string) =>
+      Promise.all(ids.map((id) => fetch(`/api/cases/${caseId}/attention/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, note }) }))),
+    [caseId],
+  );
 
   const act = useCallback(
     async (action: "resolve" | "defer" | "dismiss", note?: string) => {
@@ -102,10 +106,10 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
         undoTimer.current = setTimeout(() => setUndo(null), 6000);
       } finally { setBusy(false); }
     },
-    [caseId, queue, gIdx, busy],
+    [queue, gIdx, busy, patchAll],
   );
 
-  const undo = async () => {
+  const undo = useCallback(async () => {
     if (!undoState) return;
     const u = undoState; setUndo(null);
     await patchAll(u.items.map((i) => i.id), "reopen");
@@ -115,7 +119,7 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
     setSeg("all"); setGIdx(0);
     const kkey = u.action === "resolve" ? "resolved" : u.action === "defer" ? "deferred" : "dismissed";
     setDecided((d) => ({ ...d, [kkey]: Math.max(0, d[kkey] - u.items.length) }));
-  };
+  }, [patchAll, undoState]);
 
   const restoreDeferred = async (it: Item) => {
     await patchAll([it.id], "reopen");
@@ -151,7 +155,7 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, current, canEdit, act, queue.length, undoState, showHelp]);
+  }, [open, current, canEdit, act, queue.length, undoState, showHelp, undo]);
 
   const criticalCount = items.filter(isBlocking).length;
   const highCount = items.filter((i) => i.severity === "HIGH" && !i.exportBlocking).length;

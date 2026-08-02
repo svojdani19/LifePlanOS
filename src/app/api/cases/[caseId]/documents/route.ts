@@ -5,7 +5,8 @@ import { SAMPLE_DOCS } from "@/lib/documents/samples";
 import { putObject } from "@/lib/storage";
 import { ok, handleError } from "@/lib/api";
 
-export async function GET(_req: Request, { params }: { params: { caseId: string } }) {
+export async function GET(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.view");
@@ -23,7 +24,8 @@ export async function GET(_req: Request, { params }: { params: { caseId: string 
 //   • JSON { sample: true } — ingests the built-in demo set (generic filenames,
 //     real body text) so the auto-classifier can be seen working on content.
 //   • JSON { documents: [{ filename, text }] } — pre-extracted text.
-export async function POST(req: Request, { params }: { params: { caseId: string } }) {
+export async function POST(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "records.upload");

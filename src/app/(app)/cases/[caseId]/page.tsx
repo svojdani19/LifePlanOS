@@ -1,15 +1,21 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
-import { requireContext } from "@/lib/tenant";
+import { requireContext, requireCase, caseAccessFor } from "@/lib/tenant";
 import { prisma } from "@/lib/db";
 import { ROLE_PERMISSIONS } from "@/lib/rbac";
 import { assumptionsFor } from "@/lib/engine/generate";
 import { rankPrecedents } from "@/lib/precedents/match";
 import { CaseWorkspace } from "@/components/case/CaseWorkspace";
 
-export default async function CaseDetailPage({ params }: { params: { caseId: string } }) {
+export default async function CaseDetailPage({ params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   const ctx = await requireContext();
+  // Direct URLs are guarded before any PHI-bearing relations are loaded. List
+  // filtering is not authorization: the same case-scope policy protects this
+  // server-rendered resource.
+  await requireCase(ctx, params.caseId);
+  const caseAccess = await caseAccessFor(ctx);
   const c = await prisma.case.findFirst({
     where: { id: params.caseId, firmId: ctx.firm.id },
     include: {
@@ -61,7 +67,7 @@ export default async function CaseDetailPage({ params }: { params: { caseId: str
         data={JSON.parse(JSON.stringify(c))}
         assumptions={assumptions}
         totals={{ totalLifetime, totalPresentValue }}
-        permissions={ROLE_PERMISSIONS[ctx.user.role]}
+        permissions={caseAccess.platformAdminReadOnly ? [] : ROLE_PERMISSIONS[ctx.user.role]}
         precedents={JSON.parse(JSON.stringify(ranked))}
         physicians={JSON.parse(JSON.stringify(physicians))}
       />

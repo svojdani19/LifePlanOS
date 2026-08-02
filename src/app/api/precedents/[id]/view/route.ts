@@ -5,7 +5,8 @@ import { handleError } from "@/lib/api";
 
 // Authenticated, audited view of a precedent LCP — streams the stored file when
 // present, otherwise renders its extracted text.
-export async function GET(_req: Request, { params }: { params: { id: string } }) {
+export async function GET(_req: Request, { params: paramsPromise }: { params: Promise<{ id: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.view");

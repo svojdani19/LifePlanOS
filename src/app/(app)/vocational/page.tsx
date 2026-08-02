@@ -1,8 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { requireContext } from "@/lib/tenant";
+import { canCanonicalPermission, requireContext } from "@/lib/tenant";
 import { prisma } from "@/lib/db";
-import { can } from "@/lib/rbac";
 import { accessibleCaseIds, rolesWithPermission, templatesWithPermission } from "@/lib/authz/caseScope";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
@@ -31,12 +30,13 @@ const READINESS_TONE: Record<string, BadgeTone> = {
   "Ready for final export": "success",
 };
 
-export default async function VocationalWorkspacePage({ searchParams }: { searchParams?: { caseId?: string } }) {
+export default async function VocationalWorkspacePage({ searchParams: searchParamsPromise }: { searchParams?: Promise<{ caseId?: string }> }) {
+  const searchParams = await searchParamsPromise;
   const ctx = await requireContext();
   const access = await accessibleCaseIds(ctx, {
     firmWideRoles: rolesWithPermission("vocational.view"),
     assignmentTemplates: templatesWithPermission("vocational.view"),
-    orgWideAssignmentGrantsAll: true,
+    orgWideAssignmentGrantsAll: false,
     engagementSlots: ["assignedVocationalExpertId"],
   });
   if (!access.allowed) redirect("/dashboard");
@@ -107,12 +107,20 @@ export default async function VocationalWorkspacePage({ searchParams }: { search
     (selectedId && allCases.find((c) => c.id === selectedId)) ||
     null;
 
-  // Mirror the API's permission model exactly: intake needs futurecare.edit or
-  // physician.review; VERIFY and approval are reviewer acts (physician.review).
+  // Mirror the API's canonical permission model exactly. Specialist seats are
+  // case-scoped, and credential gates are evaluated by the shared registry.
   // A platform-admin view is strictly read-only — no mutation surfaces render.
   const readOnly = access.platformAdminReadOnly;
-  const canEdit = !readOnly && (can(ctx.user.role, "futurecare.edit") || can(ctx.user.role, "physician.review"));
-  const canReview = !readOnly && can(ctx.user.role, "physician.review");
+  const canEdit = Boolean(
+    !readOnly &&
+      selectedId &&
+      canCanonicalPermission(ctx, "vocational.edit", { caseId: selectedId }),
+  );
+  const canReview = Boolean(
+    !readOnly &&
+      selectedId &&
+      canCanonicalPermission(ctx, "vocational.attest", { caseId: selectedId }),
+  );
 
   return (
     <div>

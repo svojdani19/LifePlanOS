@@ -13,7 +13,8 @@ const patchSchema = z.object({
   status: z.enum(["SUGGESTED", "CONFIRMED", "DISMISSED"]).optional(),
 });
 
-export async function PATCH(req: Request, { params }: { params: { caseId: string; providerId: string } }) {
+export async function PATCH(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string; providerId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.edit");
@@ -28,7 +29,8 @@ export async function PATCH(req: Request, { params }: { params: { caseId: string
   }
 }
 
-export async function DELETE(_req: Request, { params }: { params: { caseId: string; providerId: string } }) {
+export async function DELETE(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string; providerId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.edit");

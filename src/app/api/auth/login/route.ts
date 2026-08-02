@@ -13,7 +13,7 @@ const schema = z.object({ email: z.string().email(), password: z.string().min(1)
 export async function POST(req: Request) {
   try {
     const { email, password, totp } = schema.parse(await req.json());
-    const h = headers();
+    const h = await headers();
     const ip = h.get("x-forwarded-for");
 
     if (!(await loginAllowed(ip, email))) {
