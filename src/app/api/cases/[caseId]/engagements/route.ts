@@ -37,6 +37,15 @@ const postSchema = z.object({
     .max(100)
     .refine((t) => VALID_REPORT_TYPES.has(t), { message: "Unknown report type — must be a registered report id." }),
   status: z.enum(["RECOMMENDED", "AWAITING_AUTHORIZATION"]).optional(),
+  // Attorney orders carry the requested preparer titles (never names) so the
+  // firm can staff the engagement accordingly.
+  scope: z.string().max(2000).optional(),
+  configuration: z
+    .object({
+      requestedPreparers: z.array(z.object({ title: z.string().max(100), specialty: z.string().max(200).optional() })).max(10).optional(),
+      orderedVia: z.string().max(50).optional(),
+    })
+    .optional(),
 });
 
 const patchSchema = z.discriminatedUnion("action", [
@@ -104,6 +113,8 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
         requestedById: ctx.user.id,
         status: input.status,
         firmFeatures: ctx.firm.features,
+        scope: input.scope,
+        configuration: input.configuration,
       },
     );
     return ok({ engagement }, 201);

@@ -217,6 +217,14 @@ export function CaseWorkspace({
   ];
   const VISIBLE_FLOW = (attorneyView ? FLOW.filter((f) => f.tab !== "costs") : FLOW).map((f, i) => ({ ...f, n: i + 1 }));
   const stageIdx = Math.max(0, STAGES.indexOf(data.status === "DRAFTING" ? "FINAL" : data.status));
+  // Attorney PV: the newest delivered (final, non-draft) export with a stated
+  // present value — null until something has actually been delivered.
+  const deliveredPresentValue: number | null = (() => {
+    const finals = ((data.reports ?? []) as AnyRec[])
+      .filter((r) => r.draft === false && typeof r.totalPresentValue === "number" && r.totalPresentValue > 0)
+      .sort((x, y) => String(y.createdAt).localeCompare(String(x.createdAt)));
+    return finals.length ? (finals[0].totalPresentValue as number) : null;
+  })();
   const SECONDARY = TABS.filter((t) =>
     (attorneyView ? ["providers", "reviews", "precedents"] : ["providers", "evidence", "reviews", "precedents"]).includes(t.id),
   );
@@ -260,7 +268,15 @@ export function CaseWorkspace({
               ...(attorneyView
                 ? [
                     { label: "Lifetime (Est. Range)", value: moneyRange(totals.totalLifetime), cls: "", sm: true },
-                    { label: "Present Value (Est. Range)", value: moneyRange(totals.totalPresentValue), cls: "text-brand-800", sm: true },
+                    // Present value is only stated once work product has been
+                    // executed and delivered: it derives from the newest final
+                    // (non-draft) export, never from work in progress.
+                    {
+                      label: "Present Value (Delivered)",
+                      value: deliveredPresentValue != null ? moneyRange(deliveredPresentValue) : "Pending delivery",
+                      cls: deliveredPresentValue != null ? "text-brand-800" : "text-ink-400",
+                      sm: true,
+                    },
                   ]
                 : [
                     { label: "Lifetime (Undiscounted)", value: formatMoney(totals.totalLifetime), cls: "" },
@@ -362,7 +378,9 @@ export function CaseWorkspace({
         {tab === "reviews" && <ReviewsPanel points={data.reviewFindings} hasPlan={hasPlan} />}
         {tab === "physician" && <PhysicianPanel data={data} canReview={can("physician.review")} call={call} />}
         {tab === "precedents" && <PrecedentsPanel precedents={precedents} data={data} />}
-        {tab === "report" && <ReportPanel data={data} canExport={can("report.export")} canEdit={can("case.edit")} call={call} busy={busy} totals={totals} physicians={physicians} />}
+        {tab === "report" && (attorneyView
+          ? <AttorneyReportPanel caseId={data.id} exports={data.reports ?? []} physicians={physicians} />
+          : <ReportPanel data={data} canExport={can("report.export")} canEdit={can("case.edit")} call={call} busy={busy} totals={totals} physicians={physicians} />)}
       </div>
     </div>
   );
@@ -1545,11 +1563,11 @@ const HIGHLIGHT_SECTION: Record<string, "reasoning" | "evidence" | "literature">
 };
 const HL = "rounded-md bg-amber-50 p-2 ring-2 ring-amber-400";
 
-// Attorney-facing estimate range: -20% to +10% of the computed value, rounded
+// Attorney-facing estimate range: -30% to +10% of the computed value, rounded
 // to the nearest $1,000 so the figures read as an estimate, not a total.
 function moneyRange(v: number): string {
   const k = (x: number) => Math.round(x / 1000) * 1000;
-  return `${formatMoney(k(v * 0.8))} – ${formatMoney(k(v * 1.1))}`;
+  return `${formatMoney(k(v * 0.7))} – ${formatMoney(k(v * 1.1))}`;
 }
 
 function RecommendationDossierView({ dossier, assessment, highlight, condensed = false }: { dossier: RecommendationDossier; assessment?: ReasoningAssessment; highlight?: string | null; condensed?: boolean }) {
@@ -3395,6 +3413,228 @@ function ValidationCard({ caseId, scope }: { caseId: string; scope?: ReportSelec
     </div>
   );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Attorney Report tab — ordering surface, not a generation surface. The
+// attorney picks a report, sees its integrity barriers (no pricing values),
+// chooses anonymous preparer titles (specialty-level for physicians), and
+// submits an Order (a CaseEngagement the firm authorizes and staffs). Final,
+// released reports are listed newest-first with prior versions tucked away.
+// ─────────────────────────────────────────────────────────────────────────────
+const PREPARER_TITLES: Record<string, string> = {
+  LIFE_CARE_PLANNER: "Life Care Planner",
+  PHYSICIAN_REVIEWER: "Physician Reviewer",
+  VOCATIONAL_EXPERT: "Vocational Expert",
+  FORENSIC_ECONOMIST: "Forensic Economist",
+  QUALITY_ASSURANCE_REVIEWER: "Quality Assurance Reviewer",
+};
+
+function attorneyPreparerOptions(def: AnyRec | null, physicianSpecialties: string[]): { key: string; label: string; specialties?: string[]; required?: boolean }[] {
+  if (!def) return [];
+  const opts: { key: string; label: string; specialties?: string[]; required?: boolean }[] = [];
+  // A credentialed planner authors every prepared report.
+  opts.push({ key: "LIFE_CARE_PLANNER", label: PREPARER_TITLES.LIFE_CARE_PLANNER, required: def.serviceTier === "core" });
+  // Physician review is offered wherever the report carries clinical opinions.
+  if (def.requiredExpert === "physician" || def.approval === "physician_required" || def.serviceTier === "core" || def.category === "Clinical analysis") {
+    opts.push({ key: "PHYSICIAN_REVIEWER", label: PREPARER_TITLES.PHYSICIAN_REVIEWER, specialties: physicianSpecialties, required: def.requiredExpert === "physician" || def.approval === "physician_required" });
+  }
+  if (def.requiredExpert === "vocational") opts.push({ key: "VOCATIONAL_EXPERT", label: PREPARER_TITLES.VOCATIONAL_EXPERT, required: true });
+  if (def.requiredExpert === "economist") opts.push({ key: "FORENSIC_ECONOMIST", label: PREPARER_TITLES.FORENSIC_ECONOMIST, required: true });
+  opts.push({ key: "QUALITY_ASSURANCE_REVIEWER", label: PREPARER_TITLES.QUALITY_ASSURANCE_REVIEWER });
+  return opts;
+}
+
+function AttorneyReportPanel({ caseId, exports, physicians = [] }: { caseId: string; exports: AnyRec[]; physicians?: AnyRec[] }) {
+  const [reports, setReports] = useState<AnyRec[]>([]);
+  const [selectedId, setSelectedId] = useState<string>("LIFE_CARE_PLAN");
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [specialty, setSpecialty] = useState<string>("");
+  const [orders, setOrders] = useState<AnyRec[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    const res = await fetch(`/api/cases/${caseId}/reports`);
+    if (res.ok) setReports((await res.json()).reports ?? []);
+    const eng = await fetch(`/api/cases/${caseId}/engagements`);
+    if (eng.ok) setOrders((await eng.json()).engagements ?? []);
+  }, [caseId]);
+  useEffect(() => { void load(); }, [load]);
+
+  const selected = reports.find((r) => r.id === selectedId) ?? null;
+  // Distinct reviewer specialties, derived anonymously from the firm's
+  // physician seats (credential summaries) — never names.
+  const physicianSpecialties = Array.from(new Set(
+    physicians.filter((p: AnyRec) => p.role === "PHYSICIAN_REVIEWER").map((p: AnyRec) => (p.credentialSummary ? String(p.credentialSummary) : "General")),
+  ));
+  const options = attorneyPreparerOptions(selected, physicianSpecialties);
+
+  // Required titles are always part of the order.
+  const effectivePicked = new Set(picked);
+  for (const o of options) if (o.required) effectivePicked.add(o.key);
+
+  const sel: ReportSelection | null = selected
+    ? { id: selected.id, name: selected.name, findingRelevance: selected.findingRelevance, gate: selected.gate, status: selected.status, gateReason: selected.gateReason }
+    : null;
+
+  async function order() {
+    if (!selected) return;
+    setBusy(true); setMsg(null);
+    const requestedPreparers = options
+      .filter((o) => effectivePicked.has(o.key))
+      .map((o) => ({ title: o.label, ...(o.key === "PHYSICIAN_REVIEWER" && specialty ? { specialty } : {}) }));
+    const scopeText = `Attorney order: ${selected.name} — preparers: ${requestedPreparers.map((r) => r.specialty ? `${r.title} (${r.specialty})` : r.title).join(", ")}`;
+    const res = await fetch(`/api/cases/${caseId}/engagements`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reportType: selected.id, scope: scopeText, configuration: { requestedPreparers, orderedVia: "attorney_report_tab" } }),
+    });
+    setBusy(false);
+    if (res.ok) { setMsg("Order submitted. The firm will confirm, staff, and prepare this report."); void load(); }
+    else { const body = await res.json().catch(() => ({})); setMsg(body.error ?? "Order could not be submitted."); }
+  }
+
+  // Final, released deliverables grouped by report, newest first.
+  const finals = exports.filter((r: AnyRec) => r.draft === false);
+  const groupsMap = new Map<string, AnyRec[]>();
+  for (const r of finals) {
+    const key = r.reportType ?? (r.format === "MEMO" ? "TESTIMONY_PREP_PACK" : "LIFE_CARE_PLAN");
+    const list = groupsMap.get(key) ?? [];
+    list.push(r);
+    groupsMap.set(key, list);
+  }
+  const finalGroups = Array.from(groupsMap.entries()).map(([key, list]) => {
+    const sorted = [...list].sort((a, b) => (b.version ?? 0) - (a.version ?? 0) || String(b.createdAt).localeCompare(String(a.createdAt)));
+    return { key, label: key.replace(/_/g, " ").toLowerCase().replace(/^\w/, (c: string) => c.toUpperCase()), newest: sorted[0], prior: sorted.slice(1) };
+  }).sort((a, b) => String(b.newest.createdAt).localeCompare(String(a.newest.createdAt)));
+
+  const openOrders = orders.filter((o: AnyRec) => !["COMPLETED", "CANCELLED"].includes(o.status));
+
+  return (
+    <div className="space-y-4">
+      {/* Report selection */}
+      <div className="card p-5">
+        <h3 className="text-sm font-semibold text-ink-900">Request Report</h3>
+        <p className="text-xs text-ink-500">Choose the report you want prepared. Barriers below must be resolved by the clinical team before a final can be released.</p>
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          {reports.filter((r: AnyRec) => !r.legacy).map((r: AnyRec) => (
+            <button
+              key={r.id}
+              onClick={() => { setSelectedId(r.id); setPicked(new Set()); setSpecialty(""); setMsg(null); }}
+              className={cn(
+                "focusable rounded-lg border p-3 text-left transition-colors",
+                selectedId === r.id ? "border-brand-400 bg-brand-50/60" : "border-ink-200 hover:border-ink-300 hover:bg-ink-50",
+              )}
+            >
+              <span className="flex items-center gap-2">
+                <span className={cn("h-2 w-2 shrink-0 rounded-full", STATUS_DOT_ATTORNEY[r.status] ?? "bg-slate-300")} />
+                <span className="text-sm font-semibold text-ink-900">{r.name}</span>
+              </span>
+              <span className="mt-0.5 block text-xs text-ink-500">{r.description}</span>
+              {r.gateReason && <span className="mt-1 block text-xs text-amber-700">Barrier: {r.gateReason}</span>}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Integrity check — barriers to completion; no pricing values. */}
+      <ValidationCard caseId={caseId} scope={sel} />
+
+      {/* Preparer titles (anonymous) */}
+      <div className="card p-5">
+        <h3 className="text-sm font-semibold text-ink-900">Report Preparers</h3>
+        <p className="text-xs text-ink-500">Choose who should prepare and review this report by title. The firm assigns the individual professionals; required titles for the selected report are always included.</p>
+        <div className="mt-3 space-y-2">
+          {options.map((o) => (
+            <div key={o.key}>
+              <label className="flex items-center gap-2 text-sm text-ink-800">
+                <input
+                  type="checkbox"
+                  checked={effectivePicked.has(o.key)}
+                  disabled={o.required}
+                  onChange={(e) => setPicked((prev) => { const n = new Set(prev); if (e.target.checked) n.add(o.key); else n.delete(o.key); return n; })}
+                />
+                {o.label}
+                {o.required && <Badge tone="neutral">required for this report</Badge>}
+              </label>
+              {o.key === "PHYSICIAN_REVIEWER" && effectivePicked.has(o.key) && (o.specialties?.length ?? 0) > 0 && (
+                <select className="input ml-6 mt-1 w-80 py-1.5 text-sm" aria-label="Reviewer specialty" value={specialty} onChange={(e) => setSpecialty(e.target.value)}>
+                  <option value="">Any available specialty</option>
+                  {o.specialties!.map((sp) => <option key={sp} value={sp}>{sp}</option>)}
+                </select>
+              )}
+            </div>
+          ))}
+        </div>
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <button className="btn-primary px-4 py-2 text-sm" disabled={busy || !selected} onClick={() => void order()}>
+            {busy ? "Submitting…" : "Order"}
+          </button>
+          {msg && <span className="text-xs text-ink-600">{msg}</span>}
+        </div>
+        {openOrders.length > 0 && (
+          <div className="mt-4 border-t border-ink-100 pt-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Open Orders</p>
+            <ul className="mt-1 space-y-1">
+              {openOrders.map((o: AnyRec) => (
+                <li key={o.id} className="flex flex-wrap items-center gap-2 text-sm text-ink-700">
+                  <span className="font-medium">{String(o.reportType).replace(/_/g, " ").toLowerCase()}</span>
+                  <Badge tone="info">{String(o.status).replace(/_/g, " ").toLowerCase()}</Badge>
+                  <span className="text-xs text-ink-400">ordered {formatDate(o.createdAt)}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+
+      {/* Final, released reports — newest per report, priors tucked underneath. */}
+      <div className="card p-5">
+        <h3 className="text-sm font-semibold text-ink-900">Final Reports</h3>
+        {finalGroups.length === 0 ? (
+          <p className="mt-2 text-sm text-ink-500">No final reports have been released on this matter yet.</p>
+        ) : (
+          <div className="mt-3 space-y-3">
+            {finalGroups.map((g) => (
+              <div key={g.key} className="rounded-lg ring-1 ring-ink-100 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="min-w-0">
+                    <span className="font-medium text-ink-900">{g.label}</span>
+                    <span className="ml-2 text-xs text-ink-500">v{g.newest.version} · {String(g.newest.format).toLowerCase()} · {formatDate(g.newest.createdAt)}</span>
+                  </span>
+                  <a className="text-sm font-medium text-brand-700 hover:underline" href={`/api/cases/${caseId}/export/${g.newest.id}/download`} target="_blank">Download</a>
+                </div>
+                {g.prior.length > 0 && (
+                  <details className="mt-2">
+                    <summary className="cursor-pointer text-xs text-ink-400">Prior versions ({g.prior.length})</summary>
+                    <ul className="mt-1 space-y-1">
+                      {g.prior.map((r: AnyRec) => (
+                        <li key={r.id} className="flex items-center justify-between text-xs text-ink-500">
+                          <span>v{r.version} · {String(r.format).toLowerCase()} · {formatDate(r.createdAt)}</span>
+                          <a className="text-brand-700 hover:underline" href={`/api/cases/${caseId}/export/${r.id}/download`} target="_blank">Download</a>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const STATUS_DOT_ATTORNEY: Record<string, string> = {
+  Ready: "bg-emerald-500",
+  "Previously exported": "bg-emerald-500",
+  "Physician review required": "bg-amber-500",
+  Blocked: "bg-red-500",
+  "Not enough information": "bg-slate-300",
+  "Expert input required": "bg-amber-500",
+  "Not enabled": "bg-slate-300",
+};
 
 function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians = [] }: { data: AnyRec; canExport: boolean; canEdit: boolean; call: any; busy: string | null; totals: AnyRec; physicians?: AnyRec[] }) {
   const [preparing, setPreparing] = useState<string>(data.preparingPhysicianId ?? "");

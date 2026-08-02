@@ -201,6 +201,10 @@ export interface CreateEngagementInput {
   status?: Extract<EngagementStatus, "RECOMMENDED" | "AWAITING_AUTHORIZATION">;
   /** Raw Firm.features — supplies the pricing config (see feeFor). */
   firmFeatures?: unknown;
+  /** Human-readable request scope (e.g. an attorney order's preparer summary). */
+  scope?: string;
+  /** Structured request context, e.g. { requestedPreparers: [{title, specialty?}] }. */
+  configuration?: unknown;
 }
 
 /**
@@ -244,6 +248,8 @@ export async function createEngagement(actor: EngagementActor, input: CreateEnga
       feeEstimate,
       feeStructure,
       estimatedCompletionDate,
+      ...(input.scope ? { scope: input.scope.slice(0, 2000) } : {}),
+      ...(input.configuration !== undefined ? { configuration: input.configuration as object } : {}),
     },
   });
 
