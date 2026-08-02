@@ -107,7 +107,7 @@ export function CaseWorkspace({
   permissions,
   precedents = [],
   physicians = [],
-  hidePricing = false,
+  attorneyView = false,
 }: {
   data: AnyRec;
   assumptions: { lifeExpectancyYears: number; discountRate: number; medicalInflation: number; geographicFactor: number };
@@ -116,7 +116,7 @@ export function CaseWorkspace({
   precedents?: AnyRec[];
   physicians?: AnyRec[];
   /** Attorney-facing view: dollar values are never rendered (data unchanged). */
-  hidePricing?: boolean;
+  attorneyView?: boolean;
 }) {
   const router = useRouter();
   const [tab, setTab] = useState("overview");
@@ -215,9 +215,11 @@ export function CaseWorkspace({
     { n: 7, label: "Physician", tab: "physician", stage: "PHYSICIAN_REVIEW", count: pendingPhysician, warn: pendingPhysician > 0 },
     { n: 8, label: "Report", tab: "report", stage: "FINAL" },
   ];
-  const VISIBLE_FLOW = (hidePricing ? FLOW.filter((f) => f.tab !== "costs") : FLOW).map((f, i) => ({ ...f, n: i + 1 }));
+  const VISIBLE_FLOW = (attorneyView ? FLOW.filter((f) => f.tab !== "costs") : FLOW).map((f, i) => ({ ...f, n: i + 1 }));
   const stageIdx = Math.max(0, STAGES.indexOf(data.status === "DRAFTING" ? "FINAL" : data.status));
-  const SECONDARY = TABS.filter((t) => ["providers", "evidence", "reviews", "precedents"].includes(t.id));
+  const SECONDARY = TABS.filter((t) =>
+    (attorneyView ? ["providers", "reviews", "precedents"] : ["providers", "evidence", "reviews", "precedents"]).includes(t.id),
+  );
 
   return (
     <div>
@@ -255,7 +257,7 @@ export function CaseWorkspace({
               { label: "Future Care Items", value: String(data.futureCareItems.length), cls: "" },
               // Attorney view: totals render as an estimate range (-20% / +10%,
               // rounded to the nearest $1k) rather than exact figures.
-              ...(hidePricing
+              ...(attorneyView
                 ? [
                     { label: "Lifetime (Est. Range)", value: moneyRange(totals.totalLifetime), cls: "", sm: true },
                     { label: "Present Value (Est. Range)", value: moneyRange(totals.totalPresentValue), cls: "text-brand-800", sm: true },
@@ -353,10 +355,10 @@ export function CaseWorkspace({
         {tab === "records" && <RecordsPanel data={data} canEdit={can("records.upload")} call={call} busy={busy} />}
         {tab === "chronology" && <ChronologyPanel data={data} canEdit={can("chronology.edit")} call={call} />}
         {tab === "causation" && <CausationPanel data={data} />}
-        {tab === "providers" && <TreatingProvidersPanel data={data} canEdit={can("case.edit") || can("physician.review")} call={call} />}
-        {tab === "evidence" && <EvidencePanel data={data} />}
-        {tab === "futurecare" && <FutureCarePanel data={data} canEdit={can("futurecare.edit")} hidePricing={hidePricing} call={call} focusId={focusId} focusCat={focusCat} />}
-        {tab === "costs" && !hidePricing && <CostsPanel data={data} assumptions={assumptions} totals={totals} canEdit={can("case.edit")} canApprove={can("physician.review")} call={call} focusId={focusId} />}
+        {tab === "providers" && <TreatingProvidersPanel data={data} canEdit={can("case.edit") || can("physician.review")} attorneyView={attorneyView} call={call} />}
+        {tab === "evidence" && !attorneyView && <EvidencePanel data={data} />}
+        {tab === "futurecare" && <FutureCarePanel data={data} canEdit={can("futurecare.edit")} attorneyView={attorneyView} call={call} focusId={focusId} focusCat={focusCat} />}
+        {tab === "costs" && !attorneyView && <CostsPanel data={data} assumptions={assumptions} totals={totals} canEdit={can("case.edit")} canApprove={can("physician.review")} call={call} focusId={focusId} />}
         {tab === "reviews" && <ReviewsPanel points={data.reviewFindings} hasPlan={hasPlan} />}
         {tab === "physician" && <PhysicianPanel data={data} canReview={can("physician.review")} call={call} />}
         {tab === "precedents" && <PrecedentsPanel precedents={precedents} data={data} />}
@@ -1711,7 +1713,7 @@ function AddCareItemForm({ data, call, onDone }: { data: AnyRec; call: any; onDo
   );
 }
 
-function FutureCarePanel({ data, canEdit, hidePricing = false, call, focusId, focusCat }: { data: AnyRec; canEdit: boolean; hidePricing?: boolean; call: any; focusId?: string | null; focusCat?: string | null }) {
+function FutureCarePanel({ data, canEdit, attorneyView = false, call, focusId, focusCat }: { data: AnyRec; canEdit: boolean; attorneyView?: boolean; call: any; focusId?: string | null; focusCat?: string | null }) {
   const [openIds, setOpenIds] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<string>("All");
   // Review-at-scale controls (Phase 11): search, probability / MD-status
@@ -1719,7 +1721,7 @@ function FutureCarePanel({ data, canEdit, hidePricing = false, call, focusId, fo
   const [q, setQ] = useState("");
   const [prob, setProb] = useState("");
   const [phys, setPhys] = useState("");
-  const [sortKey, setSortKey] = useState<CareSortKey>(hidePricing ? "service" : "presentValue");
+  const [sortKey, setSortKey] = useState<CareSortKey>(attorneyView ? "service" : "presentValue");
   const [compact, setCompact] = useState(false);
   const toggleOpen = (id: string) => setOpenIds((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   // Deep-link: when the assistant focuses an item, make sure it is visible
@@ -1760,8 +1762,8 @@ function FutureCarePanel({ data, canEdit, hidePricing = false, call, focusId, fo
           {["PENDING", "APPROVED", "MODIFIED", "REJECTED"].map((p) => <option key={p} value={p}>MD: {p.toLowerCase()}</option>)}
         </select>
         <select className="input w-auto py-1.5 text-sm" aria-label="Sort recommendations" value={sortKey} onChange={(e) => setSortKey(e.target.value as CareSortKey)}>
-          {!hidePricing && <option value="presentValue">Sort: present value</option>}
-          {!hidePricing && <option value="lifetimeCost">Sort: lifetime cost</option>}
+          {!attorneyView && <option value="presentValue">Sort: present value</option>}
+          {!attorneyView && <option value="lifetimeCost">Sort: lifetime cost</option>}
           <option value="service">Sort: name</option>
           <option value="physicianStatus">Sort: MD status</option>
         </select>
@@ -1788,7 +1790,7 @@ function FutureCarePanel({ data, canEdit, hidePricing = false, call, focusId, fo
             <div className="grid h-8 w-8 place-items-center rounded-lg bg-brand-50 text-brand-700"><g.icon className="h-4.5 w-4.5" /></div>
             <h3 className="text-sm font-semibold text-ink-900">{g.title}</h3>
             <span className="text-xs text-ink-400">{g.items.length} item{g.items.length === 1 ? "" : "s"}</span>
-            {!hidePricing && <span className="ml-auto text-xs font-medium text-brand-800">{formatMoney(g.items.reduce((s: number, it: AnyRec) => s + it.presentValue, 0))} PV</span>}
+            {!attorneyView && <span className="ml-auto text-xs font-medium text-brand-800">{formatMoney(g.items.reduce((s: number, it: AnyRec) => s + it.presentValue, 0))} PV</span>}
           </div>
           <div className="space-y-2">
       {g.items.map((it: AnyRec) => (
@@ -1808,7 +1810,7 @@ function FutureCarePanel({ data, canEdit, hidePricing = false, call, focusId, fo
               )}
             </div>
             <div className="flex items-center gap-4">
-              {!hidePricing && (
+              {!attorneyView && (
                 <div className="text-right">
                   <div className="num-metric text-sm text-brand-800">{formatMoney(it.presentValue)}</div>
                   {!compact && <div className="text-xs text-ink-400">PV · {formatMoney(it.lifetimeCost)} lifetime</div>}
@@ -1825,8 +1827,8 @@ function FutureCarePanel({ data, canEdit, hidePricing = false, call, focusId, fo
           </div>
           {openIds.has(it.id) && (
             <div className="mt-3 border-t border-ink-100 pt-3">
-              <RecommendationDossierView dossier={dossierForItem(it, data)} assessment={assessmentForItem(it, data)} highlight={focusId === it.id ? focusCat : null} condensed={hidePricing} />
-              {!hidePricing && (
+              <RecommendationDossierView dossier={dossierForItem(it, data)} assessment={assessmentForItem(it, data)} highlight={focusId === it.id ? focusCat : null} condensed={attorneyView} />
+              {!attorneyView && (
                 <div data-focus-target={focusId === it.id && focusCat && /cpt|pricing|duplicate_cost/.test(focusCat) ? "" : undefined} className={cn("mt-3 border-t border-ink-100 pt-2 text-sm text-ink-600", focusId === it.id && focusCat && /cpt|pricing|duplicate_cost/.test(focusCat) && "rounded-md bg-amber-50 p-2 ring-2 ring-amber-400")}>
                   <span className="text-xs font-medium text-ink-500">Cost basis: </span>{formatMoney(it.unitCost)}/unit · {it.pricingSource} · range {formatMoney(it.lowCost)}–{formatMoney(it.highCost)}
                   {it.lowerCostAlternative ? <> · <span className="text-xs font-medium text-ink-500">Alternative: </span>{it.lowerCostAlternative}</> : null}
@@ -2638,7 +2640,7 @@ function FindingList({ findings, onDelete, canEdit }: { findings: AnyRec[]; onDe
   );
 }
 
-function TreatingProvidersPanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; call: any }) {
+function TreatingProvidersPanel({ data, canEdit, attorneyView = false, call }: { data: AnyRec; canEdit: boolean; attorneyView?: boolean; call: any }) {
   const [providers, setProviders] = useState<AnyRec[] | null>(null);
   const [patient, setPatient] = useState<AnyRec[]>([]);
   const [openProvider, setOpenProvider] = useState<string | null>(null);
@@ -2706,13 +2708,21 @@ function TreatingProvidersPanel({ data, canEdit, call }: { data: AnyRec; canEdit
                   <div className="flex items-center gap-2">
                     {canEdit && p.status !== "CONFIRMED" && <button className="btn-outline py-1 text-xs" onClick={() => patchProvider(p.id, { status: "CONFIRMED" })}>Confirm</button>}
                     {canEdit && <button className="py-1 text-xs text-ink-400 hover:text-red-600" onClick={() => patchProvider(p.id, { status: "DISMISSED" })}>Dismiss</button>}
-                    <button className="text-xs font-medium text-brand-700 hover:underline" onClick={() => setOpenProvider(openProvider === p.id ? null : p.id)}>{openProvider === p.id ? "Hide" : `Interview (${(p.interviewFindings ?? []).length})`}</button>
+                    <button className="text-xs font-medium text-brand-700 hover:underline" onClick={() => setOpenProvider(openProvider === p.id ? null : p.id)}>{openProvider === p.id ? "Hide" : attorneyView ? `Attorney input${p.depositionSummary || p.attorneyNotes ? " ✓" : ""}` : `Interview (${(p.interviewFindings ?? []).length})`}</button>
                   </div>
                 </div>
                 {openProvider === p.id && (
                   <div className="border-t border-ink-100 p-3">
-                    <FindingList findings={p.interviewFindings ?? []} canEdit={canEdit} onDelete={(id) => delFinding(id, () => loadProviders())} />
-                    {canEdit && <InterviewEditor onAdd={(f) => addFinding({ subject: "PROVIDER", providerId: p.id, ...f }, () => loadProviders())} />}
+                    {!attorneyView && <FindingList findings={p.interviewFindings ?? []} canEdit={canEdit} onDelete={(id) => delFinding(id, () => loadProviders())} />}
+                    {!attorneyView && canEdit && <InterviewEditor onAdd={(f) => addFinding({ subject: "PROVIDER", providerId: p.id, ...f }, () => loadProviders())} />}
+                    {!attorneyView && (p.depositionSummary || p.attorneyNotes) && (
+                      <div className="mt-2 rounded-md bg-ink-50 p-2.5 text-sm">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Attorney-provided context</p>
+                        {p.depositionSummary && <p className="mt-1 whitespace-pre-wrap text-ink-700"><span className="text-xs font-medium text-ink-500">Deposition summary: </span>{p.depositionSummary}</p>}
+                        {p.attorneyNotes && <p className="mt-1 whitespace-pre-wrap text-ink-700"><span className="text-xs font-medium text-ink-500">Notes: </span>{p.attorneyNotes}</p>}
+                      </div>
+                    )}
+                    {attorneyView && <AttorneyProviderInput caseId={data.id} provider={p} onSaved={() => loadProviders()} />}
                   </div>
                 )}
               </div>
@@ -2737,6 +2747,57 @@ function TreatingProvidersPanel({ data, canEdit, call }: { data: AnyRec; canEdit
     </div>
   );
 }
+// Attorney contribution surface: deposition summary + notes (persisted on the
+// provider via the attorney-scoped PATCH) and deposition transcript upload
+// (ingested into records as a DEPOSITION document, server-enforced).
+function AttorneyProviderInput({ caseId, provider, onSaved }: { caseId: string; provider: AnyRec; onSaved: () => void }) {
+  const [dep, setDep] = useState<string>(provider.depositionSummary ?? "");
+  const [notes, setNotes] = useState<string>(provider.attorneyNotes ?? "");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  async function save() {
+    setBusy(true); setMsg(null);
+    const res = await fetch(`/api/cases/${caseId}/providers/${provider.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ depositionSummary: dep.trim() || null, attorneyNotes: notes.trim() || null }),
+    });
+    setBusy(false);
+    setMsg(res.ok ? "Saved." : "Could not save — try again.");
+    if (res.ok) onSaved();
+  }
+
+  async function upload(file: File) {
+    setBusy(true); setMsg(null);
+    const fd = new FormData();
+    fd.append("files", file);
+    const res = await fetch(`/api/cases/${caseId}/documents`, { method: "POST", body: fd });
+    setBusy(false);
+    setMsg(res.ok ? `Deposition "${file.name}" uploaded to the case records.` : "Upload failed — try again.");
+  }
+
+  return (
+    <div className="space-y-2.5">
+      <p className="text-xs text-ink-500">Your deposition summary and notes for this provider are shared with the clinical team and woven into case context. Uploaded transcripts are filed in the case records as depositions.</p>
+      <label className="block text-xs text-ink-600">Deposition summary
+        <textarea className="input mt-0.5 w-full py-1.5 text-sm" rows={4} value={dep} onChange={(e) => setDep(e.target.value)} placeholder="Key testimony, opinions on causation and future care, concessions, impeachment points…" />
+      </label>
+      <label className="block text-xs text-ink-600">Notes
+        <textarea className="input mt-0.5 w-full py-1.5 text-sm" rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Scheduling, credibility, relationship to the case, follow-ups…" />
+      </label>
+      <div className="flex flex-wrap items-center gap-3">
+        <button className="btn-primary px-3 py-1.5 text-xs" disabled={busy} onClick={() => void save()}>Save</button>
+        <label className="btn-outline cursor-pointer px-3 py-1.5 text-xs">
+          Upload deposition transcript
+          <input type="file" className="hidden" accept=".pdf,.doc,.docx,.txt" onChange={(e) => { const f = e.target.files?.[0]; if (f) void upload(f); e.target.value = ""; }} />
+        </label>
+        {msg && <span className="text-xs text-ink-500">{msg}</span>}
+      </div>
+    </div>
+  );
+}
+
 function AddProviderInline({ data, onAdded }: { data: AnyRec; onAdded: () => void }) {
   const [show, setShow] = useState(false);
   const [name, setName] = useState("");

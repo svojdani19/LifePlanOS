@@ -28,7 +28,14 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
   const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
-    requirePermission(ctx, "records.upload");
+    // The retaining attorney may upload deposition transcripts only; every
+    // other upload path stays behind records.upload.
+    const attorneyDepositionOnly = ctx.user.role === "ATTORNEY_REVIEWER";
+    if (attorneyDepositionOnly) {
+      requirePermission(ctx, "case.view");
+    } else {
+      requirePermission(ctx, "records.upload");
+    }
     await requireCase(ctx, params.caseId);
 
     const contentType = req.headers.get("content-type") ?? "";
@@ -51,12 +58,15 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
           mimeType: file.type,
           buffer,
           storageKey,
-          forcedType: typeMap[file.name],
+          forcedType: attorneyDepositionOnly ? "DEPOSITION" : typeMap[file.name],
         });
         await recordUsage(ctx, "RECORD_PAGE_OCR", { caseId: params.caseId, quantity: pages });
         created.push(document.id);
       }
     } else {
+      // Text/sample ingestion is a records-analyst path — not available to the
+      // attorney deposition-upload allowance.
+      if (attorneyDepositionOnly) requirePermission(ctx, "records.upload");
       const body = await req.json().catch(() => ({}));
       const docs: { filename: string; text?: string }[] = body.sample
         ? SAMPLE_DOCS
