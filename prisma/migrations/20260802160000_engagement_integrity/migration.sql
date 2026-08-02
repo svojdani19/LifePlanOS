@@ -5,18 +5,24 @@
 --    Null on pre-existing rows (they fall back to timestamp staleness).
 ALTER TABLE "FutureDamagesEvaluation" ADD COLUMN IF NOT EXISTS "inputsHash" TEXT;
 
--- 2. Orphan cleanup BEFORE validating the FKs. Demo/live data exists; any row
---    pointing at a vanished parent is unreachable garbage and is removed so
---    VALIDATE CONSTRAINT is guaranteed to pass.
-DELETE FROM "CaseEngagement" ce WHERE NOT EXISTS (SELECT 1 FROM "Case" c WHERE c."id" = ce."caseId");
-DELETE FROM "CaseEngagement" ce WHERE NOT EXISTS (SELECT 1 FROM "Firm" f WHERE f."id" = ce."firmId");
-DELETE FROM "Notification" n WHERE NOT EXISTS (SELECT 1 FROM "User" u WHERE u."id" = n."userId");
-DELETE FROM "Notification" n WHERE NOT EXISTS (SELECT 1 FROM "Firm" f WHERE f."id" = n."firmId");
-DELETE FROM "FutureDamagesEvaluation" e WHERE NOT EXISTS (SELECT 1 FROM "Case" c WHERE c."id" = e."caseId");
-DELETE FROM "FutureDamagesEvaluation" e WHERE NOT EXISTS (SELECT 1 FROM "Firm" f WHERE f."id" = e."firmId");
+-- 2. Preflight BEFORE validating the FKs. Never silently delete production
+--    rows in a schema migration: fail with an actionable error so an operator
+--    can investigate and remediate the exact orphan deliberately.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM "CaseEngagement" ce LEFT JOIN "Case" c ON c."id" = ce."caseId" WHERE c."id" IS NULL)
+    OR EXISTS (SELECT 1 FROM "CaseEngagement" ce LEFT JOIN "Firm" f ON f."id" = ce."firmId" WHERE f."id" IS NULL)
+    OR EXISTS (SELECT 1 FROM "Notification" n LEFT JOIN "User" u ON u."id" = n."userId" WHERE u."id" IS NULL)
+    OR EXISTS (SELECT 1 FROM "Notification" n LEFT JOIN "Firm" f ON f."id" = n."firmId" WHERE f."id" IS NULL)
+    OR EXISTS (SELECT 1 FROM "FutureDamagesEvaluation" e LEFT JOIN "Case" c ON c."id" = e."caseId" WHERE c."id" IS NULL)
+    OR EXISTS (SELECT 1 FROM "FutureDamagesEvaluation" e LEFT JOIN "Firm" f ON f."id" = e."firmId" WHERE f."id" IS NULL)
+  THEN
+    RAISE EXCEPTION 'MDIP integrity preflight found orphan rows. Inspect CaseEngagement, Notification, and FutureDamagesEvaluation before retrying.';
+  END IF;
+END $$;
 
 -- 3. Foreign keys with ON DELETE CASCADE. Added NOT VALID (no full-table lock
---    while live), then validated post-cleanup. Raw SQL because the Prisma
+--    while live), then validated after the non-destructive preflight. Raw SQL because the Prisma
 --    schema keeps scalar fields for these models (adding relations would force
 --    back-relation churn across Case/Firm/User).
 ALTER TABLE "CaseEngagement" ADD CONSTRAINT "CaseEngagement_caseId_fkey" FOREIGN KEY ("caseId") REFERENCES "Case"("id") ON DELETE CASCADE ON UPDATE CASCADE NOT VALID;
