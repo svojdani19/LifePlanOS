@@ -70,6 +70,9 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
         permissions={caseAccess.platformAdminReadOnly ? [] : ROLE_PERMISSIONS[ctx.user.role]}
         precedents={JSON.parse(JSON.stringify(ranked))}
         physicians={JSON.parse(JSON.stringify(physicians))}
+        // Attorney-facing view: dollar values are hidden (server still computes
+        // them for other roles — this is presentation, not data removal).
+        hidePricing={ctx.user.role === "ATTORNEY_REVIEWER"}
       />
     </div>
   );

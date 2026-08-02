@@ -107,6 +107,7 @@ export function CaseWorkspace({
   permissions,
   precedents = [],
   physicians = [],
+  hidePricing = false,
 }: {
   data: AnyRec;
   assumptions: { lifeExpectancyYears: number; discountRate: number; medicalInflation: number; geographicFactor: number };
@@ -114,6 +115,8 @@ export function CaseWorkspace({
   permissions: Permission[];
   precedents?: AnyRec[];
   physicians?: AnyRec[];
+  /** Attorney-facing view: dollar values are never rendered (data unchanged). */
+  hidePricing?: boolean;
 }) {
   const router = useRouter();
   const [tab, setTab] = useState("overview");
@@ -212,6 +215,7 @@ export function CaseWorkspace({
     { n: 7, label: "Physician", tab: "physician", stage: "PHYSICIAN_REVIEW", count: pendingPhysician, warn: pendingPhysician > 0 },
     { n: 8, label: "Report", tab: "report", stage: "FINAL" },
   ];
+  const VISIBLE_FLOW = (hidePricing ? FLOW.filter((f) => f.tab !== "costs") : FLOW).map((f, i) => ({ ...f, n: i + 1 }));
   const stageIdx = Math.max(0, STAGES.indexOf(data.status === "DRAFTING" ? "FINAL" : data.status));
   const SECONDARY = TABS.filter((t) => ["providers", "evidence", "reviews", "precedents"].includes(t.id));
 
@@ -246,11 +250,15 @@ export function CaseWorkspace({
 
         {/* Full-width case metrics band */}
         {hasPlan && (
-          <dl className="mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-ink-200 bg-ink-200 sm:grid-cols-5" aria-label="Case metrics">
+          <dl className={cn("mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-ink-200 bg-ink-200", hidePricing ? "sm:grid-cols-3" : "sm:grid-cols-5")} aria-label="Case metrics">
             {[
               { label: "Future Care Items", value: String(data.futureCareItems.length), cls: "" },
-              { label: "Lifetime (Undiscounted)", value: formatMoney(totals.totalLifetime), cls: "" },
-              { label: "Present Value", value: formatMoney(totals.totalPresentValue), cls: "text-brand-800" },
+              ...(hidePricing
+                ? []
+                : [
+                    { label: "Lifetime (Undiscounted)", value: formatMoney(totals.totalLifetime), cls: "" },
+                    { label: "Present Value", value: formatMoney(totals.totalPresentValue), cls: "text-brand-800" },
+                  ]),
               { label: "Physician Pending", value: String(pendingPhysician), cls: pendingPhysician > 0 ? "text-amber-700" : "" },
               { label: "Open Findings", value: String(data.reviewFindings.length), cls: data.reviewFindings.length > 0 ? "text-amber-700" : "" },
             ].map((m) => (
@@ -266,7 +274,7 @@ export function CaseWorkspace({
             its own progress rail, so the sequence reads as distinct steps. */}
         <div className="mt-3 text-[10px] font-semibold uppercase tracking-wide text-ink-400">Pipeline</div>
         <ol className="mt-1 flex w-full items-stretch overflow-x-auto" aria-label="Case workflow">
-          {FLOW.map((s, i) => {
+          {VISIBLE_FLOW.map((s, i) => {
             const sIdx = STAGES.indexOf(s.stage);
             const state = sIdx < stageIdx ? "done" : sIdx === stageIdx ? "current" : "next";
             const open = tab === s.tab;
@@ -342,8 +350,8 @@ export function CaseWorkspace({
         {tab === "causation" && <CausationPanel data={data} />}
         {tab === "providers" && <TreatingProvidersPanel data={data} canEdit={can("case.edit") || can("physician.review")} call={call} />}
         {tab === "evidence" && <EvidencePanel data={data} />}
-        {tab === "futurecare" && <FutureCarePanel data={data} canEdit={can("futurecare.edit")} call={call} focusId={focusId} focusCat={focusCat} />}
-        {tab === "costs" && <CostsPanel data={data} assumptions={assumptions} totals={totals} canEdit={can("case.edit")} canApprove={can("physician.review")} call={call} focusId={focusId} />}
+        {tab === "futurecare" && <FutureCarePanel data={data} canEdit={can("futurecare.edit")} hidePricing={hidePricing} call={call} focusId={focusId} focusCat={focusCat} />}
+        {tab === "costs" && !hidePricing && <CostsPanel data={data} assumptions={assumptions} totals={totals} canEdit={can("case.edit")} canApprove={can("physician.review")} call={call} focusId={focusId} />}
         {tab === "reviews" && <ReviewsPanel points={data.reviewFindings} hasPlan={hasPlan} />}
         {tab === "physician" && <PhysicianPanel data={data} canReview={can("physician.review")} call={call} />}
         {tab === "precedents" && <PrecedentsPanel precedents={precedents} data={data} />}
@@ -1687,7 +1695,7 @@ function AddCareItemForm({ data, call, onDone }: { data: AnyRec; call: any; onDo
   );
 }
 
-function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: AnyRec; canEdit: boolean; call: any; focusId?: string | null; focusCat?: string | null }) {
+function FutureCarePanel({ data, canEdit, hidePricing = false, call, focusId, focusCat }: { data: AnyRec; canEdit: boolean; hidePricing?: boolean; call: any; focusId?: string | null; focusCat?: string | null }) {
   const [openIds, setOpenIds] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<string>("All");
   // Review-at-scale controls (Phase 11): search, probability / MD-status
@@ -1695,7 +1703,7 @@ function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: Any
   const [q, setQ] = useState("");
   const [prob, setProb] = useState("");
   const [phys, setPhys] = useState("");
-  const [sortKey, setSortKey] = useState<CareSortKey>("presentValue");
+  const [sortKey, setSortKey] = useState<CareSortKey>(hidePricing ? "service" : "presentValue");
   const [compact, setCompact] = useState(false);
   const toggleOpen = (id: string) => setOpenIds((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   // Deep-link: when the assistant focuses an item, make sure it is visible
@@ -1736,8 +1744,8 @@ function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: Any
           {["PENDING", "APPROVED", "MODIFIED", "REJECTED"].map((p) => <option key={p} value={p}>MD: {p.toLowerCase()}</option>)}
         </select>
         <select className="input w-auto py-1.5 text-sm" aria-label="Sort recommendations" value={sortKey} onChange={(e) => setSortKey(e.target.value as CareSortKey)}>
-          <option value="presentValue">Sort: present value</option>
-          <option value="lifetimeCost">Sort: lifetime cost</option>
+          {!hidePricing && <option value="presentValue">Sort: present value</option>}
+          {!hidePricing && <option value="lifetimeCost">Sort: lifetime cost</option>}
           <option value="service">Sort: name</option>
           <option value="physicianStatus">Sort: MD status</option>
         </select>
@@ -1764,7 +1772,7 @@ function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: Any
             <div className="grid h-8 w-8 place-items-center rounded-lg bg-brand-50 text-brand-700"><g.icon className="h-4.5 w-4.5" /></div>
             <h3 className="text-sm font-semibold text-ink-900">{g.title}</h3>
             <span className="text-xs text-ink-400">{g.items.length} item{g.items.length === 1 ? "" : "s"}</span>
-            <span className="ml-auto text-xs font-medium text-brand-800">{formatMoney(g.items.reduce((s: number, it: AnyRec) => s + it.presentValue, 0))} PV</span>
+            {!hidePricing && <span className="ml-auto text-xs font-medium text-brand-800">{formatMoney(g.items.reduce((s: number, it: AnyRec) => s + it.presentValue, 0))} PV</span>}
           </div>
           <div className="space-y-2">
       {g.items.map((it: AnyRec) => (
@@ -1784,10 +1792,12 @@ function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: Any
               )}
             </div>
             <div className="flex items-center gap-4">
-              <div className="text-right">
-                <div className="num-metric text-sm text-brand-800">{formatMoney(it.presentValue)}</div>
-                {!compact && <div className="text-xs text-ink-400">PV · {formatMoney(it.lifetimeCost)} lifetime</div>}
-              </div>
+              {!hidePricing && (
+                <div className="text-right">
+                  <div className="num-metric text-sm text-brand-800">{formatMoney(it.presentValue)}</div>
+                  {!compact && <div className="text-xs text-ink-400">PV · {formatMoney(it.lifetimeCost)} lifetime</div>}
+                </div>
+              )}
               <button
                 className="focusable rounded text-xs font-medium text-brand-700 hover:underline"
                 aria-expanded={openIds.has(it.id)}
@@ -1800,10 +1810,12 @@ function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: Any
           {openIds.has(it.id) && (
             <div className="mt-3 border-t border-ink-100 pt-3">
               <RecommendationDossierView dossier={dossierForItem(it, data)} assessment={assessmentForItem(it, data)} highlight={focusId === it.id ? focusCat : null} />
-              <div data-focus-target={focusId === it.id && focusCat && /cpt|pricing|duplicate_cost/.test(focusCat) ? "" : undefined} className={cn("mt-3 border-t border-ink-100 pt-2 text-sm text-ink-600", focusId === it.id && focusCat && /cpt|pricing|duplicate_cost/.test(focusCat) && "rounded-md bg-amber-50 p-2 ring-2 ring-amber-400")}>
-                <span className="text-xs font-medium text-ink-500">Cost basis: </span>{formatMoney(it.unitCost)}/unit · {it.pricingSource} · range {formatMoney(it.lowCost)}–{formatMoney(it.highCost)}
-                {it.lowerCostAlternative ? <> · <span className="text-xs font-medium text-ink-500">Alternative: </span>{it.lowerCostAlternative}</> : null}
-              </div>
+              {!hidePricing && (
+                <div data-focus-target={focusId === it.id && focusCat && /cpt|pricing|duplicate_cost/.test(focusCat) ? "" : undefined} className={cn("mt-3 border-t border-ink-100 pt-2 text-sm text-ink-600", focusId === it.id && focusCat && /cpt|pricing|duplicate_cost/.test(focusCat) && "rounded-md bg-amber-50 p-2 ring-2 ring-amber-400")}>
+                  <span className="text-xs font-medium text-ink-500">Cost basis: </span>{formatMoney(it.unitCost)}/unit · {it.pricingSource} · range {formatMoney(it.lowCost)}–{formatMoney(it.highCost)}
+                  {it.lowerCostAlternative ? <> · <span className="text-xs font-medium text-ink-500">Alternative: </span>{it.lowerCostAlternative}</> : null}
+                </div>
+              )}
               {canEdit && <InlineItemEdit item={it} caseId={data.id} call={call} />}
             </div>
           )}
