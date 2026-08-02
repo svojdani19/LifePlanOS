@@ -288,6 +288,7 @@ const ORIGIN_LABEL: Record<string, string> = {
   TEMPLATE_BASELINE: "System generated (baseline)",
   TEMPLATE_SPECIALTY: "System generated (specialty pack)",
   PHYSICIAN_ADDED: "Physician reviewer",
+  PLANNER_ADDED: "Life care planner (manually added)",
   GOLD_IMPORT: "Imported source",
 };
 

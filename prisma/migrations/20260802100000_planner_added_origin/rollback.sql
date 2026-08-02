@@ -1,0 +1,1 @@
+-- Postgres cannot drop enum values; PLANNER_ADDED remains unused after rollback.

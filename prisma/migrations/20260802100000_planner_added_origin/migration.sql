@@ -1,0 +1,1 @@
+ALTER TYPE "RecommendationOrigin" ADD VALUE IF NOT EXISTS 'PLANNER_ADDED';

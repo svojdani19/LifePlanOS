@@ -1604,6 +1604,76 @@ function assessmentForItem(it: AnyRec, data: AnyRec): ReasoningAssessment {
   return buildReasoningAssessment(it as ReasoningItem, (data.conditions ?? []) as never, (data.chronologyEvents ?? []) as DossierChronoEvent[], kase, interviews as never, { conflicts: flags.get(it.id) ?? [], replacedByActive: replacedByActive.has(it.id) });
 }
 
+
+// Manually add a future-care item (docs: templates miss case-specific care;
+// the item enters the normal lifecycle: PENDING review, validated, assessed).
+const CARE_CATEGORIES = ["PHYSICIAN_VISIT","SPECIALIST_VISIT","PRIMARY_CARE","ORTHOPEDIC_SURGERY","NEUROSURGERY","NEUROLOGY","PMR","PAIN_MANAGEMENT","PSYCH","PHYSICAL_THERAPY","OCCUPATIONAL_THERAPY","SPEECH_THERAPY","COGNITIVE_THERAPY","MEDICATION","INJECTION","IMAGING","LABS","DME","ORTHOTICS_PROSTHETICS","MOBILITY_AID","HOME_MODIFICATION","VEHICLE_MODIFICATION","ATTENDANT_CARE","SKILLED_NURSING","CASE_MANAGEMENT","VOCATIONAL_REHAB","FUTURE_SURGERY","REVISION_SURGERY","COMPLICATION_MANAGEMENT","ASSISTIVE_TECH","SUPPLIES","TRANSPORTATION","MISC"];
+
+function AddCareItemForm({ data, call, onDone }: { data: AnyRec; call: any; onDone: () => void }) {
+  const [f, setF] = useState<AnyRec>({ service: "", category: "SPECIALIST_VISIT", specialty: "", conditionId: "", rationale: "", cptCode: "", probability: "POSSIBLE", frequencyPerYear: "1", durationYears: "", isLifetime: false, unitCost: "" });
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const set = (k: string, v: unknown) => setF((x: AnyRec) => ({ ...x, [k]: v }));
+  return (
+    <div className="card border-brand-200 p-4">
+      <div className="mb-2 text-sm font-semibold text-ink-900">Add future-care item</div>
+      <p className="mb-3 text-xs text-ink-500">
+        For care the records support but the generator did not propose. The item enters physician review like any other — it is never final until reviewed.
+      </p>
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <label className="text-xs text-ink-600">Service *
+          <input className="input mt-0.5 py-1.5 text-sm" value={f.service} onChange={(e) => set("service", e.target.value)} placeholder="e.g. Aquatic therapy program" /></label>
+        <label className="text-xs text-ink-600">Category *
+          <select className="input mt-0.5 py-1.5 text-sm" value={f.category} onChange={(e) => set("category", e.target.value)}>
+            {CARE_CATEGORIES.map((c) => <option key={c} value={c}>{c.replace(/_/g, " ").toLowerCase()}</option>)}
+          </select></label>
+        <label className="text-xs text-ink-600">Specialty *
+          <input className="input mt-0.5 py-1.5 text-sm" value={f.specialty} onChange={(e) => set("specialty", e.target.value)} placeholder="e.g. Physical Therapy" /></label>
+        <label className="text-xs text-ink-600">Supporting diagnosis
+          <select className="input mt-0.5 py-1.5 text-sm" value={f.conditionId} onChange={(e) => set("conditionId", e.target.value)}>
+            <option value="">— select —</option>
+            {(data.conditions ?? []).map((c: AnyRec) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select></label>
+        <label className="text-xs text-ink-600">Probability
+          <select className="input mt-0.5 py-1.5 text-sm" value={f.probability} onChange={(e) => set("probability", e.target.value)}>
+            <option value="PROBABLE">Probable</option><option value="POSSIBLE">Possible</option><option value="SPECULATIVE">Speculative</option>
+          </select></label>
+        <label className="text-xs text-ink-600">CPT code
+          <input className="input mt-0.5 py-1.5 text-sm" value={f.cptCode} onChange={(e) => set("cptCode", e.target.value)} /></label>
+        <label className="text-xs text-ink-600">Frequency / year *
+          <input type="number" min={0} step="0.1" className="input mt-0.5 py-1.5 text-sm" value={f.frequencyPerYear} onChange={(e) => set("frequencyPerYear", e.target.value)} /></label>
+        <label className="text-xs text-ink-600">Duration (years)
+          <input type="number" min={0} step="0.5" className="input mt-0.5 py-1.5 text-sm" value={f.durationYears} disabled={f.isLifetime} onChange={(e) => set("durationYears", e.target.value)} /></label>
+        <label className="mt-5 flex items-center gap-1.5 text-xs text-ink-600">
+          <input type="checkbox" checked={f.isLifetime} onChange={(e) => set("isLifetime", e.target.checked)} /> Lifetime care</label>
+        <label className="text-xs text-ink-600">Unit cost (USD) *
+          <input type="number" min={0} className="input mt-0.5 py-1.5 text-sm" value={f.unitCost} onChange={(e) => set("unitCost", e.target.value)} /></label>
+        <label className="text-xs text-ink-600 sm:col-span-2">Clinical rationale * <span className="text-ink-400">(cite the record basis)</span>
+          <textarea className="input mt-0.5 h-16 py-1.5 text-sm" value={f.rationale} onChange={(e) => set("rationale", e.target.value)} placeholder="Why this care is reasonably anticipated for this patient, per the records…" /></label>
+      </div>
+      {err && <p className="mt-2 text-xs text-red-600">{err}</p>}
+      <div className="mt-3 flex gap-2">
+        <button className="btn-primary px-3 py-1.5 text-xs" disabled={busy} onClick={async () => {
+          setErr(null); setBusy(true);
+          try {
+            const body = {
+              service: f.service, category: f.category, specialty: f.specialty,
+              conditionId: f.conditionId || null, rationale: f.rationale, cptCode: f.cptCode || null,
+              probability: f.probability, frequencyPerYear: Number(f.frequencyPerYear),
+              durationYears: f.isLifetime ? null : f.durationYears === "" ? null : Number(f.durationYears),
+              isLifetime: f.isLifetime, unitCost: Number(f.unitCost),
+            };
+            const r = await call(`/api/cases/${data.id}/future-care`, "POST", body, "addcare");
+            if (r?.item) onDone();
+            else setErr(r?.error ?? "Could not add the item.");
+          } finally { setBusy(false); }
+        }}>{busy ? "Adding…" : "Add item"}</button>
+        <button className="btn-outline px-3 py-1.5 text-xs" onClick={onDone}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: AnyRec; canEdit: boolean; call: any; focusId?: string | null; focusCat?: string | null }) {
   const [openIds, setOpenIds] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<string>("All");
@@ -1624,6 +1694,7 @@ function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: Any
       setOpenIds((s) => new Set(s).add(focusId));
     }
   }, [focusId, data.futureCareItems]);
+  const [showAdd, setShowAdd] = useState(false);
   if (data.futureCareItems.length === 0) return <Empty>Run the AI pipeline to generate future care recommendations.</Empty>;
 
   // Organize by care category group; chips allow selective viewing per group.
@@ -1636,8 +1707,12 @@ function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: Any
 
   return (
     <div className="space-y-5">
+      {showAdd && canEdit && <AddCareItemForm data={data} call={call} onDone={() => setShowAdd(false)} />}
       {/* Controls */}
       <div className="flex flex-wrap items-center gap-2">
+        {canEdit && !showAdd && (
+          <button className="btn-primary px-3 py-1.5 text-xs" onClick={() => setShowAdd(true)}>+ Add item</button>
+        )}
         <input className="input w-52 py-1.5 text-sm" placeholder="Search recommendations…" aria-label="Search recommendations" value={q} onChange={(e) => setQ(e.target.value)} />
         <select className="input w-auto py-1.5 text-sm" aria-label="Filter by probability" value={prob} onChange={(e) => setProb(e.target.value)}>
           <option value="">All probabilities</option>
@@ -1687,6 +1762,7 @@ function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: Any
                 <span className={cn("font-semibold text-ink-900", compact && "text-sm")}>{it.service}</span>
                 <Badge tone={PROB_TONE[it.probability]}>{it.probability.toLowerCase()}</Badge>
                 {!compact && <Badge tone={VULN_TONE[it.defenseVulnerability]} title="How exposed this item is to defense challenge, from the engine's weakening-evidence analysis">defense vulnerability: {it.defenseVulnerability.toLowerCase()}</Badge>}
+                {(it.origin === "PLANNER_ADDED" || it.origin === "PHYSICIAN_ADDED") && <Badge tone="brand" title="This item was added manually, not generated from the care templates">{it.origin === "PHYSICIAN_ADDED" ? "physician-added" : "manually added"}</Badge>}
                 <Badge tone={PHYS_TONE[it.physicianStatus]}>MD: {it.physicianStatus.toLowerCase()}</Badge>
                 {!compact && it.edited && <Badge tone="amber">edited</Badge>}
               </div>
@@ -1741,6 +1817,9 @@ function InlineProbability({ item, caseId, call }: { item: AnyRec; caseId: strin
 function InlineItemEdit({ item, caseId, call }: { item: AnyRec; caseId: string; call: any }) {
   const [freq, setFreq] = useState(String(item.frequencyPerYear ?? 1));
   const [cost, setCost] = useState(String(item.unitCost ?? 0));
+  const [dur, setDur] = useState<string>(item.isLifetime ? "" : String(item.durationYears ?? ""));
+  const [life, setLife] = useState<boolean>(!!item.isLifetime);
+  const durChanged = life !== !!item.isLifetime || (!life && dur !== String(item.durationYears ?? ""));
   const [confirmRemove, setConfirmRemove] = useState(false);
   const freqChanged = Number(freq) !== item.frequencyPerYear && Number.isFinite(Number(freq));
   const costChanged = Number(cost) !== item.unitCost && Number.isFinite(Number(cost));
@@ -1755,13 +1834,21 @@ function InlineItemEdit({ item, caseId, call }: { item: AnyRec; caseId: string; 
         Unit cost (USD)
         <input type="number" min={0} className="input mt-0.5 w-28 py-1 text-xs" value={cost} onChange={(e) => setCost(e.target.value)} />
       </label>
-      {(freqChanged || costChanged) && (
+      <label className="text-xs text-ink-500">
+        Duration (yrs)
+        <input type="number" min={0} step="0.5" className="input mt-0.5 w-20 py-1 text-xs" value={dur} disabled={life} onChange={(e) => setDur(e.target.value)} />
+      </label>
+      <label className="mt-4 flex items-center gap-1 text-xs text-ink-500">
+        <input type="checkbox" checked={life} onChange={(e) => setLife(e.target.checked)} /> Lifetime
+      </label>
+      {(freqChanged || costChanged || durChanged) && (
         <button
           className="btn-primary px-2.5 py-1 text-xs"
           onClick={async () => {
             const body: AnyRec = {};
             if (freqChanged) body.frequencyPerYear = Number(freq);
             if (costChanged) body.unitCost = Number(cost);
+            if (durChanged) { body.isLifetime = life; body.durationYears = life ? null : dur === "" ? null : Number(dur); }
             await call(`/api/cases/${caseId}/future-care/${item.id}`, "PATCH", body);
           }}
         >

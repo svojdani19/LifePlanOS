@@ -568,6 +568,7 @@ enum RecommendationOrigin {
   TEMPLATE_BASELINE // baseline add-on templates
   TEMPLATE_SPECIALTY // specialty fallback pack
   PHYSICIAN_ADDED // authored by a reviewing physician
+  PLANNER_ADDED // authored manually by a planner/case team member
   GOLD_IMPORT // imported from a reference/gold case
 }
 
