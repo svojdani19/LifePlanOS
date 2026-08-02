@@ -1,37 +1,36 @@
 import { redirect } from "next/navigation";
+import { cookies } from "next/headers";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { ShieldAlert } from "lucide-react";
-import { requireContext } from "@/lib/tenant";
+import { requireContext, audit } from "@/lib/tenant";
+import { isPlatformAdmin, VIEW_AS_COOKIE } from "@/lib/authz/platform";
 import { prisma } from "@/lib/db";
 import { storageMode } from "@/lib/storage";
 import { formatDate } from "@/lib/utils";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Badge } from "@/components/ui/Badge";
+import { ViewAsPanel } from "@/components/platform/ViewAs";
+import { WORKSPACES } from "@/lib/workspaces";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Platform Admin Workspace (MDIP docs/28). Cross-tenant BY DESIGN: platform
 // operations needs the roster of organizations (names, tiers, counts — no PHI
 // beyond counts), system health, and the demo-environment controls. Access is
-// deliberately NOT firm-role based: only emails listed in PLATFORM_ADMIN_EMAILS
-// (comma-separated) or the seeded demo platform admin may enter; everyone else
-// is redirected to /dashboard.
+// deliberately NOT firm-role based: it requires an explicit, revocable DB
+// grant — an ACTIVE, unexpired PLATFORM_SYSTEM_ADMINISTRATOR role assignment
+// (src/lib/authz/platform.ts). No email allowlists. Everyone else is
+// redirected to /dashboard, and every view of this page is audited.
 // ─────────────────────────────────────────────────────────────────────────────
-
-const DEMO_PLATFORM_ADMIN = "platform.admin@demo.lifeplanos.com";
-
-function isPlatformAdmin(email: string): boolean {
-  const listed = (process.env.PLATFORM_ADMIN_EMAILS ?? "")
-    .split(",")
-    .map((e) => e.trim().toLowerCase())
-    .filter(Boolean);
-  const normalized = email.toLowerCase();
-  return listed.includes(normalized) || normalized === DEMO_PLATFORM_ADMIN;
-}
 
 export default async function PlatformAdminPage() {
   const ctx = await requireContext();
-  if (!isPlatformAdmin(ctx.user.email)) redirect("/dashboard");
+  if (!(await isPlatformAdmin(ctx.user.id))) redirect("/dashboard");
+  // Cross-tenant page view — audited with the real actor identity.
+  await audit(ctx, "platform.admin_view", { type: "platform", id: "platform-admin" });
+
+  const viewAsCookie = cookies().get(VIEW_AS_COOKIE)?.value ?? null;
+  const viewing = viewAsCookie && WORKSPACES[viewAsCookie] ? viewAsCookie : null;
 
   const [firms, latestValidationRun] = await Promise.all([
     prisma.firm.findMany({
@@ -79,6 +78,12 @@ export default async function PlatformAdminPage() {
           { label: "Demo Orgs", value: String(demoFirms.length) },
           { label: "Storage", value: storageMode() },
         ]}
+      />
+
+      {/* ── View as (presentation only) ────────────────────────────────────────── */}
+      <ViewAsPanel
+        workspaces={Object.values(WORKSPACES).map((w) => ({ key: w.key, label: w.label, href: w.href }))}
+        viewing={viewing}
       />
 
       {/* ── Organizations ─────────────────────────────────────────────────────── */}

@@ -12,6 +12,7 @@ import {
   Activity,
   LogOut,
   BriefcaseBusiness,
+  Eye,
 } from "lucide-react";
 import { cn, initials } from "@/lib/utils";
 import { NotificationBell } from "@/components/NotificationBell";
@@ -38,11 +39,15 @@ export function Sidebar({
   firm,
   permissions,
   workspaces,
+  viewAs,
 }: {
   user: { name: string; email: string; roleLabel: string };
   firm: { name: string; tier: string };
   permissions: Permission[];
   workspaces: { href: string; label: string }[];
+  /** Platform-admin "View as" target (presentation only) — shown in addition
+   *  to the user's own workspaces, visually marked as a viewed workspace. */
+  viewAs?: { href: string; label: string } | null;
 }) {
   const pathname = usePathname();
   const router = useRouter();
@@ -81,7 +86,26 @@ export function Sidebar({
             </Link>
           );
         })}
-        {workspaces.length > 0 && <div className="my-2 border-t border-ink-100" />}
+        {viewAs && !workspaces.some((w) => w.href === viewAs.href) && (
+          <Link
+            href={viewAs.href}
+            title={`Viewing ${viewAs.label} workspace (presentation only)`}
+            aria-current={pathname === viewAs.href ? "page" : undefined}
+            className={cn(
+              "focusable relative flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors",
+              pathname === viewAs.href
+                ? "bg-violet-50 font-semibold text-violet-800"
+                : "font-medium text-violet-700 hover:bg-violet-50",
+            )}
+          >
+            <Eye className="h-[18px] w-[18px] shrink-0" aria-hidden />
+            <span className="hidden truncate lg:inline">{viewAs.label}</span>
+            <span className="hidden rounded bg-violet-100 px-1 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-700 lg:inline">
+              viewing
+            </span>
+          </Link>
+        )}
+        {(workspaces.length > 0 || viewAs) && <div className="my-2 border-t border-ink-100" />}
         {items.map((item) => {
           const active = pathname === item.href || pathname.startsWith(item.href + "/");
           return (
