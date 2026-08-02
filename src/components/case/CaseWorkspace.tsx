@@ -250,21 +250,26 @@ export function CaseWorkspace({
 
         {/* Full-width case metrics band */}
         {hasPlan && (
-          <dl className={cn("mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-ink-200 bg-ink-200", hidePricing ? "sm:grid-cols-3" : "sm:grid-cols-5")} aria-label="Case metrics">
+          <dl className="mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-ink-200 bg-ink-200 sm:grid-cols-5" aria-label="Case metrics">
             {[
               { label: "Future Care Items", value: String(data.futureCareItems.length), cls: "" },
+              // Attorney view: totals render as an estimate range (-20% / +10%,
+              // rounded to the nearest $1k) rather than exact figures.
               ...(hidePricing
-                ? []
+                ? [
+                    { label: "Lifetime (Est. Range)", value: moneyRange(totals.totalLifetime), cls: "", sm: true },
+                    { label: "Present Value (Est. Range)", value: moneyRange(totals.totalPresentValue), cls: "text-brand-800", sm: true },
+                  ]
                 : [
                     { label: "Lifetime (Undiscounted)", value: formatMoney(totals.totalLifetime), cls: "" },
                     { label: "Present Value", value: formatMoney(totals.totalPresentValue), cls: "text-brand-800" },
                   ]),
               { label: "Physician Pending", value: String(pendingPhysician), cls: pendingPhysician > 0 ? "text-amber-700" : "" },
               { label: "Open Findings", value: String(data.reviewFindings.length), cls: data.reviewFindings.length > 0 ? "text-amber-700" : "" },
-            ].map((m) => (
+            ].map((m: { label: string; value: string; cls: string; sm?: boolean }) => (
               <div key={m.label} className="bg-white px-4 py-2">
                 <dt className="text-meta">{m.label}</dt>
-                <dd className={cn("num-metric mt-0.5 text-xl", m.cls)}>{m.value}</dd>
+                <dd className={cn("num-metric mt-0.5", m.sm ? "text-sm leading-6" : "text-xl", m.cls)}>{m.value}</dd>
               </div>
             ))}
           </dl>
@@ -1537,6 +1542,13 @@ const HIGHLIGHT_SECTION: Record<string, "reasoning" | "evidence" | "literature">
   literature: "literature",
 };
 const HL = "rounded-md bg-amber-50 p-2 ring-2 ring-amber-400";
+
+// Attorney-facing estimate range: -20% to +10% of the computed value, rounded
+// to the nearest $1,000 so the figures read as an estimate, not a total.
+function moneyRange(v: number): string {
+  const k = (x: number) => Math.round(x / 1000) * 1000;
+  return `${formatMoney(k(v * 0.8))} – ${formatMoney(k(v * 1.1))}`;
+}
 
 function RecommendationDossierView({ dossier, assessment, highlight, condensed = false }: { dossier: RecommendationDossier; assessment?: ReasoningAssessment; highlight?: string | null; condensed?: boolean }) {
   const se = dossier.supportingEvidence;
