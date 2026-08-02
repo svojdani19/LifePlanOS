@@ -55,7 +55,7 @@ library; a real LLM plugs in behind `src/lib/llm` without changing callers.
 
 ## Stack
 
-- **Next.js 14** (App Router) + React 18 + TypeScript
+- **Next.js 15** (App Router) + React 18 + TypeScript
 - **Postgres** via **Prisma** (client generated to `src/generated/prisma`)
 - **Tailwind** design system (deep slate + clinical-teal identity)
 - Node stdlib `scrypt` password hashing, DB-backed sessions (swap-in seam for
@@ -77,14 +77,21 @@ npm run db:seed
 npm run dev
 ```
 
-**Demo login:** `demo@lifeplanos.app` / `password123` (firm admin).
-Other seeded roles share the same password (`planner@`, `physician@`, `para@`).
+**Local seed login:** `demo@lifeplanos.app` / the `DEV_SEED_PASSWORD` value
+(`LifePlanOS-Local-2026!` by default outside production). Other seeded roles
+share that password. The legacy seed refuses to run when `NODE_ENV=production`.
 
 **Guarded demo environment:** set `ENABLE_DEMO_MODE=true`, run
 `npx tsx --env-file=.env scripts/demo-seed.ts`, then open `/demo` for one-click
 sign-in as any of 13 role personas (`@demo.lifeplanos.com`), each landing in a
 role-specific workspace over 8 synthetic cases. Reset with
 `scripts/demo-reset.ts --confirm`. Details in `docs/29_MDIP_DEMO.md`.
+
+The guarded Super Admin persona (`platform.admin@demo.lifeplanos.com`) can
+select any organization from `/platform-admin`, inspect its cases and every
+role workspace in a clearly labeled read-only support context, and return to
+the platform tenant with one click. The target is stored server-side on the
+authenticated session and every switch/access is audited.
 
 ## Architecture notes
 

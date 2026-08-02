@@ -9,7 +9,8 @@ This seed is synthetic and must only be run in a local or disposable development
 3. Run `npm install`, `npm run setup`, and `npm run dev`.
 4. Open `http://localhost:3100/login`.
 
-Every active demo account uses the password `password123`.
+Every active local-seed account uses `DEV_SEED_PASSWORD`
+(`LifePlanOS-Local-2026!` by default). The seed refuses to run in production.
 
 | Workspace | Login | Route |
 | --- | --- | --- |
@@ -58,3 +59,19 @@ Separately from the dev seed above, an env-guarded demo environment ships with t
 > seats and the platform admin's authority comes from a
 > PLATFORM_SYSTEM_ADMINISTRATOR assignment, not an email check. See
 > docs/30_SECURITY_HARDENING.md for the current persona role table.
+
+### Super Admin: inspect every organization
+
+1. Sign in at `/demo` as `platform.admin@demo.lifeplanos.com` (or use
+   `DEMO_PASSWORD`; local default `LifePlanOS-Demo-2026!`).
+2. Open `/platform-admin` and choose **Inspect read-only** beside an
+   organization.
+3. Use **View as** to open any role workspace. The red support banner names
+   the target tenant; all target-tenant mutations and professional acts are
+   denied server-side.
+4. Choose **Exit organization** to clear the server-side session context and
+   return to Platform Administration.
+
+The tenant selection is not trusted from a browser cookie. It is stored on the
+authenticated `Session`, the platform grant is revalidated on every request,
+and actor/target identifiers are included in audit metadata.
