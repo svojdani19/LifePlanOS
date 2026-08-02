@@ -1347,6 +1347,10 @@ model TreatingProvider {
   nameKey           String
   sourceDocumentIds Json? // [{ documentId, filename, pages }] the provider appears in
   addedById         String?
+  // Attorney-supplied context (MDIP): deposition summary and free-form notes,
+  // editable by the retaining attorney from their provider view.
+  depositionSummary String?
+  attorneyNotes     String?
 
   createdAt DateTime @default(now())
 
