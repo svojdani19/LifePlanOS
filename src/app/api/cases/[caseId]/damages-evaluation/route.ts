@@ -3,6 +3,7 @@ import { requireApiContext, requirePermission, requireCase, audit, TenantError }
 import { can } from "@/lib/rbac";
 import { ok, handleError } from "@/lib/api";
 import { evaluateFutureDamages, FDE_LOGIC_VERSION, type FdeInput } from "@/lib/engine/damagesEvaluation";
+import { computeInputsHash, type FdeRowIds } from "@/lib/engine/damagesFingerprint";
 
 // Future Damages Evaluation (MDIP — docs/28). GET returns the latest persisted
 // evaluation with a computed freshness flag; POST snapshots the case's REAL
@@ -10,17 +11,19 @@ import { evaluateFutureDamages, FDE_LOGIC_VERSION, type FdeInput } from "@/lib/e
 // every prior row stale. The engine is deterministic and never invents facts —
 // this route only assembles the snapshot and stores the verdict.
 
-/** Assemble the engine input from persisted case data only. */
-async function buildSnapshot(caseId: string): Promise<FdeInput> {
+/** Assemble the engine input from persisted case data only, plus the identity
+ *  of every row behind it (for the inputs fingerprint). */
+async function buildSnapshot(caseId: string): Promise<{ input: FdeInput; rowIds: FdeRowIds }> {
   const [conditions, items, findings, documentsCount, chronologyCount, vocationalEntryCount, econAssumptionCount, interviewCount] =
     await Promise.all([
       prisma.condition.findMany({
         where: { caseId },
-        select: { name: true, relatedness: true, evidenceSources: true },
+        select: { id: true, name: true, relatedness: true, evidenceSources: true },
       }),
       prisma.futureCareItem.findMany({
         where: { caseId, supersededAt: null },
         select: {
+          id: true,
           service: true,
           category: true,
           probability: true,
@@ -34,7 +37,7 @@ async function buildSnapshot(caseId: string): Promise<FdeInput> {
       }),
       prisma.validationFinding.findMany({
         where: { caseId },
-        select: { result: true, issue: true, severity: true, exportBlocking: true },
+        select: { id: true, result: true, issue: true, severity: true, exportBlocking: true },
       }),
       prisma.document.count({ where: { caseId } }),
       prisma.chronologyEvent.count({ where: { caseId } }),
@@ -49,7 +52,7 @@ async function buildSnapshot(caseId: string): Promise<FdeInput> {
     .filter((f) => /missing/i.test(`${f.result} ${f.issue}`) && /record|document|report|page/i.test(`${f.result} ${f.issue}`))
     .map((f) => f.issue);
 
-  return {
+  const input: FdeInput = {
     conditions: conditions.map((c) => ({
       name: c.name,
       relatedness: c.relatedness,
@@ -74,6 +77,12 @@ async function buildSnapshot(caseId: string): Promise<FdeInput> {
     interviews: interviewCount > 0,
     missingRecordSignals,
   };
+  const rowIds: FdeRowIds = {
+    conditionIds: conditions.map((c) => c.id),
+    itemIds: items.map((i) => i.id),
+    findingIds: findings.map((f) => f.id),
+  };
+  return { input, rowIds };
 }
 
 export async function GET(_req: Request, { params }: { params: { caseId: string } }) {
@@ -85,10 +94,30 @@ export async function GET(_req: Request, { params }: { params: { caseId: string 
       where: { caseId: params.caseId, firmId: ctx.firm.id },
       orderBy: { evaluatedAt: "desc" },
     });
-    // Freshness is COMPUTED against the case, not just the stored flag: any
-    // case edit after the evaluation makes the stored verdict stale.
-    const isStale = evaluation ? evaluation.isStale || evaluation.evaluatedAt < c.updatedAt : false;
-    return ok({ evaluation, isStale });
+    // Freshness is COMPUTED, not just the stored flag. Fingerprinted rows
+    // compare the stored inputs hash against the case's CURRENT inputs — this
+    // catches child-table changes (new care items, findings, …) that never
+    // bump Case.updatedAt, and ignores cosmetic case edits that do. Legacy
+    // rows without a hash fall back to the timestamp comparison.
+    let isStale = false;
+    if (evaluation) {
+      if (evaluation.isStale) {
+        isStale = true;
+      } else if (evaluation.inputsHash) {
+        const { input, rowIds } = await buildSnapshot(params.caseId);
+        isStale = evaluation.inputsHash !== computeInputsHash(input, rowIds);
+      } else {
+        isStale = evaluation.evaluatedAt < c.updatedAt;
+      }
+    }
+    // Resolve the evaluator's display name (id alone is useless in the UI).
+    const evaluatedBy = evaluation
+      ? await prisma.user.findFirst({
+          where: { id: evaluation.evaluatedById, firmId: ctx.firm.id },
+          select: { id: true, name: true },
+        })
+      : null;
+    return ok({ evaluation, isStale, evaluatedByName: evaluatedBy?.name ?? null });
   } catch (err) {
     return handleError(err);
   }
@@ -106,15 +135,19 @@ export async function POST(_req: Request, { params }: { params: { caseId: string
     }
     await requireCase(ctx, params.caseId);
 
-    const snapshot = await buildSnapshot(params.caseId);
-    const result = evaluateFutureDamages(snapshot);
+    const { input, rowIds } = await buildSnapshot(params.caseId);
+    const result = evaluateFutureDamages(input);
+    const inputsHash = computeInputsHash(input, rowIds);
 
     const row = await prisma.futureDamagesEvaluation.create({
       data: {
         firmId: ctx.firm.id,
         caseId: params.caseId,
+        // caseRevision stays null: the Case model carries no revision counter
+        // today. If one is ever added, populate it here.
         logicVersion: FDE_LOGIC_VERSION,
         evaluatedById: ctx.user.id,
+        inputsHash,
         overallOutcome: result.overallOutcome,
         recommendedPrimaryProduct: result.recommendedPrimaryProduct,
         recommendedAdditionalProducts: result.recommendedAdditionalProducts,
