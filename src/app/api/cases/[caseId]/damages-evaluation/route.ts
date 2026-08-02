@@ -37,7 +37,7 @@ async function buildSnapshot(caseId: string): Promise<{ input: FdeInput; rowIds:
         },
       }),
       prisma.validationFinding.findMany({
-        where: { caseId },
+        where: { caseId, status: "OPEN" },
         select: { id: true, result: true, issue: true, severity: true, exportBlocking: true },
       }),
       prisma.document.findMany({ where: { caseId } }),

@@ -200,11 +200,34 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
  */
 export async function persistCaseValidation(caseId: string, firmId: string): Promise<CaseValidation> {
   const v = await validateCase(caseId);
+  // User dispositions (resolved-as-is / ignored) survive re-runs: a regenerated
+  // finding with the same (service, result) inherits the prior disposition. If
+  // the data changed enough to alter the finding text/key, it reopens as OPEN.
+  const prior = await prisma.validationFinding.findMany({
+    where: { caseId, status: { not: "OPEN" } },
+    select: { service: true, result: true, status: true, resolvedById: true, resolvedAt: true },
+  });
+  const dispositionByKey = new Map(prior.map((f) => [`${f.service}::${f.result}`, f]));
   await prisma.$transaction([
     prisma.validationFinding.deleteMany({ where: { caseId } }),
     ...(v.findings.length
-      ? [prisma.validationFinding.createMany({ data: v.findings.map((f) => ({ ...f, caseId, firmId })) })]
+      ? [prisma.validationFinding.createMany({
+          data: v.findings.map((f) => {
+            const carried = dispositionByKey.get(`${f.service}::${f.result}`);
+            return {
+              ...f,
+              caseId,
+              firmId,
+              ...(carried ? { status: carried.status, resolvedById: carried.resolvedById, resolvedAt: carried.resolvedAt } : {}),
+            };
+          }),
+        })]
       : []),
   ]);
   return v;
+}
+
+/** Count of findings that still gate a final export: blocking AND undispositioned. */
+export async function openBlockingCount(caseId: string): Promise<number> {
+  return prisma.validationFinding.count({ where: { caseId, exportBlocking: true, status: "OPEN" } });
 }
