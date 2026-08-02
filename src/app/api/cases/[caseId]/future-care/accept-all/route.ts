@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit } from "@/lib/tenant";
+import { enforceReviewCredential } from "@/lib/authz/credentialGate";
 import { generateReviews } from "@/lib/engine/generate";
 import { lifecycleFor } from "@/lib/engine/lifecycle";
 import { ok, handleError } from "@/lib/api";
@@ -11,6 +12,9 @@ export async function POST(_req: Request, { params }: { params: { caseId: string
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "physician.review");
+    // Bulk review decision: same credential boundary as a single decision —
+    // enforced for enterprise/demo firms, logged as credential.gap otherwise.
+    await enforceReviewCredential(ctx, "PHYSICIAN", { action: "futurecare.accept_all", caseId: params.caseId });
     await requireCase(ctx, params.caseId);
 
     // Snapshot the pending set first so the batch writes a per-item ledger

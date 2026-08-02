@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import type { Prisma } from "@/generated/prisma";
 import { requireApiContext, requirePermission, requireCase, audit, type TenantContext } from "@/lib/tenant";
 import { ok, handleError } from "@/lib/api";
+import { enforceReviewCredential } from "@/lib/authz/credentialGate";
 import {
   computeEconomicLoss,
   scenarioCompare,
@@ -122,7 +123,14 @@ export async function POST(req: Request, { params }: { params: { caseId: string 
     await requireCase(ctx, params.caseId);
 
     const url = new URL(req.url);
-    if (url.searchParams.get("compute") === "1") return compute(ctx, params.caseId, await req.json());
+    const isCompute = url.searchParams.get("compute") === "1";
+    // Economist authorship (assumptions/scenarios): review-class credential
+    // boundary — enforced for enterprise/demo firms, credential.gap otherwise.
+    await enforceReviewCredential(ctx, "ECONOMIST", {
+      action: isCompute ? "economics.compute" : "economics.assumption",
+      caseId: params.caseId,
+    });
+    if (isCompute) return compute(ctx, params.caseId, await req.json());
 
     const input = assumptionSchema.parse(await req.json());
     const prior = await prisma.economicAssumption.findFirst({

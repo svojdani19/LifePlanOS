@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit } from "@/lib/tenant";
+import { assertVerifiedCredential } from "@/lib/authz/credentialGate";
 import { signAttestation, refreshCaseAttestations } from "@/lib/engine/attestationService";
 import { verifyAttestation, type AttestationScopeEntry, type AttestableItem } from "@/lib/engine/attestation";
 import { ok, handleError } from "@/lib/api";
@@ -49,6 +50,9 @@ export async function POST(req: Request, { params }: { params: { caseId: string 
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "physician.review");
+    // Attestation-class write: the signer must PERSONALLY hold a verified
+    // physician credential — a seat/role alone never suffices (docs/26).
+    await assertVerifiedCredential(ctx, "PHYSICIAN");
     await requireCase(ctx, params.caseId);
     const input = postSchema.parse(await req.json());
 
