@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { Eye, FileDown } from "lucide-react";
 import { prisma } from "@/lib/db";
 import { requireContext } from "@/lib/tenant";
+import { isPlatformAdminAssignment } from "@/lib/authz/caseScope";
 import { can } from "@/lib/rbac";
 import { formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/Badge";
@@ -48,8 +49,12 @@ export default async function ObserverPage() {
     select: { caseId: true, builtInRole: true, responsibility: true },
   });
 
-  // Server-side workspace guard (deny → dashboard).
-  if (ctx.user.role !== "ATTORNEY_REVIEWER" && assignments.length === 0) redirect("/dashboard");
+  // Server-side workspace guard (deny → dashboard). A platform-admin
+  // assignment may VIEW the page (read-only; it renders only their own —
+  // typically empty — share list, never firm-wide data).
+  if (ctx.user.role !== "ATTORNEY_REVIEWER" && assignments.length === 0 && !(await isPlatformAdminAssignment(ctx.user.id))) {
+    redirect("/dashboard");
+  }
 
   // Visibility is assignment-scoped: ONLY cases explicitly shared via a
   // caseId-scoped assignment. Org-wide observer assignments do not broaden

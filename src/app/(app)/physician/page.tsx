@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { requireContext } from "@/lib/tenant";
 import { prisma } from "@/lib/db";
 import { formatDate } from "@/lib/utils";
+import { accessibleCaseIds, rolesWithPermission, templatesWithPermission } from "@/lib/authz/caseScope";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { PhysicianWorkspace } from "@/components/review/PhysicianWorkspace";
@@ -15,8 +16,11 @@ import type { ConfidenceVector, EvidenceSufficiency } from "@/lib/engine/clinica
 // the signed-in reviewer's own attestation history — report-level attestations
 // (ReportApproval, kind ATTESTATION) and item-scope attestations (Attestation),
 // each with its live status so a stale or invalidated signature is visible at
-// a glance. Guard: legacy PHYSICIAN_REVIEWER/ADMIN or an ACTIVE
-// PHYSICIAN_REVIEWER assignment; anyone else is redirected to /dashboard.
+// a glance. Guard (case-scoped, assignment-based — docs/28 MDIP hardening):
+// legacy PHYSICIAN_REVIEWER/ADMIN see the firm-wide queue; case-scoped
+// PHYSICIAN_REVIEWER assignment holders see ONLY their granted/engaged cases;
+// platform-admin assignments view read-only (no disposition controls).
+// Anyone else is redirected to /dashboard.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const APPROVAL_TONE: Record<string, BadgeTone> = {
@@ -27,17 +31,24 @@ const APPROVAL_TONE: Record<string, BadgeTone> = {
 
 export default async function PhysicianWorkspacePage() {
   const ctx = await requireContext();
-  const legacyAllowed = ctx.user.role === "PHYSICIAN_REVIEWER" || ctx.user.role === "ADMIN";
-  if (!legacyAllowed) {
-    const assignment = await prisma.userRoleAssignment.count({
-      where: { userId: ctx.user.id, firmId: ctx.firm.id, status: "ACTIVE", builtInRole: "PHYSICIAN_REVIEWER" },
-    });
-    if (assignment === 0) redirect("/dashboard");
-  }
+  const access = await accessibleCaseIds(ctx, {
+    firmWideRoles: rolesWithPermission("physician.review"),
+    assignmentTemplates: templatesWithPermission("physician.review"),
+    orgWideAssignmentGrantsAll: true,
+    engagementSlots: ["assignedPhysicianId"],
+  });
+  if (!access.allowed) redirect("/dashboard");
+  // null = firm-wide; otherwise the explicit accessible case-id list.
+  const scoped = access.cases === "all" ? null : access.cases;
 
-  // ── Cross-case review queue — mirrors /review exactly ──────────────────────
+  // ── Cross-case review queue — mirrors /review exactly (scoped to access) ───
   const items = await prisma.futureCareItem.findMany({
-    where: { supersededAt: null, physicianStatus: "PENDING", case: { firmId: ctx.firm.id, status: { notIn: ["CLOSED", "ARCHIVED"] } } },
+    where: {
+      supersededAt: null,
+      physicianStatus: "PENDING",
+      ...(scoped ? { caseId: { in: scoped } } : {}),
+      case: { firmId: ctx.firm.id, status: { notIn: ["CLOSED", "ARCHIVED"] } },
+    },
     include: { case: { select: { id: true, clientName: true, caseNumber: true } } },
     orderBy: { presentValue: "desc" },
   });
@@ -120,7 +131,32 @@ export default async function PhysicianWorkspacePage() {
         title="Physician Workspace"
         subtitle={`${queue.length} recommendation${queue.length === 1 ? "" : "s"} awaiting review across ${caseIds.length} case${caseIds.length === 1 ? "" : "s"} — weakest first`}
       />
-      <PhysicianWorkspace queue={orderReviewQueue(queue)} />
+      {access.platformAdminReadOnly ? (
+        // Platform-admin view is strictly read-only: no disposition controls.
+        <div className="card mt-4 overflow-hidden">
+          <div className="border-b border-ink-200 bg-ink-50 px-4 py-2.5 text-xs font-medium uppercase tracking-wide text-ink-500">
+            Review Queue (read-only platform view)
+          </div>
+          {queue.length === 0 ? (
+            <div className="p-4 text-sm text-ink-500">No recommendations are awaiting physician review.</div>
+          ) : (
+            <ul className="divide-y divide-ink-100">
+              {orderReviewQueue(queue).map((q) => (
+                <li key={q.itemId} className="flex items-center justify-between gap-2 px-4 py-2.5 text-sm">
+                  <span className="min-w-0 truncate">
+                    <span className="font-medium text-ink-800">{q.clientName}</span>
+                    <span className="ml-2 font-mono text-xs text-ink-400">{q.caseNumber}</span>
+                    <span className="ml-2 text-xs text-ink-500">{q.service}</span>
+                  </span>
+                  <span className="shrink-0 text-xs text-ink-500">PV ${Math.round(q.presentValue).toLocaleString()}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ) : (
+        <PhysicianWorkspace queue={orderReviewQueue(queue)} />
+      )}
 
       {/* ── My attestations — every signature this reviewer has on record ───── */}
       <h2 className="text-label mt-8">My Attestations</h2>

@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { requireContext } from "@/lib/tenant";
 import { prisma } from "@/lib/db";
 import { formatDate } from "@/lib/utils";
+import { accessibleCaseIds, rolesWithPermission, templatesWithPermission } from "@/lib/authz/caseScope";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 
@@ -11,8 +12,11 @@ import { Badge, type BadgeTone } from "@/components/ui/Badge";
 // case grouped by workflow stage with, per case, the physician-status mix of
 // its live future-care items, blocking integrity findings, the latest report
 // export, and any stale (revision-requested) expert approvals. Everything is
-// a real query; nothing is invented. Guard: legacy PLANNER/ADMIN or an ACTIVE
-// LIFE_CARE_PLANNER assignment; anyone else is redirected to /dashboard.
+// a real query; nothing is invented. Guard (case-scoped, assignment-based —
+// docs/28 MDIP hardening): legacy PLANNER/ADMIN see the firm-wide queue;
+// case-scoped LIFE_CARE_PLANNER assignment holders see ONLY their granted/
+// engaged cases; platform-admin assignments view read-only. Anyone else is
+// redirected to /dashboard.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const STAGE_ORDER = ["INTAKE", "RECORDS", "CHRONOLOGY", "CAUSATION", "FUTURE_CARE", "PRICING", "DRAFTING", "PHYSICIAN_REVIEW", "FINAL"] as const;
@@ -38,17 +42,19 @@ const LIFECYCLE_TONE: Record<string, BadgeTone> = {
 
 export default async function PlannerWorkspacePage() {
   const ctx = await requireContext();
-  const legacyAllowed = ctx.user.role === "PLANNER" || ctx.user.role === "ADMIN";
-  if (!legacyAllowed) {
-    const assignment = await prisma.userRoleAssignment.count({
-      where: { userId: ctx.user.id, firmId: ctx.firm.id, status: "ACTIVE", builtInRole: "LIFE_CARE_PLANNER" },
-    });
-    if (assignment === 0) redirect("/dashboard");
-  }
+  const access = await accessibleCaseIds(ctx, {
+    firmWideRoles: rolesWithPermission("futurecare.edit"),
+    assignmentTemplates: templatesWithPermission("futurecare.edit"),
+    orgWideAssignmentGrantsAll: true,
+    engagementSlots: ["assignedPlannerId"],
+  });
+  if (!access.allowed) redirect("/dashboard");
+  // null = firm-wide; otherwise the explicit accessible case-id list.
+  const scoped = access.cases === "all" ? null : access.cases;
   const firmId = ctx.firm.id;
 
   const cases = await prisma.case.findMany({
-    where: { firmId, status: { notIn: ["CLOSED", "ARCHIVED"] } },
+    where: { firmId, ...(scoped ? { id: { in: scoped } } : {}), status: { notIn: ["CLOSED", "ARCHIVED"] } },
     orderBy: { updatedAt: "desc" },
     select: { id: true, clientName: true, caseNumber: true, status: true, updatedAt: true },
   });

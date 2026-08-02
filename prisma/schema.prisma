@@ -1686,6 +1686,11 @@ model FutureDamagesEvaluation {
   nextActions                   Json
   sourceFactIds                 Json
   isStale                       Boolean  @default(false)
+  // sha256 fingerprint of the exact engine input snapshot (row ids + payload).
+  // GET recomputes the current fingerprint to report staleness truthfully —
+  // cosmetic case edits don't flag stale, child-table changes do. Null on rows
+  // evaluated before fingerprinting existed (they fall back to timestamps).
+  inputsHash                    String?
 
   @@index([caseId, evaluatedAt])
   @@index([firmId])

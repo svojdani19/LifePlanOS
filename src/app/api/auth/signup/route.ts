@@ -8,7 +8,15 @@ import { prisma } from "@/lib/db";
 const schema = z.object({
   firmName: z.string().min(2),
   adminName: z.string().min(2),
-  email: z.string().email(),
+  email: z
+    .string()
+    .email()
+    // The demo persona domain (including the seeded platform Super Admin) is
+    // reserved: those identities exist only via demo seeding and must never be
+    // claimable through public registration.
+    .refine((e) => !e.toLowerCase().endsWith("@demo.lifeplanos.com"), {
+      message: "This email domain is reserved.",
+    }),
   password: z.string().min(8, "Password must be at least 8 characters"),
   tier: z.enum(["SOLO", "SMALL_FIRM", "ENTERPRISE"]).optional(),
   state: z.string().optional(),

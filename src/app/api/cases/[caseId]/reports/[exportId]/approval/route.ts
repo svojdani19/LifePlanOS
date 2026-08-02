@@ -2,6 +2,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit } from "@/lib/tenant";
 import { getReport } from "@/lib/reports/registry";
+import { assertVerifiedCredential, enforceReviewCredential, credentialCategoryForExpert } from "@/lib/authz/credentialGate";
 import { approvalStale } from "@/lib/reports/persist";
 import { ok, handleError } from "@/lib/api";
 
@@ -45,6 +46,17 @@ export async function POST(req: Request, { params }: Params) {
       return ok({ error: `This report requires the ${expertRole} expert workflow, which is not yet available.` }, 409);
     }
     requirePermission(ctx, "physician.review");
+
+    // Credential boundary (docs/26): the signer must PERSONALLY hold the
+    // verified credential matching the report's expert role. ATTESTATION is
+    // attestation-class and ALWAYS strictly gated; APPROVAL is a review-class
+    // signature — enforced for enterprise/demo firms, logged otherwise.
+    const requiredCredential = credentialCategoryForExpert(expertRole) ?? "PHYSICIAN";
+    if (input.kind === "ATTESTATION") {
+      await assertVerifiedCredential(ctx, requiredCredential);
+    } else {
+      await enforceReviewCredential(ctx, requiredCredential, { action: "report.approve", caseId: params.caseId });
+    }
 
     if (record.draft) return ok({ error: "Draft exports cannot be approved or attested — only final exports carry a signature." }, 409);
     if (!record.contentSha256) {

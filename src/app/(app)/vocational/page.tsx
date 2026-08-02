@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { requireContext } from "@/lib/tenant";
 import { prisma } from "@/lib/db";
 import { can } from "@/lib/rbac";
+import { accessibleCaseIds, rolesWithPermission, templatesWithPermission } from "@/lib/authz/caseScope";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import VocationalWorkspace from "@/components/case/VocationalWorkspace";
@@ -13,8 +14,13 @@ import { vocationalReadiness, type VocEntry } from "@/lib/reports/vocational";
 // vocational service line: a queue of every case carrying vocational intake
 // (plus cases where an engagement assigns this expert), each with its live
 // readiness ladder, and the existing per-case VocationalWorkspace mounted for
-// the selected case. Guard: an ACTIVE VOCATIONAL_EXPERT assignment, or legacy
-// PHYSICIAN_REVIEWER/ADMIN (experts occupy reviewer seats for the pilot).
+// the selected case. Guard (case-scoped, assignment-based — docs/28 MDIP
+// hardening): an ACTIVE VOCATIONAL_EXPERT (or other vocational.view-holding
+// template) assignment — case-scoped holders see ONLY their granted/engaged
+// cases — or a legacy role whose template holds vocational.view (ADMIN,
+// PLANNER). The legacy PHYSICIAN_REVIEWER fallback is gone: a reviewer seat
+// confers no vocational authority. Platform-admin assignments may view
+// read-only.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const READINESS_TONE: Record<string, BadgeTone> = {
@@ -27,19 +33,21 @@ const READINESS_TONE: Record<string, BadgeTone> = {
 
 export default async function VocationalWorkspacePage({ searchParams }: { searchParams?: { caseId?: string } }) {
   const ctx = await requireContext();
-  const legacyAllowed = ctx.user.role === "PHYSICIAN_REVIEWER" || ctx.user.role === "ADMIN";
-  if (!legacyAllowed) {
-    const assignment = await prisma.userRoleAssignment.count({
-      where: { userId: ctx.user.id, firmId: ctx.firm.id, status: "ACTIVE", builtInRole: "VOCATIONAL_EXPERT" },
-    });
-    if (assignment === 0) redirect("/dashboard");
-  }
+  const access = await accessibleCaseIds(ctx, {
+    firmWideRoles: rolesWithPermission("vocational.view"),
+    assignmentTemplates: templatesWithPermission("vocational.view"),
+    orgWideAssignmentGrantsAll: true,
+    engagementSlots: ["assignedVocationalExpertId"],
+  });
+  if (!access.allowed) redirect("/dashboard");
+  // null = firm-wide; otherwise the explicit accessible case-id list.
+  const scoped = access.cases === "all" ? null : access.cases;
 
   // ── Queue: cases with vocational intake, plus engagement-assigned cases ────
   const [entryGroups, engagements] = await Promise.all([
     prisma.vocationalEntry.groupBy({
       by: ["caseId"],
-      where: { firmId: ctx.firm.id, supersededById: null },
+      where: { firmId: ctx.firm.id, supersededById: null, ...(scoped ? { caseId: { in: scoped } } : {}) },
       _count: true,
     }),
     prisma.caseEngagement.findMany({
@@ -71,9 +79,9 @@ export default async function VocationalWorkspacePage({ searchParams }: { search
           select: { caseId: true },
         })
       : Promise.resolve([]),
-    // Fallback picker: any open firm case can start a vocational intake.
+    // Picker: open cases within the caller's access scope.
     prisma.case.findMany({
-      where: { firmId: ctx.firm.id, status: { notIn: ["CLOSED", "ARCHIVED"] } },
+      where: { firmId: ctx.firm.id, status: { notIn: ["CLOSED", "ARCHIVED"] }, ...(scoped ? { id: { in: scoped } } : {}) },
       orderBy: { updatedAt: "desc" },
       select: { id: true, clientName: true, caseNumber: true },
     }),
@@ -101,8 +109,10 @@ export default async function VocationalWorkspacePage({ searchParams }: { search
 
   // Mirror the API's permission model exactly: intake needs futurecare.edit or
   // physician.review; VERIFY and approval are reviewer acts (physician.review).
-  const canEdit = can(ctx.user.role, "futurecare.edit") || can(ctx.user.role, "physician.review");
-  const canReview = can(ctx.user.role, "physician.review");
+  // A platform-admin view is strictly read-only — no mutation surfaces render.
+  const readOnly = access.platformAdminReadOnly;
+  const canEdit = !readOnly && (can(ctx.user.role, "futurecare.edit") || can(ctx.user.role, "physician.review"));
+  const canReview = !readOnly && can(ctx.user.role, "physician.review");
 
   return (
     <div>

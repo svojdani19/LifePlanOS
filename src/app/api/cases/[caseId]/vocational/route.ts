@@ -2,6 +2,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit, TenantError, type TenantContext } from "@/lib/tenant";
 import { can } from "@/lib/rbac";
+import { assertVerifiedCredential } from "@/lib/authz/credentialGate";
 import { ok, handleError } from "@/lib/api";
 import { VOC_KINDS, vocationalReadiness, type VocEntry } from "@/lib/reports/vocational";
 
@@ -80,7 +81,12 @@ export async function POST(req: Request, { params }: { params: { caseId: string 
     await requireCase(ctx, params.caseId);
 
     const input = entrySchema.parse(await req.json());
-    if (input.verification === "VERIFIED") requireVerifyPermission(ctx);
+    // Marking VERIFIED is the vocational expert's sign-off — attestation-class,
+    // ALWAYS gated on a verified VOCATIONAL credential (docs/26).
+    if (input.verification === "VERIFIED") {
+      requireVerifyPermission(ctx);
+      await assertVerifiedCredential(ctx, "VOCATIONAL");
+    }
 
     const entry = await prisma.vocationalEntry.create({
       data: {
@@ -123,7 +129,11 @@ export async function PATCH(req: Request, { params }: { params: { caseId: string
 
     const input = patchSchema.parse(await req.json());
     const verification = input.verification ?? existing.verification;
-    if (verification === "VERIFIED" && existing.verification !== "VERIFIED") requireVerifyPermission(ctx);
+    // Newly marking VERIFIED = vocational sign-off — always credential-gated.
+    if (verification === "VERIFIED" && existing.verification !== "VERIFIED") {
+      requireVerifyPermission(ctx);
+      await assertVerifiedCredential(ctx, "VOCATIONAL");
+    }
 
     const replacement = await prisma.vocationalEntry.create({
       data: {

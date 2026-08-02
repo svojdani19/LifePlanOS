@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { FolderKanban, Inbox, FileText, CalendarClock } from "lucide-react";
 import { prisma } from "@/lib/db";
 import { requireContext } from "@/lib/tenant";
+import { accessibleCaseIds } from "@/lib/authz/caseScope";
 import { formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/Badge";
 import { WORKSPACES } from "@/lib/workspaces";
@@ -11,8 +12,10 @@ import { WORKSPACES } from "@/lib/workspaces";
 // Case Manager workspace — moves matters through intake, record collection,
 // assignments, and deadlines. Coordination surface only: every control is a
 // link into existing case tools; no clinical approval controls exist here.
-// Access: legacy ADMIN / PLANNER / PARALEGAL, or an ACTIVE CASE_MANAGER
-// role assignment (enterprise authz path).
+// Access (case-scoped, assignment-based — docs/28 MDIP hardening): legacy
+// ADMIN / PLANNER / PARALEGAL see the firm-wide surface; case-scoped
+// CASE_MANAGER assignment holders see ONLY their granted cases; platform-admin
+// assignments view read-only.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const STAGE_LABELS: Record<string, string> = {
@@ -35,18 +38,21 @@ export default async function CaseManagerPage() {
   const ctx = await requireContext();
   const firmId = ctx.firm.id;
 
-  // Server-side workspace guard (deny → dashboard).
-  if (!(["ADMIN", "PLANNER", "PARALEGAL"] as string[]).includes(ctx.user.role)) {
-    const assignment = await prisma.userRoleAssignment.findFirst({
-      where: { userId: ctx.user.id, firmId, status: "ACTIVE", builtInRole: "CASE_MANAGER" },
-      select: { id: true },
-    });
-    if (!assignment) redirect("/dashboard");
-  }
+  // Server-side workspace guard (deny → dashboard), case-scoped when granted.
+  const access = await accessibleCaseIds(ctx, {
+    firmWideRoles: ["ADMIN", "PLANNER", "PARALEGAL"],
+    assignmentTemplates: ["CASE_MANAGER"],
+    orgWideAssignmentGrantsAll: true,
+    engagementSlots: [],
+  });
+  if (!access.allowed) redirect("/dashboard");
+  // null = firm-wide; otherwise the explicit accessible case-id list.
+  const scoped = access.cases === "all" ? null : access.cases;
+  const caseFilter = scoped ? { caseId: { in: scoped } } : {};
 
   const [activeCases, docsByCase, byStage] = await Promise.all([
     prisma.case.findMany({
-      where: { firmId, status: { notIn: ["CLOSED", "ARCHIVED"] } },
+      where: { firmId, ...(scoped ? { id: { in: scoped } } : {}), status: { notIn: ["CLOSED", "ARCHIVED"] } },
       orderBy: { updatedAt: "desc" },
       select: {
         id: true,
@@ -63,11 +69,11 @@ export default async function CaseManagerPage() {
     }),
     prisma.document.groupBy({
       by: ["caseId"],
-      where: { firmId },
+      where: { firmId, ...caseFilter },
       _count: { _all: true },
       _max: { createdAt: true },
     }),
-    prisma.case.groupBy({ by: ["status"], where: { firmId }, _count: true }),
+    prisma.case.groupBy({ by: ["status"], where: { firmId, ...(scoped ? { id: { in: scoped } } : {}) }, _count: true }),
   ]);
 
   // Deadlines derive from engagements' estimated completion dates — there is no
@@ -84,6 +90,7 @@ export default async function CaseManagerPage() {
     deadlines = await prisma.caseEngagement.findMany({
       where: {
         firmId,
+        ...caseFilter,
         estimatedCompletionDate: { not: null },
         status: { notIn: ["COMPLETED", "CANCELLED"] },
       },

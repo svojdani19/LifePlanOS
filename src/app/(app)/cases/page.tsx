@@ -1,4 +1,5 @@
 import { requireContext, activeCaseCount } from "@/lib/tenant";
+import { externalOnlyCaseIds } from "@/lib/authz/caseScope";
 import { prisma } from "@/lib/db";
 import { effectiveLimits } from "@/lib/subscription/plans";
 import { PageHeader } from "@/components/ui/PageHeader";
@@ -8,9 +9,12 @@ import { can } from "@/lib/rbac";
 
 export default async function CasesPage() {
   const ctx = await requireContext();
+  // Guests (case-scoped external-class assignments only) see ONLY the cases
+  // explicitly shared with them — never the firm-wide list (docs/28 MDIP).
+  const externalOnly = await externalOnlyCaseIds(ctx);
   const [cases, active] = await Promise.all([
     prisma.case.findMany({
-      where: { firmId: ctx.firm.id },
+      where: { firmId: ctx.firm.id, ...(externalOnly ? { id: { in: externalOnly } } : {}) },
       orderBy: { updatedAt: "desc" },
       select: {
         id: true, caseNumber: true, clientName: true, caseType: true, side: true, status: true, updatedAt: true,
@@ -39,7 +43,7 @@ export default async function CasesPage() {
       <PageHeader
         title="Cases"
         subtitle={`${active} active${limits.caseLimit === null ? "" : ` of ${limits.caseLimit}`} · ${cases.length} total`}
-        actions={can(ctx.user.role, "case.create") ? <NewCaseForm /> : undefined}
+        actions={can(ctx.user.role, "case.create") && externalOnly === null ? <NewCaseForm /> : undefined}
       />
 
       {atLimit && (

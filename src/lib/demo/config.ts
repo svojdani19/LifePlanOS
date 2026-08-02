@@ -59,19 +59,33 @@ export interface DemoPersona {
 
 /**
  * The 13 demo personas (MDIP brief). Emails live under demo.lifeplanos.com and
- * names are obviously fictional. Legacy-role mapping follows docs/28: template
- * assignments carry the real authz semantics; preferredWorkspace routes the
- * persona to their workspace after one-click login.
+ * names are obviously fictional. Template assignments carry the REAL authz
+ * semantics (each persona holds ONLY its intended template(s)); the legacy
+ * User.role is deliberately the narrowest enum value that keeps the persona's
+ * workflow functional WITHOUT granting specialist authority:
+ *
+ * - platform.admin: authority comes exclusively from the ACTIVE org-scoped
+ *   PLATFORM_SYSTEM_ADMINISTRATOR assignment (src/lib/authz/platform.ts).
+ *   Legacy role is BILLING_USER — the only legacy role with zero case/PHI
+ *   permissions — so workspace guards evaluate the platform-admin path, never
+ *   a legacy ADMIN bypass.
+ * - vocational/economist: PLANNER (futurecare.edit powers their intake/compute
+ *   APIs) — NOT PHYSICIAN_REVIEWER; attestation stays credential-gated with
+ *   the physicians.
+ * - qa: PARALEGAL-level (validation APIs need only case.view).
+ * - observer: ATTORNEY_REVIEWER (genuinely attorney-facing, read + released
+ *   downloads only).
+ * - medical.director: the multi-role PHYSICIAN_REVIEWER seat stays.
  */
 export const DEMO_PERSONAS: DemoPersona[] = [
   {
     email: "platform.admin@demo.lifeplanos.com",
     name: "Robin Demo-Vance",
-    role: "ADMIN",
+    role: "BILLING_USER",
     templateAssignments: ["PLATFORM_SYSTEM_ADMINISTRATOR"],
     preferredWorkspace: "PLATFORM_SYSTEM_ADMINISTRATOR",
     description:
-      "Platform administrator: operates tenant configuration, integrations, and platform audit visibility — never assumes a clinical identity.",
+      "Platform administrator: operates tenant configuration, integrations, and platform audit visibility — never assumes a clinical identity. Authority comes from an explicit platform role assignment, not an email list.",
   },
   {
     email: "firm.admin@demo.lifeplanos.com",
@@ -130,7 +144,7 @@ export const DEMO_PERSONAS: DemoPersona[] = [
   {
     email: "vocational@demo.lifeplanos.com",
     name: "Riley Demo-Brooks, CRC",
-    role: "PHYSICIAN_REVIEWER",
+    role: "PLANNER",
     templateAssignments: ["VOCATIONAL_EXPERT"],
     preferredWorkspace: "VOCATIONAL_EXPERT",
     description:
@@ -139,7 +153,7 @@ export const DEMO_PERSONAS: DemoPersona[] = [
   {
     email: "economist@demo.lifeplanos.com",
     name: "Cameron Demo-Price, PhD",
-    role: "PHYSICIAN_REVIEWER",
+    role: "PLANNER",
     templateAssignments: ["FORENSIC_ECONOMIST"],
     preferredWorkspace: "FORENSIC_ECONOMIST",
     description:
@@ -148,7 +162,7 @@ export const DEMO_PERSONAS: DemoPersona[] = [
   {
     email: "qa@demo.lifeplanos.com",
     name: "Drew Demo-Winslow, RN",
-    role: "PHYSICIAN_REVIEWER",
+    role: "PARALEGAL",
     templateAssignments: ["QUALITY_ASSURANCE_REVIEWER"],
     preferredWorkspace: "QUALITY_ASSURANCE_REVIEWER",
     description:

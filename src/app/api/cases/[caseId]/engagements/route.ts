@@ -5,12 +5,14 @@ import type { Permission } from "@/lib/rbac";
 import { ok, handleError } from "@/lib/api";
 import {
   EngagementError,
+  MAX_FEE,
   createEngagement,
   authorizeEngagement,
   assignExperts,
   advanceStatus,
   cancelEngagement,
 } from "@/lib/engagements/service";
+import { REPORTS } from "@/lib/reports/registry";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Case engagements API (MDIP docs/28, Agent B).
@@ -24,9 +26,19 @@ import {
 // All mutations audit + notify inside the engagement service.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// An engagement can only be created for a report type the registry knows —
+// unknown/free-text types are rejected (this route is server-only, so the
+// registry import never reaches a client bundle).
+const VALID_REPORT_TYPES = new Set(REPORTS.map((r) => r.id));
+
 const postSchema = z.object({
-  reportType: z.string().min(1).max(100),
-  feeEstimate: z.number().nonnegative().optional(),
+  reportType: z
+    .string()
+    .min(1)
+    .max(100)
+    .refine((t) => VALID_REPORT_TYPES.has(t), { message: "Unknown report type — must be a registered report id." }),
+  // finite() rejects Infinity (z.number() already rejects NaN); MAX_FEE bounds it.
+  feeEstimate: z.number().finite().nonnegative().max(MAX_FEE).optional(),
   status: z.enum(["RECOMMENDED", "AWAITING_AUTHORIZATION"]).optional(),
 });
 

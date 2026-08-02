@@ -8,6 +8,7 @@ import {
   recordUsage,
 } from "@/lib/tenant";
 import { ok, handleError } from "@/lib/api";
+import { externalOnlyCaseIds } from "@/lib/authz/caseScope";
 import { geographicFactorFor } from "@/lib/references/geoFactors";
 
 const createSchema = z.object({
@@ -23,12 +24,15 @@ const createSchema = z.object({
 });
 
 // Cases are always scoped to the caller's firm — the client can never pass firmId.
+// Guests (case-scoped external-class assignments only) are additionally scoped
+// to the cases explicitly shared with them (docs/28 MDIP hardening).
 export async function GET() {
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.view");
+    const externalOnly = await externalOnlyCaseIds(ctx);
     const cases = await prisma.case.findMany({
-      where: { firmId: ctx.firm.id },
+      where: { firmId: ctx.firm.id, ...(externalOnly ? { id: { in: externalOnly } } : {}) },
       orderBy: { updatedAt: "desc" },
       include: { createdBy: { select: { name: true } } },
     });

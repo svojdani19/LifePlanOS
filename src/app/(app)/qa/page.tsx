@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { requireContext } from "@/lib/tenant";
 import { prisma } from "@/lib/db";
 import { formatDate } from "@/lib/utils";
+import { accessibleCaseIds, rolesWithPermission, templatesWithPermission } from "@/lib/authz/caseScope";
 import { approvalStale } from "@/lib/reports/persist";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
@@ -15,8 +16,12 @@ import { Badge, type BadgeTone } from "@/components/ui/Badge";
 // awaiting final release, and a per-case release-readiness summary. QA is
 // DISPLAY-ONLY here by design: a QA reviewer cannot approve as an expert —
 // approval/attestation happens in the case Report tab under the responsible
-// expert's own credentials. Guard: an ACTIVE QUALITY_ASSURANCE_REVIEWER
-// assignment, or legacy ADMIN/PHYSICIAN_REVIEWER.
+// expert's own credentials. Guard (case-scoped, assignment-based — docs/28
+// MDIP hardening): an ACTIVE assignment carrying a qa.review-holding template
+// (QUALITY_ASSURANCE_REVIEWER) — case-scoped holders see ONLY their granted/
+// engaged cases — or a legacy role whose template holds qa.review (ADMIN).
+// The legacy PHYSICIAN_REVIEWER fallback is gone: a reviewer seat confers no
+// QA authority. Platform-admin assignments may view read-only.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const SEVERITY_TONE: Record<string, BadgeTone> = {
@@ -28,34 +33,37 @@ const SEVERITY_TONE: Record<string, BadgeTone> = {
 
 export default async function QaWorkspacePage() {
   const ctx = await requireContext();
-  const legacyAllowed = ctx.user.role === "ADMIN" || ctx.user.role === "PHYSICIAN_REVIEWER";
-  if (!legacyAllowed) {
-    const assignment = await prisma.userRoleAssignment.count({
-      where: { userId: ctx.user.id, firmId: ctx.firm.id, status: "ACTIVE", builtInRole: "QUALITY_ASSURANCE_REVIEWER" },
-    });
-    if (assignment === 0) redirect("/dashboard");
-  }
+  const access = await accessibleCaseIds(ctx, {
+    firmWideRoles: rolesWithPermission("qa.review"),
+    assignmentTemplates: templatesWithPermission("qa.review"),
+    orgWideAssignmentGrantsAll: true,
+    engagementSlots: ["assignedQaReviewerId"],
+  });
+  if (!access.allowed) redirect("/dashboard");
+  // null = firm-wide; otherwise the explicit accessible case-id list.
+  const scoped = access.cases === "all" ? null : access.cases;
+  const caseFilter = scoped ? { caseId: { in: scoped } } : {};
   const firmId = ctx.firm.id;
 
   const [findings, approvals, draftsAwaitingRelease, openCases] = await Promise.all([
     prisma.validationFinding.findMany({
-      where: { firmId, case: { status: { notIn: ["CLOSED", "ARCHIVED"] } } },
+      where: { firmId, ...caseFilter, case: { status: { notIn: ["CLOSED", "ARCHIVED"] } } },
       orderBy: [{ exportBlocking: "desc" }, { createdAt: "desc" }],
       select: { id: true, caseId: true, service: true, result: true, issue: true, severity: true, exportBlocking: true },
     }),
     prisma.reportApproval.findMany({
-      where: { firmId, status: { in: ["ACTIVE", "STALE"] } },
+      where: { firmId, ...caseFilter, status: { in: ["ACTIVE", "STALE"] } },
       orderBy: { updatedAt: "desc" },
       select: { id: true, caseId: true, reportExportId: true, kind: true, expertRole: true, reviewerName: true, contentSha256: true, status: true, updatedAt: true },
     }),
     // Expert drafts that have not been released as finals.
     prisma.reportExport.findMany({
-      where: { firmId, lifecycle: "draft_expert", supersededById: null },
+      where: { firmId, ...caseFilter, lifecycle: "draft_expert", supersededById: null },
       orderBy: { createdAt: "desc" },
       select: { id: true, caseId: true, reportType: true, format: true, version: true, createdAt: true },
     }),
     prisma.case.findMany({
-      where: { firmId, status: { notIn: ["CLOSED", "ARCHIVED"] } },
+      where: { firmId, ...(scoped ? { id: { in: scoped } } : {}), status: { notIn: ["CLOSED", "ARCHIVED"] } },
       select: { id: true, clientName: true, caseNumber: true, status: true },
     }),
   ]);

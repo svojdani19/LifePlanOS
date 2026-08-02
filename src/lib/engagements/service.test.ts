@@ -23,6 +23,7 @@ import {
   cancelEngagement,
   createEngagement,
   feeFor,
+  MAX_FEE,
   type EngagementStatus,
 } from "./service";
 
@@ -95,6 +96,18 @@ describe("feeFor", () => {
     expect(feeFor({ pricing: "cheap" }, "LIFE_CARE_PLAN")).toBeNull();
     expect(feeFor({ pricing: { LIFE_CARE_PLAN: { fixed: -5 } } }, "LIFE_CARE_PLAN")).toBeNull();
   });
+
+  it("treats NaN, Infinity, and beyond-cap values as absent", () => {
+    expect(feeFor({ pricing: { X: { fixed: NaN } } }, "X")).toBeNull();
+    expect(feeFor({ pricing: { X: { hourly: Infinity } } }, "X")).toBeNull();
+    expect(feeFor({ pricing: { X: { fixed: MAX_FEE + 1 } } }, "X")).toBeNull();
+    expect(feeFor({ pricing: { X: { fixed: MAX_FEE } } }, "X")).toEqual({
+      fixed: MAX_FEE,
+      hourly: undefined,
+      rush: undefined,
+      turnaroundDays: undefined,
+    });
+  });
 });
 
 // ── createEngagement ─────────────────────────────────────────────────────────
@@ -139,6 +152,24 @@ describe("createEngagement", () => {
     await expect(createEngagement(actor, { caseId: "case-x", reportType: "CUSTOM", requestedById: "user-req" })).rejects.toThrow(
       EngagementError,
     );
+  });
+
+  it("rejects negative, NaN, Infinity, and beyond-cap explicit fee estimates before any DB write", async () => {
+    for (const bad of [-1, NaN, Infinity, -Infinity, MAX_FEE + 1]) {
+      await expect(
+        createEngagement(actor, { caseId: "case-1", reportType: "CUSTOM", requestedById: "user-req", feeEstimate: bad }),
+      ).rejects.toThrow(EngagementError);
+    }
+    expect(engCreate).not.toHaveBeenCalled();
+
+    // The boundary itself is accepted.
+    const eng = await createEngagement(actor, {
+      caseId: "case-1",
+      reportType: "CUSTOM",
+      requestedById: "user-req",
+      feeEstimate: MAX_FEE,
+    });
+    expect(eng.feeEstimate).toBe(MAX_FEE);
   });
 });
 
@@ -265,6 +296,24 @@ describe("advanceStatus — transition graph", () => {
   it("rejects unknown statuses and routes CANCELLED to the cancel action", async () => {
     await expect(advanceStatus(actor, "eng-1", "SHIPPED")).rejects.toThrow("Unknown engagement status: SHIPPED");
     await expect(advanceStatus(actor, "eng-1", "CANCELLED")).rejects.toThrow("Cancellation requires a reason");
+  });
+
+  it("refuses to reach AUTHORIZED or RECORDS_PENDING via advance — authorization must stamp the authorizer", async () => {
+    engFindFirst.mockResolvedValue({ ...baseEngagement, status: "AWAITING_AUTHORIZATION" });
+    await expect(advanceStatus(actor, "eng-1", "AUTHORIZED")).rejects.toThrow(
+      "Authorization must go through the authorize action.",
+    );
+    await expect(advanceStatus(actor, "eng-1", "RECORDS_PENDING")).rejects.toThrow(
+      "Authorization must go through the authorize action.",
+    );
+    expect(engUpdate).not.toHaveBeenCalled();
+  });
+
+  it("COMPLETED is reachable only from DELIVERED", async () => {
+    for (const from of ENGAGEMENT_STATUSES.filter((s) => s !== "DELIVERED")) {
+      expect(ENGAGEMENT_TRANSITIONS[from]).not.toContain("COMPLETED");
+    }
+    expect(ENGAGEMENT_TRANSITIONS.DELIVERED).toContain("COMPLETED");
   });
 
   it("stamps completedAt when advancing DELIVERED → COMPLETED and audits the move", async () => {

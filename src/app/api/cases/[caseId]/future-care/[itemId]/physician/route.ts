@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit } from "@/lib/tenant";
+import { enforceReviewCredential } from "@/lib/authz/credentialGate";
 import { generateReviews, paraphraseSummary } from "@/lib/engine/generate";
 import { persistCaseValidation } from "@/lib/engine/validation";
 import { persistCaseReasoning } from "@/lib/engine/clinicalReasoningPersist";
@@ -27,6 +28,9 @@ export async function POST(req: Request, { params }: { params: { caseId: string;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "physician.review");
+    // Review-class decision: requires a verified PHYSICIAN credential —
+    // enforced for enterprise/demo firms, logged as credential.gap otherwise.
+    await enforceReviewCredential(ctx, "PHYSICIAN", { action: "futurecare.physician_review", caseId: params.caseId });
     await requireCase(ctx, params.caseId);
     const item = await prisma.futureCareItem.findFirst({ where: { id: params.itemId, caseId: params.caseId, supersededAt: null } });
     if (!item) return ok({ error: "Item not found" }, 404);

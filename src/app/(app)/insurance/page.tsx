@@ -2,6 +2,7 @@ import { redirect } from "next/navigation";
 import { FileDown, Scale } from "lucide-react";
 import { prisma } from "@/lib/db";
 import { requireContext } from "@/lib/tenant";
+import { isPlatformAdminAssignment } from "@/lib/authz/caseScope";
 import { can } from "@/lib/rbac";
 import { formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/Badge";
@@ -59,8 +60,10 @@ export default async function InsuranceClientPage() {
     select: { caseId: true },
   });
 
-  // Server-side workspace guard (deny → dashboard).
-  if (assignments.length === 0) redirect("/dashboard");
+  // Server-side workspace guard (deny → dashboard). A platform-admin
+  // assignment may VIEW the page (read-only; it renders only their own —
+  // typically empty — matter list, never firm-wide data).
+  if (assignments.length === 0 && !(await isPlatformAdminAssignment(ctx.user.id))) redirect("/dashboard");
 
   // Visibility is deliberate and per-case: only caseId-scoped assignments count.
   const engagedCaseIds = Array.from(
