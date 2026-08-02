@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { FolderKanban, Users, Layers, Sparkles } from "lucide-react";
 import { requireContext, activeCaseCount, seatCount } from "@/lib/tenant";
+import { externalOnlyCaseIds } from "@/lib/authz/caseScope";
 import { prisma } from "@/lib/db";
 import { effectiveLimits, PLANS, currentPeriod } from "@/lib/subscription/plans";
 import { formatDate } from "@/lib/utils";
@@ -22,7 +23,7 @@ const STAGE_LABELS: Record<string, string> = {
 
 // Segmented view switch — the firm-wide dashboard and the signed-in user's
 // personal dashboard (their cases can be a subset of the firm's).
-function DashboardTabs({ view }: { view: "firm" | "me" }) {
+function DashboardTabs({ view, showFirm = true }: { view: "firm" | "me"; showFirm?: boolean }) {
   const tab = (href: string, label: string, active: boolean) => (
     <Link
       href={href}
@@ -39,7 +40,7 @@ function DashboardTabs({ view }: { view: "firm" | "me" }) {
   return (
     <div className="mt-4 inline-flex items-center gap-1 rounded-xl bg-ink-100 p-1" role="tablist" aria-label="Dashboard view">
       {tab("/dashboard", "My Dashboard", view === "me")}
-      {tab("/dashboard?view=firm", "Firm Dashboard", view === "firm")}
+      {showFirm && tab("/dashboard?view=firm", "Firm Dashboard", view === "firm")}
     </div>
   );
 }
@@ -76,8 +77,13 @@ export default async function DashboardPage({ searchParams }: { searchParams?: {
   const firmId = ctx.firm.id;
   const tier = ctx.subscription?.tier ?? "SOLO";
   const limits = effectiveLimits(tier, ctx.subscription ?? undefined);
-  // My Dashboard is the primary view; the firm-wide view sits behind ?view=firm.
-  const view: "firm" | "me" = searchParams?.view === "firm" ? "firm" : "me";
+  // Guests — users whose only access is case-scoped external-class assignments
+  // (observer / external expert / attorney client / insurance client) — never
+  // see firm-wide counts, names, or activity (docs/28 MDIP hardening).
+  const externalOnly = await externalOnlyCaseIds(ctx);
+  // My Dashboard is the primary view; the firm-wide view sits behind ?view=firm
+  // and is firm-staff only — guests always get the personal view.
+  const view: "firm" | "me" = searchParams?.view === "firm" && externalOnly === null ? "firm" : "me";
 
   // ── My Dashboard — scoped to the signed-in user's real assignments:
   //    cases they created or are the preparing physician for, plus review
@@ -107,7 +113,8 @@ export default async function DashboardPage({ searchParams }: { searchParams?: {
     ]);
     // Cases elsewhere in the firm that need attention (blocking findings or
     // pending physician review) — surfaced so "my" scoping never hides work.
-    const otherAttention = await prisma.case.findMany({
+    // Firm staff only: a guest must never see other matters' names or counts.
+    const otherAttention = externalOnly !== null ? [] : await prisma.case.findMany({
       where: {
         firmId,
         id: { notIn: myCaseIds.length ? myCaseIds : ["-"] },
@@ -143,7 +150,7 @@ export default async function DashboardPage({ searchParams }: { searchParams?: {
           </div>
           <Link href="/cases" className="btn-primary"><FolderKanban className="h-4 w-4" /> Go to Cases</Link>
         </div>
-        <DashboardTabs view="me" />
+        <DashboardTabs view="me" showFirm={externalOnly === null} />
 
         {/* My metrics */}
         <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">

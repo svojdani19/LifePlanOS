@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { Files, ScanSearch, CopyX, ListChecks } from "lucide-react";
 import { prisma } from "@/lib/db";
 import { requireContext } from "@/lib/tenant";
+import { accessibleCaseIds } from "@/lib/authz/caseScope";
 import { formatDate } from "@/lib/utils";
 import { Badge } from "@/components/ui/Badge";
 import { WORKSPACES } from "@/lib/workspaces";
@@ -13,8 +14,10 @@ import { TYPE_LABEL } from "@/lib/documents/taxonomy";
 // tools. It surfaces processing problems (OCR, classification, duplicates,
 // flags), chronology QA coverage, and missing-record signals; every correction
 // happens in the case Records tab, which already has the tools. No mutation
-// APIs are introduced here. Access: legacy ADMIN / PLANNER / PARALEGAL, or an
-// ACTIVE MEDICAL_RECORD_ANALYST role assignment.
+// APIs are introduced here. Access (case-scoped, assignment-based — docs/28
+// MDIP hardening): legacy ADMIN / PLANNER / PARALEGAL see the firm-wide
+// surface; case-scoped MEDICAL_RECORD_ANALYST assignment holders see ONLY
+// their granted cases; platform-admin assignments view read-only.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const OCR_VERIFY_THRESHOLD = 0.8;
@@ -31,26 +34,30 @@ export default async function RecordsAnalystPage() {
   const ctx = await requireContext();
   const firmId = ctx.firm.id;
 
-  // Server-side workspace guard (deny → dashboard).
-  if (!(["ADMIN", "PLANNER", "PARALEGAL"] as string[]).includes(ctx.user.role)) {
-    const assignment = await prisma.userRoleAssignment.findFirst({
-      where: { userId: ctx.user.id, firmId, status: "ACTIVE", builtInRole: "MEDICAL_RECORD_ANALYST" },
-      select: { id: true },
-    });
-    if (!assignment) redirect("/dashboard");
-  }
+  // Server-side workspace guard (deny → dashboard), case-scoped when granted.
+  const access = await accessibleCaseIds(ctx, {
+    firmWideRoles: ["ADMIN", "PLANNER", "PARALEGAL"],
+    assignmentTemplates: ["MEDICAL_RECORD_ANALYST"],
+    orgWideAssignmentGrantsAll: true,
+    engagementSlots: [],
+  });
+  if (!access.allowed) redirect("/dashboard");
+  // null = firm-wide; otherwise the explicit accessible case-id list.
+  const scoped = access.cases === "all" ? null : access.cases;
+  const caseFilter = scoped ? { caseId: { in: scoped } } : {};
 
   const [totalDocs, statusCounts, lowOcrCount, unclassifiedCount, flaggedCount, queueDocs, caseQa, dupGroups, missingFindings] = await Promise.all([
-    prisma.document.count({ where: { firmId } }),
-    prisma.document.groupBy({ by: ["status"], where: { firmId }, _count: true }),
-    prisma.document.count({ where: { firmId, ocrConfidence: { lt: OCR_VERIFY_THRESHOLD } } }),
-    prisma.document.count({ where: { firmId, type: "OTHER" } }),
-    prisma.document.count({ where: { firmId, flags: { not: null } } }),
+    prisma.document.count({ where: { firmId, ...caseFilter } }),
+    prisma.document.groupBy({ by: ["status"], where: { firmId, ...caseFilter }, _count: true }),
+    prisma.document.count({ where: { firmId, ...caseFilter, ocrConfidence: { lt: OCR_VERIFY_THRESHOLD } } }),
+    prisma.document.count({ where: { firmId, ...caseFilter, type: "OTHER" } }),
+    prisma.document.count({ where: { firmId, ...caseFilter, flags: { not: null } } }),
     // Processing queue: anything not cleanly processed, low OCR confidence,
     // unclassified, or carrying an ingest flag.
     prisma.document.findMany({
       where: {
         firmId,
+        ...caseFilter,
         OR: [
           { status: { in: ["UPLOADED", "OCR_PENDING", "PROCESSING", "FAILED"] } },
           { ocrConfidence: { lt: OCR_VERIFY_THRESHOLD } },
@@ -74,7 +81,7 @@ export default async function RecordsAnalystPage() {
     }),
     // Chronology QA: structured-event coverage vs. uploaded records per case.
     prisma.case.findMany({
-      where: { firmId, status: { notIn: ["CLOSED", "ARCHIVED"] } },
+      where: { firmId, ...(scoped ? { id: { in: scoped } } : {}), status: { notIn: ["CLOSED", "ARCHIVED"] } },
       orderBy: { updatedAt: "desc" },
       select: {
         id: true,
@@ -87,7 +94,7 @@ export default async function RecordsAnalystPage() {
     // Duplicate-name detection: identical filename uploaded twice to one case.
     prisma.document.groupBy({
       by: ["caseId", "filename"],
-      where: { firmId },
+      where: { firmId, ...caseFilter },
       _count: { _all: true },
       having: { filename: { _count: { gt: 1 } } },
     }),
@@ -95,6 +102,7 @@ export default async function RecordsAnalystPage() {
     prisma.validationFinding.findMany({
       where: {
         firmId,
+        ...caseFilter,
         OR: [
           { issue: { contains: "missing", mode: "insensitive" } },
           { issue: { contains: "record", mode: "insensitive" } },

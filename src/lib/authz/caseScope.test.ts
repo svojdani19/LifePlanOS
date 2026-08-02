@@ -1,0 +1,234 @@
+import { describe, it, expect, beforeEach, vi, type Mock } from "vitest";
+
+// All DB access is mocked — these tests never touch a database.
+vi.mock("@/lib/db", () => ({
+  prisma: {
+    userRoleAssignment: { findMany: vi.fn(), count: vi.fn() },
+    caseEngagement: { findMany: vi.fn() },
+  },
+}));
+
+import { prisma } from "@/lib/db";
+import {
+  accessibleCaseIds,
+  externalOnlyCaseIds,
+  isPlatformAdminAssignment,
+  rolesWithPermission,
+  templatesWithPermission,
+  type CaseScopeContext,
+} from "./caseScope";
+
+const assignmentFindMany = prisma.userRoleAssignment.findMany as unknown as Mock;
+const assignmentCount = prisma.userRoleAssignment.count as unknown as Mock;
+const engagementFindMany = prisma.caseEngagement.findMany as unknown as Mock;
+
+const ctx = (role: string): CaseScopeContext =>
+  ({ user: { id: "u1", role }, firm: { id: "f1" } }) as CaseScopeContext;
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  assignmentFindMany.mockResolvedValue([]);
+  assignmentCount.mockResolvedValue(0);
+  engagementFindMany.mockResolvedValue([]);
+});
+
+describe("accessibleCaseIds", () => {
+  it("grants firm-wide access to firm-staff legacy roles", async () => {
+    const access = await accessibleCaseIds(ctx("PLANNER"), {
+      firmWideRoles: ["ADMIN", "PLANNER"],
+      assignmentTemplates: ["LIFE_CARE_PLANNER"],
+    });
+    expect(access).toEqual({ allowed: true, cases: "all", platformAdminReadOnly: false });
+    // Firm-wide verdicts never need the engagement query.
+    expect(engagementFindMany).not.toHaveBeenCalled();
+  });
+
+  it("returns the explicit case list for caseId-scoped assignments", async () => {
+    assignmentFindMany.mockResolvedValue([
+      { caseId: "c1", builtInRole: "VOCATIONAL_EXPERT" },
+      { caseId: "c2", builtInRole: "VOCATIONAL_EXPERT" },
+      { caseId: "c9", builtInRole: "READ_ONLY_OBSERVER" }, // irrelevant template
+    ]);
+    const access = await accessibleCaseIds(ctx("PHYSICIAN_REVIEWER"), {
+      firmWideRoles: ["ADMIN"],
+      assignmentTemplates: ["VOCATIONAL_EXPERT"],
+      engagementSlots: ["assignedVocationalExpertId"],
+    });
+    expect(access.allowed).toBe(true);
+    expect(access.cases).toEqual(["c1", "c2"]);
+    expect(access.platformAdminReadOnly).toBe(false);
+  });
+
+  it("derives access from engagement slots naming the user", async () => {
+    engagementFindMany.mockResolvedValue([{ caseId: "c7" }]);
+    const access = await accessibleCaseIds(ctx("PHYSICIAN_REVIEWER"), {
+      firmWideRoles: ["ADMIN"],
+      assignmentTemplates: ["FORENSIC_ECONOMIST"],
+      engagementSlots: ["assignedEconomistId"],
+    });
+    expect(access.allowed).toBe(true);
+    expect(access.cases).toEqual(["c7"]);
+    // The engagement query targets exactly the requested slot, non-cancelled.
+    const where = engagementFindMany.mock.calls[0][0].where;
+    expect(where.OR).toEqual([{ assignedEconomistId: "u1" }]);
+    expect(where.status).toEqual({ notIn: ["CANCELLED"] });
+    expect(where.firmId).toBe("f1");
+  });
+
+  it("unions assignment grants and engagement slots without duplicates", async () => {
+    assignmentFindMany.mockResolvedValue([{ caseId: "c1", builtInRole: "VOCATIONAL_EXPERT" }]);
+    engagementFindMany.mockResolvedValue([{ caseId: "c1" }, { caseId: "c2" }]);
+    const access = await accessibleCaseIds(ctx("PHYSICIAN_REVIEWER"), {
+      assignmentTemplates: ["VOCATIONAL_EXPERT"],
+      engagementSlots: ["assignedVocationalExpertId"],
+    });
+    expect(access.cases).toEqual(["c1", "c2"]);
+  });
+
+  it("treats an org-scoped assignment as firm-wide only when the surface allows it", async () => {
+    assignmentFindMany.mockResolvedValue([{ caseId: null, builtInRole: "QUALITY_ASSURANCE_REVIEWER" }]);
+    const internal = await accessibleCaseIds(ctx("PHYSICIAN_REVIEWER"), {
+      firmWideRoles: ["ADMIN"],
+      assignmentTemplates: ["QUALITY_ASSURANCE_REVIEWER"],
+      orgWideAssignmentGrantsAll: true,
+      engagementSlots: ["assignedQaReviewerId"],
+    });
+    expect(internal.cases).toBe("all");
+
+    const external = await accessibleCaseIds(ctx("ATTORNEY_REVIEWER"), {
+      firmWideRoles: [],
+      assignmentTemplates: ["QUALITY_ASSURANCE_REVIEWER"],
+      orgWideAssignmentGrantsAll: false,
+      engagementSlots: [],
+    });
+    expect(external.allowed).toBe(false); // org-wide grant not honored here
+  });
+
+  it("queries only ACTIVE, unexpired assignments (expired excluded at the source)", async () => {
+    await accessibleCaseIds(ctx("PHYSICIAN_REVIEWER"), { assignmentTemplates: ["VOCATIONAL_EXPERT"] });
+    const where = assignmentFindMany.mock.calls[0][0].where;
+    expect(where.status).toBe("ACTIVE");
+    expect(where.userId).toBe("u1");
+    expect(where.firmId).toBe("f1");
+    // Unexpired = no effectiveUntil, or effectiveUntil still in the future.
+    expect(where.OR).toHaveLength(2);
+    expect(where.OR[0]).toEqual({ effectiveUntil: null });
+    expect(where.OR[1].effectiveUntil.gte).toBeInstanceOf(Date);
+  });
+
+  it("denies when nothing grants access", async () => {
+    const access = await accessibleCaseIds(ctx("PHYSICIAN_REVIEWER"), {
+      firmWideRoles: ["ADMIN"],
+      assignmentTemplates: ["QUALITY_ASSURANCE_REVIEWER"],
+    });
+    expect(access).toEqual({ allowed: false, cases: [], platformAdminReadOnly: false });
+  });
+
+  it("grants a platform-admin assignment read-only firm-wide view as a last resort", async () => {
+    assignmentCount.mockResolvedValue(1);
+    const access = await accessibleCaseIds(ctx("PHYSICIAN_REVIEWER"), {
+      firmWideRoles: ["ADMIN"],
+      assignmentTemplates: ["QUALITY_ASSURANCE_REVIEWER"],
+    });
+    expect(access).toEqual({ allowed: true, cases: "all", platformAdminReadOnly: true });
+    expect(assignmentCount).toHaveBeenCalledWith({
+      where: expect.objectContaining({ userId: "u1", status: "ACTIVE", builtInRole: "PLATFORM_SYSTEM_ADMINISTRATOR" }),
+    });
+  });
+
+  it("never marks firm staff as platform-admin read-only", async () => {
+    assignmentCount.mockResolvedValue(1); // also a platform admin — irrelevant
+    const access = await accessibleCaseIds(ctx("ADMIN"), { firmWideRoles: ["ADMIN"] });
+    expect(access).toEqual({ allowed: true, cases: "all", platformAdminReadOnly: false });
+  });
+
+  it("guest rule: caseId-scoped external-class grants override a firm-staff seat role", async () => {
+    // A client seated as ATTORNEY_REVIEWER whose only grants are case-scoped
+    // ATTORNEY_CLIENT assignments must NOT inherit firm-wide access.
+    assignmentFindMany.mockResolvedValue([{ caseId: "c3", builtInRole: "ATTORNEY_CLIENT" }]);
+    const access = await accessibleCaseIds(ctx("ATTORNEY_REVIEWER"), {
+      firmWideRoles: ["ADMIN", "ATTORNEY_REVIEWER"],
+      assignmentTemplates: ["ATTORNEY_CLIENT"],
+      engagementSlots: [],
+    });
+    expect(access.cases).toEqual(["c3"]);
+  });
+
+  it("guest rule does not trigger for users holding any internal or org-wide grant", async () => {
+    assignmentFindMany.mockResolvedValue([
+      { caseId: "c3", builtInRole: "ATTORNEY_CLIENT" },
+      { caseId: null, builtInRole: "ATTORNEY_CLIENT" }, // org-wide → not a guest
+    ]);
+    const access = await accessibleCaseIds(ctx("ATTORNEY_REVIEWER"), {
+      firmWideRoles: ["ADMIN", "ATTORNEY_REVIEWER"],
+      assignmentTemplates: ["ATTORNEY_CLIENT"],
+      engagementSlots: [],
+    });
+    expect(access.cases).toBe("all");
+  });
+});
+
+describe("externalOnlyCaseIds", () => {
+  it("returns null for firm staff (no assignments)", async () => {
+    expect(await externalOnlyCaseIds(ctx("PLANNER"))).toBeNull();
+  });
+
+  it("returns null when any assignment is internal or org-scoped", async () => {
+    assignmentFindMany.mockResolvedValue([
+      { caseId: "c1", builtInRole: "READ_ONLY_OBSERVER" },
+      { caseId: null, builtInRole: "READ_ONLY_OBSERVER" },
+    ]);
+    expect(await externalOnlyCaseIds(ctx("ATTORNEY_REVIEWER"))).toBeNull();
+  });
+
+  it("returns the shared case list for a pure guest, including engagement slots", async () => {
+    assignmentFindMany.mockResolvedValue([
+      { caseId: "c1", builtInRole: "READ_ONLY_OBSERVER" },
+      { caseId: "c2", builtInRole: "INSURANCE_CLIENT" },
+    ]);
+    engagementFindMany.mockResolvedValue([{ caseId: "c2" }, { caseId: "c4" }]);
+    expect(await externalOnlyCaseIds(ctx("ATTORNEY_REVIEWER"))).toEqual(["c1", "c2", "c4"]);
+  });
+
+  it("never treats an ADMIN as a guest", async () => {
+    assignmentFindMany.mockResolvedValue([{ caseId: "c1", builtInRole: "READ_ONLY_OBSERVER" }]);
+    expect(await externalOnlyCaseIds(ctx("ADMIN"))).toBeNull();
+  });
+});
+
+describe("isPlatformAdminAssignment", () => {
+  it("is true only for an ACTIVE platform-admin assignment", async () => {
+    assignmentCount.mockResolvedValue(0);
+    expect(await isPlatformAdminAssignment("u1")).toBe(false);
+    assignmentCount.mockResolvedValue(2);
+    expect(await isPlatformAdminAssignment("u1")).toBe(true);
+  });
+});
+
+describe("permission-derived role and template lists", () => {
+  it("maps vocational.view to the staff roles and templates that hold it", () => {
+    expect(rolesWithPermission("vocational.view").sort()).toEqual(["ADMIN", "PLANNER"]);
+    expect(templatesWithPermission("vocational.view").sort()).toEqual([
+      "FIRM_ADMINISTRATOR",
+      "FORENSIC_ECONOMIST",
+      "LIFE_CARE_PLANNER",
+      "VOCATIONAL_EXPERT",
+    ]);
+  });
+
+  it("keeps PHYSICIAN_REVIEWER out of vocational, economic, and qa surfaces", () => {
+    for (const key of ["vocational.view", "economic.view", "qa.review"]) {
+      expect(rolesWithPermission(key)).not.toContain("PHYSICIAN_REVIEWER");
+      expect(templatesWithPermission(key)).not.toContain("PHYSICIAN_REVIEWER");
+    }
+  });
+
+  it("maps qa.review and physician.review to their expected holders", () => {
+    expect(rolesWithPermission("qa.review")).toEqual(["ADMIN"]);
+    expect(rolesWithPermission("physician.review").sort()).toEqual(["ADMIN", "PHYSICIAN_REVIEWER"]);
+    expect(templatesWithPermission("qa.review").sort()).toEqual([
+      "FIRM_ADMINISTRATOR",
+      "QUALITY_ASSURANCE_REVIEWER",
+    ]);
+  });
+});

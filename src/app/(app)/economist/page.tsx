@@ -3,6 +3,7 @@ import { redirect } from "next/navigation";
 import { requireContext } from "@/lib/tenant";
 import { prisma } from "@/lib/db";
 import { can } from "@/lib/rbac";
+import { accessibleCaseIds, rolesWithPermission, templatesWithPermission } from "@/lib/authz/caseScope";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import EconomistWorkspace from "@/components/case/EconomistWorkspace";
@@ -13,9 +14,13 @@ import { economistReadiness, type StoredEconResult, type ScenarioRow } from "@/l
 // economic service line: a queue of every case carrying explicitly entered
 // assumptions (plus cases where an engagement assigns this economist), each
 // with its readiness ladder, and the existing per-case EconomistWorkspace
-// mounted for the selected case. Guard: an ACTIVE FORENSIC_ECONOMIST
-// assignment, or legacy PHYSICIAN_REVIEWER/ADMIN (experts occupy reviewer
-// seats for the pilot). No assumption is ever silently chosen.
+// mounted for the selected case. Guard (case-scoped, assignment-based —
+// docs/28 MDIP hardening): an ACTIVE FORENSIC_ECONOMIST (or other
+// economic.view-holding template) assignment — case-scoped holders see ONLY
+// their granted/engaged cases — or a legacy role whose template holds
+// economic.view (ADMIN). The legacy PHYSICIAN_REVIEWER fallback is gone: a
+// reviewer seat confers no economist authority. Platform-admin assignments
+// may view read-only. No assumption is ever silently chosen.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const READINESS_TONE: Record<string, BadgeTone> = {
@@ -28,19 +33,21 @@ const READINESS_TONE: Record<string, BadgeTone> = {
 
 export default async function EconomistWorkspacePage({ searchParams }: { searchParams?: { caseId?: string } }) {
   const ctx = await requireContext();
-  const legacyAllowed = ctx.user.role === "PHYSICIAN_REVIEWER" || ctx.user.role === "ADMIN";
-  if (!legacyAllowed) {
-    const assignment = await prisma.userRoleAssignment.count({
-      where: { userId: ctx.user.id, firmId: ctx.firm.id, status: "ACTIVE", builtInRole: "FORENSIC_ECONOMIST" },
-    });
-    if (assignment === 0) redirect("/dashboard");
-  }
+  const access = await accessibleCaseIds(ctx, {
+    firmWideRoles: rolesWithPermission("economic.view"),
+    assignmentTemplates: templatesWithPermission("economic.view"),
+    orgWideAssignmentGrantsAll: true,
+    engagementSlots: ["assignedEconomistId"],
+  });
+  if (!access.allowed) redirect("/dashboard");
+  // null = firm-wide; otherwise the explicit accessible case-id list.
+  const scoped = access.cases === "all" ? null : access.cases;
 
   // ── Queue: cases with entered assumptions, plus engagement-assigned cases ──
   const [assumptionGroups, engagements] = await Promise.all([
     prisma.economicAssumption.groupBy({
       by: ["caseId"],
-      where: { firmId: ctx.firm.id, supersededById: null },
+      where: { firmId: ctx.firm.id, supersededById: null, ...(scoped ? { caseId: { in: scoped } } : {}) },
       _count: true,
     }),
     prisma.caseEngagement.findMany({
@@ -71,9 +78,9 @@ export default async function EconomistWorkspacePage({ searchParams }: { searchP
           select: { caseId: true, name: true, result: true, computedAt: true },
         })
       : Promise.resolve([]),
-    // Fallback picker: any open firm case can start assumption entry.
+    // Picker: open cases within the caller's access scope.
     prisma.case.findMany({
-      where: { firmId: ctx.firm.id, status: { notIn: ["CLOSED", "ARCHIVED"] } },
+      where: { firmId: ctx.firm.id, status: { notIn: ["CLOSED", "ARCHIVED"] }, ...(scoped ? { id: { in: scoped } } : {}) },
       orderBy: { updatedAt: "desc" },
       select: { id: true, clientName: true, caseNumber: true },
     }),
@@ -106,7 +113,10 @@ export default async function EconomistWorkspacePage({ searchParams }: { searchP
     null;
 
   // Mirror the economics API's seat check: physician.review OR futurecare.edit.
-  const canEdit = can(ctx.user.role, "physician.review") || can(ctx.user.role, "futurecare.edit");
+  // A platform-admin view is strictly read-only — no mutation surfaces render.
+  const canEdit =
+    !access.platformAdminReadOnly &&
+    (can(ctx.user.role, "physician.review") || can(ctx.user.role, "futurecare.edit"));
 
   return (
     <div>
