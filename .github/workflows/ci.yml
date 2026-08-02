@@ -31,7 +31,18 @@ jobs:
         run: npx prisma generate
       - name: Type-check
         run: npx tsc --noEmit
+      - name: Lint
+        # `next lint` passes repo-wide today (warnings only, exit 0). If legacy
+        # warnings ever get promoted to errors, scope this to the hardened
+        # modules: npx eslint src/lib/authz src/lib/engagements src/lib/demo
+        # src/lib/engine --max-warnings 0
+        run: npm run lint
       - name: Unit tests
         run: npx vitest run
       - name: Build
         run: npm run build
+      - name: Dependency audit (advisory)
+        # Non-blocking visibility into high/critical advisories in production
+        # deps — surfaced in the run log, never fails the build.
+        run: npm audit --audit-level=high --production
+        continue-on-error: true
