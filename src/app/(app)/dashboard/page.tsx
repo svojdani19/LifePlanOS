@@ -92,12 +92,30 @@ export default async function DashboardPage({ searchParams: searchParamsPromise 
   //    findings explicitly assigned to them. Nothing is invented.
   if (view === "me") {
     const uid = ctx.user.id;
+    // Cases the firm explicitly assigned to this user (case-scoped ACTIVE role
+    // assignments) count as "my cases" alongside created/preparing — this is
+    // how attorneys and other non-authoring roles receive their matters.
+    const assignedGrants = await prisma.userRoleAssignment.findMany({
+      where: {
+        userId: uid,
+        firmId,
+        status: "ACTIVE",
+        caseId: { not: null },
+        OR: [{ effectiveUntil: null }, { effectiveUntil: { gte: new Date() } }],
+      },
+      select: { caseId: true },
+    });
+    const assignedCaseIds = assignedGrants.map((a) => a.caseId).filter((id): id is string => !!id);
     const myCases = await prisma.case.findMany({
       where: {
         firmId,
         ...(scopedCaseIds ? { id: { in: scopedCaseIds } } : {}),
         ...(caseAccess.allowed ? {} : { id: { in: [] as string[] } }),
-        OR: [{ createdById: uid }, { preparingPhysicianId: uid }],
+        OR: [
+          { createdById: uid },
+          { preparingPhysicianId: uid },
+          ...(assignedCaseIds.length ? [{ id: { in: assignedCaseIds } }] : []),
+        ],
         status: { notIn: ["CLOSED", "ARCHIVED"] },
       },
       orderBy: { updatedAt: "desc" },
@@ -202,7 +220,11 @@ export default async function DashboardPage({ searchParams: searchParamsPromise 
           </div>
         )}
         {myCases.length === 0 ? (
-          <div className="card mt-2 p-5 text-sm text-ink-500">No cases are assigned to you yet — cases you create, or where you are the preparing physician, appear here.</div>
+          <div className="card mt-2 p-5 text-sm text-ink-500">
+            {ctx.user.role === "ATTORNEY_REVIEWER"
+              ? "No cases are assigned to you yet — cases the firm assigns to you appear here."
+              : "No cases are assigned to you yet — cases you create, cases the firm assigns to you, or cases where you are the preparing physician appear here."}
+          </div>
         ) : (
           <div className="card mt-2 overflow-hidden">
             <table className="w-full text-sm">
