@@ -50,6 +50,8 @@ async function main() {
   console.log(`  vocationalEntries=${summary.vocationalEntries} econAssumptions=${summary.economicAssumptions} econScenarios=${summary.economicScenarios}`);
   console.log(`  engagements=${summary.engagements} notifications=${summary.notifications}`);
   console.log("  Personas: see /demo (password from DEMO_PASSWORD, dev default otherwise).");
+  console.log("  Super Admin: platform.admin@demo.lifeplanos.com — authority via its ACTIVE");
+  console.log("  PLATFORM_SYSTEM_ADMINISTRATOR role assignment (no email allowlists).");
 }
 
 main()

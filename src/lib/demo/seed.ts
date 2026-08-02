@@ -195,8 +195,11 @@ export async function seedDemoFirm(): Promise<DemoSeedSummary> {
   const recordsAnalyst = u(ctx, "records.analyst");
   const operations = u(ctx, "operations");
 
-  // Role-template assignments (enterprise authz) — including the medical
-  // director's multi-role seat and the observer's READ_ONLY_OBSERVER template.
+  // Role-template assignments (enterprise authz) — every persona carries ONLY
+  // its intended template(s): the medical director's multi-role seat, the
+  // observer's READ_ONLY_OBSERVER template, and the platform admin's
+  // PLATFORM_SYSTEM_ADMINISTRATOR grant (the SOLE source of platform-admin
+  // authority — src/lib/authz/platform.ts; no email lists anywhere).
   await prisma.userRoleAssignment.createMany({
     data: DEMO_PERSONAS.flatMap((p) => {
       const user = ctx.byEmail.get(p.email)!;
@@ -207,9 +210,26 @@ export async function seedDemoFirm(): Promise<DemoSeedSummary> {
         assignedById: firmAdmin.id,
         responsibility: builtInRole.replace(/_/g, " "),
         assignmentReason: "Synthetic demo persona",
+        status: "ACTIVE",
+        // Org-scoped (no officeId/caseId) and non-expiring (effectiveUntil null).
       }));
     }),
   });
+
+  // Hard guarantee: the demo Super Admin's authority is this ACTIVE, org-scoped
+  // DB grant. Fail loudly if it is ever missing.
+  const platformGrants = await prisma.userRoleAssignment.count({
+    where: {
+      userId: u(ctx, "platform.admin").id,
+      firmId: firm.id,
+      builtInRole: "PLATFORM_SYSTEM_ADMINISTRATOR",
+      status: "ACTIVE",
+      effectiveUntil: null,
+    },
+  });
+  if (platformGrants !== 1) {
+    throw new Error("Demo seed integrity failure: platform.admin@demo.lifeplanos.com must hold exactly one ACTIVE PLATFORM_SYSTEM_ADMINISTRATOR assignment.");
+  }
 
   // Org-verified credentials for the credential-gated experts.
   await prisma.userCredential.createMany({
