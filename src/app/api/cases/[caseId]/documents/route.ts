@@ -28,10 +28,11 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
   const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
-    // The retaining attorney may upload deposition transcripts only; every
-    // other upload path stays behind records.upload.
-    const attorneyDepositionOnly = ctx.user.role === "ATTORNEY_REVIEWER";
-    if (attorneyDepositionOnly) {
+    // The retaining attorney may upload case records (files classify through
+    // the normal ingestion pipeline); the text/sample ingestion path stays
+    // behind records.upload.
+    const attorneyUpload = ctx.user.role === "ATTORNEY_REVIEWER";
+    if (attorneyUpload) {
       requirePermission(ctx, "case.view");
     } else {
       requirePermission(ctx, "records.upload");
@@ -58,7 +59,7 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
           mimeType: file.type,
           buffer,
           storageKey,
-          forcedType: attorneyDepositionOnly ? "DEPOSITION" : typeMap[file.name],
+          forcedType: typeMap[file.name],
         });
         await recordUsage(ctx, "RECORD_PAGE_OCR", { caseId: params.caseId, quantity: pages });
         created.push(document.id);
@@ -66,7 +67,7 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
     } else {
       // Text/sample ingestion is a records-analyst path — not available to the
       // attorney deposition-upload allowance.
-      if (attorneyDepositionOnly) requirePermission(ctx, "records.upload");
+      if (attorneyUpload) requirePermission(ctx, "records.upload");
       const body = await req.json().catch(() => ({}));
       const docs: { filename: string; text?: string }[] = body.sample
         ? SAMPLE_DOCS

@@ -33,6 +33,12 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
   });
   if (!c) notFound();
 
+  // Absolute number of open export-blocking integrity findings — the items
+  // standing between this case and ANY final report.
+  const pendingResolution = await prisma.validationFinding.count({
+    where: { caseId: c.id, exportBlocking: true, status: "OPEN" },
+  });
+
   const assumptions = assumptionsFor(c);
   const totalLifetime = c.futureCareItems.reduce((s, i) => s + i.lifetimeCost, 0);
   const totalPresentValue = c.futureCareItems.reduce((s, i) => s + i.presentValue, 0);
@@ -73,6 +79,7 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
         // Attorney-facing view: range-only pricing, condensed clinical detail,
         // no evidence tab, and the provider attorney-input surface.
         attorneyView={ctx.user.role === "ATTORNEY_REVIEWER"}
+        pendingResolution={pendingResolution}
       />
     </div>
   );

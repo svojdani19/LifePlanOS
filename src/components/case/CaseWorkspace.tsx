@@ -108,6 +108,7 @@ export function CaseWorkspace({
   precedents = [],
   physicians = [],
   attorneyView = false,
+  pendingResolution = 0,
 }: {
   data: AnyRec;
   assumptions: { lifeExpectancyYears: number; discountRate: number; medicalInflation: number; geographicFactor: number };
@@ -117,6 +118,8 @@ export function CaseWorkspace({
   physicians?: AnyRec[];
   /** Attorney-facing view: dollar values are never rendered (data unchanged). */
   attorneyView?: boolean;
+  /** Open export-blocking integrity findings — the attorney banner's Pending Resolution count. */
+  pendingResolution?: number;
 }) {
   const router = useRouter();
   const [tab, setTab] = useState("overview");
@@ -137,12 +140,9 @@ export function CaseWorkspace({
   // Deep-link from the Case Assistant: switch to the right tab, scroll to the
   // exact item, auto-expand its details, and highlight the specific section the
   // finding is about (the target panel maps focusCat → section).
-  // Integrity-check "Go To": findings reference items by service name (duplicate
-  // findings carry "A / B" — the first segment is the primary item).
-  const goToFindingService = (service: string) => {
-    const primary = service.split(" / ")[0].trim();
-    focusEntity("recommendation", primary, "");
-  };
+  // Integrity-check "Review": hands the finding to the Case Review agent for a
+  // simultaneous summary and resolution options.
+  const [reviewFinding, setReviewFinding] = useState<AnyRec | null>(null);
 
   const focusEntity = (entityType: string | null, rawEntityId: string | null, category: string) => {
     if (!rawEntityId) return;
@@ -224,14 +224,6 @@ export function CaseWorkspace({
   ];
   const VISIBLE_FLOW = (attorneyView ? FLOW.filter((f) => f.tab !== "costs") : FLOW).map((f, i) => ({ ...f, n: i + 1 }));
   const stageIdx = Math.max(0, STAGES.indexOf(data.status === "DRAFTING" ? "FINAL" : data.status));
-  // Attorney PV: the newest delivered (final, non-draft) export with a stated
-  // present value — null until something has actually been delivered.
-  const deliveredPresentValue: number | null = (() => {
-    const finals = ((data.reports ?? []) as AnyRec[])
-      .filter((r) => r.draft === false && typeof r.totalPresentValue === "number" && r.totalPresentValue > 0)
-      .sort((x, y) => String(y.createdAt).localeCompare(String(x.createdAt)));
-    return finals.length ? (finals[0].totalPresentValue as number) : null;
-  })();
   const SECONDARY = TABS.filter((t) =>
     (attorneyView ? ["providers", "reviews", "precedents"] : ["providers", "evidence", "reviews", "precedents"]).includes(t.id),
   );
@@ -255,7 +247,17 @@ export function CaseWorkspace({
             )}
           </div>
           <div className="flex items-center gap-2">
-            {hasPlan && <CaseAssistant caseId={data.id} canEdit={can("case.edit")} onFocus={focusEntity} />}
+            {hasPlan && (
+              <CaseAssistant
+                caseId={data.id}
+                canEdit={can("case.edit")}
+                onFocus={focusEntity}
+                reviewFinding={reviewFinding as never}
+                onReviewDone={() => setReviewFinding(null)}
+                canApplyChanges={can("futurecare.edit")}
+                redactPricing={attorneyView}
+              />
+            )}
             {can("futurecare.edit") && (
               <button className="btn-primary px-3 py-1.5 text-sm" disabled={busy === "gen"} onClick={() => call(`/api/cases/${data.id}/generate`, "POST", undefined, "gen")}>
                 {busy === "gen" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
@@ -267,34 +269,28 @@ export function CaseWorkspace({
 
         {/* Full-width case metrics band */}
         {hasPlan && (
-          <dl className="mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-ink-200 bg-ink-200 sm:grid-cols-5" aria-label="Case metrics">
-            {[
-              { label: "Future Care Items", value: String(data.futureCareItems.length), cls: "" },
-              // Attorney view: totals render as an estimate range (-20% / +10%,
-              // rounded to the nearest $1k) rather than exact figures.
-              ...(attorneyView
-                ? [
-                    { label: "Lifetime (Est. Range)", value: moneyRange(totals.totalLifetime), cls: "", sm: true },
-                    // Present value is only stated once work product has been
-                    // executed and delivered: it derives from the newest final
-                    // (non-draft) export, never from work in progress.
-                    {
-                      label: "Present Value (Delivered)",
-                      value: deliveredPresentValue != null ? moneyRange(deliveredPresentValue) : "Pending delivery",
-                      cls: deliveredPresentValue != null ? "text-brand-800" : "text-ink-400",
-                      sm: true,
-                    },
-                  ]
-                : [
-                    { label: "Lifetime (Undiscounted)", value: formatMoney(totals.totalLifetime), cls: "" },
-                    { label: "Present Value", value: formatMoney(totals.totalPresentValue), cls: "text-brand-800" },
-                  ]),
-              { label: "Physician Pending", value: String(pendingPhysician), cls: pendingPhysician > 0 ? "text-amber-700" : "" },
-              { label: "Open Findings", value: String(data.reviewFindings.length), cls: data.reviewFindings.length > 0 ? "text-amber-700" : "" },
-            ].map((m: { label: string; value: string; cls: string; sm?: boolean }) => (
-              <div key={m.label} className="bg-white px-4 py-2">
+          <dl className={cn("mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-ink-200 bg-ink-200", attorneyView ? "sm:grid-cols-[1fr_2fr_1fr]" : "sm:grid-cols-5")} aria-label="Case metrics">
+            {(attorneyView
+              ? [
+                  // Side tiles stay compact; the lifetime estimate is the
+                  // attorney's headline number, front and center.
+                  { label: "Future Care Items", value: String(data.futureCareItems.length), cls: "", compact: true },
+                  // Estimate range (-30% / +10%, rounded to the nearest $1k).
+                  { label: "Lifetime (Est. Range)", value: moneyRange(totals.totalLifetime), cls: "text-brand-800", center: true },
+                  // Absolute count of items blocking ANY report generation.
+                  { label: "Pending Resolution", value: String(pendingResolution), cls: pendingResolution > 0 ? "text-amber-700" : "", compact: true },
+                ]
+              : [
+                  { label: "Future Care Items", value: String(data.futureCareItems.length), cls: "" },
+                  { label: "Lifetime (Undiscounted)", value: formatMoney(totals.totalLifetime), cls: "" },
+                  { label: "Present Value", value: formatMoney(totals.totalPresentValue), cls: "text-brand-800" },
+                  { label: "Physician Pending", value: String(pendingPhysician), cls: pendingPhysician > 0 ? "text-amber-700" : "" },
+                  { label: "Open Findings", value: String(data.reviewFindings.length), cls: data.reviewFindings.length > 0 ? "text-amber-700" : "" },
+                ]
+            ).map((m: { label: string; value: string; cls: string; sm?: boolean; compact?: boolean; center?: boolean }) => (
+              <div key={m.label} className={cn("bg-white px-4 py-2", m.center && "text-center")}>
                 <dt className="text-meta">{m.label}</dt>
-                <dd className={cn("num-metric mt-0.5", m.sm ? "text-sm leading-6" : "text-xl", m.cls)}>{m.value}</dd>
+                <dd className={cn("num-metric mt-0.5", m.center ? "text-2xl" : m.compact ? "text-base leading-7" : m.sm ? "text-sm leading-6" : "text-xl", m.cls)}>{m.value}</dd>
               </div>
             ))}
           </dl>
@@ -374,20 +370,20 @@ export function CaseWorkspace({
       </div>
 
       <div className="mt-5">
-        {tab === "overview" && <IntakePanel data={data} canEdit={can("case.edit")} call={call} />}
-        {tab === "records" && <RecordsPanel data={data} canEdit={can("records.upload")} call={call} busy={busy} />}
+        {tab === "overview" && <IntakePanel data={data} canEdit={can("case.edit") || attorneyView} call={call} />}
+        {tab === "records" && <RecordsPanel data={data} canEdit={can("records.upload")} canUpload={attorneyView} call={call} busy={busy} />}
         {tab === "chronology" && <ChronologyPanel data={data} canEdit={can("chronology.edit")} call={call} />}
-        {tab === "causation" && <CausationPanel data={data} />}
+        {tab === "causation" && <CausationPanel data={data} hideConfidence={attorneyView} />}
         {tab === "providers" && <TreatingProvidersPanel data={data} canEdit={can("case.edit") || can("physician.review")} attorneyView={attorneyView} call={call} />}
         {tab === "evidence" && !attorneyView && <EvidencePanel data={data} />}
         {tab === "futurecare" && <FutureCarePanel data={data} canEdit={can("futurecare.edit")} attorneyView={attorneyView} call={call} focusId={focusId} focusCat={focusCat} />}
         {tab === "costs" && !attorneyView && <CostsPanel data={data} assumptions={assumptions} totals={totals} canEdit={can("case.edit")} canApprove={can("physician.review")} call={call} focusId={focusId} />}
         {tab === "reviews" && <ReviewsPanel points={data.reviewFindings} hasPlan={hasPlan} redactPricing={attorneyView} />}
-        {tab === "physician" && <PhysicianPanel data={data} canReview={can("physician.review")} call={call} />}
+        {tab === "physician" && <PhysicianPanel data={data} canReview={can("physician.review")} attorneyView={attorneyView} call={call} />}
         {tab === "precedents" && <PrecedentsPanel precedents={precedents} data={data} />}
         {tab === "report" && (attorneyView
-          ? <AttorneyReportPanel caseId={data.id} exports={data.reports ?? []} physicians={physicians} onGoTo={goToFindingService} />
-          : <ReportPanel data={data} canExport={can("report.export")} canEdit={can("case.edit")} call={call} busy={busy} totals={totals} physicians={physicians} onGoTo={goToFindingService} />)}
+          ? <AttorneyReportPanel caseId={data.id} exports={data.reports ?? []} physicians={physicians} onReview={setReviewFinding} />
+          : <ReportPanel data={data} canExport={can("report.export")} canEdit={can("case.edit")} call={call} busy={busy} totals={totals} physicians={physicians} onReview={setReviewFinding} />)}
       </div>
     </div>
   );
@@ -717,7 +713,8 @@ function RecordMeta({ d, compact }: { d: AnyRec; compact?: boolean }) {
   );
 }
 
-function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: boolean; call: any; busy: string | null }) {
+function RecordsPanel({ data, canEdit, canUpload = false, call, busy }: { data: AnyRec; canEdit: boolean; canUpload?: boolean; call: any; busy: string | null }) {
+  const mayUpload = canEdit || canUpload;
   const [filter, setFilter] = useState<string>("All");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -745,17 +742,19 @@ function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: bo
 
   return (
     <div className="space-y-4">
-      {canEdit && (
+      {mayUpload && (
         <div className="card flex flex-wrap items-center gap-3 p-4">
           <label className="btn-outline cursor-pointer">
             <Upload className="h-4 w-4" /> Upload Records
             <input type="file" multiple className="hidden" onChange={(e) => upload(e.target.files)} />
           </label>
-          <button className="btn-ghost" disabled={busy === "sample"} onClick={() => call(`/api/cases/${data.id}/documents`, "POST", { sample: true }, "sample")}>
-            {busy === "sample" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />} Add Sample Record Set
-          </button>
+          {canEdit && (
+            <button className="btn-ghost" disabled={busy === "sample"} onClick={() => call(`/api/cases/${data.id}/documents`, "POST", { sample: true }, "sample")}>
+              {busy === "sample" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />} Add Sample Record Set
+            </button>
+          )}
           <span className="text-xs text-ink-500">
-            Each record is auto-labeled by type. Click a record&apos;s type icon to reassign it.
+            {canEdit ? "Each record is auto-labeled by type. Click a record's type icon to reassign it." : "Each record is auto-labeled by type and processed into the case pipeline."}
           </span>
         </div>
       )}
@@ -1211,7 +1210,7 @@ function ChronologyPanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
 
 // ── Causation ────────────────────────────────────────────────────────────────
 const REL_TONE: Record<string, "green" | "amber" | "neutral" | "red"> = { RELATED: "green", AGGRAVATION: "amber", PREEXISTING_UNRELATED: "neutral", SUBSEQUENT_UNRELATED: "neutral", UNCLEAR: "red" };
-function CausationPanel({ data }: { data: AnyRec }) {
+function CausationPanel({ data, hideConfidence = false }: { data: AnyRec; hideConfidence?: boolean }) {
   if (data.conditions.length === 0) return <Empty>Run the AI pipeline to build the causation & apportionment map.</Empty>;
   return (
     <div className="grid gap-4 md:grid-cols-2">
@@ -1223,16 +1222,22 @@ function CausationPanel({ data }: { data: AnyRec }) {
               <h3 className="font-semibold text-ink-900">{c.name}</h3>
               <Badge tone={REL_TONE[c.relatedness]}>{c.relatedness.replace(/_/g, " ").toLowerCase()}</Badge>
             </div>
-            <div className="mt-2 flex items-center gap-2 text-xs text-ink-500">
-              <span>Confidence</span>
-              <div className="h-1.5 w-24 overflow-hidden rounded-full bg-ink-100"><div className="h-full bg-brand-500" style={{ width: `${c.confidence}%` }} /></div>
-              <span className="font-medium text-ink-700">{confidenceBand(c.confidence)} · {c.confidence}%</span>
-              {c.physicianConfirmed && <Badge tone="green">MD confirmed</Badge>}
-            </div>
-            {/* What the determined confidence level means and how it was set. */}
-            <p className="mt-1.5 text-[11px] leading-relaxed text-ink-400">
-              {confidenceDefinition({ confidence: c.confidence, physicianConfirmed: c.physicianConfirmed, missingInfo: c.missingInfo, evidenceCount: sources.length })}
-            </p>
+            {hideConfidence ? (
+              c.physicianConfirmed && <div className="mt-2"><Badge tone="green">MD confirmed</Badge></div>
+            ) : (
+              <>
+                <div className="mt-2 flex items-center gap-2 text-xs text-ink-500">
+                  <span>Confidence</span>
+                  <div className="h-1.5 w-24 overflow-hidden rounded-full bg-ink-100"><div className="h-full bg-brand-500" style={{ width: `${c.confidence}%` }} /></div>
+                  <span className="font-medium text-ink-700">{confidenceBand(c.confidence)} · {c.confidence}%</span>
+                  {c.physicianConfirmed && <Badge tone="green">MD confirmed</Badge>}
+                </div>
+                {/* What the determined confidence level means and how it was set. */}
+                <p className="mt-1.5 text-[11px] leading-relaxed text-ink-400">
+                  {confidenceDefinition({ confidence: c.confidence, physicianConfirmed: c.physicianConfirmed, missingInfo: c.missingInfo, evidenceCount: sources.length })}
+                </p>
+              </>
+            )}
             <p className="mt-3 text-sm text-ink-700">{c.reasoning}</p>
             {c.objectiveEvidence && <p className="mt-2 text-xs text-ink-500"><span className="font-medium">Objective evidence:</span> {c.objectiveEvidence}</p>}
             {/* Links to the actual evidence: source record + page of the content. */}
@@ -1598,8 +1603,14 @@ function RecommendationDossierView({ dossier, assessment, highlight, condensed =
         <p className="mt-1 leading-relaxed text-ink-800">{dossier.medicalNecessity}</p>
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">Probability</span>
-        <Badge tone={dossier.probability.percentage >= 51 ? "green" : "amber"}>{dossier.probability.percentage}%</Badge>
+        {/* The numeric probability stays clinical-team-only; the condensed
+            (attorney) view keeps the qualitative statement below. */}
+        {!condensed && (
+          <>
+            <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">Probability</span>
+            <Badge tone={dossier.probability.percentage >= 51 ? "green" : "amber"}>{dossier.probability.percentage}%</Badge>
+          </>
+        )}
         <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">Clinical confidence</span>
         <Badge tone={CONF_TONE_D[dossier.confidence.level]}>{dossier.confidence.level.toLowerCase()}</Badge>
       </div>
@@ -2397,11 +2408,12 @@ function AttestationCard({ caseId, canReview, items }: { caseId: string; canRevi
   );
 }
 
-function PhysicianPanel({ data, canReview, call }: { data: AnyRec; canReview: boolean; call: any }) {
+function PhysicianPanel({ data, canReview, attorneyView = false, call }: { data: AnyRec; canReview: boolean; attorneyView?: boolean; call: any }) {
   const [open, setOpen] = useState<string | null>(null);
   const [form, setForm] = useState<{ id: string; mode: "approve" | "modify" | "reject" } | null>(null);
   const [confirmAll, setConfirmAll] = useState(false);
   const [statusFilter, setStatusFilter] = useState<string>("");
+  const [groupBySpecialty, setGroupBySpecialty] = useState(false);
   if (data.futureCareItems.length === 0) return <Empty>Run the AI pipeline first to build the physician review packet.</Empty>;
 
   // Review-speed affordances (Phase 14): live counts double as filters.
@@ -2452,14 +2464,40 @@ function PhysicianPanel({ data, canReview, call }: { data: AnyRec; canReview: bo
           );
         })}
         {statusFilter && <button className="text-xs font-medium text-ink-500 hover:underline" onClick={() => setStatusFilter("")}>Show all</button>}
+        {attorneyView && (
+          <button
+            className={cn("focusable ml-auto rounded-md border px-2.5 py-1 text-xs font-medium transition-colors", groupBySpecialty ? "border-brand-300 bg-brand-50 text-brand-800" : "border-ink-200 text-ink-600 hover:bg-ink-50")}
+            aria-pressed={groupBySpecialty}
+            onClick={() => setGroupBySpecialty((v) => !v)}
+          >
+            Group by specialty
+          </button>
+        )}
       </div>
 
       {items.length === 0 && <Empty>No items with this review status.</Empty>}
-      {items.map((it: AnyRec) => (
+      {((): [string | null, AnyRec[]][] => {
+        if (!groupBySpecialty) return [[null, items]];
+        const m = new Map<string, AnyRec[]>();
+        for (const it of items as AnyRec[]) {
+          const key = it.specialty || "Unassigned specialty";
+          m.set(key, [...(m.get(key) ?? []), it]);
+        }
+        return Array.from(m.entries()).sort((x, y) => x[0].localeCompare(y[0]));
+      })().map(([groupLabel, groupItems]) => (
+        <div key={groupLabel ?? "__all"} className="space-y-3">
+          {groupLabel && (
+            <div className="mt-1 flex items-center gap-2 border-b border-ink-200 pb-1.5">
+              <h4 className="text-sm font-semibold text-ink-900">{groupLabel}</h4>
+              <span className="text-xs text-ink-400">{groupItems.length} item{groupItems.length === 1 ? "" : "s"}</span>
+            </div>
+          )}
+          {groupItems.map((it: AnyRec) => (
         <div key={it.id} className="card p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="min-w-0">
               <span className="font-medium text-ink-900">{it.service}</span>
+              {attorneyView && <Badge tone="brand" className="ml-2">{it.specialty || "unassigned"}</Badge>}
               <Badge tone={PHYS_TONE[it.physicianStatus]} className="ml-2">{it.physicianStatus.toLowerCase()}</Badge>
             </div>
             <div className="flex items-center gap-2">
@@ -2497,6 +2535,8 @@ function PhysicianPanel({ data, canReview, call }: { data: AnyRec; canReview: bo
               )}
             </div>
           )}
+        </div>
+          ))}
         </div>
       ))}
     </div>
@@ -2800,6 +2840,7 @@ function AttorneyProviderInput({ caseId, provider, onSaved }: { caseId: string; 
     setBusy(true); setMsg(null);
     const fd = new FormData();
     fd.append("files", file);
+    fd.append("typeMap", JSON.stringify({ [file.name]: "DEPOSITION" }));
     const res = await fetch(`/api/cases/${caseId}/documents`, { method: "POST", body: fd });
     setBusy(false);
     setMsg(res.ok ? `Deposition "${file.name}" uploaded to the case records.` : "Upload failed — try again.");
@@ -3318,7 +3359,7 @@ function redactMoney(t: string | null | undefined): string {
   return String(t ?? "").replace(/\$\s?[\d,]+(?:\.\d+)?/g, "[amount withheld]");
 }
 
-function ValidationCard({ caseId, scope, redactPricing = false, onGoTo, canApplyChanges = false }: { caseId: string; scope?: ReportSelection | null; redactPricing?: boolean; onGoTo?: (service: string) => void; canApplyChanges?: boolean }) {
+function ValidationCard({ caseId, scope, redactPricing = false, onReview }: { caseId: string; scope?: ReportSelection | null; redactPricing?: boolean; onReview?: (finding: AnyRec) => void }) {
   const [state, setState] = useState<AnyRec | null>(null);
   const [running, setRunning] = useState(false);
   const [showAll, setShowAll] = useState(false);
@@ -3354,6 +3395,13 @@ function ValidationCard({ caseId, scope, redactPricing = false, onGoTo, canApply
   // Reload whenever the selected report changes so the card always reflects
   // the CURRENT findings for the document the user is looking at.
   useEffect(() => { void load(); }, [load, scope?.id]);
+  // The Case Review agent re-runs the pipeline when it dispositions a finding;
+  // refresh this card the moment that happens.
+  useEffect(() => {
+    const h = () => void load();
+    window.addEventListener("lifeplanos:validation-updated", h);
+    return () => window.removeEventListener("lifeplanos:validation-updated", h);
+  }, [load]);
   const allFindings: AnyRec[] = state?.findings ?? [];
   // Scope the DISPLAY to findings relevant to the report selected in the
   // library dropdown. Export gating is unaffected — blocking is computed over
@@ -3422,13 +3470,11 @@ function ValidationCard({ caseId, scope, redactPricing = false, onGoTo, canApply
               <p className="mt-1 text-ink-700">{redactPricing ? redactMoney(f.issue) : f.issue}</p>
               <p className="mt-0.5 text-ink-500"><span className="font-medium">Correction:</span> {redactPricing ? redactMoney(f.suggestion) : f.suggestion}</p>
               {actErr && <p className="mt-1 text-xs text-red-700">{actErr}</p>}
-              <div className="mt-2 flex flex-wrap items-center gap-3 border-t border-ink-100 pt-2">
-                {onGoTo && <button className="focusable rounded text-xs font-medium text-brand-700 hover:underline" onClick={() => onGoTo(f.service)}>Go To</button>}
-                <button className="focusable rounded text-xs font-medium text-ink-600 hover:text-ink-900" disabled={actBusy !== null} onClick={() => void act(f.id, "resolve_as_is")}>Resolve As Is</button>
-                {canApplyChanges && <button className="focusable rounded text-xs font-medium text-ink-600 hover:text-ink-900" disabled={actBusy !== null} onClick={() => void act(f.id, "accept_changes")}>Accept Changes</button>}
-                <button className="focusable rounded text-xs font-medium text-ink-400 hover:text-ink-700" disabled={actBusy !== null} onClick={() => void act(f.id, "ignore")}>Ignore</button>
-                {actBusy?.startsWith(f.id) && <Loader2 className="h-3 w-3 animate-spin text-ink-400" />}
-              </div>
+              {onReview && (
+                <div className="mt-2 border-t border-ink-100 pt-2">
+                  <button className="focusable rounded text-xs font-semibold text-brand-700 hover:underline" onClick={() => onReview(f)}>Review</button>
+                </div>
+              )}
             </li>
           ))}
         </ul>
@@ -3447,13 +3493,11 @@ function ValidationCard({ caseId, scope, redactPricing = false, onGoTo, canApply
                 <p className="mt-1 text-ink-700">{redactPricing ? redactMoney(f.issue) : f.issue}</p>
                 <p className="mt-0.5 text-ink-500"><span className="font-medium">Correction:</span> {redactPricing ? redactMoney(f.suggestion) : f.suggestion}</p>
               {actErr && <p className="mt-1 text-xs text-red-700">{actErr}</p>}
-              <div className="mt-2 flex flex-wrap items-center gap-3 border-t border-ink-100 pt-2">
-                {onGoTo && <button className="focusable rounded text-xs font-medium text-brand-700 hover:underline" onClick={() => onGoTo(f.service)}>Go To</button>}
-                <button className="focusable rounded text-xs font-medium text-ink-600 hover:text-ink-900" disabled={actBusy !== null} onClick={() => void act(f.id, "resolve_as_is")}>Resolve As Is</button>
-                {canApplyChanges && <button className="focusable rounded text-xs font-medium text-ink-600 hover:text-ink-900" disabled={actBusy !== null} onClick={() => void act(f.id, "accept_changes")}>Accept Changes</button>}
-                <button className="focusable rounded text-xs font-medium text-ink-400 hover:text-ink-700" disabled={actBusy !== null} onClick={() => void act(f.id, "ignore")}>Ignore</button>
-                {actBusy?.startsWith(f.id) && <Loader2 className="h-3 w-3 animate-spin text-ink-400" />}
-              </div>
+              {onReview && (
+                <div className="mt-2 border-t border-ink-100 pt-2">
+                  <button className="focusable rounded text-xs font-semibold text-brand-700 hover:underline" onClick={() => onReview(f)}>Review</button>
+                </div>
+              )}
               </li>
             ))}
           </ul>
@@ -3513,7 +3557,7 @@ function attorneyPreparerOptions(def: AnyRec | null): { key: string; label: stri
   return opts;
 }
 
-function AttorneyReportPanel({ caseId, exports, physicians = [], onGoTo }: { caseId: string; exports: AnyRec[]; physicians?: AnyRec[]; onGoTo?: (service: string) => void }) {
+function AttorneyReportPanel({ caseId, exports, physicians = [], onReview }: { caseId: string; exports: AnyRec[]; physicians?: AnyRec[]; onReview?: (finding: AnyRec) => void }) {
   const [reports, setReports] = useState<AnyRec[]>([]);
   const [selectedId, setSelectedId] = useState<string>("LIFE_CARE_PLAN");
   const [picked, setPicked] = useState<Set<string>>(new Set());
@@ -3615,7 +3659,7 @@ function AttorneyReportPanel({ caseId, exports, physicians = [], onGoTo }: { cas
       </div>
 
       {/* Integrity check — barriers to completion; no pricing values. */}
-      <ValidationCard caseId={caseId} scope={sel} redactPricing onGoTo={onGoTo} />
+      <ValidationCard caseId={caseId} scope={sel} redactPricing onReview={onReview} />
 
       {/* Preparer titles (anonymous) */}
       <div className="card p-5">
@@ -3743,14 +3787,14 @@ const STATUS_DOT_ATTORNEY: Record<string, string> = {
   "Not enabled": "bg-slate-300",
 };
 
-function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians = [], onGoTo }: { data: AnyRec; canExport: boolean; canEdit: boolean; call: any; busy: string | null; totals: AnyRec; physicians?: AnyRec[]; onGoTo?: (service: string) => void }) {
+function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians = [], onReview }: { data: AnyRec; canExport: boolean; canEdit: boolean; call: any; busy: string | null; totals: AnyRec; physicians?: AnyRec[]; onReview?: (finding: AnyRec) => void }) {
   const [preparing, setPreparing] = useState<string>(data.preparingPhysicianId ?? "");
   const [reportSel, setReportSel] = useState<ReportSelection | null>(null);
   const chosen = physicians.find((p: AnyRec) => p.id === preparing);
   return (
     <div className="space-y-4">
       <ReportLibrary caseId={data.id} canExport={canExport} onSelect={setReportSel} />
-      <ValidationCard caseId={data.id} scope={reportSel} onGoTo={onGoTo} canApplyChanges={canEdit} />
+      <ValidationCard caseId={data.id} scope={reportSel} onReview={onReview} />
       {/* Preparing physician — only this seat's name & credentials appear in the report. */}
       <div className="card p-5">
         <h3 className="text-sm font-semibold text-ink-900">Preparing Physician</h3>
