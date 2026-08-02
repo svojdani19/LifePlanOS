@@ -1043,6 +1043,14 @@ model ValidationFinding {
   suggestion     String // suggested correction
   exportBlocking Boolean @default(false)
 
+  // User disposition. OPEN findings gate exports; RESOLVED_AS_IS and IGNORED
+  // do not. Dispositions survive validation re-runs via (service, result)
+  // matching — if the underlying data changes enough to alter the finding,
+  // it reopens.
+  status       String    @default("OPEN") // OPEN | RESOLVED_AS_IS | IGNORED
+  resolvedById String?
+  resolvedAt   DateTime?
+
   createdAt DateTime @default(now())
 
   @@index([caseId])
