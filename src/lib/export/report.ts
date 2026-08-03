@@ -24,6 +24,7 @@ import { buildReasoningAssessment, detectSetConflicts, PROBABILITY_LABEL, EVIDEN
 import { referencesFor, guidelineSourcesFor } from "@/lib/references/sources";
 import { parseBasis, basisNarrative } from "@/lib/engine/lifeExpectancy";
 import { verifyAttestation, type AttestationScopeEntry, type AttestableItem } from "@/lib/engine/attestation";
+import { evaluatePhysicianReportAuthority, type VerifiedExpertAuthority } from "@/lib/reports/professionalAuthority";
 import { bodyRegion } from "@/lib/engine/integrity";
 import { project } from "@/lib/engine/cost";
 import { typeLabel } from "@/lib/documents/taxonomy";
@@ -316,12 +317,30 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   const docById = new Map(c.documents.map((d) => [d.id, d]));
   const condById = new Map(c.conditions.map((x) => [x.id, x]));
   const catCount = new Set(reportItems.map((i) => i.category)).size;
-  // Authorship: the designated preparing physician when set (their name,
-  // credentials, and signature appear — and ONLY theirs); otherwise the case
-  // creator, with no credentials rendered.
-  const preparerName = c.preparingPhysician?.name ?? c.createdBy?.name ?? "the undersigned";
-  const preparerCredentials = c.preparingPhysician?.credentials ?? [];
-  const preparerCredSummary = c.preparingPhysician?.credentialSummary?.trim() ?? null;
+  // ── Professional voice ──────────────────────────────────────────────────────
+  // First-person expert language, professional credentials, and a signature
+  // block appear ONLY when the professional-authority gate verifies a current
+  // ACTIVE attestation that covers the included totals and whose signer still
+  // holds the physician role and a verified credential in this firm. Drafts and
+  // unverified renders use neutral, clearly attributed language: the
+  // deterministic engine holds no medical opinion, and nobody — planner,
+  // attorney, case creator, or administrator — is ever presented as the expert.
+  const authorityDecision = reportOpts.draft
+    ? null
+    : await evaluatePhysicianReportAuthority({ firmId: c.firmId, caseId }).catch(() => null);
+  const expertVoice: VerifiedExpertAuthority | null =
+    authorityDecision && authorityDecision.authorized ? authorityDecision : null;
+  const authorizingAttestation = expertVoice ? c.attestations.find((att) => att.id === expertVoice.attestationId) ?? null : null;
+  // Authorship: in verified-expert mode the signer of the verified attestation
+  // is the expert — never the case creator. In neutral mode the preparer is
+  // named for authorship only, with no credentials and no opinions attributed.
+  const preparerName = expertVoice
+    ? expertVoice.signerName
+    : c.preparingPhysician?.name ?? c.createdBy?.name ?? "the preparing life-care-planning team";
+  const preparerCredentials = expertVoice
+    ? (((authorizingAttestation?.credentialDocs as unknown) ?? []) as { id?: string; type: string; label: string | null; filename: string }[])
+    : [];
+  const preparerCredSummary = expertVoice ? expertVoice.signerCredentialSummary?.trim() ?? null : null;
   const preparer = preparerName;
   const icdFor = (name: string): string => {
     if (c.diagnosis && name.toLowerCase() === c.diagnosis.toLowerCase()) return c.icd10Code || "";
@@ -384,7 +403,16 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
 
     // Medical necessity — the physician narrative (why, patient-specific).
     out.push(new Paragraph({ spacing: { before: 120, after: 40 }, children: [new TextRun({ text: "Medical necessity.", bold: true, size: 21, color: NAVY })] }));
-    out.push(p(dossier.medicalNecessity));
+    out.push(
+      p(
+        expertVoice
+          ? dossier.medicalNecessity
+          : dossier.medicalNecessity.replace(
+              /it is my opinion, to a reasonable degree of medical probability, that this care is required\./g,
+              "the record-supported analysis identifies this care as required under the methodology's probability standard, subject to professional confirmation.",
+            ),
+      ),
+    );
 
     // Probability assessment (structured + percentage).
     const probPresent = dossier.probability.factors.filter((f) => f.present).map((f) => lc(f.label));
@@ -533,12 +561,16 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   body.push(h1("Executive Summary", { pageBreak: true }));
   body.push(
     p(
-      `I have been asked to evaluate the future medical care that ${subject}, a ${age != null ? `${age}-year-old ` : ""}${sexNoun}, will more likely than not require as a result of the injuries ${pr.subj} sustained on ${doiText}${c.mechanism ? ` by mechanism of ${lc(c.mechanism)}` : ""}, and to reduce that care to a lifetime cost stated at present value. This report sets out that opinion. It rests on my review of the medical records identified herein, the objective findings they document, the natural history of the diagnoses at issue, and the published life-care-planning methodology described below.`,
+      expertVoice
+        ? `I have been asked to evaluate the future medical care that ${subject}, a ${age != null ? `${age}-year-old ` : ""}${sexNoun}, will more likely than not require as a result of the injuries ${pr.subj} sustained on ${doiText}${c.mechanism ? ` by mechanism of ${lc(c.mechanism)}` : ""}, and to reduce that care to a lifetime cost stated at present value. This report sets out that opinion. It rests on my review of the medical records identified herein, the objective findings they document, the natural history of the diagnoses at issue, and the published life-care-planning methodology described below.`
+        : `This report compiles the future medical care that the current record supports for ${subject}, a ${age != null ? `${age}-year-old ` : ""}${sexNoun}, in connection with the injuries ${pr.subj} sustained on ${doiText}${c.mechanism ? ` by mechanism of ${lc(c.mechanism)}` : ""}, and states the projected lifetime cost of that care at present value. It is a record-supported projection prepared for professional review, resting on the medical records identified herein, the objective findings they document, the natural history of the diagnoses at issue, and the published life-care-planning methodology described below.`,
     ),
   );
   body.push(
     p(
-      `Reasoning from the record, it is my opinion, held to a reasonable degree of medical probability, that ${subject} will require the ${careCategories} set out in this plan across ${catCount} domain${catCount === 1 ? "" : "s"} of medicine. The reasonable and necessary future medical cost of that care is ${money(totalPresentValue)} at present value, corresponding to ${money(totalLifetime)} in undiscounted future dollars over the ${life.toFixed(1)}-year projection horizon. Each recommendation is tied to a specific diagnosis, to the objective evidence supporting it, to the applicable clinical standard, and to a documented pricing basis, and is stated for the reviewing physician's confirmation.`,
+      expertVoice
+        ? `Reasoning from the record, it is my opinion, held to a reasonable degree of medical probability, that ${subject} will require the ${careCategories} set out in this plan across ${catCount} domain${catCount === 1 ? "" : "s"} of medicine. The reasonable and necessary future medical cost of that care is ${money(totalPresentValue)} at present value, corresponding to ${money(totalLifetime)} in undiscounted future dollars over the ${life.toFixed(1)}-year projection horizon. Each recommendation is tied to a specific diagnosis, to the objective evidence supporting it, to the applicable clinical standard, and to a documented pricing basis, and is stated for the reviewing physician's confirmation.`
+        : `The current record-supported projection identifies the ${careCategories} set out in this plan across ${catCount} domain${catCount === 1 ? "" : "s"} of medicine. The projected future medical cost of that care is ${money(totalPresentValue)} at present value, corresponding to ${money(totalLifetime)} in undiscounted future dollars over the ${life.toFixed(1)}-year projection horizon. Each recommendation is tied to a specific diagnosis, to the objective evidence supporting it, to the applicable clinical standard, and to a documented pricing basis. This draft is subject to review and adoption by the appropriately credentialed professional; no professional attestation is currently attached.`,
     ),
   );
   body.push(h2("Summary of Key Facts"));
@@ -574,7 +606,9 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   );
   body.push(
     p(
-      `The reviewed records establish the diagnoses analyzed in this report and document the course of treatment ${subject} has undergone to date. Notwithstanding that treatment, the records reflect residual impairment that, in my opinion, will require ongoing and future medical care. The nature, frequency, duration, and cost of that care are the subject of this plan.`,
+      expertVoice
+        ? `The reviewed records establish the diagnoses analyzed in this report and document the course of treatment ${subject} has undergone to date. Notwithstanding that treatment, the records reflect residual impairment that, in my opinion, will require ongoing and future medical care. The nature, frequency, duration, and cost of that care are the subject of this plan.`
+        : `The reviewed records establish the diagnoses analyzed in this report and document the course of treatment ${subject} has undergone to date. Notwithstanding that treatment, the records reflect residual impairment that the record-supported analysis identifies as requiring ongoing and future medical care, subject to professional confirmation. The nature, frequency, duration, and cost of that care are the subject of this plan.`,
     ),
   );
 
@@ -587,11 +621,28 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   );
   body.push(
     p(
-      `A life care plan is a dynamic document. This report reflects the records and information available to me at the time of its preparation, and I reserve the right to supplement or amend my opinions should additional records, examinations, or information become available.`,
+      expertVoice
+        ? `A life care plan is a dynamic document. This report reflects the records and information available to me at the time of its preparation, and I reserve the right to supplement or amend my opinions should additional records, examinations, or information become available.`
+        : `A life care plan is a dynamic document. This report reflects the records and information available at the time of its preparation, and it is subject to supplementation or amendment by the reviewing professional should additional records, examinations, or information become available.`,
     ),
   );
 
   // ══ QUALIFICATIONS OF REVIEWER ═══════════════════════════════════════════════
+  // Rendered as an expert-qualifications section ONLY under verified authority;
+  // otherwise a neutral preparation/review-status section takes its place.
+  if (!expertVoice) {
+    body.push(h1("Preparation & Review Status", { pageBreak: true }));
+    body.push(
+      p(
+        `This document was prepared by ${preparer} of ${c.firm.name} as a record-supported draft life care plan. It compiles the current record, the deterministic analysis of that record, and the projected costs of the identified care.`,
+      ),
+    );
+    body.push(
+      p(
+        `This draft is subject to review and adoption by the appropriately credentialed professional. No professional attestation is currently attached, and no statement in this document is offered as the opinion of a physician or other credentialed expert.`,
+      ),
+    );
+  } else {
   body.push(h1("Qualifications of Reviewer", { pageBreak: true }));
   // EPIC-011 — when the preparer's seat carries a credential summary and/or
   // uploaded documents, render a real Glazer-style Qualifications paragraph and
@@ -616,16 +667,22 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     );
   }
 
+  }
+
   // ══ METHODOLOGY ══════════════════════════════════════════════════════════════
   body.push(h1("Methodology", { pageBreak: true }));
   body.push(
     p(
-      `I began by reviewing the ${c.documents.length} record set${c.documents.length === 1 ? "" : "s"} identified in the section that follows, totaling ${c.documents.reduce((s, d) => s + (d.pageCount || 0), 0)} pages. From those records I established the diagnoses and impairments at issue on the basis of the objective evidence — imaging, operative findings, physical examination, and diagnostic studies — rather than on subjective report alone.`,
+      expertVoice
+        ? `I began by reviewing the ${c.documents.length} record set${c.documents.length === 1 ? "" : "s"} identified in the section that follows, totaling ${c.documents.reduce((s, d) => s + (d.pageCount || 0), 0)} pages. From those records I established the diagnoses and impairments at issue on the basis of the objective evidence — imaging, operative findings, physical examination, and diagnostic studies — rather than on subjective report alone.`
+        : `The methodology begins with a review of the ${c.documents.length} record set${c.documents.length === 1 ? "" : "s"} identified in the section that follows, totaling ${c.documents.reduce((s, d) => s + (d.pageCount || 0), 0)} pages. From those records the diagnoses and impairments at issue are established on the basis of the objective evidence — imaging, operative findings, physical examination, and diagnostic studies — rather than on subjective report alone.`,
     ),
   );
   body.push(
     p(
-      `Having established the diagnoses, I identified the medical care each condition will more likely than not require over ${subject}'s remaining lifetime, applying the standards of the certified life-care-planning bodies together with the Official Disability Guidelines and the applicable specialty clinical practice guidelines for each diagnosis. Where the natural history, complication rate, or procedure survivorship of a condition bears on future need, I have relied upon the peer-reviewed literature, cited by recommendation.`,
+      expertVoice
+        ? `Having established the diagnoses, I identified the medical care each condition will more likely than not require over ${subject}'s remaining life expectancy — the plan's projection horizon — applying the standards of the certified life-care-planning bodies together with the Official Disability Guidelines and the applicable specialty clinical practice guidelines for each diagnosis. Where the natural history, complication rate, or procedure survivorship of a condition bears on future need, I have relied upon the peer-reviewed literature, cited by recommendation.`
+        : `With the diagnoses established, the analysis identifies the medical care each condition will more likely than not require over ${subject}'s remaining life expectancy — the plan's projection horizon — applying the standards of the certified life-care-planning bodies together with the Official Disability Guidelines and the applicable specialty clinical practice guidelines for each diagnosis. Where the natural history, complication rate, or procedure survivorship of a condition bears on future need, the analysis relies upon the peer-reviewed literature, cited by recommendation.`,
     ),
   );
   body.push(
@@ -635,7 +692,9 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   );
   body.push(
     p(
-      `Throughout, I have applied the standard of reasonable medical probability: a service is included in the plan, and its cost totaled, only where it is more likely than not to be required. Care that is foreseeable but not more likely than not is disclosed as a contingency and is not included in the totals.`,
+      expertVoice
+        ? `Throughout, I have applied the standard of reasonable medical probability: a service is included in the plan, and its cost totaled, only where it is more likely than not to be required. Care that is foreseeable but not more likely than not is disclosed as a contingency and is not included in the totals.`
+        : `Throughout, the standard of reasonable medical probability is applied: a service is included in the plan, and its cost totaled, only where it is more likely than not to be required. Care that is foreseeable but not more likely than not is disclosed as a contingency and is not included in the totals.`,
     ),
   );
   // EPIC-011 — record the interviews relied upon (Glazer-style), when present.
@@ -645,7 +704,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     if (hasPatient || interviewedProviders.length) {
       body.push(
         p(
-          `In addition to the records, I have relied upon ${[hasPatient ? `an interview of ${subject}` : null, interviewedProviders.length ? `interview${interviewedProviders.length === 1 ? "" : "s"} of the treating ${interviewedProviders.length === 1 ? "provider" : "providers"} (${interviewedProviders.map((pv) => `${pv.name}${pv.credentials ? `, ${pv.credentials}` : ""}`).join("; ")})` : null].filter(Boolean).join(" and ")}. The patient's account of current complaints appears under Current Medical Status; interview findings pertinent to a specific recommendation are set out with that recommendation.`,
+          `${expertVoice ? "In addition to the records, I have relied upon" : "In addition to the records, the plan draws upon"} ${[hasPatient ? `an interview of ${subject}` : null, interviewedProviders.length ? `interview${interviewedProviders.length === 1 ? "" : "s"} of the treating ${interviewedProviders.length === 1 ? "provider" : "providers"} (${interviewedProviders.map((pv) => `${pv.name}${pv.credentials ? `, ${pv.credentials}` : ""}`).join("; ")})` : null].filter(Boolean).join(" and ")}. The patient's account of current complaints appears under Current Medical Status; interview findings pertinent to a specific recommendation are set out with that recommendation.`,
         ),
       );
     }
@@ -689,7 +748,9 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   body.push(h1("Medical Chronology", { pageBreak: true }));
   body.push(
     p(
-      `The following chronology sets out the clinically significant encounters bearing on the diagnoses and future care at issue. It is not a recitation of every page in the record; rather, I have selected and organized the ${c.chronologyEvents.length} encounter${c.chronologyEvents.length === 1 ? "" : "s"} that inform my opinions. Each entry closes with my assessment of why the encounter matters to ${subject}'s future care.`,
+      expertVoice
+        ? `The following chronology sets out the clinically significant encounters bearing on the diagnoses and future care at issue. It is not a recitation of every page in the record; rather, I have selected and organized the ${c.chronologyEvents.length} encounter${c.chronologyEvents.length === 1 ? "" : "s"} that inform my opinions. Each entry closes with my assessment of why the encounter matters to ${subject}'s future care.`
+        : `The following chronology sets out the clinically significant encounters bearing on the diagnoses and future care at issue. It is not a recitation of every page in the record; rather, the ${c.chronologyEvents.length} encounter${c.chronologyEvents.length === 1 ? "" : "s"} that inform the plan's analysis have been selected and organized. Each entry closes with an assessment of why the encounter matters to ${subject}'s future care.`,
     ),
   );
   if (!c.chronologyEvents.length) body.push(p("No clinical encounters were catalogued from the reviewed records.", { italics: true }));
@@ -720,7 +781,9 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   if (preExisting.length) {
     body.push(
       p(
-        `The reviewed records reflect the following pre-existing condition${preExisting.length === 1 ? "" : "s"}: ${preExisting.join("; ")}. I have considered ${preExisting.length === 1 ? "this condition" : "these conditions"} in forming my opinions. The available evidence does not permit a reliable quantitative apportionment; accordingly, the plan reflects only the care supportable from the record as attributable to the injuries at issue, and any formal apportionment is deferred to the trier of fact on a developed record.`,
+        expertVoice
+          ? `The reviewed records reflect the following pre-existing condition${preExisting.length === 1 ? "" : "s"}: ${preExisting.join("; ")}. I have considered ${preExisting.length === 1 ? "this condition" : "these conditions"} in forming my opinions. The available evidence does not permit a reliable quantitative apportionment; accordingly, the plan reflects only the care supportable from the record as attributable to the injuries at issue, and any formal apportionment is deferred to the trier of fact on a developed record.`
+          : `The reviewed records reflect the following pre-existing condition${preExisting.length === 1 ? "" : "s"}: ${preExisting.join("; ")}. ${preExisting.length === 1 ? "This condition is" : "These conditions are"} accounted for in the analysis. The available evidence does not permit a reliable quantitative apportionment; accordingly, the plan reflects only the care supportable from the record as attributable to the injuries at issue, and any formal apportionment is deferred to the trier of fact on a developed record.`,
       ),
     );
   } else {
@@ -761,7 +824,9 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   if (activeConds.length) {
     body.push(
       p(
-        `${cap(pr.subj)} remains under care for ${activeConds.map((x) => lc(x.name)).slice(0, 6).join("; ")}${activeConds.length > 6 ? "; and additional conditions set out below" : ""}. In my opinion, ${pr.poss} condition has reached a point at which the future course of care can be projected to a reasonable degree of medical probability.`,
+        expertVoice
+          ? `${cap(pr.subj)} remains under care for ${activeConds.map((x) => lc(x.name)).slice(0, 6).join("; ")}${activeConds.length > 6 ? "; and additional conditions set out below" : ""}. In my opinion, ${pr.poss} condition has reached a point at which the future course of care can be projected to a reasonable degree of medical probability.`
+          : `${cap(pr.subj)} remains under care for ${activeConds.map((x) => lc(x.name)).slice(0, 6).join("; ")}${activeConds.length > 6 ? "; and additional conditions set out below" : ""}. The record-supported analysis identifies ${pr.poss} condition as having reached a point at which the future course of care can be projected under the methodology's probability standard, subject to professional confirmation.`,
       ),
     );
   }
@@ -824,14 +889,22 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   body.push(h1("Treating Physician Diagnoses", { pageBreak: true }));
   body.push(
     p(
-      `The diagnoses at issue, established from the objective record, are set out below. For each, I state its objective basis and its relationship to the incident. The clinical necessity of the care each diagnosis supports — with its supporting and contradictory evidence, guidelines, and literature — is developed per recommendation in the Future Medical Needs section, which is the clinical centerpiece of this plan.`,
+      expertVoice
+        ? `The diagnoses at issue, established from the objective record, are set out below. For each, I state its objective basis and its relationship to the incident. The clinical necessity of the care each diagnosis supports — with its supporting and contradictory evidence, guidelines, and literature — is developed per recommendation in the Future Medical Needs section, which is the clinical centerpiece of this plan.`
+        : `The diagnoses at issue, established from the objective record, are set out below. For each, its objective basis and its relationship to the incident are stated. The clinical necessity of the care each diagnosis supports — with its supporting and contradictory evidence, guidelines, and literature — is developed per recommendation in the Future Medical Needs section, which is the clinical centerpiece of this plan.`,
     ),
   );
   for (const cond of c.conditions) {
     const icd = icdFor(cond.name);
     const evSources = (Array.isArray(cond.evidenceSources) ? cond.evidenceSources : []) as { filename?: string; page?: number | null; quote?: string }[];
     body.push(new Paragraph({ spacing: { before: 220, after: 40 }, keepNext: true, children: [new TextRun({ text: cond.name, bold: true, size: 22, color: NAVY }), ...(icd ? [new TextRun({ text: `    ICD-10 ${icd}`, size: 18, color: GREY })] : [])] }));
-    body.push(p(`In my opinion, ${lc(cond.name)} is ${relatednessText(cond.relatedness)}.`));
+    body.push(
+      p(
+        expertVoice
+          ? `In my opinion, ${lc(cond.name)} is ${relatednessText(cond.relatedness)}.`
+          : `The record-supported analysis classifies ${lc(cond.name)} as ${relatednessText(cond.relatedness)}, subject to professional confirmation.`,
+      ),
+    );
     if (cond.objectiveEvidence) body.push(labeled("Objective basis", cond.objectiveEvidence));
     if (evSources.length) body.push(sourceLine(`Evidence of record: ${evSources.map((s) => `${s.filename}${s.page ? `, p. ${s.page}` : ""}`).join("; ")}.`));
     if (cond.reasoning) body.push(p(period(cap(cond.reasoning))));
@@ -843,7 +916,9 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   body.push(h1("Future Medical Needs & Medical Necessity", { pageBreak: true }));
   body.push(
     p(
-      `Set out below are the categories of future medical care that, in my opinion and to a reasonable degree of medical probability, ${subject} will require as a result of the injuries at issue. For each, I state the basis for its medical necessity, the expected course of the need, and the reasonable cost. The care is organized by domain of medicine.`,
+      expertVoice
+        ? `Set out below are the categories of future medical care that, in my opinion and to a reasonable degree of medical probability, ${subject} will require as a result of the injuries at issue. For each, I state the basis for its medical necessity, the expected course of the need, and the reasonable cost. The care is organized by domain of medicine.`
+        : `Set out below are the categories of future medical care that the record-supported analysis identifies, under the methodology's probability standard, as required as a result of the injuries at issue, subject to professional review and adoption. For each, the basis for medical necessity, the expected course of the need, and the projected cost are stated. The care is organized by domain of medicine.`,
     ),
   );
   if (!reportItems.length) body.push(p(reviewStarted ? "No future-care items have been endorsed on physician review." : "No future-care recommendations have been generated for this case.", { italics: true }));
@@ -895,7 +970,9 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   body.push(h1("Cost Analysis", { pageBreak: true }));
   body.push(
     p(
-      `The reasonable future medical cost of the care set out in this plan is ${money(totalPresentValue)} at present value, corresponding to ${money(totalLifetime)} in undiscounted future dollars. To account for reasonable variation in utilization and pricing, I have also computed a lower and higher scenario, as follows.`,
+      expertVoice
+        ? `The reasonable future medical cost of the care set out in this plan is ${money(totalPresentValue)} at present value, corresponding to ${money(totalLifetime)} in undiscounted future dollars. To account for reasonable variation in utilization and pricing, I have also computed a lower and higher scenario, as follows.`
+        : `The projected future medical cost of the care set out in this plan is ${money(totalPresentValue)} at present value, corresponding to ${money(totalLifetime)} in undiscounted future dollars. To account for reasonable variation in utilization and pricing, a lower and a higher scenario are also computed, as follows.`,
     ),
   );
   body.push(
@@ -944,7 +1021,9 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   const aggravations = c.conditions.filter((x) => x.relatedness === "AGGRAVATION");
   body.push(
     p(
-      `Taking the record as a whole, it is my opinion, to a reasonable degree of medical probability, that ${subject}'s injuries were caused by the incident ${c.dateOfInjury ? `of ${fmtDate(c.dateOfInjury)}` : "in question"} and that ${pr.subj} will require the future medical care set out in this plan as a consequence. Of the ${c.conditions.length} condition${c.conditions.length === 1 ? "" : "s"} I have analyzed, ${related.length} ${related.length === 1 ? "is" : "are"} causally related to the incident${aggravations.length ? ` and ${aggravations.length} represent${aggravations.length === 1 ? "s" : ""} aggravation of a pre-existing condition` : ""}. My projections are driven by those conditions.`,
+      expertVoice
+        ? `Taking the record as a whole, it is my opinion, to a reasonable degree of medical probability, that ${subject}'s injuries were caused by the incident ${c.dateOfInjury ? `of ${fmtDate(c.dateOfInjury)}` : "in question"} and that ${pr.subj} will require the future medical care set out in this plan as a consequence. Of the ${c.conditions.length} condition${c.conditions.length === 1 ? "" : "s"} I have analyzed, ${related.length} ${related.length === 1 ? "is" : "are"} causally related to the incident${aggravations.length ? ` and ${aggravations.length} represent${aggravations.length === 1 ? "s" : ""} aggravation of a pre-existing condition` : ""}. My projections are driven by those conditions.`
+        : `Taking the record as a whole, the record-supported analysis attributes ${subject}'s injuries to the incident ${c.dateOfInjury ? `of ${fmtDate(c.dateOfInjury)}` : "in question"} and identifies the future medical care set out in this plan as a consequence, subject to professional confirmation. Of the ${c.conditions.length} condition${c.conditions.length === 1 ? "" : "s"} analyzed, ${related.length} ${related.length === 1 ? "is" : "are"} classified as causally related to the incident${aggravations.length ? ` and ${aggravations.length} represent${aggravations.length === 1 ? "s" : ""} aggravation of a pre-existing condition` : ""}. The projections are driven by those conditions.`,
     ),
   );
   if (aggravations.length) {
@@ -956,7 +1035,9 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   }
   body.push(
     p(
-      `The plan is comprehensive of the domains of care the record supports, and each recommendation is anchored to a specific diagnosis, to the objective evidence, to the governing clinical standard, and to a documented cost basis. Taken together, the care represents, in my opinion, the reasonable and necessary future medical treatment of ${subject}'s injuries over ${pr.poss} remaining lifetime.`,
+      expertVoice
+        ? `The plan is comprehensive of the domains of care the record supports, and each recommendation is anchored to a specific diagnosis, to the objective evidence, to the governing clinical standard, and to a documented cost basis. Taken together, the care represents, in my opinion, the reasonable and necessary future medical treatment of ${subject}'s injuries over ${pr.poss} remaining life expectancy; items projected over the full horizon state their clinical duration basis with the item.`
+        : `The plan is comprehensive of the domains of care the record supports, and each recommendation is anchored to a specific diagnosis, to the objective evidence, to the governing clinical standard, and to a documented cost basis. Taken together, the care represents the projected future medical treatment of ${subject}'s injuries over ${pr.poss} remaining life expectancy, as supported by the current record and subject to professional adoption; lifetime-horizon items are stated as projections with their duration basis.`,
     ),
   );
 
@@ -964,14 +1045,18 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   body.push(h1("Limitations", { pageBreak: true }));
   body.push(
     p(
-      `This report is based upon the records and information available to me at the time of its preparation. Should additional records, diagnostic studies, examinations, or physician opinions become available, I reserve the right to supplement or revise my opinions accordingly.`,
+      expertVoice
+        ? `This report is based upon the records and information available to me at the time of its preparation. Should additional records, diagnostic studies, examinations, or physician opinions become available, I reserve the right to supplement or revise my opinions accordingly.`
+        : `This report is based upon the records and information available at the time of its preparation. Should additional records, diagnostic studies, examinations, or physician opinions become available, the reviewing professional may supplement or revise the plan accordingly.`,
     ),
   );
   const speculative = reportItems.filter((i) => i.probability === "SPECULATIVE" || i.probability === "NOT_SUPPORTED");
   if (speculative.length || excludedForReview.length) {
     body.push(
       p(
-        `The following contingencies are foreseeable but, in my opinion, are not more likely than not to be required. They are disclosed for completeness and are excluded from the totals stated above:`,
+        expertVoice
+          ? `The following contingencies are foreseeable but, in my opinion, are not more likely than not to be required. They are disclosed for completeness and are excluded from the totals stated above:`
+          : `The following contingencies are foreseeable but are not identified by the record-supported analysis as more likely than not to be required. They are disclosed for completeness and are excluded from the totals stated above:`,
       ),
     );
     for (const i of speculative) body.push(bullet(`${i.service}${i.missingSupport ? ` — ${lc(i.missingSupport)}` : ""}.`));
@@ -987,17 +1072,29 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   body.push(h1("Conclusions", { pageBreak: true }));
   body.push(
     p(
-      `Based upon my review of the medical records identified in this report, and to a reasonable degree of medical probability, it is my opinion that ${subject} will require the future medical care set out in this Life Care Plan as a result of the injuries sustained on ${doiText}. The reasonable and necessary cost of that care is ${money(totalPresentValue)} at present value (${money(totalLifetime)} undiscounted) over ${pr.poss} remaining life expectancy of ${life.toFixed(1)} years.`,
+      expertVoice
+        ? `Based upon my review of the medical records identified in this report, and to a reasonable degree of medical probability, it is my opinion that ${subject} will require the future medical care set out in this Life Care Plan as a result of the injuries sustained on ${doiText}. The reasonable and necessary cost of that care is ${money(totalPresentValue)} at present value (${money(totalLifetime)} undiscounted) over ${pr.poss} remaining life expectancy of ${life.toFixed(1)} years.`
+        : `Based upon the medical records identified in this report, the record-supported projection identifies the future medical care set out in this Life Care Plan as required in connection with the injuries sustained on ${doiText}, subject to professional review and adoption. The projected cost of that care is ${money(totalPresentValue)} at present value (${money(totalLifetime)} undiscounted) over ${pr.poss} remaining life expectancy of ${life.toFixed(1)} years.`,
     ),
   );
   body.push(
     p(
-      `The opinions expressed herein are held to a reasonable degree of medical probability and are subject to revision should additional information become available. Each recommendation is offered for the confirmation of the reviewing physician.`,
+      expertVoice
+        ? `The opinions expressed herein are held to a reasonable degree of medical probability and are subject to revision should additional information become available. Each recommendation is offered for the confirmation of the reviewing physician.`
+        : `This draft is subject to review and adoption by the appropriately credentialed professional; its statements are not offered as the opinion of a physician or other credentialed expert, and no professional attestation is currently attached. Each recommendation is offered for the confirmation of the reviewing physician.`,
     ),
   );
-  body.push(new Paragraph({ spacing: { before: 480, after: 40 }, children: [new TextRun({ text: "Respectfully submitted,", size: BODY, color: INK })] }));
-  body.push(new Paragraph({ spacing: { before: 360 }, children: [new TextRun({ text: "______________________________________", size: BODY })] }));
-  body.push(new Paragraph({ children: [new TextRun({ text: preparer, bold: true, size: BODY, color: INK })] }));
+  // A signature block is a professional act: it renders ONLY under verified
+  // authority. Drafts and unverified renders carry an unsigned authorship note.
+  if (expertVoice) {
+    body.push(new Paragraph({ spacing: { before: 480, after: 40 }, children: [new TextRun({ text: "Respectfully submitted,", size: BODY, color: INK })] }));
+    body.push(new Paragraph({ spacing: { before: 360 }, children: [new TextRun({ text: "______________________________________", size: BODY })] }));
+    body.push(new Paragraph({ children: [new TextRun({ text: preparer, bold: true, size: BODY, color: INK })] }));
+  } else {
+    body.push(new Paragraph({ spacing: { before: 480, after: 40 }, children: [new TextRun({ text: `Prepared by ${preparer} — DRAFT, not signed.`, bold: true, size: BODY, color: INK })] }));
+    body.push(p("This draft is subject to review and adoption by the appropriately credentialed professional. No professional attestation is currently attached."));
+    body.push(new Paragraph({ children: [new TextRun({ text: "", size: BODY })] }));
+  }
   body.push(new Paragraph({ children: [new TextRun({ text: c.firm.name, size: BODY, color: INK })] }));
   body.push(new Paragraph({ spacing: { after: 40 }, children: [new TextRun({ text: fmtDate(new Date()), size: CAPTION, color: GREY })] }));
 
@@ -1007,9 +1104,11 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   // never printed. The statement text is the immutable signed content; the
   // content hash lets any reader confirm the printed statement is what was
   // signed.
-  const validAttestations = c.attestations.filter(
-    (att) => verifyAttestation((att.scope as unknown as AttestationScopeEntry[]) ?? [], items as unknown as AttestableItem[]).valid,
-  );
+  const validAttestations = expertVoice
+    ? c.attestations.filter(
+        (att) => verifyAttestation((att.scope as unknown as AttestationScopeEntry[]) ?? [], items as unknown as AttestableItem[]).valid,
+      )
+    : [];
   if (validAttestations.length) {
     body.push(h1("Physician Attestation", { pageBreak: true }));
     for (const att of validAttestations) {

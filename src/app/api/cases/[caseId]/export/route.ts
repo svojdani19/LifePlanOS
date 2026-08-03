@@ -8,6 +8,7 @@ import { persistCaseReasoning } from "@/lib/engine/clinicalReasoningPersist";
 import { buildSnapshotPayload } from "@/lib/engine/snapshot";
 import { assumptionsFor } from "@/lib/engine/generate";
 import { putObject } from "@/lib/storage";
+import { evaluatePhysicianReportAuthority } from "@/lib/reports/professionalAuthority";
 import { ok, handleError } from "@/lib/api";
 
 export async function GET(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
@@ -62,6 +63,34 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
       );
     }
 
+    // ── Professional-authority gate (final expert release) ───────────────────
+    // A FINAL DOCX/PDF is an expert report: first-person medical opinions and
+    // a signature block. It may only be released under a current, verified
+    // professional attestation covering every recommendation in the totals.
+    // The decision is server-side and fail-closed; a denial creates no file,
+    // no artifact record, and no case-status change, and is audited with
+    // structural, PHI-free metadata only.
+    let preAuthority: Awaited<ReturnType<typeof evaluatePhysicianReportAuthority>> | null = null;
+    if ((format === "DOCX" || format === "PDF") && mode === "final") {
+      preAuthority = await evaluatePhysicianReportAuthority({ firmId: ctx.firm.id, caseId: params.caseId });
+      if (!preAuthority.authorized) {
+        await audit(ctx, "export.final_denied", {
+          type: "case",
+          id: params.caseId,
+          caseId: params.caseId,
+          meta: { format, template, reasons: preAuthority.reasons },
+        });
+        return ok(
+          {
+            error: "Final expert release requires current professional approval.",
+            reasons: preAuthority.reasons,
+            hint: 'A draft export (mode: "draft") remains available; it carries neutral language, a DRAFT watermark, and no signature block.',
+          },
+          422,
+        );
+      }
+    }
+
     const priorCount = await prisma.reportExport.count({ where: { caseId: params.caseId } });
 
     let key: string;
@@ -71,6 +100,33 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
 
     if (format === "DOCX" || format === "PDF") {
       const r = await buildReportDocx(params.caseId, template, { draft: mode === "draft" });
+      if (mode === "final" && preAuthority?.authorized) {
+        // Time-of-check/time-of-use: the plan must be byte-identical (same
+        // included set, same attestation validity) at the moment the artifact
+        // is recorded. Any drift during generation fails safely — regenerate
+        // and, if the plan materially changed, re-attest.
+        const recheck = await evaluatePhysicianReportAuthority({ firmId: ctx.firm.id, caseId: params.caseId });
+        const stable =
+          recheck.authorized &&
+          recheck.includedFingerprint === preAuthority.includedFingerprint &&
+          recheck.attestationId === preAuthority.attestationId &&
+          Math.round(r.totalPresentValue) === recheck.includedPresentValue;
+        if (!stable) {
+          await audit(ctx, "export.final_denied", {
+            type: "case",
+            id: params.caseId,
+            caseId: params.caseId,
+            meta: { format, template, reasons: ["PLAN_CHANGED_DURING_GENERATION"] },
+          });
+          return ok(
+            {
+              error: "The plan changed while the report was being generated. Regenerate the report; if recommendations changed materially, the physician must re-attest.",
+              reasons: ["PLAN_CHANGED_DURING_GENERATION"],
+            },
+            409,
+          );
+        }
+      }
       key = format === "PDF" ? await putObject(await convertDocxToPdf(r.buffer), ".pdf") : await putObject(r.buffer, ".docx");
       totalLifetime = r.totalLifetime;
       totalPresentValue = r.totalPresentValue;

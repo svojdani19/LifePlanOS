@@ -38,12 +38,36 @@ vi.mock("@/lib/db", async () => {
           if (where.id !== GOLDEN_CASE_ID) throw new Error(`No Case found for id ${where.id}`);
           return goldenCase();
         },
+        // Professional-authority gate: the golden case belongs to the golden firm.
+        findFirst: async ({ where }: { where: { id: string; firmId: string } }) =>
+          where.id === GOLDEN_CASE_ID && where.firmId === "firm-golden" ? { id: GOLDEN_CASE_ID, firmId: "firm-golden" } : null,
       },
       clinicalReasoningAssessment: {
         findMany: async () => goldenAssessments(),
       },
       validationFinding: {
         findMany: async () => [],
+      },
+      // ── Professional-authority gate lookups (all served from the fixture so
+      //    the REAL gate runs and authorizes the golden expert render) ────────
+      futureCareItem: {
+        findMany: async () => goldenCase().futureCareItems,
+      },
+      condition: {
+        findMany: async () => goldenCase().conditions,
+      },
+      attestation: {
+        findMany: async () => goldenCase().attestations,
+      },
+      user: {
+        findFirst: async ({ where }: { where: { id: string } }) =>
+          where.id === "user-golden-md" ? { id: "user-golden-md", role: "PHYSICIAN_REVIEWER" } : null,
+      },
+      userRoleAssignment: {
+        findFirst: async () => null,
+      },
+      userCredential: {
+        findMany: async () => [{ category: "PHYSICIAN", status: "ORG_VERIFIED", expiresAt: null }],
       },
     },
   };
