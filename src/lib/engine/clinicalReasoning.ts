@@ -3,6 +3,7 @@ import { mapRecommendationToCondition, validateCode, validatePricing, classifyRe
 import { citationCompatible } from "@/lib/engine/citationQuality";
 import { specialtyLens } from "@/lib/engine/specialtyReasoning";
 import { lintAssessmentNarratives } from "@/lib/engine/narrativeSanity";
+import { assessLifetimeSupport, describeLifetimeBasis, type LifetimeSupportResult } from "@/lib/engine/lifetimeSupport";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Clinical Reasoning Engine — Phase A.
@@ -189,6 +190,11 @@ export interface ReasoningAssessment {
   frequencySupported: boolean;
   durationClass: DurationClass;
   durationRationale: string;
+  /** Deterministic lifetime-duration support verdict (Lifetime-Honesty sprint):
+   *  the ONLY authority on whether a lifetime projection is clinically
+   *  supported, and by what independent basis. `isLifetime` itself is a
+   *  projection horizon and never counts as evidence. */
+  durationSupport: LifetimeSupportResult;
   weakeningEvidence: WeakeningItem[];
   unknowns: UnknownItem[];
   missingEvidenceRequests: string[];
@@ -261,9 +267,13 @@ function severityOf(condition: DossierCondition | null): string {
   return "undetermined";
 }
 
-function chronicityOf(condition: DossierCondition | null, isLifetime: boolean): string {
+// Chronicity derives ONLY from independent condition evidence (documented
+// diagnosis/prognosis language) — NEVER from the projection horizon. An item
+// being projected over the lifetime (`isLifetime`) says nothing about whether
+// the condition is chronic; insufficient evidence yields "undetermined".
+function chronicityOf(condition: DossierCondition | null): string {
   const hay = `${condition?.name ?? ""} ${condition?.reasoning ?? ""}`.toLowerCase();
-  if (/chronic|degenerat|arthrit|post-?traumatic|permanent/.test(hay) || isLifetime) return "chronic";
+  if (/chronic|degenerat|arthrit|post-?traumatic|permanent/.test(hay)) return "chronic";
   if (/subacute/.test(hay)) return "subacute";
   if (/acute|initial encounter|fracture\b/.test(hay)) return "acute";
   return "undetermined";
@@ -409,7 +419,7 @@ function synthesizeLiterature(literature: LiteratureAssessment[], hasGuideline: 
 // nothing is manufactured for a well-supported line.
 function deriveWeakening(
   base: string[],
-  ctx: { objectiveCount: number; physicianApproved: boolean; frequencySupported: boolean; durationClass: DurationClass; lifetimeWellSupported: boolean; weakPrimary: boolean; matched: boolean; lateralityMismatch: boolean; region: string; service: string; contradictorySource?: string | null },
+  ctx: { objectiveCount: number; physicianApproved: boolean; frequencySupported: boolean; durationClass: DurationClass; lifetimeClinicallySupported: boolean; weakPrimary: boolean; matched: boolean; lateralityMismatch: boolean; region: string; service: string; contradictorySource?: string | null },
 ): WeakeningItem[] {
   const out: WeakeningItem[] = base.map((detail) => ({
     claim: "the supporting record", detail, source: ctx.contradictorySource ?? "case record", page: null,
@@ -421,7 +431,7 @@ function deriveWeakening(
   if (ctx.objectiveCount === 0) add({ claim: "objective basis", detail: `No independent objective finding is documented for the ${ctx.region} in the current record.`, source: null, page: null, materiality: "HIGH", reducesConfidence: true, changesInclusion: true, requiresReview: true });
   if (!ctx.physicianApproved) add({ claim: "treating-record support", detail: "Not yet confirmed or signed off by the treating physician.", source: null, page: null, materiality: "MODERATE", reducesConfidence: true, changesInclusion: false, requiresReview: true });
   if (!ctx.frequencySupported) add({ claim: "frequency", detail: "The stated frequency is assumed rather than grounded in a documented cadence.", source: null, page: null, materiality: "MODERATE", reducesConfidence: true, changesInclusion: false, requiresReview: true });
-  if (ctx.durationClass === "LIFETIME" && !ctx.lifetimeWellSupported) add({ claim: "duration", detail: "A lifetime duration is asserted on limited supporting evidence.", source: null, page: null, materiality: "HIGH", reducesConfidence: true, changesInclusion: false, requiresReview: true });
+  if (ctx.durationClass === "LIFETIME" && !ctx.lifetimeClinicallySupported) add({ claim: "duration", detail: "The remaining-lifetime projection lacks independent clinical duration support and is carried as a projection assumption.", source: null, page: null, materiality: "HIGH", reducesConfidence: true, changesInclusion: false, requiresReview: true });
   if (ctx.weakPrimary) add({ claim: "published support", detail: "The strongest available citation is only a case series or case report.", source: null, page: null, materiality: "LOW", reducesConfidence: true, changesInclusion: false, requiresReview: false });
   return out;
 }
@@ -481,18 +491,22 @@ function mapConfidence(level: string): RecommendationConfidence {
   return "INDETERMINATE";
 }
 
-function durationOf(item: ReasoningItem, lifetimeWellSupported: boolean): { durationClass: DurationClass; durationRationale: string } {
+function durationOf(item: ReasoningItem, durationSupport: LifetimeSupportResult): { durationClass: DurationClass; durationRationale: string } {
   const svc = item.service.toLowerCase();
   if (item.startTrigger || item.contingencyOnly) {
     if (/surgery|arthroplasty|fusion|replacement|revision/.test(svc)) return { durationClass: "UNTIL_SURGERY", durationRationale: `Conditional: this care applies only if ${lc(item.startTrigger ?? "the trigger criteria")} — it is not open-ended.` };
     return { durationClass: "CONDITIONAL", durationRationale: `Conditional on ${lc(item.startTrigger ?? "a documented trigger")}; excluded from finalized totals until the trigger is met.` };
   }
   if (item.isLifetime) {
+    // The lifetime horizon is a PROJECTION choice. The rationale states the
+    // independent clinical basis when one exists, and otherwise discloses the
+    // scenario honestly as an assumption — it never claims the condition is
+    // chronic or progressive merely because the projection is lifetime.
     return {
       durationClass: "LIFETIME",
-      durationRationale: lifetimeWellSupported
-        ? "Lifetime care is supported: the condition is chronic and progressive on the objective record and/or applicable guidance, and no event is expected to end the need."
-        : "Lifetime duration is asserted but rests on limited support — a chronic/progressive objective basis, guideline, or physician endorsement is needed before it is defensible over the full life expectancy.",
+      durationRationale: durationSupport.clinicallySupported
+        ? `The remaining-lifetime projection is based on ${describeLifetimeBasis(durationSupport)}; it applies the stated frequency over the remaining life-expectancy horizon.`
+        : "A remaining-lifetime scenario is shown as a projection assumption; the clinical duration remains pending support. The lifetime scenario is disclosed for review and is not itself evidence of permanence.",
     };
   }
   const yrs = item.durationYears ?? 0;
@@ -577,11 +591,11 @@ export function buildChainNodes(a: {
 export function buildSelfCritique(a: {
   service: string; diagnosis: string | null; weakening: WeakeningItem[]; unknowns: UnknownItem[];
   lowerCostAlternative: string | null; frequencySupported: boolean; isLifetime: boolean;
-  lifetimeWellSupported: boolean; evidenceItems: ClassifiedEvidenceItem[]; necessity: string;
+  lifetimeClinicallySupported: boolean; evidenceItems: ClassifiedEvidenceItem[]; necessity: string;
 }): SelfCritique {
   const assumptions: string[] = [];
   if (!a.frequencySupported) assumptions.push("The stated frequency assumes a treatment cadence that is not documented.");
-  if (a.isLifetime && !a.lifetimeWellSupported) assumptions.push("Lifetime duration assumes chronic progression beyond what the record establishes.");
+  if (a.isLifetime && !a.lifetimeClinicallySupported) assumptions.push("The remaining-lifetime horizon is a projection assumption; the clinical duration is not independently established.");
   const inferred = a.evidenceItems.filter((e) => e.epistemic !== "documented_fact").map((e) => `${e.category.replace(/_/g, " ")}: ${e.text.slice(0, 70)} (${e.epistemic.replace(/_/g, " ")})`);
   return {
     whyRecommended: a.necessity.slice(0, 300),
@@ -688,9 +702,21 @@ export function buildReasoningAssessment(
     ? `The ${freqN}×/yr frequency is grounded in ${[se.priorTreatment.length ? "the documented treatment cadence" : "", se.guidelines.length ? "cited clinical guidance" : "", physicianApproved ? "physician review" : ""].filter(Boolean).join(", ")}.`
     : `The ${freqN}×/yr frequency is an assumption not yet grounded in a documented cadence, guideline, or physician review; it is pending review and should not enter finalized totals until supported.`;
 
-  // §11 duration.
-  const lifetimeWellSupported = se.guidelines.length > 0 || objectiveItems.length > 0 || physicianApproved;
-  const { durationClass, durationRationale } = durationOf(item, lifetimeWellSupported);
+  // §11 duration — ONE deterministic duration-support verdict. Replaces the old
+  // ad-hoc inference (guideline OR any objective finding OR approval) that let a
+  // generic MRI or a bare approval flag pass as lifetime-duration evidence.
+  const durationSupport = assessLifetimeSupport({
+    isLifetime: !!item.isLifetime,
+    condition,
+    guidelineEvidence: se.guidelines,
+    providerOpinions: se.physicianDocumentation
+      .filter((e) => e.source === "provider interview")
+      .map((e) => ({ text: e.text })),
+    physicianNote: item.physicianNote ?? null,
+    physicianStatus: item.physicianStatus ?? null,
+    objectiveFindingCount: objectiveItems.length,
+  });
+  const { durationClass, durationRationale } = durationOf(item, durationSupport);
 
   // CRE v1 §12 — the literature ledger. The dossier already gates citations
   // through the hard compatibility filter, so its output is the ACCEPTED set;
@@ -722,10 +748,19 @@ export function buildReasoningAssessment(
   const costEligibilityStatus = codeCritical ? "Coding/pricing inconsistency must be resolved before inclusion." : pricing.status === "Unsupported bundled estimate" ? "Bundled estimate — attach a code or disclose the bundled basis." : "Cost basis is coherent for inclusion.";
   const validationStatus: "ok" | "blocking" | "pending" = !mapping.matched || codeCritical ? "blocking" : physicianApproved || frequencySupported ? "ok" : "pending";
 
-  const trajectory = condition?.opposingRecords && /improv/i.test(condition.opposingRecords) ? "improving" : item.isLifetime ? "chronic, stable-to-worsening" : "uncertain";
+  // Trajectory derives ONLY from documented condition evidence — never from the
+  // projection horizon. No manufactured progression: absent documented
+  // progressive/degenerative language, the honest value is "undetermined".
+  const condHay = `${condition?.name ?? ""} ${condition?.objectiveEvidence ?? ""} ${condition?.reasoning ?? ""}`.toLowerCase();
+  const trajectory =
+    condition?.opposingRecords && /improv/i.test(condition.opposingRecords)
+      ? "improving"
+      : /degenerat|progressiv|end-?stage/.test(condHay)
+        ? "chronic, stable-to-worsening (per documented condition evidence)"
+        : "undetermined";
   const weakPrimary = bestLevel != null && bestLevel >= 9;
   const isSurgicalRec = /surgical|revision/.test(pathwayOf(item));
-  const weakeningEvidence = deriveWeakening(dossier.contradictoryEvidence, { objectiveCount: objectiveItems.length, physicianApproved, frequencySupported, durationClass, lifetimeWellSupported, weakPrimary, matched: mapping.matched, lateralityMismatch, region, service: item.service });
+  const weakeningEvidence = deriveWeakening(dossier.contradictoryEvidence, { objectiveCount: objectiveItems.length, physicianApproved, frequencySupported, durationClass, lifetimeClinicallySupported: durationSupport.clinicallySupported, weakPrimary, matched: mapping.matched, lateralityMismatch, region, service: item.service });
   const unknowns = deriveUnknowns([condition?.missingInfo ?? "", item.missingSupport ?? "", ...dossier.unknowns], { objectiveCount: objectiveItems.length, physicianApproved, frequencySupported, region, service: item.service, isSurgical: isSurgicalRec, isImagingRec: (item.category ?? "") === "IMAGING" });
   const missing = unknowns.map((u) => u.suggestedAction);
   const literatureSynthesis = synthesizeLiterature(literatureAssessments, se.guidelines.length > 0, item.service);
@@ -766,7 +801,7 @@ export function buildReasoningAssessment(
   const structuralDefect = !mapping.matched || lateralityMismatch || codeCritical;
   const lifecycleStatus: AssessmentLifecycleStatus = structuralDefect
     ? "INVALID"
-    : !frequencySupported || (durationClass === "LIFETIME" && !lifetimeWellSupported) || blockingUnknowns || crossRegionEvidence.length > 0 || probabilityClassification === "INSUFFICIENTLY_SUPPORTED" || !evidenceSufficiencyStandalone(objectiveItems.length, se, physicianApproved)
+    : !frequencySupported || (durationClass === "LIFETIME" && !durationSupport.mayEnterFinalizedTotals) || blockingUnknowns || crossRegionEvidence.length > 0 || probabilityClassification === "INSUFFICIENTLY_SUPPORTED" || !evidenceSufficiencyStandalone(objectiveItems.length, se, physicianApproved)
       ? "NEEDS_REVIEW"
       : "VALIDATED";
 
@@ -808,7 +843,7 @@ export function buildReasoningAssessment(
     lowerCostAlternative: item.lowerCostAlternative ?? null,
     frequencySupported,
     isLifetime: !!item.isLifetime,
-    lifetimeWellSupported,
+    lifetimeClinicallySupported: durationSupport.clinicallySupported,
     evidenceItems,
     necessity: dossier.medicalNecessity,
   });
@@ -825,7 +860,10 @@ export function buildReasoningAssessment(
   });
   const alternativeExplanations = deriveAlternativeExplanations(region, mapping.conditionId, conditions);
 
-  const materialHash = hashStr([item.service, item.category ?? "", mapping.conditionId ?? "", region, laterality, purposeFor(item.category, !!item.isLifetime), freqN, durationClass, probabilityClassification, inclusionInTotalsStatus, item.startTrigger ?? "", item.replacesService ?? "", item.physicianStatus ?? "", evidenceStrength, setContext.conflicts.map((c) => c.type + c.otherService).sort().join(",")].join("|"));
+  // Duration-support evidence (or an attributed professional duration
+  // rationale) is MATERIAL: a change in it changes the fingerprint, supersedes
+  // the assessment version, and invalidates prior approval per existing policy.
+  const materialHash = hashStr([item.service, item.category ?? "", mapping.conditionId ?? "", region, laterality, purposeFor(item.category, !!item.isLifetime), freqN, durationClass, durationSupport.fingerprint, probabilityClassification, inclusionInTotalsStatus, item.startTrigger ?? "", item.replacesService ?? "", item.physicianStatus ?? "", evidenceStrength, setContext.conflicts.map((c) => c.type + c.otherService).sort().join(",")].join("|"));
 
   return {
     recommendationService: item.service,
@@ -833,7 +871,7 @@ export function buildReasoningAssessment(
     bodyRegion: region,
     laterality,
     conditionSeverity: severityOf(condition),
-    conditionChronicity: chronicityOf(condition, !!item.isLifetime),
+    conditionChronicity: chronicityOf(condition),
     currentClinicalStatus: clinicalStatusOf(condition, se.priorTreatment.length),
     responsibleSpecialty: lens.label,
     conditionTrajectory: trajectory,
@@ -860,6 +898,7 @@ export function buildReasoningAssessment(
     frequencySupported,
     durationClass,
     durationRationale,
+    durationSupport,
     weakeningEvidence,
     unknowns,
     missingEvidenceRequests: missing,
@@ -937,11 +976,13 @@ export function reasoningFindings(
     if (inTotals && !a.frequencySupported) {
       out.push({ service: it.service, result: "Frequency unsupported", issue: `The stated frequency for "${it.service}" is not yet grounded in a cadence, guideline, or physician review.`, severity: "High", suggestion: "Document the cadence or obtain physician review before finalizing totals.", exportBlocking: !physicianApproved });
     }
-    // Unsupported lifetime duration on a totaled line — severity scales with
-    // financial materiality (§8); blocks final export unless reviewer-approved.
-    if (inTotals && a.durationClass === "LIFETIME" && /limited support/i.test(a.durationRationale)) {
+    // Lifetime projection without independent duration support on a totaled
+    // line — severity scales with financial materiality (§8); blocks final
+    // export unless reviewer-approved (existing adoption policy). The scenario
+    // itself stays calculated and disclosed — it is flagged, never dropped.
+    if (inTotals && a.durationClass === "LIFETIME" && !a.durationSupport.clinicallySupported) {
       const critical = pv >= 100_000;
-      out.push({ service: it.service, result: "Unsupported lifetime duration", issue: `"${it.service}" asserts lifetime duration on limited support${pv ? ` (PV ${Math.round(pv).toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 })})` : ""}.`, severity: critical ? "Critical" : "High", suggestion: "Establish the chronic/progressive objective basis, cite applicable guidance, or obtain physician endorsement.", exportBlocking: !physicianApproved });
+      out.push({ service: it.service, result: "Unsupported lifetime duration", issue: `"${it.service}" projects a remaining-lifetime scenario without independent clinical duration support${pv ? ` (PV ${Math.round(pv).toLocaleString("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 })})` : ""}; the lifetime horizon is a projection assumption, not established permanence.`, severity: critical ? "Critical" : "High", suggestion: "Obtain independent duration support: documented chronicity/prognosis in the record, diagnosis-keyed clinical guidance, or an attributed professional duration opinion.", exportBlocking: !physicianApproved });
     }
     // Critical evidence gap on a totaled line (a blocking unknown) → blocks final.
     const blockingUnknown = a.unknowns.find((u) => u.blocksInclusion);

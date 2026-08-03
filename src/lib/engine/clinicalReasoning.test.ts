@@ -99,16 +99,29 @@ describe("buildReasoningAssessment — frequency support (§10, test #6)", () =>
 });
 
 describe("buildReasoningAssessment — lifetime duration (§11, test #7)", () => {
-  it("flags a lifetime duration that rests on limited support", () => {
+  // Updated (Lifetime-Honesty sprint): the old rationale asserted a lifetime
+  // duration "on limited support"; the honest behavior discloses an
+  // unsupported lifetime scenario as a projection assumption, never as a
+  // clinical fact.
+  it("discloses an unsupported lifetime duration as a projection assumption", () => {
     const a = buildReasoningAssessment(tka({ service: "Attendant care", category: "ATTENDANT_CARE", isLifetime: true, physicianStatus: "PENDING" }), [kneeBare], [], kase);
     expect(a.durationClass).toBe("LIFETIME");
-    expect(a.durationRationale).toMatch(/limited support|needed|defensible/i);
+    expect(a.durationRationale).toMatch(/projection assumption/i);
+    expect(a.durationRationale).toMatch(/not itself evidence of permanence/i);
+    expect(a.durationSupport.clinicallySupported).toBe(false);
+    expect(a.durationSupport.status).toBe("ASSUMPTION_PENDING_REVIEW");
   });
 
-  it("accepts a lifetime duration backed by objective evidence and a guideline", () => {
+  // Updated (Lifetime-Honesty sprint): support now requires INDEPENDENT
+  // evidence — here, documented chronicity on the anchored condition (post-
+  // traumatic osteoarthritis with source-linked findings) plus a diagnosis-
+  // keyed guideline — and the rationale names that basis.
+  it("accepts a lifetime duration backed by independent chronicity evidence and a diagnosis-keyed guideline", () => {
     const a = buildReasoningAssessment(tka({ service: "Home-based maintenance therapy", category: "PHYSICAL_THERAPY", isLifetime: true, physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase);
     expect(a.durationClass).toBe("LIFETIME");
-    expect(a.durationRationale).toMatch(/supported|chronic|progressive/i);
+    expect(a.durationRationale).toMatch(/remaining-lifetime projection is based on/i);
+    expect(a.durationSupport.clinicallySupported).toBe(true);
+    expect(a.durationSupport.status).toBe("MULTIPLE_SUPPORTS");
   });
 });
 

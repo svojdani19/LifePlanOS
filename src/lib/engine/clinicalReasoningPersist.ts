@@ -76,11 +76,18 @@ const toRow = (a: ReasoningAssessment) => ({
   physicianReviewStatus: a.physicianReviewStatus,
   validationStatus: a.validationStatus,
   materialHash: a.materialHash,
-  generatedByModel: "deterministic-reasoning-v6",
+  // v7 — Lifetime-Honesty sprint: duration support decoupled from isLifetime;
+  // bumping the version forces one recompute of rows built under the old
+  // (circular) lifetime inference.
+  generatedByModel: "deterministic-reasoning-v7",
 });
 
 // The material fields compared to report WHAT changed when approval is invalidated.
-const MATERIAL_FIELDS = ["recommendationService", "supportingDiagnosisIds", "bodyRegion", "laterality", "clinicalPurpose", "responsibleSpecialty", "probabilityClassification", "durationClass", "inclusionInTotalsStatus", "evidenceStrength", "frequencySupported"] as const;
+// `durationRationale` carries the lifetime-duration-support verdict and its
+// independent basis, so a duration-support evidence change (or a new attributed
+// professional duration rationale) is identified as the changed field when a
+// prior approval is invalidated.
+const MATERIAL_FIELDS = ["recommendationService", "supportingDiagnosisIds", "bodyRegion", "laterality", "clinicalPurpose", "responsibleSpecialty", "probabilityClassification", "durationClass", "durationRationale", "inclusionInTotalsStatus", "evidenceStrength", "frequencySupported"] as const;
 function changedFields(prior: Record<string, unknown>, next: ReasoningAssessment): string[] {
   const nextRow = toRow(next) as Record<string, unknown>;
   return MATERIAL_FIELDS.filter((f) => JSON.stringify(prior[f] ?? null) !== JSON.stringify(nextRow[f] ?? null));
@@ -133,7 +140,7 @@ export async function persistCaseReasoning(caseId: string, firmId: string, opts:
         await prisma.clinicalReasoningAssessment.create({ data: { ...toRow(a), ...lineage, caseId, firmId, recommendationId: it.id } });
         continue;
       }
-      if (prior.materialHash === a.materialHash && prior.status !== "ERROR" && prior.reasoningChain != null && prior.generatedByModel === "deterministic-reasoning-v6") continue; // cache hit (recompute once per methodology version)
+      if (prior.materialHash === a.materialHash && prior.status !== "ERROR" && prior.reasoningChain != null && prior.generatedByModel === "deterministic-reasoning-v7") continue; // cache hit (recompute once per methodology version)
 
       // Material change (§17): supersede the prior row (preserve it), create a
       // new one, and — when the item was physician-approved — force re-review

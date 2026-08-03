@@ -20,6 +20,7 @@
 import { bodyRegion, anatomyCompatible } from "./integrity";
 import { citationCompatible, evidenceTier, selectPrimary, structuredConfidence, type ConfidenceLevel } from "./citationQuality";
 import { specialtyLens } from "./specialtyReasoning";
+import { assessLifetimeSupport, type LifetimeSupportResult } from "./lifetimeSupport";
 
 // ── Inputs (structurally satisfied by the Prisma rows; kept minimal) ─────────
 export interface DossierItem {
@@ -311,6 +312,21 @@ export function buildRecommendationDossier(
     .map((g) => ({ text: `${g.quote ? `“${g.quote}” — ` : ""}${g.title}${g.year ? ` (${g.year})` : ""}`, source: g.relevance?.evidenceLabel ?? "clinical guideline" }));
   const diagnoses: EvidenceItem[] = condition ? [{ text: `${condition.name}${condition.relatedness ? ` — ${condition.relatedness.replace(/_/g, " ").toLowerCase()}` : ""}`, source: condition.reasoning ? "causation analysis" : null }] : [];
 
+  // Lifetime-duration support (Lifetime-Honesty sprint): the deterministic
+  // verdict every duration statement below renders FROM. `isLifetime` is the
+  // projection horizon only — support comes solely from independent evidence
+  // (documented chronicity, diagnosis-keyed guidance, or an attributed
+  // professional duration opinion), never from the flag or a bare approval.
+  const durationSupport = assessLifetimeSupport({
+    isLifetime: !!item.isLifetime,
+    condition,
+    guidelineEvidence,
+    providerOpinions: providerOpinions.map((iv) => ({ text: iv.text, providerName: iv.providerName ?? null })),
+    physicianNote: item.physicianNote ?? null,
+    physicianStatus: item.physicianStatus ?? null,
+    objectiveFindingCount: objectiveFindings.length + imaging.length + examination.length,
+  });
+
   // ── Gated, relevance-ranked literature (recommendation-centric) ─────────────
   const rawCites = (Array.isArray(item.citation) ? item.citation : item.citation ? [item.citation] : []) as {
     title?: string; journal?: string; year?: string; authors?: string; pmid?: string; doi?: string;
@@ -360,7 +376,19 @@ export function buildRecommendationDossier(
     { label: "Treatment response / course", present: priorTreatment.length > 0, detail: priorTreatment.length ? "prior treatment for this condition is documented" : "no prior treatment documented" },
     { label: "Treating-physician documentation", present: physicianDocumentation.length > 0, detail: physicianDocumentation.length ? "physician review or note on file" : "awaiting physician confirmation" },
     { label: "Guideline support", present: guidelineEvidence.length > 0, detail: guidelineEvidence.length ? "supported by cited clinical guidance" : "no on-point guideline located" },
-    { label: "Expected disease progression", present: !!item.isLifetime || (item.probability === "PROBABLE"), detail: item.isLifetime ? "the condition is chronic and progressive over the lifetime" : "a defined course of care is anticipated" },
+    // Lifetime-Honesty: the projection horizon (`isLifetime`) never counts as a
+    // probability factor by itself — only independent duration support does.
+    // An unsupported lifetime item therefore does NOT gain probability from
+    // being projected over the lifetime.
+    {
+      label: "Expected clinical course",
+      present: item.isLifetime ? durationSupport.clinicallySupported : item.probability === "PROBABLE",
+      detail: item.isLifetime
+        ? durationSupport.clinicallySupported
+          ? "independent condition evidence supports the projected long-term course"
+          : "the remaining-lifetime horizon is a projection assumption — the clinical duration is not yet established"
+        : "a defined course of care is anticipated",
+    },
   ];
   // Percentage anchored to the medical-probability rating and modulated by the
   // count of supporting factors — transparent, never asserted beyond support.
@@ -410,7 +438,7 @@ export function buildRecommendationDossier(
   if (!objectiveFindings.length) potentialChallenges.push("Objective evidence tying this item to the diagnosis is thin on the present record.");
 
   // ── Medical-necessity narrative (physician voice; NOT a diagnosis restate) ─
-  let necessity = buildNecessityNarrative(item, condition, { objectiveFindings, imaging, examination, functionalLimitations, priorTreatment, guidelines: guidelineEvidence }, kase, dxName);
+  let necessity = buildNecessityNarrative(item, condition, { objectiveFindings, imaging, examination, functionalLimitations, priorTreatment, guidelines: guidelineEvidence }, kase, dxName, durationSupport);
   // Weave the patient's own account and any treating-provider opinion.
   if (patientReports.length) necessity += ` On interview, ${kase.subject} reports ${lc(cleanClause(patientReports[0].text, 140))}, which the recommendation directly addresses.`;
   if (providerOpinions.length) necessity += ` This is consistent with the opinion of ${providerOpinions[0].providerName ?? "the treating provider"} on interview.`;
@@ -459,6 +487,7 @@ function buildNecessityNarrative(
   ev: { objectiveFindings: EvidenceItem[]; imaging: EvidenceItem[]; examination: EvidenceItem[]; functionalLimitations: EvidenceItem[]; priorTreatment: EvidenceItem[]; guidelines: EvidenceItem[] },
   kase: DossierCase,
   dxName: string,
+  durationSupport: LifetimeSupportResult,
 ): string {
   const S = kase.subject;
   const sv = item.service;
@@ -508,8 +537,13 @@ function buildNecessityNarrative(
   // 4) The necessity, in the specialty's own voice (§1/§6) — its clinical goal
   //    and the forward-looking concern it manages.
   const rationale = item.rationale ? lc(cleanClause(item.rationale, 140)) : `the sequelae of ${lc(dxName)}`;
+  // Lifetime-Honesty: a lifetime need is only STATED as a lifetime need when
+  // independent evidence supports the duration; otherwise the remaining-
+  // lifetime horizon is disclosed as a projection assumption — never asserted.
   const need = item.isLifetime
-    ? `${S} will require ${lc(sv)} on a recurring basis across ${kase.pronounPoss} lifetime`
+    ? durationSupport.clinicallySupported
+      ? `${S} will require ${lc(sv)} on a recurring basis, projected over ${kase.pronounPoss} remaining life expectancy on the strength of the documented condition evidence`
+      : `a remaining-lifetime scenario for ${lc(sv)} is projected for ${S} as a planning assumption, with the clinical duration pending support`
     : `${S} will require ${lc(sv)} over a defined course`;
   parts.push(variant(sv + "need", [
     `${cap(lc(sv))} ${areIs} reasonable and necessary to ${lens.goal}, with ${lens.concern} the forward concern; on that basis ${need}.`,
@@ -519,7 +553,13 @@ function buildNecessityNarrative(
 
   // 5) Synthesis close (§8) — expert-testimony integration for complex items.
   if (complex) {
-    const prog = item.isLifetime ? "the condition is chronic and expected to progress" : "a defined further course is anticipated";
+    // Never "chronic and expected to progress" merely because the projection is
+    // lifetime — that claim requires independent condition evidence.
+    const prog = item.isLifetime
+      ? durationSupport.clinicallySupported
+        ? "the documented condition evidence supports the projected long-term course"
+        : "the remaining-lifetime horizon is carried as a projection assumption"
+      : "a defined further course is anticipated";
     parts.push(variant(sv + "syn", [
       `Taken together — the objective pathology,${fx ? " the documented functional loss," : ""} the prior treatment, and that ${prog} — this care is medically necessary to a reasonable degree of medical probability.`,
       `Integrating the diagnosis, the objective findings,${fx ? " the functional consequences," : ""} and the expected course, it is my opinion, to a reasonable degree of medical probability, that this care is required.`,

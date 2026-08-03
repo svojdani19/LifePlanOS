@@ -12,6 +12,7 @@ import { resolveUnitCost } from "@/lib/references/pricingProvider";
 import { applyPriors, priorProvenanceNote, scopeKeyOf } from "@/lib/engine/learning";
 import { rebuildEvidenceGraph } from "@/lib/engine/evidenceGraph";
 import { citationCompatible, evaluateArticle, selectPrimary, isManagementService } from "@/lib/engine/citationQuality";
+import { hasDocumentedChronicity } from "@/lib/engine/lifetimeSupport";
 import { findCandidates, literatureReachable, activeSources, type Article } from "@/lib/literature";
 import { Prisma } from "@/generated/prisma";
 import type { Case, CareCategory } from "@/generated/prisma";
@@ -732,15 +733,26 @@ export async function generateReviews(caseId: string): Promise<void> {
   }
 
   const lifetimePossible = items.filter((i) => i.isLifetime && i.probability === "POSSIBLE").sort((a, b) => b.lifetimeCost - a.lifetimeCost).slice(0, 4);
+  const conditionById = new Map(conditions.map((c) => [c.id, c]));
   for (const it of lifetimePossible) {
+    // Lifetime-Honesty: the counter may assert a chronic/progressive condition
+    // ONLY when the mapped condition carries independent documented chronicity
+    // evidence. Otherwise the counter frames the lifetime figure honestly as a
+    // projection assumption — never inventing chronicity from the horizon flag.
+    const cond = it.conditionId ? conditionById.get(it.conditionId) : undefined;
+    const chronicityDocumented = hasDocumentedChronicity(cond ?? null);
     points.push({
       kind: "DEFENSE", side: "DEFENSE", vulnerability: "MODERATE", relatedItemId: it.id,
       category: `Lifetime duration — ${it.service}`,
       description: `The defense will argue that "${it.service}" is projected across the full life expectancy on a "possible" basis, overstating duration and cost.`,
       sourceRef: `Plan basis: ${it.frequencyPerYear}/yr over the lifetime horizon; unit cost ${money(it.unitCost)} (${it.pricingSource ?? "UCR"}).`,
-      counterArgument: `The underlying condition is chronic and progressive; the projected frequency reflects averaged utilization with periodic flare-ups, and lifetime need is supported by the natural history of the diagnosis.`,
-      counterSource: it.literatureSupport ?? "Natural-history / chronic-progression literature; " + objEvidence,
-      counterCitation: CITE.NATURAL_HISTORY,
+      counterArgument: chronicityDocumented
+        ? `The documented condition evidence establishes a chronic condition; the projected frequency reflects averaged utilization with periodic flare-ups, and the remaining-lifetime projection follows the recognized natural history of the diagnosis.`
+        : `The remaining-lifetime figure is a projection scenario disclosed for review: it applies the stated frequency over the life-expectancy horizon, is priced conservatively, and is reserved for treating-physician confirmation rather than asserted as established permanence.`,
+      counterSource: chronicityDocumented
+        ? (it.literatureSupport ?? "Natural-history literature for the documented diagnosis; " + objEvidence)
+        : (it.literatureSupport ?? "Plan projection basis; treating-record documentation to be supplemented."),
+      counterCitation: chronicityDocumented ? CITE.NATURAL_HISTORY : CITE.LCP_STANDARDS,
     });
   }
 

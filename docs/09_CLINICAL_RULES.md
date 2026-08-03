@@ -141,9 +141,54 @@ deterministic first — see decision ATD-4 in [16_DECISION_LOG.md](16_DECISION_L
   unless the reviewing physician has explicitly approved the item.
 - **Duration (§8):** lifetime care requires stronger support than short-term;
   an unsupported lifetime line is HIGH, or CRITICAL when PV ≥ $100k.
+  See "Lifetime is a projection horizon" below for what counts as support.
 - **Literature (§12):** applicability outranks hierarchy — region, procedure
   family, scope (management vs procedural), and population (pediatric,
   pregnancy/obstetric) gates; rejections persist with reasons.
 - **Export (§18):** final export blocks on unresolved critical defects; draft
   export is always available with a DRAFT watermark and an unresolved-issues
   appendix, and never advances the case to FINAL.
+
+## Lifetime is a projection horizon, not clinical evidence (2026-08-03)
+
+`isLifetime` instructs the cost engine which period to project over (period,
+quantities, inflation/discounting, cost scenarios, display labels) — nothing
+more. It is never evidence that a condition is chronic, permanent, or
+progressive, and it never raises chronicity, trajectory, evidence sufficiency,
+recommendation confidence, medical probability, record/provider support, or
+validation status. Clinical conclusions flow evidence → projection, never
+projection → clinical facts.
+
+- **One duration-support authority.** `src/lib/engine/lifetimeSupport.ts`
+  (`assessLifetimeSupport`) is the single deterministic verdict every engine
+  consults (reasoning, dossier, findings, narratives). Statuses:
+  `SUPPORTED_BY_RECORD` · `SUPPORTED_BY_GUIDELINE` ·
+  `SUPPORTED_BY_PROFESSIONAL_OPINION` · `MULTIPLE_SUPPORTS` ·
+  `ASSUMPTION_PENDING_REVIEW` · `INSUFFICIENT` (and `NOT_APPLICABLE` for
+  non-lifetime items).
+- **What counts as independent support:** explicit documented chronicity/
+  permanence on the condition (anchored in the record), a source-linked
+  prognosis quote, diagnosis-keyed natural-history/clinical guidance, or an
+  ATTRIBUTED professional duration rationale (a note or interview opinion that
+  actually speaks to duration). A generic objective finding (an MRI proving the
+  injury) documents the injury, not the duration, and never counts.
+- **Independent support vs. professional adoption are separate.** Physician
+  approval of an item is professional ADOPTION under review policy: it lifts
+  the finalized-totals/export block exactly as before, but it is never
+  treating-record evidence, never converts a condition to documented-chronic,
+  and never invents a prognosis. Insufficient evidence yields the honest value
+  ("undetermined" chronicity/trajectory; projection-assumption narratives) —
+  progression is never manufactured.
+- **Unsupported lifetime scenarios remain calculated and disclosed.** They stay
+  priced and visible per the existing contingency/inclusion rules, framed as
+  "a remaining-lifetime scenario … shown as a projection assumption", and are
+  never represented as established medical necessity — and never silently
+  dropped. Supported scenarios name their independent basis.
+- **The financial model stays deterministic.** `cost.ts` lifetime math is
+  unchanged; identical financial inputs yield identical lifetime costs
+  regardless of duration-support status.
+- **Lifecycle:** the duration-support verdict (and any attributed professional
+  duration rationale) feeds the assessment material fingerprint — a change
+  supersedes the assessment version and invalidates prior approval per the
+  existing lineage policy, with the duration-support field identified in the
+  change set.
