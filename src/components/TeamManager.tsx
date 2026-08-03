@@ -93,6 +93,7 @@ interface Member {
   inviteToken: string | null;
   createdAt: string;
   credentialSummary?: string | null;
+  clients?: string[];
 }
 
 export function TeamManager({ currentUserId }: { currentUserId: string }) {
@@ -224,22 +225,33 @@ export function TeamManager({ currentUserId }: { currentUserId: string }) {
                     <div className="grid h-9 w-9 place-items-center rounded-full bg-brand-100 text-xs font-semibold text-brand-800">
                       {initials(m.name)}
                     </div>
-                    <div>
+                    <div className="min-w-0">
                       <p className="font-medium text-ink-900">{m.name}</p>
                       <p className="text-xs text-ink-500">{m.email}</p>
+                      <p className="mt-0.5 text-xs text-ink-500">
+                        <span className="font-medium text-ink-600">Clients:</span>{" "}
+                        {m.clients && m.clients.length > 0 ? m.clients.join(", ") : "none affiliated"}
+                      </p>
                     </div>
                   </div>
                 </td>
                 <td className="px-4 py-3">
                   {m.id === currentUserId || m.status === "SUSPENDED" ? (
                     <span className="text-ink-700">{ROLE_LABEL[m.role]}</span>
+                  ) : m.role === "PHYSICIAN_REVIEWER" ? (
+                    // Credentialed professional seats are platform-governed —
+                    // the firm cannot change or edit this selection.
+                    <span title="Managed by the platform administrator">
+                      <span className="text-ink-700">{ROLE_LABEL[m.role]}</span>
+                      <span className="mt-0.5 block text-[11px] text-ink-400">Managed by platform administrator</span>
+                    </span>
                   ) : (
                     <select
                       className="rounded-md border border-ink-300 bg-white px-2 py-1 text-xs"
                       value={m.role}
                       onChange={(e) => changeRole(m.id, e.target.value)}
                     >
-                      {ROLES.map(([v, l]) => (
+                      {ROLES.filter(([v]) => v !== "PHYSICIAN_REVIEWER").map(([v, l]) => (
                         <option key={v} value={v}>
                           {l}
                         </option>

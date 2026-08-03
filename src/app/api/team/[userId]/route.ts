@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, audit, TenantError } from "@/lib/tenant";
+import { isPlatformAdmin } from "@/lib/authz/platform";
 import { ok, handleError } from "@/lib/api";
 
 const patchSchema = z.object({
@@ -16,10 +17,22 @@ export async function PATCH(req: Request, { params: paramsPromise }: { params: P
     const ctx = await requireApiContext();
     const input = patchSchema.parse(await req.json());
     const onlyCredentialSummary = input.role === undefined && input.status === undefined;
+    const platformAdmin = await isPlatformAdmin(ctx.user.id);
     // Seat owners may set their own credential summary; role/status = team.manage.
-    if (!(onlyCredentialSummary && params.userId === ctx.user.id)) requirePermission(ctx, "team.manage");
+    // Platform admins may act here (audited) — they alone govern professional seats.
+    if (!(onlyCredentialSummary && params.userId === ctx.user.id) && !platformAdmin) requirePermission(ctx, "team.manage");
     const target = await prisma.user.findFirst({ where: { id: params.userId, firmId: ctx.firm.id } });
     if (!target) throw new TenantError("User not found", "FORBIDDEN", 404);
+    // Credentialed professional seats are platform-governed: a firm admin can
+    // neither change the role OF a physician reviewer nor promote anyone INTO
+    // that seat. Only the platform administrator can.
+    if (input.role !== undefined && !platformAdmin && (target.role === "PHYSICIAN_REVIEWER" || input.role === "PHYSICIAN_REVIEWER")) {
+      throw new TenantError(
+        "Only the platform administrator can change a credentialed professional seat (physician reviewer).",
+        "FORBIDDEN",
+        403,
+      );
+    }
     if (target.id === ctx.user.id && input.status === "SUSPENDED") {
       throw new TenantError("You cannot suspend your own account.", "FORBIDDEN", 400);
     }
