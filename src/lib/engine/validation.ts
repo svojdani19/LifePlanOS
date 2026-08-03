@@ -44,7 +44,7 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
     prisma.condition.findMany({ where: { caseId } }),
     prisma.case.findUnique({
       where: { id: caseId },
-      select: { dateOfBirth: true, sex: true, lifeExpectancyYears: true, lifeExpectancyBasis: true },
+      select: { dateOfBirth: true, sex: true, lifeExpectancyYears: true, lifeExpectancyBasis: true, specialty: true, additionalSpecialties: true },
     }),
     prisma.chronologyEvent.findMany({ where: { caseId } }),
   ]);
@@ -142,7 +142,41 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
       }];
     });
   });
+  // Specialty alignment — every recommendation's specialty should be one the
+  // case requested at intake (Specialty for Review). A different recommended
+  // specialty is surfaced as an advisory, never silently kept or dropped.
+  const requestedSpecialties = [
+    kase?.specialty,
+    ...(Array.isArray(kase?.additionalSpecialties) ? (kase!.additionalSpecialties as string[]) : []),
+  ].filter((x): x is string => !!x);
+  const specialtyMatchesRequested = (have: string) =>
+    requestedSpecialties.some((want) => {
+      const h = have.toLowerCase();
+      const w = want.toLowerCase();
+      return h.includes(w) || w.includes(h);
+    });
+  const specialtyFindings: { service: string; result: string; issue: string; severity: string; suggestion: string; exportBlocking: boolean }[] = [];
+  if (requestedSpecialties.length) {
+    const unmatched = new Map<string, string[]>();
+    for (const it of items as { specialty?: string | null; service: string }[]) {
+      const spec = (it.specialty ?? "").trim();
+      if (!spec || specialtyMatchesRequested(spec)) continue;
+      unmatched.set(spec, [...(unmatched.get(spec) ?? []), it.service]);
+    }
+    for (const [spec, services] of unmatched) {
+      specialtyFindings.push({
+        service: services.length > 3 ? `${services.slice(0, 3).join(", ")} +${services.length - 3} more` : services.join(", "),
+        result: "Specialty not requested at intake",
+        issue: `${services.length} recommendation${services.length === 1 ? "" : "s"} carr${services.length === 1 ? "ies" : "y"} the ${spec} specialty, which is not among the specialties selected for review on the Intake page.`,
+        severity: "Moderate",
+        suggestion: `Add ${spec} to Specialty for Review on the Intake page, or have the clinical team reassign the item's specialty.`,
+        exportBlocking: false,
+      });
+    }
+  }
+
   const findings = [
+    ...specialtyFindings,
     ...indicationFindings,
     ...claimFindings,
     ...report.findings.map((f) => ({

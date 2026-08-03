@@ -2425,7 +2425,18 @@ function PhysicianPanel({ data, canReview, attorneyView = false, call }: { data:
   const [form, setForm] = useState<{ id: string; mode: "approve" | "modify" | "reject" } | null>(null);
   const [confirmAll, setConfirmAll] = useState(false);
   const [statusFilter, setStatusFilter] = useState<string>("");
-  const [groupBySpecialty, setGroupBySpecialty] = useState(false);
+  // Attorney filter: the specialties requested on intake drive the dropdown.
+  const [specialtyFilter, setSpecialtyFilter] = useState<string>("");
+  const requestedSpecialties: string[] = [data.specialty, ...(Array.isArray(data.additionalSpecialties) ? data.additionalSpecialties : [])].filter(Boolean);
+  const matchesRequested = (have: string) =>
+    requestedSpecialties.some((want) => {
+      const h = String(have).toLowerCase();
+      const w = String(want).toLowerCase();
+      return h.includes(w) || w.includes(h);
+    });
+  const offSpecialty: string[] = requestedSpecialties.length
+    ? Array.from(new Set((data.futureCareItems as AnyRec[]).filter((it) => it.specialty && !matchesRequested(it.specialty)).map((it) => String(it.specialty))))
+    : [];
   if (data.futureCareItems.length === 0) return <Empty>Run the AI pipeline first to build the physician review packet.</Empty>;
 
   // Review-speed affordances (Phase 14): live counts double as filters.
@@ -2442,7 +2453,7 @@ function PhysicianPanel({ data, canReview, attorneyView = false, call }: { data:
 
   return (
     <div className="space-y-3">
-      <AttestationCard caseId={data.id} canReview={canReview} items={data.futureCareItems} />
+      {!attorneyView && <AttestationCard caseId={data.id} canReview={canReview} items={data.futureCareItems} />}
       <div className="card flex flex-wrap items-center justify-between gap-3 p-4 text-sm text-ink-600">
         <span className="min-w-0 flex-1">
           Physician review packet — {canReview ? "every item stays Pending until you designate it. Review the paraphrased summary, then approve, modify (adjust probability, frequency, or duration), or reject with a documented reason. A decided item can be reopened." : "read-only: your role cannot sign off on medical necessity."}
@@ -2477,25 +2488,39 @@ function PhysicianPanel({ data, canReview, attorneyView = false, call }: { data:
         })}
         {statusFilter && <button className="text-xs font-medium text-ink-500 hover:underline" onClick={() => setStatusFilter("")}>Show all</button>}
         {attorneyView && (
-          <button
-            className={cn("focusable ml-auto rounded-md border px-2.5 py-1 text-xs font-medium transition-colors", groupBySpecialty ? "border-brand-300 bg-brand-50 text-brand-800" : "border-ink-200 text-ink-600 hover:bg-ink-50")}
-            aria-pressed={groupBySpecialty}
-            onClick={() => setGroupBySpecialty((v) => !v)}
+          <select
+            className="input ml-auto w-auto py-1 text-xs"
+            aria-label="Filter by requested specialty"
+            value={specialtyFilter}
+            onChange={(e) => setSpecialtyFilter(e.target.value)}
           >
-            Group by specialty
-          </button>
+            <option value="">All specialties</option>
+            {requestedSpecialties.map((sp) => (
+              <option key={sp} value={sp}>{sp}</option>
+            ))}
+          </select>
         )}
       </div>
+      {/* Recommended specialties beyond what intake requested — surfaced, never silent. */}
+      {offSpecialty.length > 0 && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50/70 p-3 text-sm text-amber-900">
+          The recommendations include {offSpecialty.length === 1 ? "a specialty" : "specialties"} not requested at intake:{" "}
+          <span className="font-semibold">{offSpecialty.join(", ")}</span>. Add {offSpecialty.length === 1 ? "it" : "them"} under Specialty for
+          Review on the Intake page if this care should be reviewed, or the clinical team can reassign the items.
+        </div>
+      )}
 
       {items.length === 0 && <Empty>No items with this review status.</Empty>}
       {((): [string | null, AnyRec[]][] => {
-        if (!groupBySpecialty) return [[null, items]];
-        const m = new Map<string, AnyRec[]>();
-        for (const it of items as AnyRec[]) {
-          const key = it.specialty || "Unassigned specialty";
-          m.set(key, [...(m.get(key) ?? []), it]);
-        }
-        return Array.from(m.entries()).sort((x, y) => x[0].localeCompare(y[0]));
+        if (!specialtyFilter) return [[null, items]];
+        // Tolerant match: item specialties are short forms ("PM&R"); the intake
+        // list carries the long names ("Physical Medicine & Rehabilitation (PM&R)").
+        const want = specialtyFilter.toLowerCase();
+        const filtered = (items as AnyRec[]).filter((it) => {
+          const have = String(it.specialty ?? "").toLowerCase();
+          return have && (want.includes(have) || have.includes(want));
+        });
+        return [[specialtyFilter, filtered]];
       })().map(([groupLabel, groupItems]) => (
         <div key={groupLabel ?? "__all"} className="space-y-3">
           {groupLabel && (
@@ -2509,7 +2534,12 @@ function PhysicianPanel({ data, canReview, attorneyView = false, call }: { data:
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="min-w-0">
               <span className="font-medium text-ink-900">{it.service}</span>
-              {attorneyView && <Badge tone="brand" className="ml-2">{it.specialty || "unassigned"}</Badge>}
+              {attorneyView && (
+                <Badge tone={it.specialty && requestedSpecialties.length && !matchesRequested(it.specialty) ? "amber" : "brand"} className="ml-2">
+                  {it.specialty || "unassigned"}
+                  {it.specialty && requestedSpecialties.length && !matchesRequested(it.specialty) ? " — not requested at intake" : ""}
+                </Badge>
+              )}
               <Badge tone={PHYS_TONE[it.physicianStatus]} className="ml-2">{it.physicianStatus.toLowerCase()}</Badge>
             </div>
             <div className="flex items-center gap-2">
