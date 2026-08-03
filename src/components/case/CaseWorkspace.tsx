@@ -399,6 +399,8 @@ const WORK_STATUSES = ["Employed", "Unemployed", "Disabled"];
 
 function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; call: any }) {
   const [form, setForm] = useState({
+    dateOfBirth: data.dateOfBirth ? String(data.dateOfBirth).slice(0, 10) : "",
+    dateOfInjury: data.dateOfInjury ? String(data.dateOfInjury).slice(0, 10) : "",
     diagnosis: data.diagnosis ?? "",
     icd10Code: data.icd10Code ?? "",
     mechanism: data.mechanism ?? "",
@@ -499,6 +501,12 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
       )}
 
       <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <Field label="Client Date of Birth">
+          <input type="date" className="input" disabled={!canEdit} value={form.dateOfBirth} onChange={(e) => set("dateOfBirth", e.target.value)} />
+        </Field>
+        <Field label="Date of Injury">
+          <input type="date" className="input" disabled={!canEdit} value={form.dateOfInjury} onChange={(e) => set("dateOfInjury", e.target.value)} />
+        </Field>
         <Field label="Primary Diagnosis" wide>
           <Icd10Search
             value={form.diagnosis}
@@ -614,7 +622,7 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
         <div className="mt-4 flex items-center gap-3">
           <button className="btn-primary" onClick={async () => {
             if (unlinkedDx.length) { alert(`Link an ICD-10 code to each diagnosis before saving. Missing: ${unlinkedDx.join(", ")}. Pick a code from the search results.`); return; }
-            const r = await call(`/api/cases/${data.id}`, "PATCH", { ...form, additionalDiagnoses: additional.filter((d) => d.diagnosis.trim()), additionalSpecialties: addlSpecialties.map((s) => s.trim()).filter(Boolean) }, "intake"); if (r) setSaved(true);
+            const r = await call(`/api/cases/${data.id}`, "PATCH", { ...form, dateOfBirth: form.dateOfBirth || null, dateOfInjury: form.dateOfInjury || null, additionalDiagnoses: additional.filter((d) => d.diagnosis.trim()), additionalSpecialties: addlSpecialties.map((s) => s.trim()).filter(Boolean) }, "intake"); if (r) setSaved(true);
           }}>Save Intake</button>
           {unlinkedDx.length > 0 && <span className="text-sm text-amber-600">Link an ICD-10 code to {unlinkedDx.length === 1 ? "the flagged diagnosis" : `${unlinkedDx.length} diagnoses`} before saving.</span>}
           {saved && unlinkedDx.length === 0 && <span className="text-sm text-emerald-600">Saved.</span>}
