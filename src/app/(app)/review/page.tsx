@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { ROLE_PERMISSIONS } from "@/lib/rbac";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { PhysicianWorkspace } from "@/components/review/PhysicianWorkspace";
+import { AdminReviewOverview, type AdminReviewGroup } from "@/components/review/AdminReviewOverview";
 import { orderReviewQueue, weakestDimensions, sufficiencySummary, type ReviewQueueItem } from "@/lib/engine/reviewQueue";
 import type { ConfidenceVector, EvidenceSufficiency } from "@/lib/engine/clinicalReasoning";
 
@@ -16,6 +17,78 @@ import type { ConfidenceVector, EvidenceSufficiency } from "@/lib/engine/clinica
 
 export default async function ReviewPage() {
   const ctx = await requireContext();
+
+  // Firm administrators get an oversight view: firm-wide needs organized by
+  // case, filterable by client or attorney, with no pricing, frequency,
+  // codes, clinical criteria, or review controls.
+  if (ctx.user.role === "ADMIN") {
+    const pending = await prisma.futureCareItem.findMany({
+      where: { supersededAt: null, physicianStatus: "PENDING", case: { firmId: ctx.firm.id, status: { notIn: ["CLOSED", "ARCHIVED"] } } },
+      orderBy: { service: "asc" },
+      select: {
+        id: true,
+        caseId: true,
+        service: true,
+        category: true,
+        specialty: true,
+        probability: true,
+        defenseVulnerability: true,
+        physicianStatus: true,
+        case: { select: { clientName: true, caseNumber: true } },
+      },
+    });
+    const caseIds = [...new Set(pending.map((i) => i.caseId))];
+    const grants = caseIds.length
+      ? await prisma.userRoleAssignment.findMany({
+          where: { firmId: ctx.firm.id, caseId: { in: caseIds }, status: "ACTIVE", builtInRole: "ATTORNEY_CLIENT" },
+          select: { caseId: true, userId: true },
+        })
+      : [];
+    const attorneyUsers = grants.length
+      ? await prisma.user.findMany({ where: { id: { in: grants.map((g) => g.userId) } }, select: { id: true, name: true } })
+      : [];
+    const nameById = new Map(attorneyUsers.map((u) => [u.id, u.name]));
+    const attorneysByCase = new Map<string, string[]>();
+    for (const g of grants) {
+      if (!g.caseId) continue;
+      const name = nameById.get(g.userId);
+      if (!name) continue;
+      attorneysByCase.set(g.caseId, [...new Set([...(attorneysByCase.get(g.caseId) ?? []), name])]);
+    }
+    const groupMap = new Map<string, AdminReviewGroup>();
+    for (const it of pending) {
+      const g = groupMap.get(it.caseId) ?? {
+        caseId: it.caseId,
+        clientName: it.case.clientName,
+        caseNumber: it.case.caseNumber,
+        attorneys: attorneysByCase.get(it.caseId) ?? [],
+        items: [],
+      };
+      g.items.push({
+        id: it.id,
+        service: it.service,
+        category: it.category,
+        specialty: it.specialty,
+        probability: it.probability,
+        defenseVulnerability: it.defenseVulnerability,
+        physicianStatus: it.physicianStatus,
+      });
+      groupMap.set(it.caseId, g);
+    }
+    const groups = [...groupMap.values()].sort((x, y) => x.clientName.localeCompare(y.clientName));
+    return (
+      <div>
+        <PageHeader
+          title="Physician Review"
+          subtitle={`Firm-wide needs awaiting physician review — ${pending.length} item${pending.length === 1 ? "" : "s"} across ${groups.length} case${groups.length === 1 ? "" : "s"}`}
+        />
+        <div className="mt-5">
+          <AdminReviewOverview groups={groups} />
+        </div>
+      </div>
+    );
+  }
+
   const canReview = ROLE_PERMISSIONS[ctx.user.role].includes("physician.review");
   if (!canReview) {
     return (
