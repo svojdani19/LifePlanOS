@@ -149,11 +149,15 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
     kase?.specialty,
     ...(Array.isArray(kase?.additionalSpecialties) ? (kase!.additionalSpecialties as string[]) : []),
   ].filter((x): x is string => !!x);
+  // Word-token subset match (singular/plural-insensitive) — raw substring
+  // matching false-positives on pairs like Urology / Neurology.
+  const specTokens = (t: string) => t.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean).map((w) => w.replace(/s$/, ""));
   const specialtyMatchesRequested = (have: string) =>
     requestedSpecialties.some((want) => {
-      const h = have.toLowerCase();
-      const w = want.toLowerCase();
-      return h.includes(w) || w.includes(h);
+      const ht = specTokens(have);
+      const wt = specTokens(want);
+      if (!ht.length || !wt.length) return false;
+      return ht.every((w) => wt.includes(w)) || wt.every((w) => ht.includes(w));
     });
   const specialtyFindings: { service: string; result: string; issue: string; severity: string; suggestion: string; exportBlocking: boolean }[] = [];
   if (requestedSpecialties.length) {

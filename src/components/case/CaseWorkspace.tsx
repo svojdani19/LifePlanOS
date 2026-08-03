@@ -552,6 +552,9 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
                 onChange={(e) => { setAddlSpecialties((prev) => prev.map((x, i) => (i === idx ? e.target.value : x))); setSaved(false); }}
               >
                 <option value="">Additional specialty {idx + 1}…</option>
+                {/* A saved value outside the canonical list (e.g. an engine-recommended
+                    specialty added via "Add for me") still displays and stays selectable. */}
+                {s && !MEDICAL_SPECIALTIES.includes(s) && <option value={s}>{s}</option>}
                 {MEDICAL_SPECIALTIES.map((m) => <option key={m} value={m}>{m}</option>)}
               </select>
               {canEdit && (
@@ -2428,12 +2431,7 @@ function PhysicianPanel({ data, canReview, attorneyView = false, call }: { data:
   // Attorney filter: the specialties requested on intake drive the dropdown.
   const [specialtyFilter, setSpecialtyFilter] = useState<string>("");
   const requestedSpecialties: string[] = [data.specialty, ...(Array.isArray(data.additionalSpecialties) ? data.additionalSpecialties : [])].filter(Boolean);
-  const matchesRequested = (have: string) =>
-    requestedSpecialties.some((want) => {
-      const h = String(have).toLowerCase();
-      const w = String(want).toLowerCase();
-      return h.includes(w) || w.includes(h);
-    });
+  const matchesRequested = (have: string) => requestedSpecialties.some((want) => specMatch(String(have), String(want)));
   const offSpecialty: string[] = requestedSpecialties.length
     ? Array.from(new Set((data.futureCareItems as AnyRec[]).filter((it) => it.specialty && !matchesRequested(it.specialty)).map((it) => String(it.specialty))))
     : [];
@@ -2443,12 +2441,19 @@ function PhysicianPanel({ data, canReview, attorneyView = false, call }: { data:
   async function addOffSpecialties() {
     setAddingSpecs(true);
     try {
-      const canonical = (spec: string) =>
-        MEDICAL_SPECIALTIES.find((m) => m.toLowerCase().includes(spec.toLowerCase()) || spec.toLowerCase().includes(m.toLowerCase())) ?? spec;
-      const merged = Array.from(new Set([
-        ...(Array.isArray(data.additionalSpecialties) ? (data.additionalSpecialties as string[]) : []),
-        ...offSpecialty.map(canonical),
-      ]));
+      // Canonicalize to the intake list: substring match first, then a
+      // singular/plural-insensitive token-subset match ("Orthopedics" →
+      // "Orthopedic Surgery"). Unmatched names are kept verbatim.
+      const canonical = (spec: string) => MEDICAL_SPECIALTIES.find((m) => specMatch(m, spec)) ?? spec;
+      const same = specMatch;
+      const merged: string[] = Array.isArray(data.additionalSpecialties) ? [...(data.additionalSpecialties as string[])] : [];
+      for (const raw of offSpecialty) {
+        const spec = canonical(raw);
+        // Skip anything already covered by the primary or an existing entry.
+        if (data.specialty && same(spec, String(data.specialty))) continue;
+        if (merged.some((m) => same(m, spec))) continue;
+        merged.push(spec);
+      }
       const r = await call(`/api/cases/${data.id}`, "PATCH", { additionalSpecialties: merged }, "addspec");
       // Keep the integrity check in sync — the advisory clears on re-run.
       if (r) void fetch(`/api/cases/${data.id}/validation`, { method: "POST" });
@@ -2537,13 +2542,9 @@ function PhysicianPanel({ data, canReview, attorneyView = false, call }: { data:
       {items.length === 0 && <Empty>No items with this review status.</Empty>}
       {((): [string | null, AnyRec[]][] => {
         if (!specialtyFilter) return [[null, items]];
-        // Tolerant match: item specialties are short forms ("PM&R"); the intake
+        // Token match: item specialties are short forms ("PM&R"); the intake
         // list carries the long names ("Physical Medicine & Rehabilitation (PM&R)").
-        const want = specialtyFilter.toLowerCase();
-        const filtered = (items as AnyRec[]).filter((it) => {
-          const have = String(it.specialty ?? "").toLowerCase();
-          return have && (want.includes(have) || have.includes(want));
-        });
+        const filtered = (items as AnyRec[]).filter((it) => it.specialty && specMatch(String(it.specialty), specialtyFilter));
         return [[specialtyFilter, filtered]];
       })().map(([groupLabel, groupItems]) => (
         <div key={groupLabel ?? "__all"} className="space-y-3">
@@ -3600,6 +3601,18 @@ function ValidationCard({ caseId, scope, redactPricing = false, onReview }: { ca
 // submits an Order (a CaseEngagement the firm authorizes and staffs). Final,
 // released reports are listed newest-first with prior versions tucked away.
 // ─────────────────────────────────────────────────────────────────────────────
+// Specialty comparison: word-token subset match, singular/plural-insensitive.
+// Never raw substring — "Urology" must not match "Neurology".
+function specTokens(t: string): string[] {
+  return t.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean).map((w) => w.replace(/s$/, ""));
+}
+function specMatch(a: string, b: string): boolean {
+  const at = specTokens(a);
+  const bt = specTokens(b);
+  if (!at.length || !bt.length) return false;
+  return at.every((w) => bt.includes(w)) || bt.every((w) => at.includes(w));
+}
+
 const PREPARER_TITLES: Record<string, string> = {
   LIFE_CARE_PLANNER: "Life Care Planner",
   PHYSICIAN_REVIEWER: "Physician Reviewer",
