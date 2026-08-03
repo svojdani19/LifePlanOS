@@ -59,6 +59,7 @@ import { suggestDiagnoses } from "@/lib/intake/diagnosisSuggest";
 import { confidenceBand, confidenceDefinition } from "@/lib/engine/confidence";
 import { BookOpenCheck } from "lucide-react";
 import { MEDICAL_SPECIALTIES } from "@/lib/intake/specialties";
+import { attorneyItemsNeeded } from "@/lib/attorneyItems";
 import { US_STATES } from "@/lib/intake/jurisdictions";
 import { CaseAssistant } from "@/components/case/CaseAssistant";
 
@@ -3640,14 +3641,14 @@ function attorneyPreparerOptions(def: AnyRec | null): { key: string; label: stri
 // integrity items (physician review, citations, duplicates) are the clinical
 // team's work and are deliberately not surfaced as "blocked" here.
 function requestBlockingItems(data: AnyRec): { label: string; tab: string; action: string }[] {
-  const blockers: { label: string; tab: string; action: string }[] = [];
-  if (!data.dateOfBirth) blockers.push({ label: "Client date of birth is missing.", tab: "overview", action: "Complete intake" });
-  if (!data.dateOfInjury) blockers.push({ label: "Date of injury is missing.", tab: "overview", action: "Complete intake" });
-  if (!data.diagnosis) blockers.push({ label: "Primary diagnosis is missing.", tab: "overview", action: "Complete intake" });
-  if (!data.jurisdiction) blockers.push({ label: "Jurisdiction is missing.", tab: "overview", action: "Complete intake" });
-  if (!data.specialty) blockers.push({ label: "Specialty for review has not been selected.", tab: "overview", action: "Complete intake" });
-  if ((data.documents ?? []).length === 0) blockers.push({ label: "No medical records have been uploaded.", tab: "records", action: "Upload records" });
-  return blockers;
+  return attorneyItemsNeeded({
+    dateOfBirth: data.dateOfBirth,
+    dateOfInjury: data.dateOfInjury,
+    diagnosis: data.diagnosis,
+    jurisdiction: data.jurisdiction,
+    specialty: data.specialty,
+    documentCount: (data.documents ?? []).length,
+  });
 }
 
 function AttorneyReportPanel({ caseId, caseData, exports, physicians = [], onNavigate }: { caseId: string; caseData: AnyRec; exports: AnyRec[]; physicians?: AnyRec[]; onNavigate?: (tab: string) => void }) {
