@@ -2437,6 +2437,25 @@ function PhysicianPanel({ data, canReview, attorneyView = false, call }: { data:
   const offSpecialty: string[] = requestedSpecialties.length
     ? Array.from(new Set((data.futureCareItems as AnyRec[]).filter((it) => it.specialty && !matchesRequested(it.specialty)).map((it) => String(it.specialty))))
     : [];
+  const [addingSpecs, setAddingSpecs] = useState(false);
+  // "Add for me": append the flagged specialties to the case's Specialty for
+  // Review list (canonicalized to the intake list's names where they match).
+  async function addOffSpecialties() {
+    setAddingSpecs(true);
+    try {
+      const canonical = (spec: string) =>
+        MEDICAL_SPECIALTIES.find((m) => m.toLowerCase().includes(spec.toLowerCase()) || spec.toLowerCase().includes(m.toLowerCase())) ?? spec;
+      const merged = Array.from(new Set([
+        ...(Array.isArray(data.additionalSpecialties) ? (data.additionalSpecialties as string[]) : []),
+        ...offSpecialty.map(canonical),
+      ]));
+      const r = await call(`/api/cases/${data.id}`, "PATCH", { additionalSpecialties: merged }, "addspec");
+      // Keep the integrity check in sync — the advisory clears on re-run.
+      if (r) void fetch(`/api/cases/${data.id}/validation`, { method: "POST" });
+    } finally {
+      setAddingSpecs(false);
+    }
+  }
   if (data.futureCareItems.length === 0) return <Empty>Run the AI pipeline first to build the physician review packet.</Empty>;
 
   // Review-speed affordances (Phase 14): live counts double as filters.
@@ -2507,6 +2526,11 @@ function PhysicianPanel({ data, canReview, attorneyView = false, call }: { data:
           The recommendations include {offSpecialty.length === 1 ? "a specialty" : "specialties"} not requested at intake:{" "}
           <span className="font-semibold">{offSpecialty.join(", ")}</span>. Add {offSpecialty.length === 1 ? "it" : "them"} under Specialty for
           Review on the Intake page if this care should be reviewed, or the clinical team can reassign the items.
+          <div className="mt-2">
+            <button className="btn-primary px-3 py-1.5 text-xs" disabled={addingSpecs} onClick={() => void addOffSpecialties()}>
+              {addingSpecs ? "Adding…" : `Add ${offSpecialty.length === 1 ? "it" : "them"} for me`}
+            </button>
+          </div>
         </div>
       )}
 
