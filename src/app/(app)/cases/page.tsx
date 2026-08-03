@@ -31,12 +31,22 @@ export default async function CasesPage() {
       ? prisma.case.count({ where: { firmId: ctx.firm.id, id: { in: scoped }, status: { notIn: ["CLOSED", "ARCHIVED"] } } })
       : activeCaseCount(ctx.firm.id),
   ]);
+  const attorneyView = ctx.user.role === "ATTORNEY_REVIEWER";
   const pvSums = await prisma.futureCareItem.groupBy({
     by: ["caseId"],
     where: { caseId: { in: cases.map((c) => c.id) }, supersededAt: null },
-    _sum: { presentValue: true },
+    _sum: { presentValue: true, lifetimeCost: true },
   });
   const pvByCase = new Map(pvSums.map((p) => [p.caseId, p._sum.presentValue ?? 0]));
+  const lifetimeByCase = new Map(pvSums.map((p) => [p.caseId, p._sum.lifetimeCost ?? 0]));
+  // Attorney rows show the estimated life value as a range (-30% / +10%,
+  // rounded to the nearest $1k) instead of exact present value.
+  const fmt = (n: number) => `$${Math.round(n).toLocaleString("en-US")}`;
+  const lifeRange = (v: number) => {
+    if (!v) return null;
+    const k = (x: number) => Math.round(x / 1000) * 1000;
+    return `${fmt(k(v * 0.7))} – ${fmt(k(v * 1.1))}`;
+  };
   const limits = effectiveLimits(ctx.subscription?.tier ?? "SOLO", ctx.subscription ?? undefined);
   const atLimit = limits.caseLimit !== null && active >= limits.caseLimit;
 
@@ -59,7 +69,8 @@ export default async function CasesPage() {
         rows={cases.map((c) => ({
           id: c.id, caseNumber: c.caseNumber, clientName: c.clientName, caseType: c.caseType, side: c.side, status: c.status,
           updatedAt: c.updatedAt.toISOString(),
-          presentValue: pvByCase.get(c.id) ?? 0,
+          presentValue: attorneyView ? 0 : (pvByCase.get(c.id) ?? 0),
+          estimatedLifeValue: attorneyView ? lifeRange(lifetimeByCase.get(c.id) ?? 0) : null,
           mdPending: c._count.futureCareItems,
           blockingFindings: c._count.validationFindings,
           documentCount: c._count.documents,

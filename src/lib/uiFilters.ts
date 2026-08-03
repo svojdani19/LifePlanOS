@@ -11,6 +11,8 @@ export interface CaseListRow {
   updatedAt: string; // ISO
   // Work-queue columns (optional; list pages may omit them)
   presentValue?: number;
+  /** Attorney view: lifetime estimate range shown in place of present value. */
+  estimatedLifeValue?: string | null;
   mdPending?: number;
   blockingFindings?: number;
   documentCount?: number;
