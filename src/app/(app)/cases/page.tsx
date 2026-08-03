@@ -31,7 +31,9 @@ export default async function CasesPage() {
       ? prisma.case.count({ where: { firmId: ctx.firm.id, id: { in: scoped }, status: { notIn: ["CLOSED", "ARCHIVED"] } } })
       : activeCaseCount(ctx.firm.id),
   ]);
-  const attorneyView = ctx.user.role === "ATTORNEY_REVIEWER";
+  // Attorneys AND firm administrators see the estimated life value range in
+  // the list; exact present value stays a clinical-view figure.
+  const attorneyView = ctx.user.role === "ATTORNEY_REVIEWER" || ctx.user.role === "ADMIN";
   const pvSums = await prisma.futureCareItem.groupBy({
     by: ["caseId"],
     where: { caseId: { in: cases.map((c) => c.id) }, supersededAt: null },

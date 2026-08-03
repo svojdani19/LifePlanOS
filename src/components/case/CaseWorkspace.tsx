@@ -238,22 +238,24 @@ export function CaseWorkspace({
       <div className="sticky top-0 z-30 -mx-6 border-b border-ink-200 bg-white/95 px-6 pt-3 backdrop-blur supports-[backdrop-filter]:bg-white/85">
         {/* Identity + actions */}
         <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
+          <div className="min-w-0">
           <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
             <h1 className="truncate text-lg font-bold tracking-tight text-ink-900">{data.clientName}</h1>
             <span className="font-mono text-xs text-ink-400">{data.caseNumber}</span>
             <Badge tone={data.side === "PLAINTIFF" ? "brand" : data.side === "DEFENSE" ? "warning" : "slate"}>{data.side.toLowerCase()}</Badge>
             <span className="hidden text-xs text-ink-500 md:inline">{data.caseType.replace(/_/g, " ").toLowerCase()}</span>
-            {assignedAttorneys.length > 0 && (
-              <Badge tone="info" title="Attorney assigned to this matter">
-                Attorney: {assignedAttorneys.join(", ")}
-              </Badge>
-            )}
             {data.diagnosis && (
               <span className="hidden max-w-[24rem] truncate text-xs text-ink-500 xl:inline" title={`${data.diagnosis}${data.icd10Code ? ` [${data.icd10Code}]` : ""}`}>
                 · {data.diagnosis}
                 {data.icd10Code ? <span className="font-mono text-ink-400"> [{data.icd10Code}]</span> : null}
               </span>
             )}
+          </div>
+          {assignedAttorneys.length > 0 && (
+            <p className="mt-0.5 text-sm text-ink-500" title="Attorney assigned to this matter">
+              Attorney: <span className="font-medium text-ink-700">{assignedAttorneys.join(", ")}</span>
+            </p>
+          )}
           </div>
           <div className="flex items-center gap-2">
             {hasPlan && (
