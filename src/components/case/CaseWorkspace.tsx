@@ -1850,7 +1850,11 @@ function FutureCarePanel({ data, canEdit, attorneyView = false, call, focusId, f
                 {!compact && it.edited && <Badge tone="amber">edited</Badge>}
               </div>
               {!compact && (
-                <p className="mt-1 text-xs text-ink-500">{it.category.replace(/_/g, " ").toLowerCase()} · {it.specialty} · {it.cptCode || "no CPT"} · {it.frequencyPerYear}/yr {it.isLifetime ? "for life" : it.durationYears ? `× ${it.durationYears}y` : ""}</p>
+                <p className="mt-1 text-xs text-ink-500">
+                  {it.category.replace(/_/g, " ").toLowerCase()} · {it.specialty}
+                  {/* Codes and frequency are clinical detail — hidden from the attorney view. */}
+                  {!attorneyView && <> · {it.cptCode || "no CPT"} · {it.frequencyPerYear}/yr {it.isLifetime ? "for life" : it.durationYears ? `× ${it.durationYears}y` : ""}</>}
+                </p>
               )}
             </div>
             <div className="flex items-center gap-4">
