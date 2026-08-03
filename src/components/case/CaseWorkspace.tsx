@@ -110,6 +110,7 @@ export function CaseWorkspace({
   physicians = [],
   attorneyView = false,
   pendingResolution = 0,
+  assignedAttorneys = [],
 }: {
   data: AnyRec;
   assumptions: { lifeExpectancyYears: number; discountRate: number; medicalInflation: number; geographicFactor: number };
@@ -121,6 +122,8 @@ export function CaseWorkspace({
   attorneyView?: boolean;
   /** Open export-blocking integrity findings — the attorney banner's Pending Resolution count. */
   pendingResolution?: number;
+  /** Case-assigned attorney names, shown in the banner for firm admins. */
+  assignedAttorneys?: string[];
 }) {
   const router = useRouter();
   const [tab, setTab] = useState("overview");
@@ -240,6 +243,11 @@ export function CaseWorkspace({
             <span className="font-mono text-xs text-ink-400">{data.caseNumber}</span>
             <Badge tone={data.side === "PLAINTIFF" ? "brand" : data.side === "DEFENSE" ? "warning" : "slate"}>{data.side.toLowerCase()}</Badge>
             <span className="hidden text-xs text-ink-500 md:inline">{data.caseType.replace(/_/g, " ").toLowerCase()}</span>
+            {assignedAttorneys.length > 0 && (
+              <Badge tone="info" title="Attorney assigned to this matter">
+                Attorney: {assignedAttorneys.join(", ")}
+              </Badge>
+            )}
             {data.diagnosis && (
               <span className="hidden max-w-[24rem] truncate text-xs text-ink-500 xl:inline" title={`${data.diagnosis}${data.icd10Code ? ` [${data.icd10Code}]` : ""}`}>
                 · {data.diagnosis}

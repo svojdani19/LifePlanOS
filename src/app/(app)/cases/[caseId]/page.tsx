@@ -19,6 +19,22 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
   // Firm administrators see the individual case exactly as the retaining
   // attorney does — the attorney presentation IS the case view for both roles.
   const attorneyView = ctx.user.role === "ATTORNEY_REVIEWER" || ctx.user.role === "ADMIN";
+  // Firm admins see who the assigned attorney(s) on the matter are, right in
+  // the case banner (case-scoped attorney assignments).
+  let assignedAttorneys: string[] = [];
+  if (ctx.user.role === "ADMIN") {
+    const grants = await prisma.userRoleAssignment.findMany({
+      where: { firmId: ctx.firm.id, caseId: params.caseId, status: "ACTIVE", builtInRole: { in: ["ATTORNEY_CLIENT"] } },
+      select: { userId: true },
+    });
+    if (grants.length) {
+      const users = await prisma.user.findMany({
+        where: { id: { in: grants.map((g) => g.userId) } },
+        select: { name: true },
+      });
+      assignedAttorneys = users.map((u) => u.name);
+    }
+  }
   const c = await prisma.case.findFirst({
     where: { id: params.caseId, firmId: ctx.firm.id },
     include: {
@@ -85,6 +101,7 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
         // permissions are swapped to the attorney's set for a faithful preview,
         // while server-side authorization still runs against the real session).
         attorneyView={attorneyView}
+        assignedAttorneys={Array.from(new Set(assignedAttorneys))}
         pendingResolution={pendingResolution}
       />
     </div>
