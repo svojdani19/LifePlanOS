@@ -174,6 +174,8 @@ function ConfidenceBar({ label, value }: { label: string; value: number }) {
 export default function AttorneyWorkspace({ firmName, userName, cases, pricing }: Props) {
   const [tab, setTab] = useState<Tab>("Overview");
   const [caseId, setCaseId] = useState<string | null>(cases[0]?.id ?? null);
+  const [orderBusy, setOrderBusy] = useState<string | null>(null);
+  const [orderMsg, setOrderMsg] = useState<string | null>(null);
   const [evaluation, setEvaluation] = useState<Evaluation | null>(null);
   const [isStale, setIsStale] = useState(false);
   const [evaluating, setEvaluating] = useState(false);
@@ -490,7 +492,38 @@ export default function AttorneyWorkspace({ firmName, userName, cases, pricing }
           )}
 
           {/* ── Report Options ─────────────────────────────────────────────── */}
-          {tab === "Report Options" && (
+          {tab === "Report Options" && (() => {
+            // Ordering criteria: the report must be enabled for the firm and the
+            // attorney's own Items Needed list must be clear. Clinical readiness
+            // (vocational/economic intake, physician review) is the engaged
+            // team's work and never blocks placing the order.
+            const itemsOutstanding = selected
+              ? attorneyItemsNeeded({
+                  dateOfBirth: selected.dateOfBirth,
+                  dateOfInjury: selected.dateOfInjury,
+                  diagnosis: selected.diagnosis,
+                  jurisdiction: selected.jurisdiction,
+                  specialty: selected.specialty,
+                  documentCount: selected.documentCount,
+                }).length
+              : 0;
+            const order = async (reportId: string, name: string) => {
+              if (!caseId) return;
+              setOrderBusy(reportId); setOrderMsg(null);
+              try {
+                const res = await fetch(`/api/cases/${caseId}/engagements`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ reportType: reportId, scope: `Attorney order: ${name}`, configuration: { orderedVia: "attorney_workspace" } }),
+                });
+                const body = await res.json().catch(() => ({}));
+                setOrderMsg(res.ok ? `${name} ordered — the firm will confirm and staff it.` : (body.error ?? "Order could not be submitted."));
+                if (res.ok && caseId) void loadEngagements(caseId);
+              } finally {
+                setOrderBusy(null);
+              }
+            };
+            return (
             <div className="mt-4 card overflow-hidden">
               {reports === null ? (
                 <div className="p-6 text-sm text-ink-500">Loading report options…</div>
@@ -504,10 +537,13 @@ export default function AttorneyWorkspace({ firmName, userName, cases, pricing }
                       <th className="px-4 py-2.5 font-medium">Status</th>
                       <th className="px-4 py-2.5 font-medium">Fee</th>
                       <th className="px-4 py-2.5 font-medium">Turnaround</th>
+                      <th className="px-4 py-2.5 font-medium" />
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-ink-100">
-                    {reports.map((r) => (
+                    {reports.map((r) => {
+                      const orderable = r.status !== "Not enabled" && itemsOutstanding === 0;
+                      return (
                       <tr key={r.id}>
                         <td className="px-4 py-2.5">
                           <span className="font-medium text-ink-900">{r.name}</span>
@@ -516,16 +552,30 @@ export default function AttorneyWorkspace({ firmName, userName, cases, pricing }
                         <td className="px-4 py-2.5"><Badge tone={r.status === "Ready" || r.status === "Previously exported" ? "success" : "neutral"}>{r.status}</Badge></td>
                         <td className="px-4 py-2.5 text-ink-700">{pricing[r.id] ?? "Contact for pricing"}</td>
                         <td className="px-4 py-2.5 text-ink-700">{pricing[`${r.id}.turnaround`] ?? "Contact for timing"}</td>
+                        <td className="px-4 py-2.5 text-right">
+                          <button
+                            className="btn-primary px-3 py-1.5 text-xs disabled:opacity-40"
+                            disabled={!orderable || orderBusy !== null}
+                            title={r.status === "Not enabled" ? "This report line is not enabled for the firm." : itemsOutstanding > 0 ? "Complete the Items Needed tab first." : undefined}
+                            onClick={() => void order(r.id, r.name)}
+                          >
+                            {orderBusy === r.id ? "Ordering…" : "Order"}
+                          </button>
+                        </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               )}
               <div className="border-t border-ink-100 px-4 py-3 text-xs text-ink-500">
-                Report generation is handled by the clinical team — this listing is informational for engagement planning.
+                {orderMsg ?? (itemsOutstanding > 0
+                  ? `Complete the ${itemsOutstanding} item${itemsOutstanding === 1 ? "" : "s"} on the Items Needed tab to enable ordering.`
+                  : "Ordering submits an engagement for the firm to confirm and staff — report preparation is handled by the clinical team.")}
               </div>
             </div>
-          )}
+            );
+          })()}
 
           {/* ── Active Engagements ─────────────────────────────────────────── */}
           {tab === "Active Engagements" && (
