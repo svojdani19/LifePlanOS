@@ -127,7 +127,7 @@ const PRODUCT_LABEL: Record<string, string> = {
 
 const productLabel = (id: string | null) => (id ? PRODUCT_LABEL[id] ?? id.replace(/_/g, " ") : "—");
 
-const TABS = ["Overview", "Items Needed", "Report Options", "Active Engagements", "Final Deliverables"] as const;
+const TABS = ["Overview", "Items Needed", "Report Options", "Pending Reports", "Final Deliverables"] as const;
 type Tab = (typeof TABS)[number];
 
 // ── Small pieces ─────────────────────────────────────────────────────────────
@@ -577,20 +577,20 @@ export default function AttorneyWorkspace({ firmName, userName, cases, pricing }
             );
           })()}
 
-          {/* ── Active Engagements ─────────────────────────────────────────── */}
-          {tab === "Active Engagements" && (
+          {/* ── Pending Reports — ordered engagements not yet delivered. ──── */}
+          {tab === "Pending Reports" && (
             <div className="mt-4 card p-5">
               {engagements === "unavailable" ? (
                 <div className="py-6 text-center">
-                  <h3 className="text-base font-semibold text-ink-900">Engagement tracking activating</h3>
+                  <h3 className="text-base font-semibold text-ink-900">Report tracking activating</h3>
                   <p className="mx-auto mt-1 max-w-md text-sm text-ink-500">
-                    Engagement status for this firm is being switched on — authorized report engagements will appear here.
+                    Report tracking for this firm is being switched on — your ordered reports will appear here.
                   </p>
                 </div>
               ) : engagements === null ? (
                 <p className="text-sm text-ink-500">Loading engagements…</p>
               ) : engagements.length === 0 ? (
-                <p className="text-sm text-ink-500">No active engagements on this case yet.</p>
+                <p className="text-sm text-ink-500">No pending reports on this case yet — place an order under Report Options.</p>
               ) : (
                 <ul className="divide-y divide-ink-100">
                   {engagements.map((e) => (
