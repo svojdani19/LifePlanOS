@@ -382,7 +382,7 @@ export function CaseWorkspace({
         {tab === "physician" && <PhysicianPanel data={data} canReview={can("physician.review")} attorneyView={attorneyView} call={call} />}
         {tab === "precedents" && <PrecedentsPanel precedents={precedents} data={data} />}
         {tab === "report" && (attorneyView
-          ? <AttorneyReportPanel caseId={data.id} exports={data.reports ?? []} physicians={physicians} onReview={setReviewFinding} />
+          ? <AttorneyReportPanel caseId={data.id} caseData={data} exports={data.reports ?? []} physicians={physicians} onNavigate={setTab} />
           : <ReportPanel data={data} canExport={can("report.export")} canEdit={can("case.edit")} call={call} busy={busy} totals={totals} physicians={physicians} onReview={setReviewFinding} />)}
       </div>
     </div>
@@ -3557,7 +3557,21 @@ function attorneyPreparerOptions(def: AnyRec | null): { key: string; label: stri
   return opts;
 }
 
-function AttorneyReportPanel({ caseId, exports, physicians = [], onReview }: { caseId: string; exports: AnyRec[]; physicians?: AnyRec[]; onReview?: (finding: AnyRec) => void }) {
+// Request-side readiness: the barriers an ATTORNEY can act on. Clinical
+// integrity items (physician review, citations, duplicates) are the clinical
+// team's work and are deliberately not surfaced as "blocked" here.
+function requestBlockingItems(data: AnyRec): { label: string; tab: string; action: string }[] {
+  const blockers: { label: string; tab: string; action: string }[] = [];
+  if (!data.dateOfBirth) blockers.push({ label: "Client date of birth is missing.", tab: "overview", action: "Complete intake" });
+  if (!data.dateOfInjury) blockers.push({ label: "Date of injury is missing.", tab: "overview", action: "Complete intake" });
+  if (!data.diagnosis) blockers.push({ label: "Primary diagnosis is missing.", tab: "overview", action: "Complete intake" });
+  if (!data.jurisdiction) blockers.push({ label: "Jurisdiction is missing.", tab: "overview", action: "Complete intake" });
+  if (!data.specialty) blockers.push({ label: "Specialty for review has not been selected.", tab: "overview", action: "Complete intake" });
+  if ((data.documents ?? []).length === 0) blockers.push({ label: "No medical records have been uploaded.", tab: "records", action: "Upload records" });
+  return blockers;
+}
+
+function AttorneyReportPanel({ caseId, caseData, exports, physicians = [], onNavigate }: { caseId: string; caseData: AnyRec; exports: AnyRec[]; physicians?: AnyRec[]; onNavigate?: (tab: string) => void }) {
   const [reports, setReports] = useState<AnyRec[]>([]);
   const [selectedId, setSelectedId] = useState<string>("LIFE_CARE_PLAN");
   const [picked, setPicked] = useState<Set<string>>(new Set());
@@ -3578,14 +3592,11 @@ function AttorneyReportPanel({ caseId, exports, physicians = [], onReview }: { c
 
   const selected = reports.find((r) => r.id === selectedId) ?? null;
   const options = attorneyPreparerOptions(selected);
+  const blockers = requestBlockingItems(caseData);
 
   // Required titles are always part of the order.
   const effectivePicked = new Set(picked);
   for (const o of options) if (o.required) effectivePicked.add(o.key);
-
-  const sel: ReportSelection | null = selected
-    ? { id: selected.id, name: selected.name, findingRelevance: selected.findingRelevance, gate: selected.gate, status: selected.status, gateReason: selected.gateReason }
-    : null;
 
   async function order() {
     if (!selected) return;
@@ -3629,7 +3640,7 @@ function AttorneyReportPanel({ caseId, exports, physicians = [], onReview }: { c
       {/* Report selection */}
       <div className="card p-5">
         <h3 className="text-sm font-semibold text-ink-900">Request Report</h3>
-        <p className="text-xs text-ink-500">Choose the report you want prepared. Barriers below must be resolved by the clinical team before a final can be released.</p>
+        <p className="text-xs text-ink-500">Choose the report you want prepared. Anything still needed from your side appears under Request-Blocking Items below.</p>
         {/* The exact same report library as the clinical view, grouped by the
             same categories — only the action differs (order, not generate). */}
         {ATTORNEY_CATEGORY_ORDER.filter((cat) => reports.some((r: AnyRec) => r.category === cat)).map((cat) => (
@@ -3646,11 +3657,10 @@ function AttorneyReportPanel({ caseId, exports, physicians = [], onReview }: { c
                   )}
                 >
                   <span className="flex items-center gap-2">
-                    <span className={cn("h-2 w-2 shrink-0 rounded-full", STATUS_DOT_ATTORNEY[r.status] ?? "bg-slate-300")} />
+                    <span className={cn("h-2 w-2 shrink-0 rounded-full", blockers.length === 0 ? "bg-emerald-500" : "bg-amber-500")} />
                     <span className="text-sm font-semibold text-ink-900">{r.name}</span>
                   </span>
                   <span className="mt-0.5 block text-xs text-ink-500">{r.description}</span>
-                  {r.gateReason && <span className="mt-1 block text-xs text-amber-700">Barrier: {r.gateReason}</span>}
                 </button>
               ))}
             </div>
@@ -3658,8 +3668,35 @@ function AttorneyReportPanel({ caseId, exports, physicians = [], onReview }: { c
         ))}
       </div>
 
-      {/* Integrity check — barriers to completion; no pricing values. */}
-      <ValidationCard caseId={caseId} scope={sel} redactPricing onReview={onReview} />
+      {/* Request-side readiness — only barriers the attorney controls. The
+          clinical team's internal integrity items are resolved after ordering
+          and are never presented to the attorney as "blocked". */}
+      <div className="card p-5">
+        <div className="flex items-center gap-2">
+          <h3 className="text-sm font-semibold text-ink-900">Request-Blocking Items</h3>
+          {blockers.length === 0
+            ? <Badge tone="green">ready to order</Badge>
+            : <Badge tone="amber">{blockers.length} to complete</Badge>}
+        </div>
+        {blockers.length === 0 ? (
+          <p className="mt-2 text-sm text-ink-600">
+            Everything needed from your side is on file. Any remaining internal items are handled by the clinical team as part of preparing the report.
+          </p>
+        ) : (
+          <ul className="mt-3 space-y-2">
+            {blockers.map((bk) => (
+              <li key={bk.label} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-amber-50/70 p-3 text-sm">
+                <span className="text-ink-800">{bk.label}</span>
+                {onNavigate && (
+                  <button className="focusable rounded text-xs font-semibold text-brand-700 hover:underline" onClick={() => onNavigate(bk.tab)}>
+                    {bk.action}
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
 
       {/* Preparer titles (anonymous) */}
       <div className="card p-5">
