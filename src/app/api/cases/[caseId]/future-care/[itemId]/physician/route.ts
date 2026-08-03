@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { prisma } from "@/lib/db";
-import { requireApiContext, requirePermission, requireCase, audit } from "@/lib/tenant";
+import { requireApiContext, requireCanonicalPermission, requireCase, audit } from "@/lib/tenant";
 import { enforceReviewCredential } from "@/lib/authz/credentialGate";
 import { generateReviews, paraphraseSummary } from "@/lib/engine/generate";
 import { persistCaseValidation } from "@/lib/engine/validation";
@@ -24,10 +24,11 @@ const schema = z.object({
 
 // Physician review workflow (Module 12): approve / reject / modify an item and
 // attach a medical-necessity statement. Restricted to physician.review permission.
-export async function POST(req: Request, { params }: { params: { caseId: string; itemId: string } }) {
+export async function POST(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string; itemId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
-    requirePermission(ctx, "physician.review");
+    requireCanonicalPermission(ctx, "physician.review", { caseId: params.caseId });
     // Review-class decision: requires a verified PHYSICIAN credential —
     // enforced for enterprise/demo firms, logged as credential.gap otherwise.
     await enforceReviewCredential(ctx, "PHYSICIAN", { action: "futurecare.physician_review", caseId: params.caseId });

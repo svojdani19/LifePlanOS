@@ -7,7 +7,8 @@ import { ok, handleError } from "@/lib/api";
 // deterministic validation layer (diagnosis mapping, coding/pricing, inclusion
 // eligibility). GET returns the stored findings; POST recomputes and stores.
 
-export async function GET(_req: Request, { params }: { params: { caseId: string } }) {
+export async function GET(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.view");
@@ -24,7 +25,8 @@ export async function GET(_req: Request, { params }: { params: { caseId: string 
   }
 }
 
-export async function POST(_req: Request, { params }: { params: { caseId: string } }) {
+export async function POST(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.view");

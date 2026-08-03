@@ -18,7 +18,7 @@ import {
 // role history must survive for audit.
 // ─────────────────────────────────────────────────────────────────────────────
 
-type Params = { params: { roleId: string } };
+type Params = { params: Promise<{ roleId: string }> };
 
 const permissionSchema = z.object({
   key: z.string().min(1),
@@ -47,7 +47,8 @@ const patchSchema = z
     path: ["changeReason"],
   });
 
-export async function GET(_req: Request, { params }: Params) {
+export async function GET(_req: Request, { params: paramsPromise }: Params) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "team.manage");
@@ -73,7 +74,8 @@ export async function GET(_req: Request, { params }: Params) {
   }
 }
 
-export async function PATCH(req: Request, { params }: Params) {
+export async function PATCH(req: Request, { params: paramsPromise }: Params) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "team.manage");
@@ -135,7 +137,8 @@ export async function PATCH(req: Request, { params }: Params) {
   }
 }
 
-export async function DELETE(_req: Request, { params }: Params) {
+export async function DELETE(_req: Request, { params: paramsPromise }: Params) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "team.manage");

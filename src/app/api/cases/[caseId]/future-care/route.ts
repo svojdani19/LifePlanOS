@@ -27,7 +27,8 @@ const createSchema = z.object({
   unitCost: z.number().min(0),
 });
 
-export async function POST(req: Request, { params }: { params: { caseId: string } }) {
+export async function POST(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "futurecare.edit");

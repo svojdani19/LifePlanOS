@@ -30,7 +30,7 @@ export async function POST(req: Request) {
       return ok({ error: "Demo environment is not seeded. Run: npx tsx scripts/demo-seed.ts" }, 409);
     }
 
-    const h = headers();
+    const h = await headers();
     await createSession(user.id, { userAgent: h.get("user-agent"), ip: h.get("x-forwarded-for") });
     await prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } });
     await prisma.auditLog.create({

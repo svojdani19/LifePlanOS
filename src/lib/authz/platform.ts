@@ -29,6 +29,7 @@ export async function isPlatformAdmin(userId: string): Promise<boolean> {
       userId,
       builtInRole: PLATFORM_ADMIN_TEMPLATE,
       status: "ACTIVE",
+      effectiveFrom: { lte: new Date() },
       OR: [{ effectiveUntil: null }, { effectiveUntil: { gt: new Date() } }],
     },
   });

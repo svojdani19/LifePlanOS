@@ -23,7 +23,8 @@ function sourceQuote(text: string, conditionName: string): string {
   return q?.quote ?? clean.slice(0, 479).trimEnd() + "…";
 }
 
-export async function GET(_req: Request, { params }: { params: { caseId: string } }) {
+export async function GET(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.view");
@@ -35,7 +36,8 @@ export async function GET(_req: Request, { params }: { params: { caseId: string 
   }
 }
 
-export async function POST(req: Request, { params }: { params: { caseId: string } }) {
+export async function POST(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.edit");

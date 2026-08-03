@@ -38,7 +38,7 @@ export async function createSession(
     },
   });
 
-  cookies().set(SESSION_COOKIE, raw, {
+  (await cookies()).set(SESSION_COOKIE, raw, {
     httpOnly: true,
     secure: process.env.NODE_ENV === "production",
     sameSite: "lax",
@@ -47,9 +47,15 @@ export async function createSession(
   });
 }
 
-/** Returns the userId for a valid, unexpired session, or null. */
-export async function readSession(): Promise<string | null> {
-  const raw = cookies().get(SESSION_COOKIE)?.value;
+export interface SessionContext {
+  id: string;
+  userId: string;
+  supportFirmId: string | null;
+}
+
+/** Returns identity plus server-side support context for a valid session. */
+export async function readSessionContext(): Promise<SessionContext | null> {
+  const raw = (await cookies()).get(SESSION_COOKIE)?.value;
   if (!raw) return null;
   const session = await prisma.session.findUnique({ where: { tokenHash: hashToken(raw) } });
   if (!session) return null;
@@ -63,13 +69,24 @@ export async function readSession(): Promise<string | null> {
   if (now - session.lastSeenAt.getTime() > REFRESH_MS) {
     await prisma.session.update({ where: { id: session.id }, data: { lastSeenAt: new Date() } }).catch(() => {});
   }
-  return session.userId;
+  return { id: session.id, userId: session.userId, supportFirmId: session.supportFirmId };
+}
+
+/** Compatibility helper for callers that need identity only. */
+export async function readSession(): Promise<string | null> {
+  return (await readSessionContext())?.userId ?? null;
+}
+
+/** Change the target tenant on the authenticated server-side session. */
+export async function setSessionSupportFirm(sessionId: string, supportFirmId: string | null): Promise<void> {
+  await prisma.session.update({ where: { id: sessionId }, data: { supportFirmId } });
 }
 
 export async function destroySession(): Promise<void> {
-  const raw = cookies().get(SESSION_COOKIE)?.value;
+  const cookieStore = await cookies();
+  const raw = cookieStore.get(SESSION_COOKIE)?.value;
   if (raw) {
     await prisma.session.deleteMany({ where: { tokenHash: hashToken(raw) } }).catch(() => {});
   }
-  cookies().delete(SESSION_COOKIE);
+  cookieStore.delete(SESSION_COOKIE);
 }

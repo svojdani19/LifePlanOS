@@ -10,6 +10,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
 import { formatDate, formatMoney } from "@/lib/utils";
 import { explainLowerCostOption, type FdeOutcome, type FdeFactor } from "@/lib/engine/damagesEvaluation";
+import { attorneyItemsNeeded } from "@/lib/attorneyItems";
 
 // ── Props from the server page ───────────────────────────────────────────────
 
@@ -19,6 +20,10 @@ export interface AttorneyCase {
   caseNumber: string;
   status: string;
   dateOfInjury: string | null;
+  dateOfBirth?: string | null;
+  diagnosis?: string | null;
+  jurisdiction?: string | null;
+  specialty?: string | null;
   updatedAt: string;
   documentCount: number;
   chronologyCount: number;
@@ -122,7 +127,7 @@ const PRODUCT_LABEL: Record<string, string> = {
 
 const productLabel = (id: string | null) => (id ? PRODUCT_LABEL[id] ?? id.replace(/_/g, " ") : "—");
 
-const TABS = ["Overview", "Evidence & Gaps", "Report Options", "Active Engagements", "Final Deliverables"] as const;
+const TABS = ["Overview", "Items Needed", "Report Options", "Pending Reports", "Final Deliverables"] as const;
 type Tab = (typeof TABS)[number];
 
 // ── Small pieces ─────────────────────────────────────────────────────────────
@@ -169,6 +174,8 @@ function ConfidenceBar({ label, value }: { label: string; value: number }) {
 export default function AttorneyWorkspace({ firmName, userName, cases, pricing }: Props) {
   const [tab, setTab] = useState<Tab>("Overview");
   const [caseId, setCaseId] = useState<string | null>(cases[0]?.id ?? null);
+  const [orderBusy, setOrderBusy] = useState<string | null>(null);
+  const [orderMsg, setOrderMsg] = useState<string | null>(null);
   const [evaluation, setEvaluation] = useState<Evaluation | null>(null);
   const [isStale, setIsStale] = useState(false);
   const [evaluating, setEvaluating] = useState(false);
@@ -433,37 +440,90 @@ export default function AttorneyWorkspace({ firmName, userName, cases, pricing }
             </div>
           )}
 
-          {/* ── Evidence & Gaps ────────────────────────────────────────────── */}
-          {tab === "Evidence & Gaps" && (
+          {/* ── Items Needed — the attorney's own inputs required before any
+                 report can be prepared, each with a jump into the case. ────── */}
+          {tab === "Items Needed" && (
             <div className="mt-4 space-y-4">
-              {!evaluation ? (
-                <div className="card p-6 text-sm text-ink-500">
-                  Run the damages evaluation on the Overview tab to see the named factors behind the recommendation.
-                </div>
-              ) : (
-                <>
-                  {evaluation.confidenceDimensions && (
-                    <div className="card p-5">
-                      <h3 className="h-section">Confidence Dimensions</h3>
-                      <div className="mt-3 grid gap-4 sm:grid-cols-3">
-                        <ConfidenceBar label="Record completeness" value={evaluation.confidenceDimensions.recordCompleteness} />
-                        <ConfidenceBar label="Physician review coverage" value={evaluation.confidenceDimensions.physicianReviewCoverage} />
-                        <ConfidenceBar label="Evidence support" value={evaluation.confidenceDimensions.evidenceSupport} />
-                      </div>
+              {(() => {
+                const items = selected
+                  ? attorneyItemsNeeded({
+                      dateOfBirth: selected.dateOfBirth,
+                      dateOfInjury: selected.dateOfInjury,
+                      diagnosis: selected.diagnosis,
+                      jurisdiction: selected.jurisdiction,
+                      specialty: selected.specialty,
+                      documentCount: selected.documentCount,
+                    })
+                  : [];
+                return (
+                  <div className="card p-5">
+                    <div className="flex items-center gap-2">
+                      <h3 className="h-section">Items Needed From You</h3>
+                      {selected && (items.length === 0
+                        ? <Badge tone="success">nothing outstanding</Badge>
+                        : <Badge tone="warning">{items.length} item{items.length === 1 ? "" : "s"}</Badge>)}
                     </div>
-                  )}
-                  <div className="grid gap-4 lg:grid-cols-3">
-                    <FactorList title="Supporting Factors" tone="success" factors={evaluation.supportingFactors} empty="No supporting factors were found in the case record." />
-                    <FactorList title="Weakening Factors" tone="warning" factors={evaluation.weakeningFactors} empty="No weakening factors were identified." />
-                    <FactorList title="Missing Information" tone="danger" factors={evaluation.missingInformation} empty="No information gaps were identified." />
+                    <p className="mt-1 text-xs text-ink-500">
+                      What the firm needs from your side before any report can be prepared on this matter. Clinical work is handled by the clinical team after you order.
+                    </p>
+                    {!selected ? (
+                      <p className="mt-3 text-sm text-ink-500">Select a matter above.</p>
+                    ) : items.length === 0 ? (
+                      <p className="mt-3 text-sm text-ink-600">Everything needed from your side is on file for this matter.</p>
+                    ) : (
+                      <ul className="mt-3 space-y-2">
+                        {items.map((it) => (
+                          <li key={it.label} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-amber-50/70 p-3 text-sm">
+                            <span className="text-ink-800">{it.label}</span>
+                            <a
+                              className="focusable rounded text-xs font-semibold text-brand-700 hover:underline"
+                              href={`/cases/${selected.id}?tab=${it.tab}`}
+                            >
+                              Go To — {it.action}
+                            </a>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
                   </div>
-                </>
-              )}
+                );
+              })()}
             </div>
           )}
 
           {/* ── Report Options ─────────────────────────────────────────────── */}
-          {tab === "Report Options" && (
+          {tab === "Report Options" && (() => {
+            // Ordering criteria: the report must be enabled for the firm and the
+            // attorney's own Items Needed list must be clear. Clinical readiness
+            // (vocational/economic intake, physician review) is the engaged
+            // team's work and never blocks placing the order.
+            const itemsOutstanding = selected
+              ? attorneyItemsNeeded({
+                  dateOfBirth: selected.dateOfBirth,
+                  dateOfInjury: selected.dateOfInjury,
+                  diagnosis: selected.diagnosis,
+                  jurisdiction: selected.jurisdiction,
+                  specialty: selected.specialty,
+                  documentCount: selected.documentCount,
+                }).length
+              : 0;
+            const order = async (reportId: string, name: string) => {
+              if (!caseId) return;
+              setOrderBusy(reportId); setOrderMsg(null);
+              try {
+                const res = await fetch(`/api/cases/${caseId}/engagements`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ reportType: reportId, scope: `Attorney order: ${name}`, configuration: { orderedVia: "attorney_workspace" } }),
+                });
+                const body = await res.json().catch(() => ({}));
+                setOrderMsg(res.ok ? `${name} ordered — the firm will confirm and staff it.` : (body.error ?? "Order could not be submitted."));
+                if (res.ok && caseId) void loadEngagements(caseId);
+              } finally {
+                setOrderBusy(null);
+              }
+            };
+            return (
             <div className="mt-4 card overflow-hidden">
               {reports === null ? (
                 <div className="p-6 text-sm text-ink-500">Loading report options…</div>
@@ -477,10 +537,13 @@ export default function AttorneyWorkspace({ firmName, userName, cases, pricing }
                       <th className="px-4 py-2.5 font-medium">Status</th>
                       <th className="px-4 py-2.5 font-medium">Fee</th>
                       <th className="px-4 py-2.5 font-medium">Turnaround</th>
+                      <th className="px-4 py-2.5 font-medium" />
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-ink-100">
-                    {reports.map((r) => (
+                    {reports.map((r) => {
+                      const orderable = r.status !== "Not enabled" && itemsOutstanding === 0;
+                      return (
                       <tr key={r.id}>
                         <td className="px-4 py-2.5">
                           <span className="font-medium text-ink-900">{r.name}</span>
@@ -489,31 +552,45 @@ export default function AttorneyWorkspace({ firmName, userName, cases, pricing }
                         <td className="px-4 py-2.5"><Badge tone={r.status === "Ready" || r.status === "Previously exported" ? "success" : "neutral"}>{r.status}</Badge></td>
                         <td className="px-4 py-2.5 text-ink-700">{pricing[r.id] ?? "Contact for pricing"}</td>
                         <td className="px-4 py-2.5 text-ink-700">{pricing[`${r.id}.turnaround`] ?? "Contact for timing"}</td>
+                        <td className="px-4 py-2.5 text-right">
+                          <button
+                            className="btn-primary px-3 py-1.5 text-xs disabled:opacity-40"
+                            disabled={!orderable || orderBusy !== null}
+                            title={r.status === "Not enabled" ? "This report line is not enabled for the firm." : itemsOutstanding > 0 ? "Complete the Items Needed tab first." : undefined}
+                            onClick={() => void order(r.id, r.name)}
+                          >
+                            {orderBusy === r.id ? "Ordering…" : "Order"}
+                          </button>
+                        </td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               )}
               <div className="border-t border-ink-100 px-4 py-3 text-xs text-ink-500">
-                Report generation is handled by the clinical team — this listing is informational for engagement planning.
+                {orderMsg ?? (itemsOutstanding > 0
+                  ? `Complete the ${itemsOutstanding} item${itemsOutstanding === 1 ? "" : "s"} on the Items Needed tab to enable ordering.`
+                  : "Ordering submits an engagement for the firm to confirm and staff — report preparation is handled by the clinical team.")}
               </div>
             </div>
-          )}
+            );
+          })()}
 
-          {/* ── Active Engagements ─────────────────────────────────────────── */}
-          {tab === "Active Engagements" && (
+          {/* ── Pending Reports — ordered engagements not yet delivered. ──── */}
+          {tab === "Pending Reports" && (
             <div className="mt-4 card p-5">
               {engagements === "unavailable" ? (
                 <div className="py-6 text-center">
-                  <h3 className="text-base font-semibold text-ink-900">Engagement tracking activating</h3>
+                  <h3 className="text-base font-semibold text-ink-900">Report tracking activating</h3>
                   <p className="mx-auto mt-1 max-w-md text-sm text-ink-500">
-                    Engagement status for this firm is being switched on — authorized report engagements will appear here.
+                    Report tracking for this firm is being switched on — your ordered reports will appear here.
                   </p>
                 </div>
               ) : engagements === null ? (
                 <p className="text-sm text-ink-500">Loading engagements…</p>
               ) : engagements.length === 0 ? (
-                <p className="text-sm text-ink-500">No active engagements on this case yet.</p>
+                <p className="text-sm text-ink-500">No pending reports on this case yet — place an order under Report Options.</p>
               ) : (
                 <ul className="divide-y divide-ink-100">
                   {engagements.map((e) => (

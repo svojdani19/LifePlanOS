@@ -24,7 +24,7 @@ export async function POST(req: Request) {
     const { workspace } = schema.parse(await req.json());
 
     if (workspace === "clear") {
-      cookies().delete(VIEW_AS_COOKIE);
+      (await cookies()).delete(VIEW_AS_COOKIE);
       await audit(ctx, "platform.view_as", { type: "workspace", id: "clear", meta: { workspace: "clear" } });
       return ok({ cleared: true, redirect: "/platform-admin" });
     }
@@ -32,7 +32,7 @@ export async function POST(req: Request) {
     const def = WORKSPACES[workspace];
     if (!def) return ok({ error: "Unknown workspace." }, 400);
 
-    cookies().set(VIEW_AS_COOKIE, def.key, {
+    (await cookies()).set(VIEW_AS_COOKIE, def.key, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
@@ -55,7 +55,7 @@ export async function GET() {
   try {
     const ctx = await requireApiContext();
     if (!(await isPlatformAdmin(ctx.user.id))) return ok({ viewing: null });
-    const key = cookies().get(VIEW_AS_COOKIE)?.value ?? null;
+    const key = (await cookies()).get(VIEW_AS_COOKIE)?.value ?? null;
     return ok({ viewing: key && WORKSPACES[key] ? key : null });
   } catch (err) {
     return handleError(err);

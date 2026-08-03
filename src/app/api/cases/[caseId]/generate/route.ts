@@ -7,7 +7,8 @@ import { persistCaseReasoning } from "@/lib/engine/clinicalReasoningPersist";
 import { ok, handleError } from "@/lib/api";
 
 // Run the full AI pipeline: chronology → causation → future care → costs → reviews.
-export async function POST(_req: Request, { params }: { params: { caseId: string } }) {
+export async function POST(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "futurecare.edit");

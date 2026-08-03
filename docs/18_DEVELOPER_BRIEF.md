@@ -55,7 +55,7 @@ papering over it.
 | Auth | Custom session auth (httpOnly cookie), bcrypt, optional TOTP MFA, login rate limiting |
 | Billing | Stripe (subscription tiers, webhook) |
 | Reports | `docx` library — serif, navy-header litigation format |
-| Dev | `npm run dev` on **port 3100**; seed via `npm run db:seed` (demo login `demo@lifeplanos.app` / `password123`) |
+| Dev | `npm run dev` on **port 3100**; seed via `npm run db:seed` (login `demo@lifeplanos.app` / `DEV_SEED_PASSWORD`, local default `LifePlanOS-Local-2026!`) |
 
 ~85k lines of TypeScript. No external AI API is required at runtime today: the "engines" are
 deterministic TypeScript. Provider seams exist (see §7) for cloud OCR and pricing APIs but

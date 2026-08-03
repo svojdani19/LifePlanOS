@@ -5,7 +5,8 @@ import { SAMPLE_DOCS } from "@/lib/documents/samples";
 import { putObject } from "@/lib/storage";
 import { ok, handleError } from "@/lib/api";
 
-export async function GET(_req: Request, { params }: { params: { caseId: string } }) {
+export async function GET(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.view");
@@ -23,10 +24,19 @@ export async function GET(_req: Request, { params }: { params: { caseId: string 
 //   • JSON { sample: true } — ingests the built-in demo set (generic filenames,
 //     real body text) so the auto-classifier can be seen working on content.
 //   • JSON { documents: [{ filename, text }] } — pre-extracted text.
-export async function POST(req: Request, { params }: { params: { caseId: string } }) {
+export async function POST(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
-    requirePermission(ctx, "records.upload");
+    // The retaining attorney may upload case records (files classify through
+    // the normal ingestion pipeline); the text/sample ingestion path stays
+    // behind records.upload.
+    const attorneyUpload = ctx.user.role === "ATTORNEY_REVIEWER";
+    if (attorneyUpload) {
+      requirePermission(ctx, "case.view");
+    } else {
+      requirePermission(ctx, "records.upload");
+    }
     await requireCase(ctx, params.caseId);
 
     const contentType = req.headers.get("content-type") ?? "";
@@ -55,6 +65,9 @@ export async function POST(req: Request, { params }: { params: { caseId: string 
         created.push(document.id);
       }
     } else {
+      // Text/sample ingestion is a records-analyst path — not available to the
+      // attorney deposition-upload allowance.
+      if (attorneyUpload) requirePermission(ctx, "records.upload");
       const body = await req.json().catch(() => ({}));
       const docs: { filename: string; text?: string }[] = body.sample
         ? SAMPLE_DOCS

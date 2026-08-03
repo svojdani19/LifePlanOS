@@ -1,7 +1,6 @@
 import Link from "next/link";
 import { FolderKanban, Users, Layers, Sparkles } from "lucide-react";
-import { requireContext, activeCaseCount, seatCount } from "@/lib/tenant";
-import { externalOnlyCaseIds } from "@/lib/authz/caseScope";
+import { requireContext, activeCaseCount, seatCount, caseAccessFor } from "@/lib/tenant";
 import { prisma } from "@/lib/db";
 import { effectiveLimits, PLANS, currentPeriod } from "@/lib/subscription/plans";
 import { formatDate } from "@/lib/utils";
@@ -72,26 +71,53 @@ function auditLabel(action: string): string {
   return AUDIT_LABEL[action] ?? action.replace(/[._]/g, " ").replace(/^\w/, (c) => c.toUpperCase());
 }
 
-export default async function DashboardPage({ searchParams }: { searchParams?: { view?: string } }) {
+export default async function DashboardPage({ searchParams: searchParamsPromise }: { searchParams?: Promise<{ view?: string }> }) {
+  const searchParams = await searchParamsPromise;
   const ctx = await requireContext();
   const firmId = ctx.firm.id;
   const tier = ctx.subscription?.tier ?? "SOLO";
   const limits = effectiveLimits(tier, ctx.subscription ?? undefined);
-  // Guests — users whose only access is case-scoped external-class assignments
-  // (observer / external expert / attorney client / insurance client) — never
-  // see firm-wide counts, names, or activity (docs/28 MDIP hardening).
-  const externalOnly = await externalOnlyCaseIds(ctx);
+  // Resolve resource scope before any case names/counts are queried. Users with
+  // no case authority (for example billing-only seats) receive an empty personal
+  // dashboard; case-scoped specialists and guests see only granted cases.
+  const caseAccess = await caseAccessFor(ctx);
+  const scopedCaseIds = caseAccess.cases === "all" ? null : caseAccess.cases;
+  const maySeeFirmDashboard = caseAccess.allowed && caseAccess.cases === "all";
   // My Dashboard is the primary view; the firm-wide view sits behind ?view=firm
   // and is firm-staff only — guests always get the personal view.
-  const view: "firm" | "me" = searchParams?.view === "firm" && externalOnly === null ? "firm" : "me";
+  const view: "firm" | "me" = searchParams?.view === "firm" && maySeeFirmDashboard ? "firm" : "me";
 
   // ── My Dashboard — scoped to the signed-in user's real assignments:
   //    cases they created or are the preparing physician for, plus review
   //    findings explicitly assigned to them. Nothing is invented.
   if (view === "me") {
     const uid = ctx.user.id;
+    // Cases the firm explicitly assigned to this user (case-scoped ACTIVE role
+    // assignments) count as "my cases" alongside created/preparing — this is
+    // how attorneys and other non-authoring roles receive their matters.
+    const assignedGrants = await prisma.userRoleAssignment.findMany({
+      where: {
+        userId: uid,
+        firmId,
+        status: "ACTIVE",
+        caseId: { not: null },
+        OR: [{ effectiveUntil: null }, { effectiveUntil: { gte: new Date() } }],
+      },
+      select: { caseId: true },
+    });
+    const assignedCaseIds = assignedGrants.map((a) => a.caseId).filter((id): id is string => !!id);
     const myCases = await prisma.case.findMany({
-      where: { firmId, OR: [{ createdById: uid }, { preparingPhysicianId: uid }], status: { notIn: ["CLOSED", "ARCHIVED"] } },
+      where: {
+        firmId,
+        ...(scopedCaseIds ? { id: { in: scopedCaseIds } } : {}),
+        ...(caseAccess.allowed ? {} : { id: { in: [] as string[] } }),
+        OR: [
+          { createdById: uid },
+          { preparingPhysicianId: uid },
+          ...(assignedCaseIds.length ? [{ id: { in: assignedCaseIds } }] : []),
+        ],
+        status: { notIn: ["CLOSED", "ARCHIVED"] },
+      },
       orderBy: { updatedAt: "desc" },
       select: { id: true, clientName: true, caseNumber: true, status: true, updatedAt: true, preparingPhysicianId: true },
     });
@@ -104,7 +130,12 @@ export default async function DashboardPage({ searchParams }: { searchParams?: {
         ? prisma.validationFinding.groupBy({ by: ["caseId"], where: { caseId: { in: myCaseIds }, exportBlocking: true }, _count: true })
         : Promise.resolve([] as { caseId: string; _count: number }[]),
       prisma.attentionItem.findMany({
-        where: { firmId, assignedUserId: uid, status: { in: ["OPEN", "IN_REVIEW"] } },
+        where: {
+          firmId,
+          assignedUserId: uid,
+          status: { in: ["OPEN", "IN_REVIEW"] },
+          ...(!caseAccess.allowed ? { caseId: { in: [] as string[] } } : scopedCaseIds ? { caseId: { in: scopedCaseIds } } : {}),
+        },
         orderBy: { createdAt: "desc" },
         take: 8,
         select: { id: true, caseId: true, title: true, severity: true },
@@ -114,7 +145,7 @@ export default async function DashboardPage({ searchParams }: { searchParams?: {
     // Cases elsewhere in the firm that need attention (blocking findings or
     // pending physician review) — surfaced so "my" scoping never hides work.
     // Firm staff only: a guest must never see other matters' names or counts.
-    const otherAttention = externalOnly !== null ? [] : await prisma.case.findMany({
+    const otherAttention = !maySeeFirmDashboard ? [] : await prisma.case.findMany({
       where: {
         firmId,
         id: { notIn: myCaseIds.length ? myCaseIds : ["-"] },
@@ -150,13 +181,13 @@ export default async function DashboardPage({ searchParams }: { searchParams?: {
           </div>
           <Link href="/cases" className="btn-primary"><FolderKanban className="h-4 w-4" /> Go to Cases</Link>
         </div>
-        <DashboardTabs view="me" showFirm={externalOnly === null} />
+        <DashboardTabs view="me" showFirm={maySeeFirmDashboard} />
 
         {/* My metrics */}
         <div className="mt-5 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {[
             { label: "My Active Cases", value: myCases.length, sub: "created or preparing" },
-            { label: "Awaiting My Physician Review", value: totalMd, sub: "items on my cases" },
+            { label: "Awaiting Physician Review", value: totalMd, sub: "items on my cases" },
             { label: "Blocking Findings", value: totalBlocking, sub: "on my cases" },
             { label: "Findings Assigned to Me", value: assignedToMe.length, sub: "open / in review" },
           ].map((k) => (
@@ -189,7 +220,11 @@ export default async function DashboardPage({ searchParams }: { searchParams?: {
           </div>
         )}
         {myCases.length === 0 ? (
-          <div className="card mt-2 p-5 text-sm text-ink-500">No cases are assigned to you yet — cases you create, or where you are the preparing physician, appear here.</div>
+          <div className="card mt-2 p-5 text-sm text-ink-500">
+            {ctx.user.role === "ATTORNEY_REVIEWER"
+              ? "No cases are assigned to you yet — cases the firm assigns to you appear here."
+              : "No cases are assigned to you yet — cases you create, cases the firm assigns to you, or cases where you are the preparing physician appear here."}
+          </div>
         ) : (
           <div className="card mt-2 overflow-hidden">
             <table className="w-full text-sm">

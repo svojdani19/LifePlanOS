@@ -3,10 +3,12 @@ import { describe, it, expect, beforeEach, vi, type Mock } from "vitest";
 // All DB access is mocked — these tests never touch a database.
 vi.mock("@/lib/db", () => ({
   prisma: {
-    caseEngagement: { create: vi.fn(), findFirst: vi.fn(), update: vi.fn() },
+    caseEngagement: { create: vi.fn(), findFirst: vi.fn(), updateMany: vi.fn() },
     case: { findFirst: vi.fn() },
     document: { count: vi.fn() },
     user: { findMany: vi.fn() },
+    userRoleAssignment: { findMany: vi.fn() },
+    userCredential: { findMany: vi.fn() },
     auditLog: { create: vi.fn() },
     notification: { create: vi.fn(), createMany: vi.fn() },
   },
@@ -29,10 +31,12 @@ import {
 
 const engCreate = prisma.caseEngagement.create as unknown as Mock;
 const engFindFirst = prisma.caseEngagement.findFirst as unknown as Mock;
-const engUpdate = prisma.caseEngagement.update as unknown as Mock;
+const engUpdateMany = prisma.caseEngagement.updateMany as unknown as Mock;
 const caseFindFirst = prisma.case.findFirst as unknown as Mock;
 const docCount = prisma.document.count as unknown as Mock;
 const userFindMany = prisma.user.findMany as unknown as Mock;
+const assignmentFindMany = prisma.userRoleAssignment.findMany as unknown as Mock;
+const credentialFindMany = prisma.userCredential.findMany as unknown as Mock;
 const auditCreate = prisma.auditLog.create as unknown as Mock;
 const notifCreate = prisma.notification.create as unknown as Mock;
 
@@ -72,10 +76,15 @@ beforeEach(() => {
   vi.clearAllMocks();
   caseFindFirst.mockResolvedValue({ id: "case-1", caseNumber: "LCP-2026-0001" });
   engCreate.mockImplementation(async ({ data }: { data: object }) => ({ id: "eng-1", ...data }));
-  engUpdate.mockImplementation(async ({ data }: { data: object }) => ({ ...baseEngagement, ...data }));
+  engUpdateMany.mockResolvedValue({ count: 1 });
   auditCreate.mockResolvedValue({});
   notifCreate.mockResolvedValue({});
   userFindMany.mockResolvedValue([]);
+  assignmentFindMany.mockResolvedValue([
+    { userId: "planner-1", builtInRole: "LIFE_CARE_PLANNER", caseId: null },
+    { userId: "qa-1", builtInRole: "QUALITY_ASSURANCE_REVIEWER", caseId: null },
+  ]);
+  credentialFindMany.mockResolvedValue([]);
   docCount.mockResolvedValue(3);
 });
 
@@ -183,8 +192,11 @@ describe("authorizeEngagement", () => {
     expect(eng.status).toBe("AUTHORIZED");
     expect(eng.authorizedById).toBe("user-admin");
     expect(eng.authorizedAt).toBeInstanceOf(Date);
-    expect(engUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ status: "AUTHORIZED", missingRequirements: [] }) }),
+    expect(engUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ status: "AWAITING_AUTHORIZATION" }),
+        data: expect.objectContaining({ status: "AUTHORIZED", missingRequirements: [] }),
+      }),
     );
     expect(auditCreate).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ action: "engagement.authorize" }) }),
@@ -253,6 +265,37 @@ describe("assignExperts", () => {
     );
   });
 
+  it("rejects an active seat that lacks the role required by its slot", async () => {
+    engFindFirst.mockResolvedValue({ ...baseEngagement, status: "AUTHORIZED" });
+    userFindMany.mockResolvedValue([{ id: "physician-1" }]);
+    assignmentFindMany.mockResolvedValue([
+      { userId: "physician-1", builtInRole: "LIFE_CARE_PLANNER", caseId: null },
+    ]);
+
+    await expect(assignExperts(actor, "eng-1", { physicianId: "physician-1" })).rejects.toThrow(
+      "required active role assignment",
+    );
+  });
+
+  it("requires verified, unexpired credentials for regulated expert slots", async () => {
+    engFindFirst.mockResolvedValue({ ...baseEngagement, status: "AUTHORIZED" });
+    userFindMany.mockResolvedValue([{ id: "economist-1" }]);
+    assignmentFindMany.mockResolvedValue([
+      { userId: "economist-1", builtInRole: "FORENSIC_ECONOMIST", caseId: null },
+    ]);
+    credentialFindMany.mockResolvedValue([]);
+
+    await expect(assignExperts(actor, "eng-1", { economistId: "economist-1" })).rejects.toThrow(
+      "verified, unexpired ECONOMIST credential",
+    );
+
+    credentialFindMany.mockResolvedValue([{ userId: "economist-1", category: "ECONOMIST" }]);
+    await expect(assignExperts(actor, "eng-1", { economistId: "economist-1" })).resolves.toMatchObject({
+      assignedEconomistId: "economist-1",
+      status: "IN_PROGRESS",
+    });
+  });
+
   it("refuses assignment from a pre-authorization state", async () => {
     engFindFirst.mockResolvedValue({ ...baseEngagement, status: "AWAITING_AUTHORIZATION" });
     await expect(assignExperts(actor, "eng-1", { plannerId: "planner-1" })).rejects.toThrow(/Invalid engagement transition/);
@@ -268,7 +311,7 @@ describe("advanceStatus — transition graph", () => {
         if (to === "CANCELLED" || to === "AUTHORIZED" || to === "RECORDS_PENDING") continue;
         vi.clearAllMocks();
         caseFindFirst.mockResolvedValue({ id: "case-1", caseNumber: "LCP-2026-0001" });
-        engUpdate.mockImplementation(async ({ data }: { data: object }) => ({ ...baseEngagement, ...data }));
+        engUpdateMany.mockResolvedValue({ count: 1 });
         engFindFirst.mockResolvedValue({ ...baseEngagement, status: from });
         const eng = await advanceStatus(actor, "eng-1", to);
         expect(eng.status).toBe(to);
@@ -306,7 +349,7 @@ describe("advanceStatus — transition graph", () => {
     await expect(advanceStatus(actor, "eng-1", "RECORDS_PENDING")).rejects.toThrow(
       "Authorization must go through the authorize action.",
     );
-    expect(engUpdate).not.toHaveBeenCalled();
+    expect(engUpdateMany).not.toHaveBeenCalled();
   });
 
   it("COMPLETED is reachable only from DELIVERED", async () => {
@@ -334,7 +377,7 @@ describe("cancelEngagement", () => {
   it("requires a non-empty reason", async () => {
     await expect(cancelEngagement(actor, "eng-1", "")).rejects.toThrow("A cancellation reason is required.");
     await expect(cancelEngagement(actor, "eng-1", "   ")).rejects.toThrow("A cancellation reason is required.");
-    expect(engUpdate).not.toHaveBeenCalled();
+    expect(engUpdateMany).not.toHaveBeenCalled();
   });
 
   it("cancels a live engagement, persisting the reason as cancellationStatus, and notifies the team", async () => {
@@ -354,6 +397,13 @@ describe("cancelEngagement", () => {
   it("refuses to cancel a terminal engagement", async () => {
     engFindFirst.mockResolvedValue({ ...baseEngagement, status: "COMPLETED" });
     await expect(cancelEngagement(actor, "eng-1", "too late")).rejects.toThrow(/Invalid engagement transition/);
+  });
+
+  it("returns a conflict when another request changed the status first", async () => {
+    engFindFirst.mockResolvedValue({ ...baseEngagement, status: "IN_PROGRESS" });
+    engUpdateMany.mockResolvedValue({ count: 0 });
+
+    await expect(advanceStatus(actor, "eng-1", "QA_REVIEW")).rejects.toMatchObject({ status: 409 });
   });
 });
 

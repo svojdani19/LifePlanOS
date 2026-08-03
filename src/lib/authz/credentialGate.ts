@@ -18,25 +18,9 @@ import type { CredentialCategory } from "./registry";
 // Legacy rows (status SELF_REPORTED, category null) NEVER qualify, nor do
 // PENDING / EXPIRED / SUSPENDED rows.
 //
-// Two enforcement strengths (deliberate, to preserve existing workflows
-// conservatively — see docs/26):
-//
-//   1. ATTESTATION-class writes — signing an Attestation row, a ReportApproval
-//      of kind ATTESTATION, or marking vocational conclusions VERIFIED — are
-//      ALWAYS gated strictly via `assertVerifiedCredential`, regardless of any
-//      feature flag. A signature without the underlying professional
-//      credential is a defensibility defect, so there is no soft path.
-//
-//   2. Plain expert review/authorship decisions (approve / modify / reject on
-//      future-care items, report-level APPROVAL signatures, economic
-//      assumption entry) go through `enforceReviewCredential`: the gate
-//      BLOCKS when the firm has opted into strict authorization
-//      (features["authorization.enterprise"] === true) or is a demo firm
-//      (Firm.isDemo — demo personas are seeded with verified credentials);
-//      otherwise it LOGS a structured "credential.gap" warning (console +
-//      audit trail) instead of blocking, so pilot firms whose experts occupy
-//      PHYSICIAN_REVIEWER seats without verified credential rows keep working
-//      while the gap stays visible.
+// Both attestation-class writes and professional review/authorship decisions
+// fail closed. Tenant plan, demo state, rollout flags, and legacy enum roles can
+// never substitute for the matching verified professional credential.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const VERIFIED_STATUSES = new Set(["ORG_VERIFIED", "EXTERNALLY_VERIFIED"]);
@@ -92,10 +76,9 @@ export async function assertVerifiedCredential(actor: Actor, category: Credentia
 }
 
 /**
- * SOFT gate for plain expert review/authorship decisions. Enforces (403) when
- * the firm has opted into enterprise authorization or is a demo firm;
- * otherwise records a structured "credential.gap" warning (console + audit)
- * and lets the legacy workflow proceed. See the file header for the rationale.
+ * Fail-closed gate for expert review/authorship decisions. Professional
+ * opinions cannot become less protected because a tenant has not enabled an
+ * enterprise feature flag. A gap is audited and the action is always refused.
  */
 export async function enforceReviewCredential(
   ctx: TenantContext,
@@ -103,34 +86,16 @@ export async function enforceReviewCredential(
   info: { action: string; caseId?: string },
 ): Promise<void> {
   if (await hasVerifiedCredential(ctx, category)) return;
-
-  const features = (ctx.firm as { features?: unknown }).features as Record<string, unknown> | null | undefined;
-  const strict = (features != null && features["authorization.enterprise"] === true) || ctx.firm.isDemo === true;
-  if (strict) {
-    throw new TenantError(
-      `A verified ${category} credential is required for this action. Ask a firm administrator to verify your credential.`,
-      "FORBIDDEN",
-      403,
-    );
-  }
-
-  // Legacy firms: never block, always leave a trace — console for operators,
-  // audit for the firm's own trail.
-  console.warn(
-    JSON.stringify({
-      event: "credential.gap",
-      userId: ctx.user.id,
-      firmId: ctx.firm.id,
-      requiredCredential: category,
-      action: info.action,
-      ...(info.caseId ? { caseId: info.caseId } : {}),
-    }),
-  );
   await audit(ctx, "credential.gap", {
     type: "credential",
     caseId: info.caseId,
     meta: { requiredCredential: category, action: info.action },
   }).catch(() => {
-    /* the warning path must never break the workflow it declined to block */
+    /* authorization denial must not depend on audit availability */
   });
+  throw new TenantError(
+    `A verified ${category} credential is required for this action. Ask a firm administrator to verify your credential.`,
+    "FORBIDDEN",
+    403,
+  );
 }

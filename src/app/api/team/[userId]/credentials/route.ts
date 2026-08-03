@@ -17,7 +17,8 @@ async function authorize(userId: string) {
   return { ctx, target };
 }
 
-export async function GET(_req: Request, { params }: { params: { userId: string } }) {
+export async function GET(_req: Request, { params: paramsPromise }: { params: Promise<{ userId: string }> }) {
+  const params = await paramsPromise;
   try {
     const { ctx } = await authorize(params.userId);
     const credentials = await prisma.userCredential.findMany({
@@ -32,7 +33,8 @@ export async function GET(_req: Request, { params }: { params: { userId: string 
 }
 
 const metaSchema = z.object({ type: z.enum(["BOARD_CERTIFICATION", "CV", "LICENSE", "OTHER"]).default("OTHER"), label: z.string().max(160).optional() });
-export async function POST(req: Request, { params }: { params: { userId: string } }) {
+export async function POST(req: Request, { params: paramsPromise }: { params: Promise<{ userId: string }> }) {
+  const params = await paramsPromise;
   try {
     const { ctx } = await authorize(params.userId);
     const form = await req.formData();

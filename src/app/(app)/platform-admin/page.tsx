@@ -10,7 +10,7 @@ import { storageMode } from "@/lib/storage";
 import { formatDate } from "@/lib/utils";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Badge } from "@/components/ui/Badge";
-import { ViewAsPanel } from "@/components/platform/ViewAs";
+import { TenantContextButton, ViewAsPanel } from "@/components/platform/ViewAs";
 import { WORKSPACES } from "@/lib/workspaces";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -29,7 +29,7 @@ export default async function PlatformAdminPage() {
   // Cross-tenant page view — audited with the real actor identity.
   await audit(ctx, "platform.admin_view", { type: "platform", id: "platform-admin" });
 
-  const viewAsCookie = cookies().get(VIEW_AS_COOKIE)?.value ?? null;
+  const viewAsCookie = (await cookies()).get(VIEW_AS_COOKIE)?.value ?? null;
   const viewing = viewAsCookie && WORKSPACES[viewAsCookie] ? viewAsCookie : null;
 
   const [firms, latestValidationRun] = await Promise.all([
@@ -101,6 +101,7 @@ export default async function PlatformAdminPage() {
                 <th className="px-4 py-2.5 font-medium">Cases</th>
                 <th className="px-4 py-2.5 font-medium">Authz Rev</th>
                 <th className="px-4 py-2.5 font-medium">Created</th>
+                <th className="px-4 py-2.5 text-right font-medium">Support context</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-ink-100">
@@ -125,6 +126,11 @@ export default async function PlatformAdminPage() {
                   <td className="px-4 py-2.5 tabular-nums">{f._count.cases}</td>
                   <td className="px-4 py-2.5 tabular-nums text-ink-500">{f.authzRevision}</td>
                   <td className="px-4 py-2.5 text-ink-500">{formatDate(f.createdAt)}</td>
+                  <td className="px-4 py-2.5 text-right">
+                    {f.id !== (ctx.actorFirmId ?? ctx.user.firmId) && (
+                      <TenantContextButton firmId={f.id} active={ctx.supportMode === true && f.id === ctx.firm.id} />
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>

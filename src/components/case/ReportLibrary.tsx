@@ -86,7 +86,7 @@ export default function ReportLibrary({ caseId, canExport, onSelect }: { caseId:
       const cur = list.find((r) => r.id === selectedId);
       if (cur) onSelect?.({ id: cur.id, name: cur.name, findingRelevance: cur.findingRelevance, gate: cur.gate, status: cur.status, gateReason: cur.gateReason });
     }
-  }, [caseId]);
+  }, [caseId, onSelect, selectedId]);
   useEffect(() => { void load(); }, [load]);
 
   const selected = reports.find((r) => r.id === selectedId) ?? null;

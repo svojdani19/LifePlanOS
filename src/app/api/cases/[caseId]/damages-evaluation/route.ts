@@ -4,6 +4,7 @@ import { can } from "@/lib/rbac";
 import { ok, handleError } from "@/lib/api";
 import { evaluateFutureDamages, FDE_LOGIC_VERSION, type FdeInput } from "@/lib/engine/damagesEvaluation";
 import { computeInputsHash, type FdeRowIds } from "@/lib/engine/damagesFingerprint";
+import type { FutureDamagesEvaluation, Prisma } from "@/generated/prisma";
 
 // Future Damages Evaluation (MDIP — docs/28). GET returns the latest persisted
 // evaluation with a computed freshness flag; POST snapshots the case's REAL
@@ -14,7 +15,7 @@ import { computeInputsHash, type FdeRowIds } from "@/lib/engine/damagesFingerpri
 /** Assemble the engine input from persisted case data only, plus the identity
  *  of every row behind it (for the inputs fingerprint). */
 async function buildSnapshot(caseId: string): Promise<{ input: FdeInput; rowIds: FdeRowIds }> {
-  const [conditions, items, findings, documentsCount, chronologyCount, vocationalEntryCount, econAssumptionCount, interviewCount] =
+  const [conditions, items, findings, documents, chronologyEvents, vocationalEntries, economicAssumptions, interviewFindings] =
     await Promise.all([
       prisma.condition.findMany({
         where: { caseId },
@@ -36,29 +37,31 @@ async function buildSnapshot(caseId: string): Promise<{ input: FdeInput; rowIds:
         },
       }),
       prisma.validationFinding.findMany({
-        where: { caseId },
+        where: { caseId, status: "OPEN" },
         select: { id: true, result: true, issue: true, severity: true, exportBlocking: true },
       }),
-      prisma.document.count({ where: { caseId } }),
-      prisma.chronologyEvent.count({ where: { caseId } }),
-      prisma.vocationalEntry.count({ where: { caseId, supersededById: null } }),
-      prisma.economicAssumption.count({ where: { caseId, supersededById: null } }),
-      prisma.interviewFinding.count({ where: { caseId } }),
+      prisma.document.findMany({ where: { caseId } }),
+      prisma.chronologyEvent.findMany({ where: { caseId } }),
+      prisma.vocationalEntry.findMany({ where: { caseId, supersededById: null } }),
+      prisma.economicAssumption.findMany({ where: { caseId, supersededById: null } }),
+      prisma.interviewFinding.findMany({ where: { caseId } }),
     ]);
 
   // Missing-record signals: persisted finding texts that mention missing
   // records — derived, never invented (the engine treats them verbatim).
-  const missingRecordSignals = findings
+  const missingRecordFindings = findings
     .filter((f) => /missing/i.test(`${f.result} ${f.issue}`) && /record|document|report|page/i.test(`${f.result} ${f.issue}`))
-    .map((f) => f.issue);
+  const missingRecordSignals = missingRecordFindings.map((f) => f.issue);
 
   const input: FdeInput = {
     conditions: conditions.map((c) => ({
+      id: c.id,
       name: c.name,
       relatedness: c.relatedness,
       evidenceSourceCount: Array.isArray(c.evidenceSources) ? c.evidenceSources.length : 0,
     })),
     items: items.map((i) => ({
+      id: i.id,
       service: i.service,
       category: i.category,
       probability: i.probability,
@@ -69,23 +72,39 @@ async function buildSnapshot(caseId: string): Promise<{ input: FdeInput; rowIds:
       contingencyOnly: i.contingencyOnly,
       origin: i.origin,
     })),
-    findings: findings.map((f) => ({ result: f.result, severity: f.severity, exportBlocking: f.exportBlocking })),
-    documentsCount,
-    chronologyCount,
-    vocationalEntryCount,
-    econAssumptionCount,
-    interviews: interviewCount > 0,
+    findings: findings.map((f) => ({ id: f.id, result: f.result, severity: f.severity, exportBlocking: f.exportBlocking })),
+    documentsCount: documents.length,
+    chronologyCount: chronologyEvents.length,
+    vocationalEntryCount: vocationalEntries.length,
+    econAssumptionCount: economicAssumptions.length,
+    interviews: interviewFindings.length > 0,
     missingRecordSignals,
+    sourceIds: {
+      documents: documents.map((r) => r.id),
+      chronologyEvents: chronologyEvents.map((r) => r.id),
+      vocationalEntries: vocationalEntries.map((r) => r.id),
+      economicAssumptions: economicAssumptions.map((r) => r.id),
+      interviewFindings: interviewFindings.map((r) => r.id),
+      missingRecordFindings: missingRecordFindings.map((r) => r.id),
+    },
   };
   const rowIds: FdeRowIds = {
     conditionIds: conditions.map((c) => c.id),
     itemIds: items.map((i) => i.id),
     findingIds: findings.map((f) => f.id),
+    sourceRecords: [
+      ...documents.map((material) => ({ kind: "document", id: material.id, material })),
+      ...chronologyEvents.map((material) => ({ kind: "chronology-event", id: material.id, material })),
+      ...vocationalEntries.map((material) => ({ kind: "vocational-entry", id: material.id, material })),
+      ...economicAssumptions.map((material) => ({ kind: "economic-assumption", id: material.id, material })),
+      ...interviewFindings.map((material) => ({ kind: "interview-finding", id: material.id, material })),
+    ],
   };
   return { input, rowIds };
 }
 
-export async function GET(_req: Request, { params }: { params: { caseId: string } }) {
+export async function GET(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.view");
@@ -123,7 +142,8 @@ export async function GET(_req: Request, { params }: { params: { caseId: string 
   }
 }
 
-export async function POST(_req: Request, { params }: { params: { caseId: string } }) {
+export async function POST(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.view");
@@ -139,8 +159,7 @@ export async function POST(_req: Request, { params }: { params: { caseId: string
     const result = evaluateFutureDamages(input);
     const inputsHash = computeInputsHash(input, rowIds);
 
-    const row = await prisma.futureDamagesEvaluation.create({
-      data: {
+    const data = {
         firmId: ctx.firm.id,
         caseId: params.caseId,
         // caseRevision stays null: the Case model carries no revision counter
@@ -161,13 +180,31 @@ export async function POST(_req: Request, { params }: { params: { caseId: string
         nextActions: result.nextActions,
         sourceFactIds: result.sourceFactIds,
         isStale: false,
-      },
-    });
-    // Every earlier evaluation is superseded by this one.
-    await prisma.futureDamagesEvaluation.updateMany({
-      where: { caseId: params.caseId, firmId: ctx.firm.id, id: { not: row.id } },
-      data: { isStale: true },
-    });
+      } satisfies Prisma.FutureDamagesEvaluationUncheckedCreateInput;
+
+    // Supersede + create is one SERIALIZABLE transaction. A concurrent writer
+    // cannot leave two evaluations marked current; serialization conflicts are
+    // retried once with a fresh database snapshot.
+    let row: FutureDamagesEvaluation | null = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        row = await prisma.$transaction(
+          async (tx) => {
+            await tx.futureDamagesEvaluation.updateMany({
+              where: { caseId: params.caseId, firmId: ctx.firm.id, isStale: false },
+              data: { isStale: true },
+            });
+            return tx.futureDamagesEvaluation.create({ data });
+          },
+          { isolationLevel: "Serializable" },
+        );
+        break;
+      } catch (err) {
+        const code = typeof err === "object" && err !== null && "code" in err ? String(err.code) : null;
+        if ((code !== "P2034" && code !== "P2002") || attempt === 1) throw err;
+      }
+    }
+    if (!row) throw new TenantError("The evaluation could not be persisted safely.", "FORBIDDEN", 409);
 
     await audit(ctx, "damages.evaluate", {
       type: "futureDamagesEvaluation",

@@ -20,8 +20,49 @@ const isBlocking = (i: Item) => i.severity === "CRITICAL" || i.exportBlocking;
 
 type Seg = "all" | "blocking" | "important" | "review" | "deferred";
 
-export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; canEdit: boolean; onFocus?: (entityType: string | null, entityId: string | null, category: string) => void }) {
+interface ReviewFinding {
+  id: string; service: string; result: string; issue: string; suggestion: string; severity: string; exportBlocking: boolean;
+}
+
+function redactMoneyText(t: string | null | undefined): string {
+  return String(t ?? "").replace(/\$\s?[\d,]+(?:\.\d+)?/g, "[amount withheld]");
+}
+
+export function CaseAssistant({ caseId, canEdit, onFocus, reviewFinding = null, onReviewDone, canApplyChanges = false, redactPricing = false }: {
+  caseId: string;
+  canEdit: boolean;
+  onFocus?: (entityType: string | null, entityId: string | null, category: string) => void;
+  /** An integrity finding under review — opens the panel with a pinned resolution card. */
+  reviewFinding?: ReviewFinding | null;
+  onReviewDone?: () => void;
+  canApplyChanges?: boolean;
+  redactPricing?: boolean;
+}) {
   const [open, setOpen] = useState(false);
+  const [findingBusy, setFindingBusy] = useState<string | null>(null);
+  const [findingErr, setFindingErr] = useState<string | null>(null);
+  // A finding sent in for review opens the panel immediately.
+  useEffect(() => {
+    if (reviewFinding) { setOpen(true); setFindingErr(null); }
+  }, [reviewFinding]);
+  const rp = (t: string | null | undefined) => (redactPricing ? redactMoneyText(t) : String(t ?? ""));
+  const actOnFinding = async (action: string) => {
+    if (!reviewFinding) return;
+    setFindingBusy(action); setFindingErr(null);
+    try {
+      const res = await fetch(`/api/cases/${caseId}/validation/${reviewFinding.id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) { setFindingErr(body.error ?? "Action failed."); return; }
+      window.dispatchEvent(new CustomEvent("lifeplanos:validation-updated"));
+      onReviewDone?.();
+    } finally {
+      setFindingBusy(null);
+    }
+  };
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<Item[]>([]);
   const [deferred, setDeferred] = useState<Item[]>([]);
@@ -78,7 +119,11 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
 
   const focus = (it: Item) => { onFocus?.(it.entityType, it.entityId, it.category); setOpen(false); };
 
-  const patchAll = (ids: string[], action: string, note?: string) => Promise.all(ids.map((id) => fetch(`/api/cases/${caseId}/attention/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, note }) })));
+  const patchAll = useCallback(
+    (ids: string[], action: string, note?: string) =>
+      Promise.all(ids.map((id) => fetch(`/api/cases/${caseId}/attention/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action, note }) }))),
+    [caseId],
+  );
 
   const act = useCallback(
     async (action: "resolve" | "defer" | "dismiss", note?: string) => {
@@ -102,10 +147,10 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
         undoTimer.current = setTimeout(() => setUndo(null), 6000);
       } finally { setBusy(false); }
     },
-    [caseId, queue, gIdx, busy],
+    [queue, gIdx, busy, patchAll],
   );
 
-  const undo = async () => {
+  const undo = useCallback(async () => {
     if (!undoState) return;
     const u = undoState; setUndo(null);
     await patchAll(u.items.map((i) => i.id), "reopen");
@@ -115,7 +160,7 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
     setSeg("all"); setGIdx(0);
     const kkey = u.action === "resolve" ? "resolved" : u.action === "defer" ? "deferred" : "dismissed";
     setDecided((d) => ({ ...d, [kkey]: Math.max(0, d[kkey] - u.items.length) }));
-  };
+  }, [patchAll, undoState]);
 
   const restoreDeferred = async (it: Item) => {
     await patchAll([it.id], "reopen");
@@ -151,7 +196,7 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open, current, canEdit, act, queue.length, undoState, showHelp]);
+  }, [open, current, canEdit, act, queue.length, undoState, showHelp, undo]);
 
   const criticalCount = items.filter(isBlocking).length;
   const highCount = items.filter((i) => i.severity === "HIGH" && !i.exportBlocking).length;
@@ -205,6 +250,40 @@ export function CaseAssistant({ caseId, canEdit, onFocus }: { caseId: string; ca
                 <button onClick={() => setOpen(false)} title="Close (Esc)" className="rounded-md p-1.5 text-ink-400 hover:bg-ink-100"><X className="h-4 w-4" /></button>
               </div>
             </div>
+
+            {/* Integrity finding under review — summary + resolution in one place. */}
+            {reviewFinding && (
+              <div className="border-b border-amber-200 bg-amber-50/70 px-4 py-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase ${SEV_CHIP[reviewFinding.severity.toUpperCase()] ?? "bg-ink-100 text-ink-600"}`}>{reviewFinding.severity}</span>
+                  <span className="text-sm font-semibold text-ink-900">{reviewFinding.service}</span>
+                  <span className="text-xs text-ink-500">— {rp(reviewFinding.result)}{reviewFinding.exportBlocking ? " (blocks final export)" : ""}</span>
+                  <button onClick={() => onReviewDone?.()} aria-label="Dismiss finding review" className="ml-auto rounded-md p-1 text-ink-400 hover:bg-amber-100"><X className="h-3.5 w-3.5" /></button>
+                </div>
+                <p className="mt-1.5 text-xs text-ink-700">{rp(reviewFinding.issue)}</p>
+                <p className="mt-1 text-xs text-ink-600"><span className="font-medium">Suggested correction:</span> {rp(reviewFinding.suggestion)}</p>
+                {findingErr && <p className="mt-1.5 text-xs text-red-700">{findingErr}</p>}
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <button
+                    className="rounded-md border border-ink-300 bg-white px-2.5 py-1 text-xs font-medium text-ink-700 hover:bg-ink-50"
+                    onClick={() => { onFocus?.("recommendation", reviewFinding.service.split(" / ")[0].trim(), ""); onReviewDone?.(); setOpen(false); }}
+                  >
+                    Go to item
+                  </button>
+                  <button className="rounded-md border border-ink-300 bg-white px-2.5 py-1 text-xs font-medium text-ink-700 hover:bg-ink-50" disabled={findingBusy !== null} onClick={() => void actOnFinding("resolve_as_is")}>
+                    {findingBusy === "resolve_as_is" ? <Loader2 className="inline h-3 w-3 animate-spin" /> : null} Resolve As Is
+                  </button>
+                  {canApplyChanges && (
+                    <button className="rounded-md bg-brand-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-brand-700" disabled={findingBusy !== null} onClick={() => void actOnFinding("accept_changes")}>
+                      {findingBusy === "accept_changes" ? <Loader2 className="inline h-3 w-3 animate-spin" /> : null} Accept Changes
+                    </button>
+                  )}
+                  <button className="rounded-md px-2.5 py-1 text-xs font-medium text-ink-500 hover:bg-ink-100" disabled={findingBusy !== null} onClick={() => void actOnFinding("ignore")}>
+                    Ignore
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Progress bar */}
             {queue.length > 0 && <div className="h-1 w-full bg-ink-100"><div className="h-1 bg-brand-500 transition-all duration-300" style={{ width: `${(gIdx / queue.length) * 100}%` }} /></div>}

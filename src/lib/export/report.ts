@@ -1128,7 +1128,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   // export-blocking finding plus the contingency / excluded recommendations,
   // so a reviewer can see exactly what stands between this draft and a final.
   if (reportOpts.draft) {
-    const persistedFindings = await prisma.validationFinding.findMany({ where: { caseId }, orderBy: { createdAt: "asc" } });
+    const persistedFindings = await prisma.validationFinding.findMany({ where: { caseId, status: "OPEN" }, orderBy: { createdAt: "asc" } });
     const unresolved = persistedFindings.filter((f) => f.exportBlocking);
     body.push(h1("Appendix G — Unresolved Issues (Draft)", { pageBreak: true }));
     body.push(p("This is a DRAFT. The following issues must be resolved before a final export is permitted."));

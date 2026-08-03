@@ -18,11 +18,14 @@ Implemented 2026-08-02. Each area is its own commit for independent review.
 - Seeded with the org-scoped platform assignment (seed fails loudly without
   it); legacy role is BILLING_USER so nothing bypasses the DB-grant path.
 - Public signup rejects the reserved `@demo.lifeplanos.com` domain.
-- "View as": platform admins can open any of the 14 workspaces from
-  /platform-admin via an httpOnly cookie set by the audited
-  `/api/platform/view-as` route. A labeled banner ("presentation only") with
-  one-click return renders while active. View-as changes navigation only —
-  never permissions, credentials, or audit actor identity.
+- Tenant support context: `/platform-admin` can select any organization using
+  `/api/platform/context`. The target firm id is stored on the authenticated
+  server-side Session, the platform grant is revalidated on every request,
+  and the entire target context is read-only. Team, role, settings, billing,
+  audit, case, and role-workspace views are available without granting a
+  clinical identity. Actor and target firm ids are included in audit metadata.
+- "View as" remains presentation-only workspace navigation within the selected
+  organization; it never changes permissions, credentials, or actor identity.
 
 ## Professional credential boundaries
 - `src/lib/authz/credentialGate.ts`: a credential qualifies only with the
@@ -30,8 +33,10 @@ Implemented 2026-08-02. Each area is its own commit for independent review.
   expiry. SELF_REPORTED/PENDING/EXPIRED/SUSPENDED/uncategorized never pass.
 - Always-strict: item attestations (PHYSICIAN), report attestations (mapped
   from the report's requiredExpert), vocational VERIFIED sign-off.
-- Enterprise-or-demo enforced, warn+audit (`credential.gap`) elsewhere:
-  physician item decisions, report approvals, economics authorship.
+- Fail-closed everywhere: physician decisions, report approvals, economics
+  authorship, vocational verification, and all attestations require the exact
+  verified, unexpired professional credential. Gaps are audited as
+  `credential.gap`; tenant plan or rollout flags never soften the boundary.
 - All gated routes record the session actor; regression tests cover the
   cross-professional matrix (specialists cannot cross-attest; admins and
   the Super Admin cannot attest without credentials).
@@ -60,9 +65,19 @@ Implemented 2026-08-02. Each area is its own commit for independent review.
   live in migration SQL, not the Prisma schema — a future `db push` may
   propose dropping them; migrations are the source of truth.
 
-## CI
-- Added `npm run lint` and non-blocking `npm audit --audit-level=high`
-  to the existing validate/generate/tsc/vitest/build pipeline.
+## CI and dependency baseline
+- CI runs on every push and pull request with PostgreSQL 16, applies the full
+  migration history to a clean database, then validates Prisma, type-checks,
+  lints, runs tests, builds, and audits production dependencies.
+- Next.js is upgraded from the end-of-life 14 line to 15.5.22; App Router
+  dynamic params and async request APIs follow the Next.js 15 contract.
+
+## Database integrity
+- Integrity preflights fail visibly instead of deleting orphan data.
+- MDIP user foreign keys and tenant-boundary triggers prevent cross-tenant
+  engagement, notification, and evaluation references.
+- One non-stale damages evaluation per case is protected by a partial unique
+  index and a serializable supersede/create transaction.
 
 ## Demo persona legacy roles (tightened)
 platform.admin=BILLING_USER, firm.admin=ADMIN, attorney=ATTORNEY_REVIEWER,

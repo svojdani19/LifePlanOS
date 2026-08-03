@@ -39,12 +39,32 @@ const patchSchema = z.object({
 
 const ASSUMPTION_KEYS = ["lifeExpectancyYears", "discountRate", "medicalInflation", "geographicFactor"] as const;
 
-export async function PATCH(req: Request, { params }: { params: { caseId: string } }) {
+// The retaining attorney may maintain the intake facts (client, injury,
+// diagnosis, work status) but never workflow stage, economic assumptions, or
+// the preparing physician — those stay behind case.edit.
+const ATTORNEY_INTAKE_KEYS = new Set([
+  "clientName", "dateOfBirth", "sex", "caseType", "side", "jurisdiction", "zipCode",
+  "dateOfInjury", "mechanism", "diagnosis", "icd10Code", "additionalDiagnoses",
+  "injurySpecialty", "preExistingConditions", "preExistingReviewed", "specialty",
+  "additionalSpecialties", "currentWorkStatus", "disabilityReason", "functionalLimitations",
+]);
+
+export async function PATCH(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
-    requirePermission(ctx, "case.edit");
+    const rawInput = patchSchema.parse(await req.json());
+    const attorneyIntakePatch =
+      ctx.user.role === "ATTORNEY_REVIEWER" &&
+      Object.keys(rawInput).length > 0 &&
+      Object.keys(rawInput).every((k) => ATTORNEY_INTAKE_KEYS.has(k));
+    if (attorneyIntakePatch) {
+      requirePermission(ctx, "case.view");
+    } else {
+      requirePermission(ctx, "case.edit");
+    }
     const prior = await requireCase(ctx, params.caseId);
-    const input = patchSchema.parse(await req.json());
+    const input = rawInput;
 
     const { assumptionReason: _reason, ...rest } = input;
     if (rest.preparingPhysicianId) {

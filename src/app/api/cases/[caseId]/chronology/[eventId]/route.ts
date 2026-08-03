@@ -15,7 +15,8 @@ const patchSchema = z.object({
 });
 
 // Edit a chronology event; marks it human-edited to preserve the audit trail.
-export async function PATCH(req: Request, { params }: { params: { caseId: string; eventId: string } }) {
+export async function PATCH(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string; eventId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "chronology.edit");

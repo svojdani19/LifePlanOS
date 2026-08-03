@@ -26,7 +26,7 @@ export async function POST(req: Request) {
   try {
     const body = schema.parse(await req.json());
     const user = await signupFirm(body);
-    const h = headers();
+    const h = await headers();
     await createSession(user.id, { userAgent: h.get("user-agent"), ip: h.get("x-forwarded-for") });
     await prisma.auditLog.create({
       data: { firmId: user.firmId, userId: user.id, action: "firm.signup", targetType: "firm", targetId: user.firmId },

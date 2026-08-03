@@ -39,7 +39,9 @@ const SEC_HEADERS = {
 } as const;
 
 async function persistedFindings(caseId: string): Promise<RDValidationFinding[]> {
-  const rows = await prisma.validationFinding.findMany({ where: { caseId } });
+  // Dispositioned findings (resolved-as-is / ignored) no longer gate or appear
+  // in generated documents' unresolved lists.
+  const rows = await prisma.validationFinding.findMany({ where: { caseId, status: "OPEN" } });
   return rows.map((f) => ({ service: f.service, result: f.result, issue: f.issue, severity: f.severity, suggestion: f.suggestion, exportBlocking: f.exportBlocking }));
 }
 
@@ -97,7 +99,8 @@ function effectiveApproval(def: ReportDefinition, config: unknown) {
   return def.deriveApproval ? def.deriveApproval(config) : def.approval;
 }
 
-export async function GET(req: Request, { params }: { params: { caseId: string } }) {
+export async function GET(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.view");
@@ -172,7 +175,7 @@ export async function GET(req: Request, { params }: { params: { caseId: string }
 
     // Library listing with per-report readiness.
     const [findings, items, exports, approvals] = await Promise.all([
-      prisma.validationFinding.findMany({ where: { caseId: params.caseId }, select: { exportBlocking: true } }),
+      prisma.validationFinding.findMany({ where: { caseId: params.caseId, status: "OPEN" }, select: { exportBlocking: true } }),
       prisma.futureCareItem.findMany({ where: { caseId: params.caseId, supersededAt: null }, select: { physicianStatus: true, contingencyOnly: true } }),
       prisma.reportExport.findMany({ where: { caseId: params.caseId }, orderBy: { createdAt: "desc" } }),
       prisma.reportApproval.findMany({ where: { caseId: params.caseId, status: "ACTIVE" }, orderBy: { createdAt: "desc" } }),
@@ -249,7 +252,8 @@ export async function GET(req: Request, { params }: { params: { caseId: string }
   }
 }
 
-export async function POST(req: Request, { params }: { params: { caseId: string } }) {
+export async function POST(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "report.export");

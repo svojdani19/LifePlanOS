@@ -5,7 +5,8 @@ import { handleError } from "@/lib/api";
 
 // Stream a credential document through an authenticated, firm-scoped route
 // (never served statically).
-export async function GET(_req: Request, { params }: { params: { userId: string; credentialId: string } }) {
+export async function GET(_req: Request, { params: paramsPromise }: { params: Promise<{ userId: string; credentialId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     const cred = await prisma.userCredential.findFirst({ where: { id: params.credentialId, userId: params.userId, firmId: ctx.firm.id } });

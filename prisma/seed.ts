@@ -8,20 +8,25 @@ import { generatePlan } from "../src/lib/engine/generate";
 const prisma = new PrismaClient();
 
 const DEMO_EMAIL = "demo@lifeplanos.app";
-const DEMO_PASSWORD = "password123";
+const DEV_SEED_PASSWORD = process.env.DEV_SEED_PASSWORD ?? "LifePlanOS-Local-2026!";
 
 function period(now = new Date()) {
   return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}`;
 }
 
 async function main() {
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "The legacy development seed is disabled in production. Use the guarded demo seed with explicit production acknowledgments.",
+    );
+  }
   // Idempotent: wipe the demo firm if it already exists, then rebuild.
   const existing = await prisma.firm.findUnique({ where: { slug: "meridian-life-care" } });
   if (existing) {
     await prisma.firm.delete({ where: { id: existing.id } });
   }
 
-  const passwordHash = await hashPassword(DEMO_PASSWORD);
+  const passwordHash = await hashPassword(DEV_SEED_PASSWORD);
   const now = new Date();
   const inviteExpiresAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
 
@@ -32,6 +37,12 @@ async function main() {
       state: "CA",
       primaryColor: "#0891b2",
       letterhead: "Meridian Life Care Planning, LLC · Certified Life Care Planners · Los Angeles, CA",
+      features: {
+        "authorization.enterprise": true,
+        "report.vocational_assessment": true,
+        "report.forensic_economist": true,
+        "report.report_level_attestation": true,
+      },
       subscription: {
         create: {
           tier: "SMALL_FIRM",
@@ -53,7 +64,7 @@ async function main() {
           { email: "economist@lifeplanos.app", name: "Cameron Price, PhD", role: "ATTORNEY_REVIEWER", status: "ACTIVE", passwordHash, preferredWorkspace: "FORENSIC_ECONOMIST" },
           { email: "qa@lifeplanos.app", name: "Drew Wilson, RN", role: "ATTORNEY_REVIEWER", status: "ACTIVE", passwordHash, preferredWorkspace: "QUALITY_ASSURANCE_REVIEWER" },
           { email: "billing@lifeplanos.app", name: "Jamie Ortiz", role: "BILLING_USER", status: "ACTIVE", passwordHash, preferredWorkspace: "LEGACY_BILLING" },
-          { email: "platform@lifeplanos.app", name: "Robin System Admin", role: "ADMIN", status: "ACTIVE", passwordHash, preferredWorkspace: "PLATFORM_SYSTEM_ADMINISTRATOR" },
+          { email: "platform@lifeplanos.app", name: "Robin System Admin", role: "BILLING_USER", status: "ACTIVE", passwordHash, preferredWorkspace: "PLATFORM_SYSTEM_ADMINISTRATOR" },
           { email: "expert@lifeplanos.app", name: "Dr. Leslie Grant", role: "ATTORNEY_REVIEWER", status: "ACTIVE", passwordHash, preferredWorkspace: "EXTERNAL_EXPERT" },
           { email: "observer@lifeplanos.app", name: "Sydney Moore", role: "ATTORNEY_REVIEWER", status: "ACTIVE", passwordHash, preferredWorkspace: "READ_ONLY_OBSERVER" },
           { email: "insurance@lifeplanos.app", name: "Alexis Kim", role: "ATTORNEY_REVIEWER", status: "ACTIVE", passwordHash, preferredWorkspace: "INSURANCE_CLIENT" },
@@ -136,6 +147,45 @@ async function main() {
     }
     const plan = await generatePlan(davidId);
     await prisma.case.update({ where: { id: davidId }, data: { status: "PHYSICIAN_REVIEW" } });
+    // Make every case-scoped demo persona usable without granting firm-wide
+    // visibility. Specialists receive access through the engagement; external
+    // recipients receive explicit case assignments.
+    const qa = firm.users.find((u) => u.email === "qa@lifeplanos.app")!;
+    await prisma.caseEngagement.create({
+      data: {
+        firmId: firm.id,
+        caseId: davidId,
+        requestedById: admin.id,
+        authorizedById: admin.id,
+        authorizedAt: now,
+        reportType: "LIFE_CARE_PLAN",
+        status: "IN_PROGRESS",
+        assignedPlannerId: planner.id,
+        assignedPhysicianId: physician.id,
+        assignedVocationalExpertId: vocational.id,
+        assignedEconomistId: economist.id,
+        assignedQaReviewerId: qa.id,
+      },
+    });
+    const caseScopedEmails = [
+      "attorney@lifeplanos.app",
+      "expert@lifeplanos.app",
+      "observer@lifeplanos.app",
+      "insurance@lifeplanos.app",
+    ];
+    await prisma.userRoleAssignment.createMany({
+      data: firm.users
+        .filter((u) => caseScopedEmails.includes(u.email))
+        .map((u) => ({
+          userId: u.id,
+          firmId: firm.id,
+          caseId: davidId,
+          builtInRole: roleByEmail[u.email],
+          assignedById: admin.id,
+          responsibility: "Synthetic case-scoped demo access",
+          assignmentReason: "Synthetic demo matter",
+        })),
+    });
     console.log(`  Populated David Chen: ${SAMPLE_DOCS.length} records, ${plan.futureCare} future-care items, ${plan.chronology} chronology events`);
   }
 
@@ -163,8 +213,8 @@ async function main() {
   });
 
   console.log("✔ Seeded firm:", firm.name);
-  console.log("  Login →", DEMO_EMAIL, "/", DEMO_PASSWORD);
-  console.log("  All active demo personas use password:", DEMO_PASSWORD);
+  console.log("  Login →", DEMO_EMAIL, "/", DEV_SEED_PASSWORD);
+  console.log("  All active local personas use DEV_SEED_PASSWORD (development default shown above)." );
 }
 
 main()

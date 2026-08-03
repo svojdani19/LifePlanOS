@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { prisma } from "@/lib/db";
-import { requireApiContext, requirePermission, requireCase, audit } from "@/lib/tenant";
+import { requireApiContext, requireCanonicalPermission, requireCase, audit } from "@/lib/tenant";
 import { getReport } from "@/lib/reports/registry";
 import { assertVerifiedCredential, enforceReviewCredential, credentialCategoryForExpert } from "@/lib/authz/credentialGate";
 import { approvalStale } from "@/lib/reports/persist";
@@ -24,13 +24,14 @@ const postSchema = z.object({
   confirm: z.literal(true),
 });
 
-type Params = { params: { caseId: string; exportId: string } };
+type Params = { params: Promise<{ caseId: string; exportId: string }> };
 
 async function loadExport(caseId: string, exportId: string, firmId: string) {
   return prisma.reportExport.findFirst({ where: { id: exportId, caseId, firmId } });
 }
 
-export async function POST(req: Request, { params }: Params) {
+export async function POST(req: Request, { params: paramsPromise }: Params) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     await requireCase(ctx, params.caseId);
@@ -42,10 +43,19 @@ export async function POST(req: Request, { params }: Params) {
     // The report definition names the expert whose signature finalizes it.
     const def = getReport(record.reportType ?? "");
     const expertRole = def?.requiredExpert ?? "physician";
-    if (expertRole !== "physician") {
-      return ok({ error: `This report requires the ${expertRole} expert workflow, which is not yet available.` }, 409);
-    }
-    requirePermission(ctx, "physician.review");
+    const permission =
+      expertRole === "vocational"
+        ? "vocational.attest"
+        : expertRole === "economist"
+          ? "economic.attest"
+          : input.kind === "ATTESTATION"
+            ? "report.attest"
+            : "report.approve";
+    requireCanonicalPermission(ctx, permission, {
+      caseId: params.caseId,
+      reportType: record.reportType ?? undefined,
+      reportStatus: record.draft ? "DRAFT" : "FINAL",
+    });
 
     // Credential boundary (docs/26): the signer must PERSONALLY hold the
     // verified credential matching the report's expert role. ATTESTATION is
@@ -106,13 +116,18 @@ export async function POST(req: Request, { params }: Params) {
   }
 }
 
-export async function GET(_req: Request, { params }: Params) {
+export async function GET(_req: Request, { params: paramsPromise }: Params) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
-    requirePermission(ctx, "case.view");
     await requireCase(ctx, params.caseId);
     const record = await loadExport(params.caseId, params.exportId, ctx.firm.id);
     if (!record) return ok({ error: "Export not found" }, 404);
+    requireCanonicalPermission(ctx, "attestation.view", {
+      caseId: params.caseId,
+      reportType: record.reportType ?? undefined,
+      reportStatus: record.draft ? "DRAFT" : "FINAL",
+    });
     const approvals = await prisma.reportApproval.findMany({
       where: { reportExportId: record.id },
       orderBy: { createdAt: "desc" },

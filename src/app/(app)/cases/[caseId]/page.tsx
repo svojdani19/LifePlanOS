@@ -1,15 +1,40 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
-import { requireContext } from "@/lib/tenant";
+import { requireContext, requireCase, caseAccessFor } from "@/lib/tenant";
 import { prisma } from "@/lib/db";
 import { ROLE_PERMISSIONS } from "@/lib/rbac";
 import { assumptionsFor } from "@/lib/engine/generate";
 import { rankPrecedents } from "@/lib/precedents/match";
 import { CaseWorkspace } from "@/components/case/CaseWorkspace";
 
-export default async function CaseDetailPage({ params }: { params: { caseId: string } }) {
+export default async function CaseDetailPage({ params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   const ctx = await requireContext();
+  // Direct URLs are guarded before any PHI-bearing relations are loaded. List
+  // filtering is not authorization: the same case-scope policy protects this
+  // server-rendered resource.
+  await requireCase(ctx, params.caseId);
+  const caseAccess = await caseAccessFor(ctx);
+  // Firm administrators see the individual case exactly as the retaining
+  // attorney does — the attorney presentation IS the case view for both roles.
+  const attorneyView = ctx.user.role === "ATTORNEY_REVIEWER" || ctx.user.role === "ADMIN";
+  // Firm admins see who the assigned attorney(s) on the matter are, right in
+  // the case banner (case-scoped attorney assignments).
+  let assignedAttorneys: string[] = [];
+  if (ctx.user.role === "ADMIN") {
+    const grants = await prisma.userRoleAssignment.findMany({
+      where: { firmId: ctx.firm.id, caseId: params.caseId, status: "ACTIVE", builtInRole: { in: ["ATTORNEY_CLIENT"] } },
+      select: { userId: true },
+    });
+    if (grants.length) {
+      const users = await prisma.user.findMany({
+        where: { id: { in: grants.map((g) => g.userId) } },
+        select: { name: true },
+      });
+      assignedAttorneys = users.map((u) => u.name);
+    }
+  }
   const c = await prisma.case.findFirst({
     where: { id: params.caseId, firmId: ctx.firm.id },
     include: {
@@ -26,6 +51,12 @@ export default async function CaseDetailPage({ params }: { params: { caseId: str
     },
   });
   if (!c) notFound();
+
+  // Absolute number of open export-blocking integrity findings — the items
+  // standing between this case and ANY final report.
+  const pendingResolution = await prisma.validationFinding.count({
+    where: { caseId: c.id, exportBlocking: true, status: "OPEN" },
+  });
 
   const assumptions = assumptionsFor(c);
   const totalLifetime = c.futureCareItems.reduce((s, i) => s + i.lifetimeCost, 0);
@@ -61,9 +92,17 @@ export default async function CaseDetailPage({ params }: { params: { caseId: str
         data={JSON.parse(JSON.stringify(c))}
         assumptions={assumptions}
         totals={{ totalLifetime, totalPresentValue }}
-        permissions={ROLE_PERMISSIONS[ctx.user.role]}
+        permissions={caseAccess.platformAdminReadOnly ? [] : attorneyView ? ROLE_PERMISSIONS.ATTORNEY_REVIEWER : ROLE_PERMISSIONS[ctx.user.role]}
         precedents={JSON.parse(JSON.stringify(ranked))}
         physicians={JSON.parse(JSON.stringify(physicians))}
+        // Attorney-facing view: range-only pricing, condensed clinical detail,
+        // no evidence tab, and the provider attorney-input surface. Firm admins
+        // can preview it per case via ?viewAs=attorney (presentation only —
+        // permissions are swapped to the attorney's set for a faithful preview,
+        // while server-side authorization still runs against the real session).
+        attorneyView={attorneyView}
+        assignedAttorneys={Array.from(new Set(assignedAttorneys))}
+        pendingResolution={pendingResolution}
       />
     </div>
   );

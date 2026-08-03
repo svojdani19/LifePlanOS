@@ -18,7 +18,8 @@ const ACTIONS = {
 } as const;
 type Action = keyof typeof ACTIONS;
 
-export async function PATCH(req: Request, { params }: { params: { caseId: string; itemId: string } }) {
+export async function PATCH(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string; itemId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.edit");

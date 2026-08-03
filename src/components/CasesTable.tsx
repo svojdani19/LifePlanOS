@@ -98,7 +98,7 @@ export function CasesTable({ rows }: { rows: CaseListRow[] }) {
                   </button>
                 </th>
               ))}
-              <th className="px-4 py-2.5 text-right font-medium">Present Value</th>
+              <th className="px-4 py-2.5 text-right font-medium">{rows.some((r) => r.estimatedLifeValue != null) ? "Estimated Life Value" : "Present Value"}</th>
               <th className="px-4 py-2.5 font-medium">Needs Attention</th>
             </tr>
           </thead>
@@ -137,7 +137,7 @@ export function CasesTable({ rows }: { rows: CaseListRow[] }) {
                   <td className="px-4 py-2.5"><Badge tone={SIDE_TONE[c.side] ?? "neutral"}>{c.side.toLowerCase()}</Badge></td>
                   <td className="px-4 py-2.5"><Badge tone={closed ? "neutral" : "info"}>{c.status.toLowerCase().replace(/_/g, " ")}</Badge></td>
                   <td className="px-4 py-2.5 text-ink-500">{formatDate(new Date(c.updatedAt))}</td>
-                  <td className="px-4 py-2.5 text-right tabular-nums text-ink-700">{c.presentValue ? formatMoney(c.presentValue) : "—"}</td>
+                  <td className="px-4 py-2.5 text-right tabular-nums text-ink-700">{c.estimatedLifeValue ?? (c.presentValue ? formatMoney(c.presentValue) : "—")}</td>
                   <td className="px-4 py-2.5">
                     {(c.blockingFindings ?? 0) > 0 && <Badge tone="red">{c.blockingFindings} blocking</Badge>}{" "}
                     {(c.mdPending ?? 0) > 0 && <Badge tone="amber">{c.mdPending} MD pending</Badge>}

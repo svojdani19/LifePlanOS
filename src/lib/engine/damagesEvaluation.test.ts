@@ -162,20 +162,20 @@ describe("evaluateFutureDamages — determinism and provenance", () => {
     const r = evaluateFutureDamages(
       input({
         conditions: [
-          { name: "Cervical radiculopathy", relatedness: "RELATED", evidenceSourceCount: 3 },
-          { name: "Prior lumbar strain", relatedness: "UNCLEAR", evidenceSourceCount: 0 },
+          { id: "condition-1", name: "Cervical radiculopathy", relatedness: "RELATED", evidenceSourceCount: 3 },
+          { id: "condition-2", name: "Prior lumbar strain", relatedness: "UNCLEAR", evidenceSourceCount: 0 },
         ],
-        items: [item({ isLifetime: true, service: "Annual pain management" })],
-        findings: [{ result: "Diagnosis mismatch", severity: "High", exportBlocking: true }],
+        items: [item({ id: "item-1", isLifetime: true, service: "Annual pain management" })],
+        findings: [{ id: "finding-1", result: "Diagnosis mismatch", severity: "High", exportBlocking: true }],
       }),
     );
     expect(r.supportingFactors.find((f) => f.factor === "Causally related conditions documented")?.detail).toContain("Cervical radiculopathy");
     expect(r.supportingFactors.find((f) => f.factor === "Lifetime care recommended")?.detail).toContain("Annual pain management");
     expect(r.weakeningFactors.find((f) => f.factor === "Unresolved causation")?.detail).toContain("Prior lumbar strain");
     expect(r.weakeningFactors.find((f) => f.factor === "Export-blocking validation findings")?.detail).toContain("Diagnosis mismatch");
-    expect(r.sourceFactIds).toContain("condition:Cervical radiculopathy");
-    expect(r.sourceFactIds).toContain("item:Annual pain management");
-    expect(r.sourceFactIds).toContain("finding:Diagnosis mismatch");
+    expect(r.sourceFactIds).toContain("condition:condition-1");
+    expect(r.sourceFactIds).toContain("future-care-item:item-1");
+    expect(r.sourceFactIds).toContain("validation-finding:finding-1");
   });
 
   it("invents nothing: a minimal case yields no supporting factors about absent facts", () => {

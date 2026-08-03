@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/db";
 import { notify } from "@/lib/notifications/service";
-import type { CaseEngagement } from "@/generated/prisma";
+import type { CaseEngagement, Prisma } from "@/generated/prisma";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CaseEngagement service (MDIP docs/28, Agent B). An engagement is the
@@ -158,6 +158,22 @@ async function requireEngagement(actor: EngagementActor, engagementId: string): 
   return engagement;
 }
 
+/** Compare-and-swap prevents two stale requests from both advancing a state. */
+async function updateAtExpectedStatus(
+  actor: EngagementActor,
+  engagement: CaseEngagement,
+  data: Prisma.CaseEngagementUpdateManyMutationInput,
+): Promise<CaseEngagement> {
+  const result = await prisma.caseEngagement.updateMany({
+    where: { id: engagement.id, firmId: actor.firmId, status: engagement.status },
+    data,
+  });
+  if (result.count !== 1) {
+    throw new EngagementError("The engagement changed in another session. Refresh and try again.", 409);
+  }
+  return { ...engagement, ...data, updatedAt: new Date() } as CaseEngagement;
+}
+
 /** Case number for PHI-free notification text ("—" if the case vanished). */
 async function caseNumberFor(firmId: string, caseId: string): Promise<string> {
   const c = await prisma.case.findFirst({ where: { id: caseId, firmId }, select: { caseNumber: true } });
@@ -185,6 +201,10 @@ export interface CreateEngagementInput {
   status?: Extract<EngagementStatus, "RECOMMENDED" | "AWAITING_AUTHORIZATION">;
   /** Raw Firm.features — supplies the pricing config (see feeFor). */
   firmFeatures?: unknown;
+  /** Human-readable request scope (e.g. an attorney order's preparer summary). */
+  scope?: string;
+  /** Structured request context, e.g. { requestedPreparers: [{title, specialty?}] }. */
+  configuration?: unknown;
 }
 
 /**
@@ -228,6 +248,8 @@ export async function createEngagement(actor: EngagementActor, input: CreateEnga
       feeEstimate,
       feeStructure,
       estimatedCompletionDate,
+      ...(input.scope ? { scope: input.scope.slice(0, 2000) } : {}),
+      ...(input.configuration !== undefined ? { configuration: input.configuration as object } : {}),
     },
   });
 
@@ -264,14 +286,11 @@ export async function authorizeEngagement(actor: EngagementActor, engagementId: 
   if (recordCount === 0) missingRequirements.push("MEDICAL_RECORDS");
   const nextStatus: EngagementStatus = missingRequirements.length > 0 ? "RECORDS_PENDING" : "AUTHORIZED";
 
-  const updated = await prisma.caseEngagement.update({
-    where: { id: engagement.id },
-    data: {
+  const updated = await updateAtExpectedStatus(actor, engagement, {
       status: nextStatus,
       authorizedById: actor.userId,
       authorizedAt: new Date(),
       missingRequirements: missingRequirements as never,
-    },
   });
 
   await auditEngagement(actor, "engagement.authorize", engagement, {
@@ -318,24 +337,6 @@ export async function assignExperts(
     throw invalidTransition(engagement.status, "ASSIGNMENT_PENDING");
   }
 
-  // Every referenced assignee must be an ACTIVE seat in this firm.
-  const referencedIds = [
-    assignees.plannerId,
-    assignees.physicianId,
-    assignees.vocationalExpertId,
-    assignees.economistId,
-    assignees.qaReviewerId,
-  ].filter((id): id is string => typeof id === "string" && id.length > 0);
-  if (referencedIds.length > 0) {
-    const found = await prisma.user.findMany({
-      where: { id: { in: referencedIds }, firmId: actor.firmId, status: "ACTIVE" },
-      select: { id: true },
-    });
-    const foundIds = new Set(found.map((u) => u.id));
-    const missing = referencedIds.filter((id) => !foundIds.has(id));
-    if (missing.length > 0) throw new EngagementError("One or more assignees are not active members of this firm.", 400);
-  }
-
   // Merge: undefined leaves a slot untouched; null explicitly clears it.
   const next = {
     assignedPlannerId: assignees.plannerId === undefined ? engagement.assignedPlannerId : assignees.plannerId,
@@ -345,13 +346,74 @@ export async function assignExperts(
     assignedEconomistId: assignees.economistId === undefined ? engagement.assignedEconomistId : assignees.economistId,
     assignedQaReviewerId: assignees.qaReviewerId === undefined ? engagement.assignedQaReviewerId : assignees.qaReviewerId,
   };
+
+  // Every occupied slot must be an ACTIVE seat with the matching active role
+  // assignment. Regulated expert slots also require a verified credential.
+  const referencedIds = [...new Set(Object.values(next).filter((id): id is string => typeof id === "string" && id.length > 0))];
+  if (referencedIds.length > 0) {
+    const now = new Date();
+    const found = await prisma.user.findMany({
+      where: { id: { in: referencedIds }, firmId: actor.firmId, status: "ACTIVE" },
+      select: { id: true },
+    });
+    const foundIds = new Set(found.map((u) => u.id));
+    const missing = referencedIds.filter((id) => !foundIds.has(id));
+    if (missing.length > 0) throw new EngagementError("One or more assignees are not active members of this firm.", 400);
+
+    const [assignments, credentials] = await Promise.all([
+      prisma.userRoleAssignment.findMany({
+        where: {
+          userId: { in: referencedIds },
+          firmId: actor.firmId,
+          status: "ACTIVE",
+          effectiveFrom: { lte: now },
+          OR: [{ effectiveUntil: null }, { effectiveUntil: { gt: now } }],
+        },
+        select: { userId: true, builtInRole: true, caseId: true },
+      }),
+      prisma.userCredential.findMany({
+        where: {
+          userId: { in: referencedIds },
+          firmId: actor.firmId,
+          status: { in: ["ORG_VERIFIED", "EXTERNALLY_VERIFIED"] },
+          OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+        },
+        select: { userId: true, category: true },
+      }),
+    ]);
+
+    const slotRequirements = [
+      { label: "planner", userId: next.assignedPlannerId, roles: ["LIFE_CARE_PLANNER"], credential: null },
+      { label: "physician", userId: next.assignedPhysicianId, roles: ["PHYSICIAN_REVIEWER"], credential: "PHYSICIAN" },
+      { label: "vocational expert", userId: next.assignedVocationalExpertId, roles: ["VOCATIONAL_EXPERT"], credential: "VOCATIONAL" },
+      { label: "economist", userId: next.assignedEconomistId, roles: ["FORENSIC_ECONOMIST"], credential: "ECONOMIST" },
+      { label: "QA reviewer", userId: next.assignedQaReviewerId, roles: ["QUALITY_ASSURANCE_REVIEWER"], credential: null },
+    ] as const;
+
+    for (const requirement of slotRequirements) {
+      if (!requirement.userId) continue;
+      const holdsRole = assignments.some(
+        (a) =>
+          a.userId === requirement.userId &&
+          a.builtInRole != null &&
+          requirement.roles.includes(a.builtInRole as never) &&
+          (a.caseId == null || a.caseId === engagement.caseId),
+      );
+      if (!holdsRole) {
+        throw new EngagementError(`The selected ${requirement.label} does not hold the required active role assignment for this case.`, 400);
+      }
+      if (
+        requirement.credential &&
+        !credentials.some((c) => c.userId === requirement.userId && c.category === requirement.credential)
+      ) {
+        throw new EngagementError(`The selected ${requirement.label} lacks a verified, unexpired ${requirement.credential} credential.`, 400);
+      }
+    }
+  }
   const anyAssigned = Object.values(next).some((v) => v != null);
   const nextStatus: EngagementStatus = anyAssigned ? "IN_PROGRESS" : "ASSIGNMENT_PENDING";
 
-  const updated = await prisma.caseEngagement.update({
-    where: { id: engagement.id },
-    data: { ...next, status: nextStatus },
-  });
+  const updated = await updateAtExpectedStatus(actor, engagement, { ...next, status: nextStatus });
 
   await auditEngagement(actor, "engagement.assign", engagement, {
     from: engagement.status,
@@ -413,12 +475,9 @@ export async function advanceStatus(actor: EngagementActor, engagementId: string
     throw invalidTransition(engagement.status, nextStatus);
   }
 
-  const updated = await prisma.caseEngagement.update({
-    where: { id: engagement.id },
-    data: {
+  const updated = await updateAtExpectedStatus(actor, engagement, {
       status: nextStatus,
       ...(nextStatus === "COMPLETED" ? { completedAt: new Date() } : {}),
-    },
   });
 
   await auditEngagement(actor, "engagement.advance", engagement, { from: engagement.status, to: nextStatus });
@@ -447,9 +506,10 @@ export async function cancelEngagement(actor: EngagementActor, engagementId: str
     throw invalidTransition(engagement.status, "CANCELLED");
   }
 
-  const updated = await prisma.caseEngagement.update({
-    where: { id: engagement.id },
-    data: { status: "CANCELLED", cancellationStatus: trimmed, cancelledAt: new Date() },
+  const updated = await updateAtExpectedStatus(actor, engagement, {
+    status: "CANCELLED",
+    cancellationStatus: trimmed,
+    cancelledAt: new Date(),
   });
 
   await auditEngagement(actor, "engagement.cancel", engagement, { from: engagement.status, reason: trimmed });

@@ -143,6 +143,7 @@ model Firm {
   attentionItems       AttentionItem[]
   reasoningAssessments ClinicalReasoningAssessment[]
   attestations         Attestation[]
+  supportSessions      Session[]                     @relation("SessionSupportFirm")
 
   // Tenant feature flags (pilot hardening P1): {"report.vocational_assessment": true, ...}
   // Null = defaults from src/lib/flags.ts. Additive; never required.
@@ -225,24 +226,24 @@ model User {
   firmId String
   firm   Firm   @relation(fields: [firmId], references: [id], onDelete: Cascade)
 
-  email        String     @unique
-  name         String
-  role         UserRole   @default(PLANNER)
-  status       UserStatus @default(ACTIVE)
-  passwordHash String? // null while INVITED (set on invite acceptance)
+  email              String     @unique
+  name               String
+  role               UserRole   @default(PLANNER)
+  status             UserStatus @default(ACTIVE)
+  passwordHash       String? // null while INVITED (set on invite acceptance)
   // Role workspace selected by the user. The value is a key from
   // src/lib/workspaces.ts and is validated against active assignments.
   preferredWorkspace String?
   // Two-factor authentication (TOTP). Secret is stored server-side; codes are
   // never persisted. Backup codes are stored as one-way hashes.
-  mfaEnabled     Boolean @default(false)
-  totpSecret     String? // base32 TOTP secret (set once enabled)
-  mfaBackupCodes Json? // string[] of sha-256 hashes of unused recovery codes
+  mfaEnabled         Boolean    @default(false)
+  totpSecret         String? // base32 TOTP secret (set once enabled)
+  mfaBackupCodes     Json? // string[] of sha-256 hashes of unused recovery codes
 
   // Invitation flow.
   inviteToken     String?   @unique
   inviteExpiresAt DateTime?
-  invitedById        String?
+  invitedById     String?
 
   // Cached "board certified in …" summary rendered in report Qualifications.
   credentialSummary String?
@@ -264,18 +265,23 @@ model User {
 }
 
 model Session {
-  id         String   @id @default(uuid())
-  userId     String
-  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  tokenHash  String   @unique // sha-256 of the raw cookie token (raw token never stored)
-  expiresAt  DateTime
-  lastSeenAt DateTime @default(now()) // drives idle-timeout expiry
-  createdAt  DateTime @default(now())
-  userAgent  String?
-  ip         String?
+  id            String   @id @default(uuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash     String   @unique // sha-256 of the raw cookie token (raw token never stored)
+  expiresAt     DateTime
+  lastSeenAt    DateTime @default(now()) // drives idle-timeout expiry
+  createdAt     DateTime @default(now())
+  userAgent     String?
+  ip            String?
+  // Server-side target tenant selected by a platform operator. This is never
+  // accepted from a cookie and is re-authorized on every context load.
+  supportFirmId String?
+  supportFirm   Firm?    @relation("SessionSupportFirm", fields: [supportFirmId], references: [id], onDelete: SetNull)
 
   @@index([userId])
   @@index([tokenHash])
+  @@index([supportFirmId])
 }
 
 // Throttling record for authentication attempts — powers login rate limiting
@@ -1037,6 +1043,14 @@ model ValidationFinding {
   suggestion     String // suggested correction
   exportBlocking Boolean @default(false)
 
+  // User disposition. OPEN findings gate exports; RESOLVED_AS_IS and IGNORED
+  // do not. Dispositions survive validation re-runs via (service, result)
+  // matching — if the underlying data changes enough to alter the finding,
+  // it reopens.
+  status       String    @default("OPEN") // OPEN | RESOLVED_AS_IS | IGNORED
+  resolvedById String?
+  resolvedAt   DateTime?
+
   createdAt DateTime @default(now())
 
   @@index([caseId])
@@ -1341,6 +1355,10 @@ model TreatingProvider {
   nameKey           String
   sourceDocumentIds Json? // [{ documentId, filename, pages }] the provider appears in
   addedById         String?
+  // Attorney-supplied context (MDIP): deposition summary and free-form notes,
+  // editable by the retaining attorney from their provider view.
+  depositionSummary String?
+  attorneyNotes     String?
 
   createdAt DateTime @default(now())
 

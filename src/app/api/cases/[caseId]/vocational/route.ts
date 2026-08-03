@@ -1,7 +1,6 @@
 import { z } from "zod";
 import { prisma } from "@/lib/db";
-import { requireApiContext, requirePermission, requireCase, audit, TenantError, type TenantContext } from "@/lib/tenant";
-import { can } from "@/lib/rbac";
+import { requireApiContext, requireCanonicalPermission, requireCase, audit, type TenantContext } from "@/lib/tenant";
 import { assertVerifiedCredential } from "@/lib/authz/credentialGate";
 import { ok, handleError } from "@/lib/api";
 import { VOC_KINDS, vocationalReadiness, type VocEntry } from "@/lib/reports/vocational";
@@ -30,28 +29,27 @@ const entrySchema = z.object({
 const patchSchema = entrySchema.partial();
 
 /** Intake may be built by planners (futurecare.edit) or reviewers (physician.review). */
-function requireIntakePermission(ctx: TenantContext): void {
-  if (!can(ctx.user.role, "futurecare.edit") && !can(ctx.user.role, "physician.review")) {
-    throw new TenantError("Your role cannot edit the vocational intake.", "FORBIDDEN", 403);
-  }
+function requireIntakePermission(ctx: TenantContext, caseId: string): void {
+  // Life-care planners and vocational experts receive this canonical permission;
+  // only vocational.attest can promote an entry to VERIFIED.
+  requireCanonicalPermission(ctx, "vocational.edit", { caseId });
 }
 
 /** Marking an entry VERIFIED is a reviewer act (vocational experts occupy
  *  PHYSICIAN_REVIEWER seats for the pilot — docs/25). */
-function requireVerifyPermission(ctx: TenantContext): void {
-  if (!can(ctx.user.role, "physician.review")) {
-    throw new TenantError("Only a reviewing expert can mark an entry VERIFIED.", "FORBIDDEN", 403);
-  }
+function requireVerifyPermission(ctx: TenantContext, caseId: string): void {
+  requireCanonicalPermission(ctx, "vocational.attest", { caseId });
 }
 
 const toDate = (s: string | undefined): Date | null | undefined => (s === undefined ? undefined : s ? new Date(s) : null);
 
 // ── GET: current (non-superseded) entries grouped by kind + readiness ────────
-export async function GET(_req: Request, { params }: { params: { caseId: string } }) {
+export async function GET(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
-    requirePermission(ctx, "case.view");
     await requireCase(ctx, params.caseId);
+    requireCanonicalPermission(ctx, "vocational.view", { caseId: params.caseId });
 
     const entries = await prisma.vocationalEntry.findMany({
       where: { caseId: params.caseId, firmId: ctx.firm.id, supersededById: null },
@@ -74,17 +72,18 @@ export async function GET(_req: Request, { params }: { params: { caseId: string 
 }
 
 // ── POST: create a sourced entry ─────────────────────────────────────────────
-export async function POST(req: Request, { params }: { params: { caseId: string } }) {
+export async function POST(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
-    requireIntakePermission(ctx);
     await requireCase(ctx, params.caseId);
+    requireIntakePermission(ctx, params.caseId);
 
     const input = entrySchema.parse(await req.json());
     // Marking VERIFIED is the vocational expert's sign-off — attestation-class,
     // ALWAYS gated on a verified VOCATIONAL credential (docs/26).
     if (input.verification === "VERIFIED") {
-      requireVerifyPermission(ctx);
+      requireVerifyPermission(ctx, params.caseId);
       await assertVerifiedCredential(ctx, "VOCATIONAL");
     }
 
@@ -113,11 +112,12 @@ export async function POST(req: Request, { params }: { params: { caseId: string 
 }
 
 // ── PATCH ?id= : supersede-not-edit (replacement row; old row points forward) ─
-export async function PATCH(req: Request, { params }: { params: { caseId: string } }) {
+export async function PATCH(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
-    requireIntakePermission(ctx);
     await requireCase(ctx, params.caseId);
+    requireIntakePermission(ctx, params.caseId);
 
     const id = new URL(req.url).searchParams.get("id");
     if (!id) return ok({ error: "Query parameter `id` is required" }, 400);
@@ -131,7 +131,7 @@ export async function PATCH(req: Request, { params }: { params: { caseId: string
     const verification = input.verification ?? existing.verification;
     // Newly marking VERIFIED = vocational sign-off — always credential-gated.
     if (verification === "VERIFIED" && existing.verification !== "VERIFIED") {
-      requireVerifyPermission(ctx);
+      requireVerifyPermission(ctx, params.caseId);
       await assertVerifiedCredential(ctx, "VOCATIONAL");
     }
 

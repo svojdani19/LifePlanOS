@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
-import { requireApiContext, requirePermission, requireCase, audit } from "@/lib/tenant";
+import { requireApiContext, requireCanonicalPermission, requireCase, audit } from "@/lib/tenant";
+import { EXTERNAL_CLASS_TEMPLATES } from "@/lib/authz/caseScope";
 import { getObject } from "@/lib/storage";
 import { handleError } from "@/lib/api";
 
@@ -14,13 +15,36 @@ const CONTENT_TYPES: Record<string, string> = {
 
 // Authenticated, audited download of a generated report. PHI files are never
 // served statically — access is logged (export logging, Module 17).
-export async function GET(_req: Request, { params }: { params: { caseId: string; exportId: string } }) {
+export async function GET(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string; exportId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
-    requirePermission(ctx, "report.export");
     const c = await requireCase(ctx, params.caseId);
     const record = await prisma.reportExport.findFirst({ where: { id: params.exportId, caseId: params.caseId, firmId: ctx.firm.id } });
     if (!record || !record.storageKey) return new Response("Not found", { status: 404 });
+
+    requireCanonicalPermission(ctx, "report.download", {
+      caseId: params.caseId,
+      reportType: record.reportType ?? undefined,
+      reportStatus: record.lifecycle ?? (record.draft ? "draft_expert" : "final_expert"),
+    });
+
+    // External recipients may receive only the current, finalized artifact.
+    // Internal users retain access to version history for audit/discovery.
+    const now = new Date();
+    const externalAssignmentCount = await prisma.userRoleAssignment.count({
+      where: {
+        userId: ctx.user.id,
+        firmId: ctx.firm.id,
+        builtInRole: { in: [...EXTERNAL_CLASS_TEMPLATES] },
+        status: "ACTIVE",
+        effectiveFrom: { lte: now },
+        OR: [{ effectiveUntil: null }, { effectiveUntil: { gt: now } }],
+      },
+    });
+    if (externalAssignmentCount > 0 && !isExternallyReleasable(record)) {
+      return new Response("Not found", { status: 404 });
+    }
 
     const buf = await getObject(record.storageKey);
     await audit(ctx, "export.download", { type: "reportExport", id: record.id, caseId: params.caseId });
@@ -52,4 +76,13 @@ export async function GET(_req: Request, { params }: { params: { caseId: string;
   } catch (err) {
     return handleError(err);
   }
+}
+
+function isExternallyReleasable(record: {
+  draft: boolean;
+  lifecycle: string | null;
+  supersededById: string | null;
+}): boolean {
+  if (record.draft || record.supersededById) return false;
+  return record.lifecycle === "final_expert" || record.lifecycle === "amended";
 }

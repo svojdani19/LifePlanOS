@@ -1,7 +1,7 @@
 "use client";
 
 import ReportLibrary, { type ReportSelection } from "@/components/case/ReportLibrary";
-import { useState, useMemo, useRef, useEffect, Fragment } from "react";
+import { useState, useMemo, useRef, useEffect, useCallback, Fragment } from "react";
 import { useRouter } from "next/navigation";
 import {
   Sparkles,
@@ -59,6 +59,7 @@ import { suggestDiagnoses } from "@/lib/intake/diagnosisSuggest";
 import { confidenceBand, confidenceDefinition } from "@/lib/engine/confidence";
 import { BookOpenCheck } from "lucide-react";
 import { MEDICAL_SPECIALTIES } from "@/lib/intake/specialties";
+import { attorneyItemsNeeded } from "@/lib/attorneyItems";
 import { US_STATES } from "@/lib/intake/jurisdictions";
 import { CaseAssistant } from "@/components/case/CaseAssistant";
 
@@ -107,6 +108,9 @@ export function CaseWorkspace({
   permissions,
   precedents = [],
   physicians = [],
+  attorneyView = false,
+  pendingResolution = 0,
+  assignedAttorneys = [],
 }: {
   data: AnyRec;
   assumptions: { lifeExpectancyYears: number; discountRate: number; medicalInflation: number; geographicFactor: number };
@@ -114,6 +118,12 @@ export function CaseWorkspace({
   permissions: Permission[];
   precedents?: AnyRec[];
   physicians?: AnyRec[];
+  /** Attorney-facing view: dollar values are never rendered (data unchanged). */
+  attorneyView?: boolean;
+  /** Open export-blocking integrity findings — the attorney banner's Pending Resolution count. */
+  pendingResolution?: number;
+  /** Case-assigned attorney names, shown in the banner for firm admins. */
+  assignedAttorneys?: string[];
 }) {
   const router = useRouter();
   const [tab, setTab] = useState("overview");
@@ -134,6 +144,10 @@ export function CaseWorkspace({
   // Deep-link from the Case Assistant: switch to the right tab, scroll to the
   // exact item, auto-expand its details, and highlight the specific section the
   // finding is about (the target panel maps focusCat → section).
+  // Integrity-check "Review": hands the finding to the Case Review agent for a
+  // simultaneous summary and resolution options.
+  const [reviewFinding, setReviewFinding] = useState<AnyRec | null>(null);
+
   const focusEntity = (entityType: string | null, rawEntityId: string | null, category: string) => {
     if (!rawEntityId) return;
     // The attention engine falls back to the service NAME when it cannot resolve
@@ -212,8 +226,11 @@ export function CaseWorkspace({
     { n: 7, label: "Physician", tab: "physician", stage: "PHYSICIAN_REVIEW", count: pendingPhysician, warn: pendingPhysician > 0 },
     { n: 8, label: "Report", tab: "report", stage: "FINAL" },
   ];
+  const VISIBLE_FLOW = (attorneyView ? FLOW.filter((f) => f.tab !== "costs") : FLOW).map((f, i) => ({ ...f, n: i + 1 }));
   const stageIdx = Math.max(0, STAGES.indexOf(data.status === "DRAFTING" ? "FINAL" : data.status));
-  const SECONDARY = TABS.filter((t) => ["providers", "evidence", "reviews", "precedents"].includes(t.id));
+  const SECONDARY = TABS.filter((t) =>
+    (attorneyView ? ["providers", "reviews", "precedents"] : ["providers", "evidence", "reviews", "precedents"]).includes(t.id),
+  );
 
   return (
     <div>
@@ -221,6 +238,7 @@ export function CaseWorkspace({
       <div className="sticky top-0 z-30 -mx-6 border-b border-ink-200 bg-white/95 px-6 pt-3 backdrop-blur supports-[backdrop-filter]:bg-white/85">
         {/* Identity + actions */}
         <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
+          <div className="min-w-0">
           <div className="flex min-w-0 flex-wrap items-center gap-x-2.5 gap-y-1">
             <h1 className="truncate text-lg font-bold tracking-tight text-ink-900">{data.clientName}</h1>
             <span className="font-mono text-xs text-ink-400">{data.caseNumber}</span>
@@ -233,8 +251,24 @@ export function CaseWorkspace({
               </span>
             )}
           </div>
+          {assignedAttorneys.length > 0 && (
+            <p className="mt-0.5 text-sm text-ink-500" title="Attorney assigned to this matter">
+              Attorney: <span className="font-medium text-ink-700">{assignedAttorneys.join(", ")}</span>
+            </p>
+          )}
+          </div>
           <div className="flex items-center gap-2">
-            {hasPlan && <CaseAssistant caseId={data.id} canEdit={can("case.edit")} onFocus={focusEntity} />}
+            {hasPlan && (
+              <CaseAssistant
+                caseId={data.id}
+                canEdit={can("case.edit")}
+                onFocus={focusEntity}
+                reviewFinding={reviewFinding as never}
+                onReviewDone={() => setReviewFinding(null)}
+                canApplyChanges={can("futurecare.edit")}
+                redactPricing={attorneyView}
+              />
+            )}
             {can("futurecare.edit") && (
               <button className="btn-primary px-3 py-1.5 text-sm" disabled={busy === "gen"} onClick={() => call(`/api/cases/${data.id}/generate`, "POST", undefined, "gen")}>
                 {busy === "gen" ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
@@ -246,17 +280,28 @@ export function CaseWorkspace({
 
         {/* Full-width case metrics band */}
         {hasPlan && (
-          <dl className="mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-ink-200 bg-ink-200 sm:grid-cols-5" aria-label="Case metrics">
-            {[
-              { label: "Future Care Items", value: String(data.futureCareItems.length), cls: "" },
-              { label: "Lifetime (Undiscounted)", value: formatMoney(totals.totalLifetime), cls: "" },
-              { label: "Present Value", value: formatMoney(totals.totalPresentValue), cls: "text-brand-800" },
-              { label: "Physician Pending", value: String(pendingPhysician), cls: pendingPhysician > 0 ? "text-amber-700" : "" },
-              { label: "Open Findings", value: String(data.reviewFindings.length), cls: data.reviewFindings.length > 0 ? "text-amber-700" : "" },
-            ].map((m) => (
-              <div key={m.label} className="bg-white px-4 py-2">
+          <dl className={cn("mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-ink-200 bg-ink-200", attorneyView ? "sm:grid-cols-[1fr_2fr_1fr]" : "sm:grid-cols-5")} aria-label="Case metrics">
+            {(attorneyView
+              ? [
+                  // Side tiles stay compact; the lifetime estimate is the
+                  // attorney's headline number, front and center.
+                  { label: "Future Care Items", value: String(data.futureCareItems.length), cls: "", compact: true },
+                  // Estimate range (-30% / +10%, rounded to the nearest $1k).
+                  { label: "Lifetime (Est. Range)", value: moneyRange(totals.totalLifetime), cls: "text-brand-800", center: true },
+                  // Absolute count of items blocking ANY report generation.
+                  { label: "Pending Resolution", value: String(pendingResolution), cls: pendingResolution > 0 ? "text-amber-700" : "", compact: true },
+                ]
+              : [
+                  { label: "Future Care Items", value: String(data.futureCareItems.length), cls: "" },
+                  { label: "Lifetime (Undiscounted)", value: formatMoney(totals.totalLifetime), cls: "" },
+                  { label: "Present Value", value: formatMoney(totals.totalPresentValue), cls: "text-brand-800" },
+                  { label: "Physician Pending", value: String(pendingPhysician), cls: pendingPhysician > 0 ? "text-amber-700" : "" },
+                  { label: "Open Findings", value: String(data.reviewFindings.length), cls: data.reviewFindings.length > 0 ? "text-amber-700" : "" },
+                ]
+            ).map((m: { label: string; value: string; cls: string; sm?: boolean; compact?: boolean; center?: boolean }) => (
+              <div key={m.label} className={cn("bg-white px-4 py-2", m.center && "text-center")}>
                 <dt className="text-meta">{m.label}</dt>
-                <dd className={cn("num-metric mt-0.5 text-xl", m.cls)}>{m.value}</dd>
+                <dd className={cn("num-metric mt-0.5", m.center ? "text-2xl" : m.compact ? "text-base leading-7" : m.sm ? "text-sm leading-6" : "text-xl", m.cls)}>{m.value}</dd>
               </div>
             ))}
           </dl>
@@ -266,7 +311,7 @@ export function CaseWorkspace({
             its own progress rail, so the sequence reads as distinct steps. */}
         <div className="mt-3 text-[10px] font-semibold uppercase tracking-wide text-ink-400">Pipeline</div>
         <ol className="mt-1 flex w-full items-stretch overflow-x-auto" aria-label="Case workflow">
-          {FLOW.map((s, i) => {
+          {VISIBLE_FLOW.map((s, i) => {
             const sIdx = STAGES.indexOf(s.stage);
             const state = sIdx < stageIdx ? "done" : sIdx === stageIdx ? "current" : "next";
             const open = tab === s.tab;
@@ -313,16 +358,20 @@ export function CaseWorkspace({
         </ol>
 
         {/* Secondary workspaces — a visually separate band of their own */}
-        <div className="-mx-6 flex items-center border-t border-ink-200 bg-ink-50/70 px-6 py-1" role="navigation" aria-label="Case workspaces">
-          <span className="text-label mr-4 shrink-0">Workspaces</span>
+        <div className="-mx-6 flex items-center gap-1.5 border-t border-ink-200 bg-ink-50/70 px-6 py-1.5" role="navigation" aria-label="Case workspaces">
+          <span className="text-label mr-2.5 shrink-0">Workspaces</span>
           {SECONDARY.map((t) => (
             <button
               key={t.id}
               onClick={() => setTab(t.id)}
               aria-current={tab === t.id ? "page" : undefined}
               className={cn(
-                "focusable flex flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1 text-[13px] transition-colors",
-                tab === t.id ? "bg-white font-semibold text-brand-800 shadow-sm ring-1 ring-ink-200" : "text-ink-500 hover:bg-white/70 hover:text-ink-800",
+                // Every tab carries a visible outline so the band clearly reads
+                // as a row of clickable workspaces, not plain text.
+                "focusable flex flex-1 items-center justify-center gap-1.5 whitespace-nowrap rounded-md border px-2.5 py-1 text-[13px] transition-colors",
+                tab === t.id
+                  ? "border-brand-300 bg-white font-semibold text-brand-800 shadow-sm"
+                  : "border-ink-200 bg-white/60 text-ink-600 hover:border-ink-300 hover:bg-white hover:text-ink-900",
               )}
             >
               <t.icon className="h-3.5 w-3.5" aria-hidden /> {t.label}
@@ -332,18 +381,20 @@ export function CaseWorkspace({
       </div>
 
       <div className="mt-5">
-        {tab === "overview" && <IntakePanel data={data} canEdit={can("case.edit")} call={call} />}
-        {tab === "records" && <RecordsPanel data={data} canEdit={can("records.upload")} call={call} busy={busy} />}
+        {tab === "overview" && <IntakePanel data={data} canEdit={can("case.edit") || attorneyView} call={call} />}
+        {tab === "records" && <RecordsPanel data={data} canEdit={can("records.upload")} canUpload={attorneyView} call={call} busy={busy} />}
         {tab === "chronology" && <ChronologyPanel data={data} canEdit={can("chronology.edit")} call={call} />}
-        {tab === "causation" && <CausationPanel data={data} />}
-        {tab === "providers" && <TreatingProvidersPanel data={data} canEdit={can("case.edit") || can("physician.review")} call={call} />}
-        {tab === "evidence" && <EvidencePanel data={data} />}
-        {tab === "futurecare" && <FutureCarePanel data={data} canEdit={can("futurecare.edit")} call={call} focusId={focusId} focusCat={focusCat} />}
-        {tab === "costs" && <CostsPanel data={data} assumptions={assumptions} totals={totals} canEdit={can("case.edit")} canApprove={can("physician.review")} call={call} focusId={focusId} />}
-        {tab === "reviews" && <ReviewsPanel points={data.reviewFindings} hasPlan={hasPlan} />}
-        {tab === "physician" && <PhysicianPanel data={data} canReview={can("physician.review")} call={call} />}
+        {tab === "causation" && <CausationPanel data={data} hideConfidence={attorneyView} />}
+        {tab === "providers" && <TreatingProvidersPanel data={data} canEdit={can("case.edit") || can("physician.review")} attorneyView={attorneyView} call={call} />}
+        {tab === "evidence" && !attorneyView && <EvidencePanel data={data} />}
+        {tab === "futurecare" && <FutureCarePanel data={data} canEdit={can("futurecare.edit")} attorneyView={attorneyView} call={call} focusId={focusId} focusCat={focusCat} />}
+        {tab === "costs" && !attorneyView && <CostsPanel data={data} assumptions={assumptions} totals={totals} canEdit={can("case.edit")} canApprove={can("physician.review")} call={call} focusId={focusId} />}
+        {tab === "reviews" && <ReviewsPanel points={data.reviewFindings} hasPlan={hasPlan} redactPricing={attorneyView} />}
+        {tab === "physician" && <PhysicianPanel data={data} canReview={can("physician.review")} attorneyView={attorneyView} call={call} />}
         {tab === "precedents" && <PrecedentsPanel precedents={precedents} data={data} />}
-        {tab === "report" && <ReportPanel data={data} canExport={can("report.export")} canEdit={can("case.edit")} call={call} busy={busy} totals={totals} physicians={physicians} />}
+        {tab === "report" && (attorneyView
+          ? <AttorneyReportPanel caseId={data.id} caseData={data} exports={data.reports ?? []} physicians={physicians} onNavigate={setTab} />
+          : <ReportPanel data={data} canExport={can("report.export")} canEdit={can("case.edit")} call={call} busy={busy} totals={totals} physicians={physicians} onReview={setReviewFinding} />)}
       </div>
     </div>
   );
@@ -359,6 +410,8 @@ const WORK_STATUSES = ["Employed", "Unemployed", "Disabled"];
 
 function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; call: any }) {
   const [form, setForm] = useState({
+    dateOfBirth: data.dateOfBirth ? String(data.dateOfBirth).slice(0, 10) : "",
+    dateOfInjury: data.dateOfInjury ? String(data.dateOfInjury).slice(0, 10) : "",
     diagnosis: data.diagnosis ?? "",
     icd10Code: data.icd10Code ?? "",
     mechanism: data.mechanism ?? "",
@@ -459,6 +512,12 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
       )}
 
       <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <Field label="Client Date of Birth">
+          <input type="date" className="input" disabled={!canEdit} value={form.dateOfBirth} onChange={(e) => set("dateOfBirth", e.target.value)} />
+        </Field>
+        <Field label="Date of Injury">
+          <input type="date" className="input" disabled={!canEdit} value={form.dateOfInjury} onChange={(e) => set("dateOfInjury", e.target.value)} />
+        </Field>
         <Field label="Primary Diagnosis" wide>
           <Icd10Search
             value={form.diagnosis}
@@ -504,6 +563,9 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
                 onChange={(e) => { setAddlSpecialties((prev) => prev.map((x, i) => (i === idx ? e.target.value : x))); setSaved(false); }}
               >
                 <option value="">Additional specialty {idx + 1}…</option>
+                {/* A saved value outside the canonical list (e.g. an engine-recommended
+                    specialty added via "Add for me") still displays and stays selectable. */}
+                {s && !MEDICAL_SPECIALTIES.includes(s) && <option value={s}>{s}</option>}
                 {MEDICAL_SPECIALTIES.map((m) => <option key={m} value={m}>{m}</option>)}
               </select>
               {canEdit && (
@@ -574,7 +636,7 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
         <div className="mt-4 flex items-center gap-3">
           <button className="btn-primary" onClick={async () => {
             if (unlinkedDx.length) { alert(`Link an ICD-10 code to each diagnosis before saving. Missing: ${unlinkedDx.join(", ")}. Pick a code from the search results.`); return; }
-            const r = await call(`/api/cases/${data.id}`, "PATCH", { ...form, additionalDiagnoses: additional.filter((d) => d.diagnosis.trim()), additionalSpecialties: addlSpecialties.map((s) => s.trim()).filter(Boolean) }, "intake"); if (r) setSaved(true);
+            const r = await call(`/api/cases/${data.id}`, "PATCH", { ...form, dateOfBirth: form.dateOfBirth || null, dateOfInjury: form.dateOfInjury || null, additionalDiagnoses: additional.filter((d) => d.diagnosis.trim()), additionalSpecialties: addlSpecialties.map((s) => s.trim()).filter(Boolean) }, "intake"); if (r) setSaved(true);
           }}>Save Intake</button>
           {unlinkedDx.length > 0 && <span className="text-sm text-amber-600">Link an ICD-10 code to {unlinkedDx.length === 1 ? "the flagged diagnosis" : `${unlinkedDx.length} diagnoses`} before saving.</span>}
           {saved && unlinkedDx.length === 0 && <span className="text-sm text-emerald-600">Saved.</span>}
@@ -673,7 +735,8 @@ function RecordMeta({ d, compact }: { d: AnyRec; compact?: boolean }) {
   );
 }
 
-function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: boolean; call: any; busy: string | null }) {
+function RecordsPanel({ data, canEdit, canUpload = false, call, busy }: { data: AnyRec; canEdit: boolean; canUpload?: boolean; call: any; busy: string | null }) {
+  const mayUpload = canEdit || canUpload;
   const [filter, setFilter] = useState<string>("All");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -701,17 +764,19 @@ function RecordsPanel({ data, canEdit, call, busy }: { data: AnyRec; canEdit: bo
 
   return (
     <div className="space-y-4">
-      {canEdit && (
+      {mayUpload && (
         <div className="card flex flex-wrap items-center gap-3 p-4">
           <label className="btn-outline cursor-pointer">
             <Upload className="h-4 w-4" /> Upload Records
             <input type="file" multiple className="hidden" onChange={(e) => upload(e.target.files)} />
           </label>
-          <button className="btn-ghost" disabled={busy === "sample"} onClick={() => call(`/api/cases/${data.id}/documents`, "POST", { sample: true }, "sample")}>
-            {busy === "sample" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />} Add Sample Record Set
-          </button>
+          {canEdit && (
+            <button className="btn-ghost" disabled={busy === "sample"} onClick={() => call(`/api/cases/${data.id}/documents`, "POST", { sample: true }, "sample")}>
+              {busy === "sample" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />} Add Sample Record Set
+            </button>
+          )}
           <span className="text-xs text-ink-500">
-            Each record is auto-labeled by type. Click a record&apos;s type icon to reassign it.
+            {canEdit ? "Each record is auto-labeled by type. Click a record's type icon to reassign it." : "Each record is auto-labeled by type and processed into the case pipeline."}
           </span>
         </div>
       )}
@@ -1167,7 +1232,7 @@ function ChronologyPanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
 
 // ── Causation ────────────────────────────────────────────────────────────────
 const REL_TONE: Record<string, "green" | "amber" | "neutral" | "red"> = { RELATED: "green", AGGRAVATION: "amber", PREEXISTING_UNRELATED: "neutral", SUBSEQUENT_UNRELATED: "neutral", UNCLEAR: "red" };
-function CausationPanel({ data }: { data: AnyRec }) {
+function CausationPanel({ data, hideConfidence = false }: { data: AnyRec; hideConfidence?: boolean }) {
   if (data.conditions.length === 0) return <Empty>Run the AI pipeline to build the causation & apportionment map.</Empty>;
   return (
     <div className="grid gap-4 md:grid-cols-2">
@@ -1179,16 +1244,22 @@ function CausationPanel({ data }: { data: AnyRec }) {
               <h3 className="font-semibold text-ink-900">{c.name}</h3>
               <Badge tone={REL_TONE[c.relatedness]}>{c.relatedness.replace(/_/g, " ").toLowerCase()}</Badge>
             </div>
-            <div className="mt-2 flex items-center gap-2 text-xs text-ink-500">
-              <span>Confidence</span>
-              <div className="h-1.5 w-24 overflow-hidden rounded-full bg-ink-100"><div className="h-full bg-brand-500" style={{ width: `${c.confidence}%` }} /></div>
-              <span className="font-medium text-ink-700">{confidenceBand(c.confidence)} · {c.confidence}%</span>
-              {c.physicianConfirmed && <Badge tone="green">MD confirmed</Badge>}
-            </div>
-            {/* What the determined confidence level means and how it was set. */}
-            <p className="mt-1.5 text-[11px] leading-relaxed text-ink-400">
-              {confidenceDefinition({ confidence: c.confidence, physicianConfirmed: c.physicianConfirmed, missingInfo: c.missingInfo, evidenceCount: sources.length })}
-            </p>
+            {hideConfidence ? (
+              c.physicianConfirmed && <div className="mt-2"><Badge tone="green">MD confirmed</Badge></div>
+            ) : (
+              <>
+                <div className="mt-2 flex items-center gap-2 text-xs text-ink-500">
+                  <span>Confidence</span>
+                  <div className="h-1.5 w-24 overflow-hidden rounded-full bg-ink-100"><div className="h-full bg-brand-500" style={{ width: `${c.confidence}%` }} /></div>
+                  <span className="font-medium text-ink-700">{confidenceBand(c.confidence)} · {c.confidence}%</span>
+                  {c.physicianConfirmed && <Badge tone="green">MD confirmed</Badge>}
+                </div>
+                {/* What the determined confidence level means and how it was set. */}
+                <p className="mt-1.5 text-[11px] leading-relaxed text-ink-400">
+                  {confidenceDefinition({ confidence: c.confidence, physicianConfirmed: c.physicianConfirmed, missingInfo: c.missingInfo, evidenceCount: sources.length })}
+                </p>
+              </>
+            )}
             <p className="mt-3 text-sm text-ink-700">{c.reasoning}</p>
             {c.objectiveEvidence && <p className="mt-2 text-xs text-ink-500"><span className="font-medium">Objective evidence:</span> {c.objectiveEvidence}</p>}
             {/* Links to the actual evidence: source record + page of the content. */}
@@ -1526,7 +1597,14 @@ const HIGHLIGHT_SECTION: Record<string, "reasoning" | "evidence" | "literature">
 };
 const HL = "rounded-md bg-amber-50 p-2 ring-2 ring-amber-400";
 
-function RecommendationDossierView({ dossier, assessment, highlight }: { dossier: RecommendationDossier; assessment?: ReasoningAssessment; highlight?: string | null }) {
+// Attorney-facing estimate range: -30% to +10% of the computed value, rounded
+// to the nearest $1,000 so the figures read as an estimate, not a total.
+function moneyRange(v: number): string {
+  const k = (x: number) => Math.round(x / 1000) * 1000;
+  return `${formatMoney(k(v * 0.7))} – ${formatMoney(k(v * 1.1))}`;
+}
+
+function RecommendationDossierView({ dossier, assessment, highlight, condensed = false }: { dossier: RecommendationDossier; assessment?: ReasoningAssessment; highlight?: string | null; condensed?: boolean }) {
   const se = dossier.supportingEvidence;
   const target = highlight ? HIGHLIGHT_SECTION[highlight] : undefined;
   return (
@@ -1547,12 +1625,21 @@ function RecommendationDossierView({ dossier, assessment, highlight }: { dossier
         <p className="mt-1 leading-relaxed text-ink-800">{dossier.medicalNecessity}</p>
       </div>
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">Probability</span>
-        <Badge tone={dossier.probability.percentage >= 51 ? "green" : "amber"}>{dossier.probability.percentage}%</Badge>
+        {/* The numeric probability stays clinical-team-only; the condensed
+            (attorney) view keeps the qualitative statement below. */}
+        {!condensed && (
+          <>
+            <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">Probability</span>
+            <Badge tone={dossier.probability.percentage >= 51 ? "green" : "amber"}>{dossier.probability.percentage}%</Badge>
+          </>
+        )}
         <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">Clinical confidence</span>
         <Badge tone={CONF_TONE_D[dossier.confidence.level]}>{dossier.confidence.level.toLowerCase()}</Badge>
       </div>
       <p className="text-ink-700">{dossier.probability.statement}</p>
+      {/* Attorney-condensed view ends at the probability statement — the
+          clinical evidence detail below is the clinical team's surface. */}
+      {condensed ? null : (<>
       <div data-focus-target={target === "evidence" ? "" : undefined} className={cn(target === "evidence" && HL)}>
         <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Supporting clinical evidence</p>
         <div className="mt-1 grid gap-2 md:grid-cols-2">
@@ -1589,6 +1676,7 @@ function RecommendationDossierView({ dossier, assessment, highlight }: { dossier
       )}
       <div><p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Potential challenges</p><ul className="mt-0.5 space-y-0.5">{dossier.potentialChallenges.slice(0, 5).map((t, i) => <li key={i} className="text-ink-700">{t}</li>)}</ul></div>
       <p className="text-xs text-ink-500">{dossier.confidence.explanation}</p>
+      </>)}
     </div>
   );
 }
@@ -1683,7 +1771,7 @@ function AddCareItemForm({ data, call, onDone }: { data: AnyRec; call: any; onDo
   );
 }
 
-function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: AnyRec; canEdit: boolean; call: any; focusId?: string | null; focusCat?: string | null }) {
+function FutureCarePanel({ data, canEdit, attorneyView = false, call, focusId, focusCat }: { data: AnyRec; canEdit: boolean; attorneyView?: boolean; call: any; focusId?: string | null; focusCat?: string | null }) {
   const [openIds, setOpenIds] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<string>("All");
   // Review-at-scale controls (Phase 11): search, probability / MD-status
@@ -1691,7 +1779,7 @@ function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: Any
   const [q, setQ] = useState("");
   const [prob, setProb] = useState("");
   const [phys, setPhys] = useState("");
-  const [sortKey, setSortKey] = useState<CareSortKey>("presentValue");
+  const [sortKey, setSortKey] = useState<CareSortKey>(attorneyView ? "service" : "presentValue");
   const [compact, setCompact] = useState(false);
   const toggleOpen = (id: string) => setOpenIds((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
   // Deep-link: when the assistant focuses an item, make sure it is visible
@@ -1732,8 +1820,8 @@ function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: Any
           {["PENDING", "APPROVED", "MODIFIED", "REJECTED"].map((p) => <option key={p} value={p}>MD: {p.toLowerCase()}</option>)}
         </select>
         <select className="input w-auto py-1.5 text-sm" aria-label="Sort recommendations" value={sortKey} onChange={(e) => setSortKey(e.target.value as CareSortKey)}>
-          <option value="presentValue">Sort: present value</option>
-          <option value="lifetimeCost">Sort: lifetime cost</option>
+          {!attorneyView && <option value="presentValue">Sort: present value</option>}
+          {!attorneyView && <option value="lifetimeCost">Sort: lifetime cost</option>}
           <option value="service">Sort: name</option>
           <option value="physicianStatus">Sort: MD status</option>
         </select>
@@ -1760,7 +1848,7 @@ function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: Any
             <div className="grid h-8 w-8 place-items-center rounded-lg bg-brand-50 text-brand-700"><g.icon className="h-4.5 w-4.5" /></div>
             <h3 className="text-sm font-semibold text-ink-900">{g.title}</h3>
             <span className="text-xs text-ink-400">{g.items.length} item{g.items.length === 1 ? "" : "s"}</span>
-            <span className="ml-auto text-xs font-medium text-brand-800">{formatMoney(g.items.reduce((s: number, it: AnyRec) => s + it.presentValue, 0))} PV</span>
+            {!attorneyView && <span className="ml-auto text-xs font-medium text-brand-800">{formatMoney(g.items.reduce((s: number, it: AnyRec) => s + it.presentValue, 0))} PV</span>}
           </div>
           <div className="space-y-2">
       {g.items.map((it: AnyRec) => (
@@ -1776,14 +1864,20 @@ function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: Any
                 {!compact && it.edited && <Badge tone="amber">edited</Badge>}
               </div>
               {!compact && (
-                <p className="mt-1 text-xs text-ink-500">{it.category.replace(/_/g, " ").toLowerCase()} · {it.specialty} · {it.cptCode || "no CPT"} · {it.frequencyPerYear}/yr {it.isLifetime ? "for life" : it.durationYears ? `× ${it.durationYears}y` : ""}</p>
+                <p className="mt-1 text-xs text-ink-500">
+                  {it.category.replace(/_/g, " ").toLowerCase()} · {it.specialty}
+                  {/* Codes and frequency are clinical detail — hidden from the attorney view. */}
+                  {!attorneyView && <> · {it.cptCode || "no CPT"} · {it.frequencyPerYear}/yr {it.isLifetime ? "for life" : it.durationYears ? `× ${it.durationYears}y` : ""}</>}
+                </p>
               )}
             </div>
             <div className="flex items-center gap-4">
-              <div className="text-right">
-                <div className="num-metric text-sm text-brand-800">{formatMoney(it.presentValue)}</div>
-                {!compact && <div className="text-xs text-ink-400">PV · {formatMoney(it.lifetimeCost)} lifetime</div>}
-              </div>
+              {!attorneyView && (
+                <div className="text-right">
+                  <div className="num-metric text-sm text-brand-800">{formatMoney(it.presentValue)}</div>
+                  {!compact && <div className="text-xs text-ink-400">PV · {formatMoney(it.lifetimeCost)} lifetime</div>}
+                </div>
+              )}
               <button
                 className="focusable rounded text-xs font-medium text-brand-700 hover:underline"
                 aria-expanded={openIds.has(it.id)}
@@ -1795,11 +1889,13 @@ function FutureCarePanel({ data, canEdit, call, focusId, focusCat }: { data: Any
           </div>
           {openIds.has(it.id) && (
             <div className="mt-3 border-t border-ink-100 pt-3">
-              <RecommendationDossierView dossier={dossierForItem(it, data)} assessment={assessmentForItem(it, data)} highlight={focusId === it.id ? focusCat : null} />
-              <div data-focus-target={focusId === it.id && focusCat && /cpt|pricing|duplicate_cost/.test(focusCat) ? "" : undefined} className={cn("mt-3 border-t border-ink-100 pt-2 text-sm text-ink-600", focusId === it.id && focusCat && /cpt|pricing|duplicate_cost/.test(focusCat) && "rounded-md bg-amber-50 p-2 ring-2 ring-amber-400")}>
-                <span className="text-xs font-medium text-ink-500">Cost basis: </span>{formatMoney(it.unitCost)}/unit · {it.pricingSource} · range {formatMoney(it.lowCost)}–{formatMoney(it.highCost)}
-                {it.lowerCostAlternative ? <> · <span className="text-xs font-medium text-ink-500">Alternative: </span>{it.lowerCostAlternative}</> : null}
-              </div>
+              <RecommendationDossierView dossier={dossierForItem(it, data)} assessment={assessmentForItem(it, data)} highlight={focusId === it.id ? focusCat : null} condensed={attorneyView} />
+              {!attorneyView && (
+                <div data-focus-target={focusId === it.id && focusCat && /cpt|pricing|duplicate_cost/.test(focusCat) ? "" : undefined} className={cn("mt-3 border-t border-ink-100 pt-2 text-sm text-ink-600", focusId === it.id && focusCat && /cpt|pricing|duplicate_cost/.test(focusCat) && "rounded-md bg-amber-50 p-2 ring-2 ring-amber-400")}>
+                  <span className="text-xs font-medium text-ink-500">Cost basis: </span>{formatMoney(it.unitCost)}/unit · {it.pricingSource} · range {formatMoney(it.lowCost)}–{formatMoney(it.highCost)}
+                  {it.lowerCostAlternative ? <> · <span className="text-xs font-medium text-ink-500">Alternative: </span>{it.lowerCostAlternative}</> : null}
+                </div>
+              )}
               {canEdit && <InlineItemEdit item={it} caseId={data.id} call={call} />}
             </div>
           )}
@@ -2127,7 +2223,10 @@ function NumField({ label, value, onChange, step, disabled, pct }: { label: stri
 // Contested-points review: each point states the argument one side will make,
 // cites its source, and provides the opposing side's counter-argument with its
 // own supporting source.
-function ReviewsPanel({ points, hasPlan }: { points: AnyRec[]; hasPlan: boolean }) {
+function ReviewsPanel({ points, hasPlan, redactPricing = false }: { points: AnyRec[]; hasPlan: boolean; redactPricing?: boolean }) {
+  // Pricing-restricted viewers (attorney) see the contested points with all
+  // dollar figures withheld; the argument structure is unchanged.
+  const rp = (t: unknown) => (redactPricing ? redactMoney(String(t ?? "")) : String(t ?? ""));
   const [filter, setFilter] = useState<"ALL" | "DEFENSE" | "PLAINTIFF">("ALL");
   if (!hasPlan) return <Empty>Run the AI pipeline to generate the contested-points review.</Empty>;
   if (!points.length) return <Empty>No contested points identified — the plan is cleanly supported.</Empty>;
@@ -2159,16 +2258,16 @@ function ReviewsPanel({ points, hasPlan }: { points: AnyRec[]; hasPlan: boolean 
               {/* Argument */}
               <div className="mt-2 rounded-lg border-l-4 border-amber-300 bg-amber-50/60 p-3">
                 <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-800">{raiser} argues</p>
-                <p className="mt-0.5 text-sm text-ink-800">{p.description}</p>
-                {p.sourceRef && <p className="mt-1 text-xs text-ink-500"><span className="font-medium">Source:</span> {p.sourceRef}</p>}
+                <p className="mt-0.5 text-sm text-ink-800">{rp(p.description)}</p>
+                {p.sourceRef && <p className="mt-1 text-xs text-ink-500"><span className="font-medium">Source:</span> {rp(p.sourceRef)}</p>}
               </div>
 
               {/* Counter */}
               {p.counterArgument && (
                 <div className="mt-2 rounded-lg border-l-4 border-emerald-300 bg-emerald-50/60 p-3">
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-800">{counter} counter</p>
-                  <p className="mt-0.5 text-sm text-ink-800">{p.counterArgument}</p>
-                  {p.counterSource && <p className="mt-1 text-xs text-ink-500"><span className="font-medium">Support:</span> {p.counterSource}</p>}
+                  <p className="mt-0.5 text-sm text-ink-800">{rp(p.counterArgument)}</p>
+                  {p.counterSource && <p className="mt-1 text-xs text-ink-500"><span className="font-medium">Support:</span> {rp(p.counterSource)}</p>}
                   {p.counterCitation && <p className="mt-1 text-xs text-emerald-800"><span className="font-medium">Citation:</span> {p.counterCitation}</p>}
                 </div>
               )}
@@ -2256,11 +2355,11 @@ function AttestationCard({ caseId, canReview, items }: { caseId: string; canRevi
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  async function load() {
+  const load = useCallback(async () => {
     const res = await fetch(`/api/cases/${caseId}/attestation`);
     if (res.ok) setState((await res.json()).attestations ?? []);
-  }
-  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [caseId]);
+  }, [caseId]);
+  useEffect(() => { void load(); }, [load]);
   async function sign() {
     setBusy(true);
     setError(null);
@@ -2335,11 +2434,44 @@ function AttestationCard({ caseId, canReview, items }: { caseId: string; canRevi
   );
 }
 
-function PhysicianPanel({ data, canReview, call }: { data: AnyRec; canReview: boolean; call: any }) {
+function PhysicianPanel({ data, canReview, attorneyView = false, call }: { data: AnyRec; canReview: boolean; attorneyView?: boolean; call: any }) {
   const [open, setOpen] = useState<string | null>(null);
   const [form, setForm] = useState<{ id: string; mode: "approve" | "modify" | "reject" } | null>(null);
   const [confirmAll, setConfirmAll] = useState(false);
   const [statusFilter, setStatusFilter] = useState<string>("");
+  // Attorney filter: the specialties requested on intake drive the dropdown.
+  const [specialtyFilter, setSpecialtyFilter] = useState<string>("");
+  const requestedSpecialties: string[] = [data.specialty, ...(Array.isArray(data.additionalSpecialties) ? data.additionalSpecialties : [])].filter(Boolean);
+  const matchesRequested = (have: string) => requestedSpecialties.some((want) => specMatch(String(have), String(want)));
+  const offSpecialty: string[] = requestedSpecialties.length
+    ? Array.from(new Set((data.futureCareItems as AnyRec[]).filter((it) => it.specialty && !matchesRequested(it.specialty)).map((it) => String(it.specialty))))
+    : [];
+  const [addingSpecs, setAddingSpecs] = useState(false);
+  // "Add for me": append the flagged specialties to the case's Specialty for
+  // Review list (canonicalized to the intake list's names where they match).
+  async function addOffSpecialties() {
+    setAddingSpecs(true);
+    try {
+      // Canonicalize to the intake list: substring match first, then a
+      // singular/plural-insensitive token-subset match ("Orthopedics" →
+      // "Orthopedic Surgery"). Unmatched names are kept verbatim.
+      const canonical = (spec: string) => MEDICAL_SPECIALTIES.find((m) => specMatch(m, spec)) ?? spec;
+      const same = specMatch;
+      const merged: string[] = Array.isArray(data.additionalSpecialties) ? [...(data.additionalSpecialties as string[])] : [];
+      for (const raw of offSpecialty) {
+        const spec = canonical(raw);
+        // Skip anything already covered by the primary or an existing entry.
+        if (data.specialty && same(spec, String(data.specialty))) continue;
+        if (merged.some((m) => same(m, spec))) continue;
+        merged.push(spec);
+      }
+      const r = await call(`/api/cases/${data.id}`, "PATCH", { additionalSpecialties: merged }, "addspec");
+      // Keep the integrity check in sync — the advisory clears on re-run.
+      if (r) void fetch(`/api/cases/${data.id}/validation`, { method: "POST" });
+    } finally {
+      setAddingSpecs(false);
+    }
+  }
   if (data.futureCareItems.length === 0) return <Empty>Run the AI pipeline first to build the physician review packet.</Empty>;
 
   // Review-speed affordances (Phase 14): live counts double as filters.
@@ -2356,7 +2488,7 @@ function PhysicianPanel({ data, canReview, call }: { data: AnyRec; canReview: bo
 
   return (
     <div className="space-y-3">
-      <AttestationCard caseId={data.id} canReview={canReview} items={data.futureCareItems} />
+      {!attorneyView && <AttestationCard caseId={data.id} canReview={canReview} items={data.futureCareItems} />}
       <div className="card flex flex-wrap items-center justify-between gap-3 p-4 text-sm text-ink-600">
         <span className="min-w-0 flex-1">
           Physician review packet — {canReview ? "every item stays Pending until you designate it. Review the paraphrased summary, then approve, modify (adjust probability, frequency, or duration), or reject with a documented reason. A decided item can be reopened." : "read-only: your role cannot sign off on medical necessity."}
@@ -2390,14 +2522,60 @@ function PhysicianPanel({ data, canReview, call }: { data: AnyRec; canReview: bo
           );
         })}
         {statusFilter && <button className="text-xs font-medium text-ink-500 hover:underline" onClick={() => setStatusFilter("")}>Show all</button>}
+        {attorneyView && (
+          <select
+            className="input ml-auto w-auto py-1 text-xs"
+            aria-label="Filter by requested specialty"
+            value={specialtyFilter}
+            onChange={(e) => setSpecialtyFilter(e.target.value)}
+          >
+            <option value="">All specialties</option>
+            {requestedSpecialties.map((sp) => (
+              <option key={sp} value={sp}>{sp}</option>
+            ))}
+          </select>
+        )}
       </div>
+      {/* Recommended specialties beyond what intake requested — surfaced, never silent. */}
+      {offSpecialty.length > 0 && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50/70 p-3 text-sm text-amber-900">
+          The recommendations include {offSpecialty.length === 1 ? "a specialty" : "specialties"} not requested at intake:{" "}
+          <span className="font-semibold">{offSpecialty.join(", ")}</span>. Add {offSpecialty.length === 1 ? "it" : "them"} under Specialty for
+          Review on the Intake page if this care should be reviewed, or the clinical team can reassign the items.
+          <div className="mt-2">
+            <button className="btn-primary px-3 py-1.5 text-xs" disabled={addingSpecs} onClick={() => void addOffSpecialties()}>
+              {addingSpecs ? "Adding…" : `Add ${offSpecialty.length === 1 ? "it" : "them"} for me`}
+            </button>
+          </div>
+        </div>
+      )}
 
       {items.length === 0 && <Empty>No items with this review status.</Empty>}
-      {items.map((it: AnyRec) => (
+      {((): [string | null, AnyRec[]][] => {
+        if (!specialtyFilter) return [[null, items]];
+        // Token match: item specialties are short forms ("PM&R"); the intake
+        // list carries the long names ("Physical Medicine & Rehabilitation (PM&R)").
+        const filtered = (items as AnyRec[]).filter((it) => it.specialty && specMatch(String(it.specialty), specialtyFilter));
+        return [[specialtyFilter, filtered]];
+      })().map(([groupLabel, groupItems]) => (
+        <div key={groupLabel ?? "__all"} className="space-y-3">
+          {groupLabel && (
+            <div className="mt-1 flex items-center gap-2 border-b border-ink-200 pb-1.5">
+              <h4 className="text-sm font-semibold text-ink-900">{groupLabel}</h4>
+              <span className="text-xs text-ink-400">{groupItems.length} item{groupItems.length === 1 ? "" : "s"}</span>
+            </div>
+          )}
+          {groupItems.map((it: AnyRec) => (
         <div key={it.id} className="card p-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="min-w-0">
               <span className="font-medium text-ink-900">{it.service}</span>
+              {attorneyView && (
+                <Badge tone={it.specialty && requestedSpecialties.length && !matchesRequested(it.specialty) ? "amber" : "brand"} className="ml-2">
+                  {it.specialty || "unassigned"}
+                  {it.specialty && requestedSpecialties.length && !matchesRequested(it.specialty) ? " — not requested at intake" : ""}
+                </Badge>
+              )}
               <Badge tone={PHYS_TONE[it.physicianStatus]} className="ml-2">{it.physicianStatus.toLowerCase()}</Badge>
             </div>
             <div className="flex items-center gap-2">
@@ -2435,6 +2613,8 @@ function PhysicianPanel({ data, canReview, call }: { data: AnyRec; canReview: bo
               )}
             </div>
           )}
+        </div>
+          ))}
         </div>
       ))}
     </div>
@@ -2606,20 +2786,20 @@ function FindingList({ findings, onDelete, canEdit }: { findings: AnyRec[]; onDe
   );
 }
 
-function TreatingProvidersPanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; call: any }) {
+function TreatingProvidersPanel({ data, canEdit, attorneyView = false, call }: { data: AnyRec; canEdit: boolean; attorneyView?: boolean; call: any }) {
   const [providers, setProviders] = useState<AnyRec[] | null>(null);
   const [patient, setPatient] = useState<AnyRec[]>([]);
   const [openProvider, setOpenProvider] = useState<string | null>(null);
 
-  async function loadProviders(refresh = false) {
+  const loadProviders = useCallback(async (refresh = false) => {
     const res = await fetch(`/api/cases/${data.id}/providers${refresh ? "?refresh=1" : ""}`);
     if (res.ok) setProviders((await res.json()).providers ?? []);
-  }
-  async function loadPatient() {
+  }, [data.id]);
+  const loadPatient = useCallback(async () => {
     const res = await fetch(`/api/cases/${data.id}/interviews?subject=PATIENT`);
     if (res.ok) setPatient((await res.json()).findings ?? []);
-  }
-  useEffect(() => { loadProviders(true); loadPatient(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [data.id]);
+  }, [data.id]);
+  useEffect(() => { void loadProviders(true); void loadPatient(); }, [loadPatient, loadProviders]);
 
   async function addFinding(body: AnyRec, after: () => void) {
     const res = await fetch(`/api/cases/${data.id}/interviews`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
@@ -2674,13 +2854,21 @@ function TreatingProvidersPanel({ data, canEdit, call }: { data: AnyRec; canEdit
                   <div className="flex items-center gap-2">
                     {canEdit && p.status !== "CONFIRMED" && <button className="btn-outline py-1 text-xs" onClick={() => patchProvider(p.id, { status: "CONFIRMED" })}>Confirm</button>}
                     {canEdit && <button className="py-1 text-xs text-ink-400 hover:text-red-600" onClick={() => patchProvider(p.id, { status: "DISMISSED" })}>Dismiss</button>}
-                    <button className="text-xs font-medium text-brand-700 hover:underline" onClick={() => setOpenProvider(openProvider === p.id ? null : p.id)}>{openProvider === p.id ? "Hide" : `Interview (${(p.interviewFindings ?? []).length})`}</button>
+                    <button className="text-xs font-medium text-brand-700 hover:underline" onClick={() => setOpenProvider(openProvider === p.id ? null : p.id)}>{openProvider === p.id ? "Hide" : attorneyView ? `Attorney input${p.depositionSummary || p.attorneyNotes ? " ✓" : ""}` : `Interview (${(p.interviewFindings ?? []).length})`}</button>
                   </div>
                 </div>
                 {openProvider === p.id && (
                   <div className="border-t border-ink-100 p-3">
-                    <FindingList findings={p.interviewFindings ?? []} canEdit={canEdit} onDelete={(id) => delFinding(id, () => loadProviders())} />
-                    {canEdit && <InterviewEditor onAdd={(f) => addFinding({ subject: "PROVIDER", providerId: p.id, ...f }, () => loadProviders())} />}
+                    {!attorneyView && <FindingList findings={p.interviewFindings ?? []} canEdit={canEdit} onDelete={(id) => delFinding(id, () => loadProviders())} />}
+                    {!attorneyView && canEdit && <InterviewEditor onAdd={(f) => addFinding({ subject: "PROVIDER", providerId: p.id, ...f }, () => loadProviders())} />}
+                    {!attorneyView && (p.depositionSummary || p.attorneyNotes) && (
+                      <div className="mt-2 rounded-md bg-ink-50 p-2.5 text-sm">
+                        <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Attorney-provided context</p>
+                        {p.depositionSummary && <p className="mt-1 whitespace-pre-wrap text-ink-700"><span className="text-xs font-medium text-ink-500">Deposition summary: </span>{p.depositionSummary}</p>}
+                        {p.attorneyNotes && <p className="mt-1 whitespace-pre-wrap text-ink-700"><span className="text-xs font-medium text-ink-500">Notes: </span>{p.attorneyNotes}</p>}
+                      </div>
+                    )}
+                    {attorneyView && <AttorneyProviderInput caseId={data.id} provider={p} onSaved={() => loadProviders()} />}
                   </div>
                 )}
               </div>
@@ -2705,6 +2893,58 @@ function TreatingProvidersPanel({ data, canEdit, call }: { data: AnyRec; canEdit
     </div>
   );
 }
+// Attorney contribution surface: deposition summary + notes (persisted on the
+// provider via the attorney-scoped PATCH) and deposition transcript upload
+// (ingested into records as a DEPOSITION document, server-enforced).
+function AttorneyProviderInput({ caseId, provider, onSaved }: { caseId: string; provider: AnyRec; onSaved: () => void }) {
+  const [dep, setDep] = useState<string>(provider.depositionSummary ?? "");
+  const [notes, setNotes] = useState<string>(provider.attorneyNotes ?? "");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  async function save() {
+    setBusy(true); setMsg(null);
+    const res = await fetch(`/api/cases/${caseId}/providers/${provider.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ depositionSummary: dep.trim() || null, attorneyNotes: notes.trim() || null }),
+    });
+    setBusy(false);
+    setMsg(res.ok ? "Saved." : "Could not save — try again.");
+    if (res.ok) onSaved();
+  }
+
+  async function upload(file: File) {
+    setBusy(true); setMsg(null);
+    const fd = new FormData();
+    fd.append("files", file);
+    fd.append("typeMap", JSON.stringify({ [file.name]: "DEPOSITION" }));
+    const res = await fetch(`/api/cases/${caseId}/documents`, { method: "POST", body: fd });
+    setBusy(false);
+    setMsg(res.ok ? `Deposition "${file.name}" uploaded to the case records.` : "Upload failed — try again.");
+  }
+
+  return (
+    <div className="space-y-2.5">
+      <p className="text-xs text-ink-500">Your deposition summary and notes for this provider are shared with the clinical team and woven into case context. Uploaded transcripts are filed in the case records as depositions.</p>
+      <label className="block text-xs text-ink-600">Deposition summary
+        <textarea className="input mt-0.5 w-full py-1.5 text-sm" rows={4} value={dep} onChange={(e) => setDep(e.target.value)} placeholder="Key testimony, opinions on causation and future care, concessions, impeachment points…" />
+      </label>
+      <label className="block text-xs text-ink-600">Notes
+        <textarea className="input mt-0.5 w-full py-1.5 text-sm" rows={3} value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Scheduling, credibility, relationship to the case, follow-ups…" />
+      </label>
+      <div className="flex flex-wrap items-center gap-3">
+        <button className="btn-primary px-3 py-1.5 text-xs" disabled={busy} onClick={() => void save()}>Save</button>
+        <label className="btn-outline cursor-pointer px-3 py-1.5 text-xs">
+          Upload deposition transcript
+          <input type="file" className="hidden" accept=".pdf,.doc,.docx,.txt" onChange={(e) => { const f = e.target.files?.[0]; if (f) void upload(f); e.target.value = ""; }} />
+        </label>
+        {msg && <span className="text-xs text-ink-500">{msg}</span>}
+      </div>
+    </div>
+  );
+}
+
 function AddProviderInline({ data, onAdded }: { data: AnyRec; onAdded: () => void }) {
   const [show, setShow] = useState(false);
   const [name, setName] = useState("");
@@ -2736,7 +2976,7 @@ function EvidencePanel({ data }: { data: AnyRec }) {
   // report narrative renders from), never a recomputed variant.
   const [assessments, setAssessments] = useState<AnyRec[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
-  async function load(method: "GET" | "POST" = "GET") {
+  const load = useCallback(async (method: "GET" | "POST" = "GET") => {
     if (method === "POST") setRebuilding(true);
     try {
       const res = await fetch(`/api/cases/${data.id}/evidence`, { method });
@@ -2747,8 +2987,8 @@ function EvidencePanel({ data }: { data: AnyRec }) {
     } finally {
       setRebuilding(false);
     }
-  }
-  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [data.id]);
+  }, [data.id]);
+  useEffect(() => { void load(); }, [load]);
   useEffect(() => {
     // Failures are surfaced, never silent — an empty Explorer must say WHY.
     fetch(`/api/cases/${data.id}/reasoning`)
@@ -2759,8 +2999,8 @@ function EvidencePanel({ data }: { data: AnyRec }) {
       .catch(() => setLoadError("Couldn't load the reasoning assessments — refresh the page or log in again."));
   }, [data.id]);
 
-  const conditions: AnyRec[] = data.conditions ?? [];
-  const items: AnyRec[] = data.futureCareItems ?? [];
+  const conditions: AnyRec[] = useMemo(() => data.conditions ?? [], [data.conditions]);
+  const items: AnyRec[] = useMemo(() => data.futureCareItems ?? [], [data.futureCareItems]);
   const condById = useMemo(() => new Map(conditions.map((c: AnyRec) => [c.id, c])), [conditions]);
   const itemById = useMemo(() => new Map(items.map((i: AnyRec) => [i.id, i])), [items]);
   const [selType, selId] = sel ? sel.split(":") : [null, null];
@@ -3192,11 +3432,18 @@ function VersionCompareCard({ caseId, embedded = false }: { caseId: string; embe
 
 // Persisted integrity findings for the case (diagnosis mapping, coding/pricing,
 // inclusion eligibility). Critical findings mean the DOCX exports as a DRAFT.
-function ValidationCard({ caseId, scope }: { caseId: string; scope?: ReportSelection | null }) {
+// Strip dollar amounts from finding text for pricing-restricted viewers.
+function redactMoney(t: string | null | undefined): string {
+  return String(t ?? "").replace(/\$\s?[\d,]+(?:\.\d+)?/g, "[amount withheld]");
+}
+
+function ValidationCard({ caseId, scope, redactPricing = false, onReview }: { caseId: string; scope?: ReportSelection | null; redactPricing?: boolean; onReview?: (finding: AnyRec) => void }) {
   const [state, setState] = useState<AnyRec | null>(null);
   const [running, setRunning] = useState(false);
   const [showAll, setShowAll] = useState(false);
-  async function load(method: "GET" | "POST" = "GET") {
+  const [actBusy, setActBusy] = useState<string | null>(null);
+  const [actErr, setActErr] = useState<string | null>(null);
+  const load = useCallback(async (method: "GET" | "POST" = "GET") => {
     if (method === "POST") setRunning(true);
     try {
       const res = await fetch(`/api/cases/${caseId}/validation`, { method });
@@ -3204,10 +3451,35 @@ function ValidationCard({ caseId, scope }: { caseId: string; scope?: ReportSelec
     } finally {
       setRunning(false);
     }
-  }
+  }, [caseId]);
+  // Disposition a finding: the server updates it, re-runs the validation
+  // engine (and the cost pipeline when a correction changed items), and
+  // returns the fresh state — so gates update in the same click.
+  const act = useCallback(async (findingId: string, action: string) => {
+    setActBusy(findingId + action); setActErr(null);
+    try {
+      const res = await fetch(`/api/cases/${caseId}/validation/${findingId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) setActErr(body.error ?? "Action failed.");
+      else setState(body);
+    } finally {
+      setActBusy(null);
+    }
+  }, [caseId]);
   // Reload whenever the selected report changes so the card always reflects
   // the CURRENT findings for the document the user is looking at.
-  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [caseId, scope?.id]);
+  useEffect(() => { void load(); }, [load, scope?.id]);
+  // The Case Review agent re-runs the pipeline when it dispositions a finding;
+  // refresh this card the moment that happens.
+  useEffect(() => {
+    const h = () => void load();
+    window.addEventListener("lifeplanos:validation-updated", h);
+    return () => window.removeEventListener("lifeplanos:validation-updated", h);
+  }, [load]);
   const allFindings: AnyRec[] = state?.findings ?? [];
   // Scope the DISPLAY to findings relevant to the report selected in the
   // library dropdown. Export gating is unaffected — blocking is computed over
@@ -3220,8 +3492,9 @@ function ValidationCard({ caseId, scope }: { caseId: string; scope?: ReportSelec
       relevant = allFindings.filter((f) => re.test(`${f.result} ${f.issue}`));
     } catch { relevant = allFindings; }
   }
-  const findings = relevant;
-  const hiddenCount = allFindings.length - findings.length;
+  const findings = relevant.filter((f) => (f.status ?? "OPEN") === "OPEN");
+  const dispositioned = relevant.filter((f) => (f.status ?? "OPEN") !== "OPEN");
+  const hiddenCount = allFindings.length - relevant.length;
   const SEV_TONE: Record<string, "red" | "amber" | "neutral"> = { Critical: "red", High: "amber", Moderate: "neutral", Low: "neutral" };
   return (
     <div className="card p-5">
@@ -3270,10 +3543,16 @@ function ValidationCard({ caseId, scope }: { caseId: string; scope?: ReportSelec
               <div className="flex flex-wrap items-center gap-2">
                 <Badge tone={SEV_TONE[f.severity] ?? "neutral"}>{f.severity.toLowerCase()}</Badge>
                 <span className="font-semibold text-ink-900">{f.service}</span>
-                <span className="text-ink-500">— {f.result} (blocks final export)</span>
+                <span className="text-ink-500">— {redactPricing ? redactMoney(f.result) : f.result} (blocks final export)</span>
               </div>
-              <p className="mt-1 text-ink-700">{f.issue}</p>
-              <p className="mt-0.5 text-ink-500"><span className="font-medium">Correction:</span> {f.suggestion}</p>
+              <p className="mt-1 text-ink-700">{redactPricing ? redactMoney(f.issue) : f.issue}</p>
+              <p className="mt-0.5 text-ink-500"><span className="font-medium">Correction:</span> {redactPricing ? redactMoney(f.suggestion) : f.suggestion}</p>
+              {actErr && <p className="mt-1 text-xs text-red-700">{actErr}</p>}
+              {onReview && (
+                <div className="mt-2 border-t border-ink-100 pt-2">
+                  <button className="focusable rounded text-xs font-semibold text-brand-700 hover:underline" onClick={() => onReview(f)}>Review</button>
+                </div>
+              )}
             </li>
           ))}
         </ul>
@@ -3287,10 +3566,33 @@ function ValidationCard({ caseId, scope }: { caseId: string; scope?: ReportSelec
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge tone={SEV_TONE[f.severity] ?? "neutral"}>{f.severity.toLowerCase()}</Badge>
                   <span className="font-semibold text-ink-900">{f.service}</span>
-                  <span className="text-ink-500">— {f.result}</span>
+                  <span className="text-ink-500">— {redactPricing ? redactMoney(f.result) : f.result}</span>
                 </div>
-                <p className="mt-1 text-ink-700">{f.issue}</p>
-                <p className="mt-0.5 text-ink-500"><span className="font-medium">Correction:</span> {f.suggestion}</p>
+                <p className="mt-1 text-ink-700">{redactPricing ? redactMoney(f.issue) : f.issue}</p>
+                <p className="mt-0.5 text-ink-500"><span className="font-medium">Correction:</span> {redactPricing ? redactMoney(f.suggestion) : f.suggestion}</p>
+              {actErr && <p className="mt-1 text-xs text-red-700">{actErr}</p>}
+              {onReview && (
+                <div className="mt-2 border-t border-ink-100 pt-2">
+                  <button className="focusable rounded text-xs font-semibold text-brand-700 hover:underline" onClick={() => onReview(f)}>Review</button>
+                </div>
+              )}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+      {dispositioned.length > 0 && (
+        <details className="mt-3">
+          <summary className="cursor-pointer text-xs font-medium text-ink-500">{dispositioned.length} resolved / ignored finding{dispositioned.length === 1 ? "" : "s"}</summary>
+          <ul className="mt-2 space-y-2">
+            {dispositioned.map((f) => (
+              <li key={f.id} className="rounded-lg bg-ink-50/40 p-3 text-xs opacity-80">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge tone="neutral">{String(f.status).replace(/_/g, " ").toLowerCase()}</Badge>
+                  <span className="font-semibold text-ink-900">{f.service}</span>
+                  <span className="text-ink-500">— {redactPricing ? redactMoney(f.result) : f.result}</span>
+                  <button className="focusable ml-auto rounded text-xs font-medium text-brand-700 hover:underline" disabled={actBusy !== null} onClick={() => void act(f.id, "reopen")}>Reopen</button>
+                </div>
               </li>
             ))}
           </ul>
@@ -3303,14 +3605,323 @@ function ValidationCard({ caseId, scope }: { caseId: string; scope?: ReportSelec
   );
 }
 
-function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians = [] }: { data: AnyRec; canExport: boolean; canEdit: boolean; call: any; busy: string | null; totals: AnyRec; physicians?: AnyRec[] }) {
+// ─────────────────────────────────────────────────────────────────────────────
+// Attorney Report tab — ordering surface, not a generation surface. The
+// attorney picks a report, sees its integrity barriers (no pricing values),
+// chooses anonymous preparer titles (specialty-level for physicians), and
+// submits an Order (a CaseEngagement the firm authorizes and staffs). Final,
+// released reports are listed newest-first with prior versions tucked away.
+// ─────────────────────────────────────────────────────────────────────────────
+// Specialty comparison: word-token subset match, singular/plural-insensitive.
+// Never raw substring — "Urology" must not match "Neurology".
+function specTokens(t: string): string[] {
+  return t.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean).map((w) => w.replace(/s$/, ""));
+}
+function specMatch(a: string, b: string): boolean {
+  const at = specTokens(a);
+  const bt = specTokens(b);
+  if (!at.length || !bt.length) return false;
+  return at.every((w) => bt.includes(w)) || bt.every((w) => at.includes(w));
+}
+
+const PREPARER_TITLES: Record<string, string> = {
+  LIFE_CARE_PLANNER: "Life Care Planner",
+  PHYSICIAN_REVIEWER: "Physician Reviewer",
+  VOCATIONAL_EXPERT: "Vocational Expert",
+  FORENSIC_ECONOMIST: "Forensic Economist",
+  QUALITY_ASSURANCE_REVIEWER: "Quality Assurance Reviewer",
+};
+
+function attorneyPreparerOptions(def: AnyRec | null): { key: string; label: string; required?: boolean }[] {
+  if (!def) return [];
+  const opts: { key: string; label: string; required?: boolean }[] = [];
+  // A credentialed planner authors every prepared report.
+  opts.push({ key: "LIFE_CARE_PLANNER", label: PREPARER_TITLES.LIFE_CARE_PLANNER, required: def.serviceTier === "core" });
+  // Physician review is offered wherever the report carries clinical opinions.
+  if (def.requiredExpert === "physician" || def.approval === "physician_required" || def.serviceTier === "core" || def.category === "Clinical analysis") {
+    opts.push({ key: "PHYSICIAN_REVIEWER", label: PREPARER_TITLES.PHYSICIAN_REVIEWER, required: def.requiredExpert === "physician" || def.approval === "physician_required" });
+  }
+  if (def.requiredExpert === "vocational") opts.push({ key: "VOCATIONAL_EXPERT", label: PREPARER_TITLES.VOCATIONAL_EXPERT, required: true });
+  if (def.requiredExpert === "economist") opts.push({ key: "FORENSIC_ECONOMIST", label: PREPARER_TITLES.FORENSIC_ECONOMIST, required: true });
+  opts.push({ key: "QUALITY_ASSURANCE_REVIEWER", label: PREPARER_TITLES.QUALITY_ASSURANCE_REVIEWER });
+  return opts;
+}
+
+// Request-side readiness: the barriers an ATTORNEY can act on. Clinical
+// integrity items (physician review, citations, duplicates) are the clinical
+// team's work and are deliberately not surfaced as "blocked" here.
+function requestBlockingItems(data: AnyRec): { label: string; tab: string; action: string }[] {
+  return attorneyItemsNeeded({
+    dateOfBirth: data.dateOfBirth,
+    dateOfInjury: data.dateOfInjury,
+    diagnosis: data.diagnosis,
+    jurisdiction: data.jurisdiction,
+    specialty: data.specialty,
+    documentCount: (data.documents ?? []).length,
+  });
+}
+
+function AttorneyReportPanel({ caseId, caseData, exports, physicians = [], onNavigate }: { caseId: string; caseData: AnyRec; exports: AnyRec[]; physicians?: AnyRec[]; onNavigate?: (tab: string) => void }) {
+  const [reports, setReports] = useState<AnyRec[]>([]);
+  const [selectedId, setSelectedId] = useState<string>("LIFE_CARE_PLAN");
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  // One entry per requested physician reviewer; specialty options mirror the
+  // Intake page's "Specialty for Review" list exactly.
+  const [physSpecialties, setPhysSpecialties] = useState<string[]>([""]);
+  const [orders, setOrders] = useState<AnyRec[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    const res = await fetch(`/api/cases/${caseId}/reports`);
+    if (res.ok) setReports((await res.json()).reports ?? []);
+    const eng = await fetch(`/api/cases/${caseId}/engagements`);
+    if (eng.ok) setOrders((await eng.json()).engagements ?? []);
+  }, [caseId]);
+  useEffect(() => { void load(); }, [load]);
+
+  const selected = reports.find((r) => r.id === selectedId) ?? null;
+  const options = attorneyPreparerOptions(selected);
+  const blockers = requestBlockingItems(caseData);
+
+  // Required titles are always part of the order.
+  const effectivePicked = new Set(picked);
+  for (const o of options) if (o.required) effectivePicked.add(o.key);
+
+  async function order() {
+    if (!selected) return;
+    setBusy(true); setMsg(null);
+    const requestedPreparers: { title: string; specialty?: string }[] = options
+      .filter((o) => effectivePicked.has(o.key))
+      .flatMap((o): { title: string; specialty?: string }[] => {
+        if (o.key !== "PHYSICIAN_REVIEWER") return [{ title: o.label }];
+        const chosen = Array.from(new Set(physSpecialties.map((sp) => sp.trim()).filter(Boolean)));
+        return chosen.length ? chosen.map((sp) => ({ title: o.label, specialty: sp })) : [{ title: o.label }];
+      });
+    const scopeText = `Attorney order: ${selected.name} — preparers: ${requestedPreparers.map((r) => r.specialty ? `${r.title} (${r.specialty})` : r.title).join(", ")}`;
+    const res = await fetch(`/api/cases/${caseId}/engagements`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reportType: selected.id, scope: scopeText, configuration: { requestedPreparers, orderedVia: "attorney_report_tab" } }),
+    });
+    setBusy(false);
+    if (res.ok) { setMsg("Order submitted. The firm will confirm, staff, and prepare this report."); void load(); }
+    else { const body = await res.json().catch(() => ({})); setMsg(body.error ?? "Order could not be submitted."); }
+  }
+
+  // Final, released deliverables grouped by report, newest first.
+  const finals = exports.filter((r: AnyRec) => r.draft === false);
+  const groupsMap = new Map<string, AnyRec[]>();
+  for (const r of finals) {
+    const key = r.reportType ?? (r.format === "MEMO" ? "TESTIMONY_PREP_PACK" : "LIFE_CARE_PLAN");
+    const list = groupsMap.get(key) ?? [];
+    list.push(r);
+    groupsMap.set(key, list);
+  }
+  const finalGroups = Array.from(groupsMap.entries()).map(([key, list]) => {
+    const sorted = [...list].sort((a, b) => (b.version ?? 0) - (a.version ?? 0) || String(b.createdAt).localeCompare(String(a.createdAt)));
+    return { key, label: key.replace(/_/g, " ").toLowerCase().replace(/^\w/, (c: string) => c.toUpperCase()), newest: sorted[0], prior: sorted.slice(1) };
+  }).sort((a, b) => String(b.newest.createdAt).localeCompare(String(a.newest.createdAt)));
+
+  const openOrders = orders.filter((o: AnyRec) => !["COMPLETED", "CANCELLED"].includes(o.status));
+
+  return (
+    <div className="space-y-4">
+      {/* Report selection */}
+      <div className="card p-5">
+        <h3 className="text-sm font-semibold text-ink-900">Request Report</h3>
+        <p className="text-xs text-ink-500">Choose the report you want prepared. Anything still needed from your side appears under Request-Blocking Items below.</p>
+        {/* The exact same report library as the clinical view, grouped by the
+            same categories — only the action differs (order, not generate). */}
+        {ATTORNEY_CATEGORY_ORDER.filter((cat) => reports.some((r: AnyRec) => r.category === cat)).map((cat) => (
+          <div key={cat} className="mt-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">{cat}</p>
+            <div className="mt-1.5 grid gap-2 sm:grid-cols-2">
+              {reports.filter((r: AnyRec) => r.category === cat).map((r: AnyRec) => (
+                <button
+                  key={r.id}
+                  onClick={() => { setSelectedId(r.id); setPicked(new Set()); setPhysSpecialties([""]); setMsg(null); }}
+                  className={cn(
+                    "focusable rounded-lg border p-3 text-left transition-colors",
+                    selectedId === r.id ? "border-brand-400 bg-brand-50/60" : "border-ink-200 hover:border-ink-300 hover:bg-ink-50",
+                  )}
+                >
+                  <span className="flex items-center gap-2">
+                    <span className={cn("h-2 w-2 shrink-0 rounded-full", blockers.length === 0 ? "bg-emerald-500" : "bg-amber-500")} />
+                    <span className="text-sm font-semibold text-ink-900">{r.name}</span>
+                  </span>
+                  <span className="mt-0.5 block text-xs text-ink-500">{r.description}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Request-side readiness — only barriers the attorney controls. The
+          clinical team's internal integrity items are resolved after ordering
+          and are never presented to the attorney as "blocked". */}
+      <div className="card p-5">
+        <div className="flex items-center gap-2">
+          <h3 className="text-sm font-semibold text-ink-900">Request-Blocking Items</h3>
+          {blockers.length === 0
+            ? <Badge tone="green">ready to order</Badge>
+            : <Badge tone="amber">{blockers.length} to complete</Badge>}
+        </div>
+        {blockers.length === 0 ? (
+          <p className="mt-2 text-sm text-ink-600">
+            Everything needed from your side is on file. Any remaining internal items are handled by the clinical team as part of preparing the report.
+          </p>
+        ) : (
+          <ul className="mt-3 space-y-2">
+            {blockers.map((bk) => (
+              <li key={bk.label} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-amber-50/70 p-3 text-sm">
+                <span className="text-ink-800">{bk.label}</span>
+                {onNavigate && (
+                  <button className="focusable rounded text-xs font-semibold text-brand-700 hover:underline" onClick={() => onNavigate(bk.tab)}>
+                    {bk.action}
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      {/* Preparer titles (anonymous) */}
+      <div className="card p-5">
+        <h3 className="text-sm font-semibold text-ink-900">Report Preparers</h3>
+        <p className="text-xs text-ink-500">Choose who should prepare and review this report by title. The firm assigns the individual professionals; required titles for the selected report are always included.</p>
+        <div className="mt-3 space-y-2">
+          {options.map((o) => (
+            <div key={o.key}>
+              <label className="flex items-center gap-2 text-sm text-ink-800">
+                <input
+                  type="checkbox"
+                  checked={effectivePicked.has(o.key)}
+                  disabled={o.required}
+                  onChange={(e) => setPicked((prev) => { const n = new Set(prev); if (e.target.checked) n.add(o.key); else n.delete(o.key); return n; })}
+                />
+                {o.label}
+                {o.required && <Badge tone="neutral">required for this report</Badge>}
+              </label>
+              {o.key === "PHYSICIAN_REVIEWER" && effectivePicked.has(o.key) && (
+                <div className="ml-6 mt-1 space-y-1.5">
+                  {physSpecialties.map((sp, idx) => (
+                    <div key={idx} className="flex items-center gap-2">
+                      <select
+                        className="input w-80 py-1.5 text-sm"
+                        aria-label={`Reviewer specialty ${idx + 1}`}
+                        value={sp}
+                        onChange={(e) => setPhysSpecialties((prev) => prev.map((x, i) => (i === idx ? e.target.value : x)))}
+                      >
+                        <option value="">Any available specialty</option>
+                        {MEDICAL_SPECIALTIES.map((m) => <option key={m} value={m}>{m}</option>)}
+                      </select>
+                      {physSpecialties.length > 1 && (
+                        <button
+                          type="button"
+                          className="focusable rounded text-xs text-ink-400 hover:text-red-600"
+                          aria-label={`Remove physician reviewer ${idx + 1}`}
+                          onClick={() => setPhysSpecialties((prev) => prev.filter((_, i) => i !== idx))}
+                        >
+                          Remove
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    className="focusable rounded text-xs font-medium text-brand-700 hover:underline"
+                    onClick={() => setPhysSpecialties((prev) => [...prev, ""])}
+                  >
+                    + Add another physician reviewer
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <button className="btn-primary px-4 py-2 text-sm" disabled={busy || !selected} onClick={() => void order()}>
+            {busy ? "Submitting…" : "Order"}
+          </button>
+          {msg && <span className="text-xs text-ink-600">{msg}</span>}
+        </div>
+        {openOrders.length > 0 && (
+          <div className="mt-4 border-t border-ink-100 pt-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Open Orders</p>
+            <ul className="mt-1 space-y-1">
+              {openOrders.map((o: AnyRec) => (
+                <li key={o.id} className="flex flex-wrap items-center gap-2 text-sm text-ink-700">
+                  <span className="font-medium">{String(o.reportType).replace(/_/g, " ").toLowerCase()}</span>
+                  <Badge tone="info">{String(o.status).replace(/_/g, " ").toLowerCase()}</Badge>
+                  <span className="text-xs text-ink-400">ordered {formatDate(o.createdAt)}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </div>
+
+      {/* Final, released reports — newest per report, priors tucked underneath. */}
+      <div className="card p-5">
+        <h3 className="text-sm font-semibold text-ink-900">Final Reports</h3>
+        {finalGroups.length === 0 ? (
+          <p className="mt-2 text-sm text-ink-500">No final reports have been released on this matter yet.</p>
+        ) : (
+          <div className="mt-3 space-y-3">
+            {finalGroups.map((g) => (
+              <div key={g.key} className="rounded-lg ring-1 ring-ink-100 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="min-w-0">
+                    <span className="font-medium text-ink-900">{g.label}</span>
+                    <span className="ml-2 text-xs text-ink-500">v{g.newest.version} · {String(g.newest.format).toLowerCase()} · {formatDate(g.newest.createdAt)}</span>
+                  </span>
+                  <a className="text-sm font-medium text-brand-700 hover:underline" href={`/api/cases/${caseId}/export/${g.newest.id}/download`} target="_blank">Download</a>
+                </div>
+                {g.prior.length > 0 && (
+                  <details className="mt-2">
+                    <summary className="cursor-pointer text-xs text-ink-400">Prior versions ({g.prior.length})</summary>
+                    <ul className="mt-1 space-y-1">
+                      {g.prior.map((r: AnyRec) => (
+                        <li key={r.id} className="flex items-center justify-between text-xs text-ink-500">
+                          <span>v{r.version} · {String(r.format).toLowerCase()} · {formatDate(r.createdAt)}</span>
+                          <a className="text-brand-700 hover:underline" href={`/api/cases/${caseId}/export/${r.id}/download`} target="_blank">Download</a>
+                        </li>
+                      ))}
+                    </ul>
+                  </details>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const ATTORNEY_CATEGORY_ORDER = ["Core", "Record review", "Damages", "Clinical analysis", "Governance", "Custom"];
+
+const STATUS_DOT_ATTORNEY: Record<string, string> = {
+  Ready: "bg-emerald-500",
+  "Previously exported": "bg-emerald-500",
+  "Physician review required": "bg-amber-500",
+  Blocked: "bg-red-500",
+  "Not enough information": "bg-slate-300",
+  "Expert input required": "bg-amber-500",
+  "Not enabled": "bg-slate-300",
+};
+
+function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians = [], onReview }: { data: AnyRec; canExport: boolean; canEdit: boolean; call: any; busy: string | null; totals: AnyRec; physicians?: AnyRec[]; onReview?: (finding: AnyRec) => void }) {
   const [preparing, setPreparing] = useState<string>(data.preparingPhysicianId ?? "");
   const [reportSel, setReportSel] = useState<ReportSelection | null>(null);
   const chosen = physicians.find((p: AnyRec) => p.id === preparing);
   return (
     <div className="space-y-4">
       <ReportLibrary caseId={data.id} canExport={canExport} onSelect={setReportSel} />
-      <ValidationCard caseId={data.id} scope={reportSel} />
+      <ValidationCard caseId={data.id} scope={reportSel} onReview={onReview} />
       {/* Preparing physician — only this seat's name & credentials appear in the report. */}
       <div className="card p-5">
         <h3 className="text-sm font-semibold text-ink-900">Preparing Physician</h3>

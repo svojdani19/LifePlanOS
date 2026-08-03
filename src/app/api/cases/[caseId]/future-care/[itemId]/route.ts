@@ -24,7 +24,8 @@ const patchSchema = z.object({
 // Edit a future-care item; cost-affecting fields trigger a reprojection. Human
 // edits set `edited=true` (preserved on regeneration awareness) and re-run the
 // adversarial reviews so flags stay in sync.
-export async function PATCH(req: Request, { params }: { params: { caseId: string; itemId: string } }) {
+export async function PATCH(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string; itemId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "futurecare.edit");
@@ -147,7 +148,8 @@ export async function PATCH(req: Request, { params }: { params: { caseId: string
   }
 }
 
-export async function DELETE(_req: Request, { params }: { params: { caseId: string; itemId: string } }) {
+export async function DELETE(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string; itemId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "futurecare.edit");

@@ -6,7 +6,8 @@ import { handleError } from "@/lib/api";
 // Authenticated, audited view of a source record — the target of the "Source"
 // link under each chronology event. Streams the stored file when present, and
 // otherwise serves the extracted text (e.g. for demo records with no binary).
-export async function GET(_req: Request, { params }: { params: { caseId: string; docId: string } }) {
+export async function GET(_req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string; docId: string }> }) {
+  const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
     requirePermission(ctx, "case.view");

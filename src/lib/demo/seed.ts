@@ -159,6 +159,13 @@ export async function seedDemoFirm(): Promise<DemoSeedSummary> {
       state: "CA",
       primaryColor: "#0891b2",
       letterhead: "Life Care Plan Partners Demo · Synthetic evaluation environment · All persons and records fictional",
+      features: {
+        "authorization.enterprise": true,
+        "report.vocational_assessment": true,
+        "report.forensic_economist": true,
+        "report.report_level_attestation": true,
+        "report.damages_summary": true,
+      },
       subscription: {
         create: {
           tier: "ENTERPRISE",

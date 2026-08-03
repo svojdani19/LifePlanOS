@@ -1,8 +1,7 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { requireContext } from "@/lib/tenant";
+import { canCanonicalPermission, requireContext } from "@/lib/tenant";
 import { prisma } from "@/lib/db";
-import { can } from "@/lib/rbac";
 import { accessibleCaseIds, rolesWithPermission, templatesWithPermission } from "@/lib/authz/caseScope";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { Badge, type BadgeTone } from "@/components/ui/Badge";
@@ -31,12 +30,13 @@ const READINESS_TONE: Record<string, BadgeTone> = {
   "Ready for final export": "success",
 };
 
-export default async function EconomistWorkspacePage({ searchParams }: { searchParams?: { caseId?: string } }) {
+export default async function EconomistWorkspacePage({ searchParams: searchParamsPromise }: { searchParams?: Promise<{ caseId?: string }> }) {
+  const searchParams = await searchParamsPromise;
   const ctx = await requireContext();
   const access = await accessibleCaseIds(ctx, {
     firmWideRoles: rolesWithPermission("economic.view"),
     assignmentTemplates: templatesWithPermission("economic.view"),
-    orgWideAssignmentGrantsAll: true,
+    orgWideAssignmentGrantsAll: false,
     engagementSlots: ["assignedEconomistId"],
   });
   if (!access.allowed) redirect("/dashboard");
@@ -112,11 +112,13 @@ export default async function EconomistWorkspacePage({ searchParams }: { searchP
     (selectedId && allCases.find((c) => c.id === selectedId)) ||
     null;
 
-  // Mirror the economics API's seat check: physician.review OR futurecare.edit.
+  // Mirror the economics API's canonical permission and credential checks.
   // A platform-admin view is strictly read-only — no mutation surfaces render.
-  const canEdit =
+  const canEdit = Boolean(
     !access.platformAdminReadOnly &&
-    (can(ctx.user.role, "physician.review") || can(ctx.user.role, "futurecare.edit"));
+      selectedId &&
+      canCanonicalPermission(ctx, "economic.edit", { caseId: selectedId }),
+  );
 
   return (
     <div>

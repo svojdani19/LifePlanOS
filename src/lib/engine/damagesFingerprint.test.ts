@@ -135,4 +135,21 @@ describe("computeInputsHash — stale detection", () => {
     signals.missingRecordSignals = ["Missing PT records 2025"];
     expect(computeInputsHash(signals, baseRows)).not.toBe(fresh);
   });
+
+  it("changes when a material source changes without changing row counts", () => {
+    const withDocument: FdeRowIds = {
+      ...baseRows,
+      sourceRecords: [
+        { kind: "document", id: "doc-1", material: { status: "PROCESSED", extractedText: "Initial record" } },
+      ],
+    };
+    const editedDocument: FdeRowIds = {
+      ...baseRows,
+      sourceRecords: [
+        { kind: "document", id: "doc-1", material: { status: "PROCESSED", extractedText: "Corrected record" } },
+      ],
+    };
+
+    expect(computeInputsHash(baseInput(), editedDocument)).not.toBe(computeInputsHash(baseInput(), withDocument));
+  });
 });

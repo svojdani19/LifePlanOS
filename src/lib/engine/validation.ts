@@ -44,7 +44,7 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
     prisma.condition.findMany({ where: { caseId } }),
     prisma.case.findUnique({
       where: { id: caseId },
-      select: { dateOfBirth: true, sex: true, lifeExpectancyYears: true, lifeExpectancyBasis: true },
+      select: { dateOfBirth: true, sex: true, lifeExpectancyYears: true, lifeExpectancyBasis: true, specialty: true, additionalSpecialties: true },
     }),
     prisma.chronologyEvent.findMany({ where: { caseId } }),
   ]);
@@ -142,7 +142,45 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
       }];
     });
   });
+  // Specialty alignment — every recommendation's specialty should be one the
+  // case requested at intake (Specialty for Review). A different recommended
+  // specialty is surfaced as an advisory, never silently kept or dropped.
+  const requestedSpecialties = [
+    kase?.specialty,
+    ...(Array.isArray(kase?.additionalSpecialties) ? (kase!.additionalSpecialties as string[]) : []),
+  ].filter((x): x is string => !!x);
+  // Word-token subset match (singular/plural-insensitive) — raw substring
+  // matching false-positives on pairs like Urology / Neurology.
+  const specTokens = (t: string) => t.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean).map((w) => w.replace(/s$/, ""));
+  const specialtyMatchesRequested = (have: string) =>
+    requestedSpecialties.some((want) => {
+      const ht = specTokens(have);
+      const wt = specTokens(want);
+      if (!ht.length || !wt.length) return false;
+      return ht.every((w) => wt.includes(w)) || wt.every((w) => ht.includes(w));
+    });
+  const specialtyFindings: { service: string; result: string; issue: string; severity: string; suggestion: string; exportBlocking: boolean }[] = [];
+  if (requestedSpecialties.length) {
+    const unmatched = new Map<string, string[]>();
+    for (const it of items as { specialty?: string | null; service: string }[]) {
+      const spec = (it.specialty ?? "").trim();
+      if (!spec || specialtyMatchesRequested(spec)) continue;
+      unmatched.set(spec, [...(unmatched.get(spec) ?? []), it.service]);
+    }
+    for (const [spec, services] of unmatched) {
+      specialtyFindings.push({
+        service: services.length > 3 ? `${services.slice(0, 3).join(", ")} +${services.length - 3} more` : services.join(", "),
+        result: "Specialty not requested at intake",
+        issue: `${services.length} recommendation${services.length === 1 ? "" : "s"} carr${services.length === 1 ? "ies" : "y"} the ${spec} specialty, which is not among the specialties selected for review on the Intake page.`,
+        severity: "Moderate",
+        suggestion: `Add ${spec} to Specialty for Review on the Intake page, or have the clinical team reassign the item's specialty.`,
+        exportBlocking: false,
+      });
+    }
+  }
+
   const findings = [
+    ...specialtyFindings,
     ...indicationFindings,
     ...claimFindings,
     ...report.findings.map((f) => ({
@@ -200,11 +238,34 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
  */
 export async function persistCaseValidation(caseId: string, firmId: string): Promise<CaseValidation> {
   const v = await validateCase(caseId);
+  // User dispositions (resolved-as-is / ignored) survive re-runs: a regenerated
+  // finding with the same (service, result) inherits the prior disposition. If
+  // the data changed enough to alter the finding text/key, it reopens as OPEN.
+  const prior = await prisma.validationFinding.findMany({
+    where: { caseId, status: { not: "OPEN" } },
+    select: { service: true, result: true, status: true, resolvedById: true, resolvedAt: true },
+  });
+  const dispositionByKey = new Map(prior.map((f) => [`${f.service}::${f.result}`, f]));
   await prisma.$transaction([
     prisma.validationFinding.deleteMany({ where: { caseId } }),
     ...(v.findings.length
-      ? [prisma.validationFinding.createMany({ data: v.findings.map((f) => ({ ...f, caseId, firmId })) })]
+      ? [prisma.validationFinding.createMany({
+          data: v.findings.map((f) => {
+            const carried = dispositionByKey.get(`${f.service}::${f.result}`);
+            return {
+              ...f,
+              caseId,
+              firmId,
+              ...(carried ? { status: carried.status, resolvedById: carried.resolvedById, resolvedAt: carried.resolvedAt } : {}),
+            };
+          }),
+        })]
       : []),
   ]);
   return v;
+}
+
+/** Count of findings that still gate a final export: blocking AND undispositioned. */
+export async function openBlockingCount(caseId: string): Promise<number> {
+  return prisma.validationFinding.count({ where: { caseId, exportBlocking: true, status: "OPEN" } });
 }

@@ -222,6 +222,9 @@ export const LIFE_CARE_PLANNER = template(
     "attention.manage",
     "precedents.view",
     "vocational.view",
+    // Planners may collect sourced intake; vocational.attest remains exclusive
+    // to the credentialed vocational expert template.
+    "vocational.edit",
     "attestation.view",
     "credentials.upload",
   ],
