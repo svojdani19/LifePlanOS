@@ -8,14 +8,18 @@ import { assumptionsFor } from "@/lib/engine/generate";
 import { rankPrecedents } from "@/lib/precedents/match";
 import { CaseWorkspace } from "@/components/case/CaseWorkspace";
 
-export default async function CaseDetailPage({ params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
+export default async function CaseDetailPage({ params: paramsPromise, searchParams: searchParamsPromise }: { params: Promise<{ caseId: string }>; searchParams?: Promise<Record<string, string | string[] | undefined>> }) {
   const params = await paramsPromise;
+  const searchParams = (await searchParamsPromise) ?? {};
   const ctx = await requireContext();
   // Direct URLs are guarded before any PHI-bearing relations are loaded. List
   // filtering is not authorization: the same case-scope policy protects this
   // server-rendered resource.
   await requireCase(ctx, params.caseId);
   const caseAccess = await caseAccessFor(ctx);
+  const isFirmAdmin = ctx.user.role === "ADMIN";
+  const attorneyPreview = isFirmAdmin && searchParams.viewAs === "attorney";
+  const attorneyView = ctx.user.role === "ATTORNEY_REVIEWER" || attorneyPreview;
   const c = await prisma.case.findFirst({
     where: { id: params.caseId, firmId: ctx.firm.id },
     include: {
@@ -66,19 +70,37 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
 
   return (
     <div>
-      <Link href="/cases" className="mb-4 inline-flex items-center gap-1.5 text-sm text-ink-500 hover:text-ink-800">
-        <ArrowLeft className="h-4 w-4" /> All Cases
-      </Link>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <Link href="/cases" className="inline-flex items-center gap-1.5 text-sm text-ink-500 hover:text-ink-800">
+          <ArrowLeft className="h-4 w-4" /> All Cases
+        </Link>
+        {isFirmAdmin && (
+          <Link
+            href={`/cases/${params.caseId}${attorneyPreview ? "" : "?viewAs=attorney"}`}
+            className={`focusable rounded-md border px-2.5 py-1 text-xs font-medium ${attorneyPreview ? "border-violet-300 bg-violet-50 text-violet-800" : "border-ink-200 text-ink-600 hover:bg-ink-50"}`}
+          >
+            {attorneyPreview ? "Attorney view — return to admin view" : "View as attorney"}
+          </Link>
+        )}
+      </div>
+      {attorneyPreview && (
+        <div className="mb-4 rounded-lg border border-violet-200 bg-violet-50/70 px-4 py-2 text-sm text-violet-900">
+          Previewing this case exactly as the retaining attorney sees it — presentation only; your own permissions and identity are unchanged.
+        </div>
+      )}
       <CaseWorkspace
         data={JSON.parse(JSON.stringify(c))}
         assumptions={assumptions}
         totals={{ totalLifetime, totalPresentValue }}
-        permissions={caseAccess.platformAdminReadOnly ? [] : ROLE_PERMISSIONS[ctx.user.role]}
+        permissions={caseAccess.platformAdminReadOnly ? [] : attorneyPreview ? ROLE_PERMISSIONS.ATTORNEY_REVIEWER : ROLE_PERMISSIONS[ctx.user.role]}
         precedents={JSON.parse(JSON.stringify(ranked))}
         physicians={JSON.parse(JSON.stringify(physicians))}
         // Attorney-facing view: range-only pricing, condensed clinical detail,
-        // no evidence tab, and the provider attorney-input surface.
-        attorneyView={ctx.user.role === "ATTORNEY_REVIEWER"}
+        // no evidence tab, and the provider attorney-input surface. Firm admins
+        // can preview it per case via ?viewAs=attorney (presentation only —
+        // permissions are swapped to the attorney's set for a faithful preview,
+        // while server-side authorization still runs against the real session).
+        attorneyView={attorneyView}
         pendingResolution={pendingResolution}
       />
     </div>
