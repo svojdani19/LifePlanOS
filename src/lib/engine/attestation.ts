@@ -34,7 +34,11 @@ export interface AttestableItem {
 }
 
 /** One pinned entry of an attestation's scope — the material fields frozen at
- *  signing. Field list mirrors the P2.R1 material-change definition. */
+ *  signing. Field list mirrors the P2.R1 material-change definition.
+ *  `clinicalFingerprint` (versioned, cfp-1) additionally pins the exact
+ *  clinical evidence reviewed for the item — see engine/attestationBinding.ts.
+ *  It is stored alongside the pinned fields but deliberately EXCLUDED from
+ *  attestationContentHash so legacy rows keep verifying byte-for-byte. */
 export interface AttestationScopeEntry {
   lineageId: string;
   itemId: string;
@@ -48,6 +52,9 @@ export interface AttestationScopeEntry {
   unitCost: number;
   presentValue: number;
   physicianStatus: string;
+  /** Per-recommendation clinical binding fingerprint captured at signing
+   *  (cfp-1). Absent/null on legacy attestations. */
+  clinicalFingerprint?: string | null;
 }
 
 const ATTESTABLE = new Set(["APPROVED", "MODIFIED"]);

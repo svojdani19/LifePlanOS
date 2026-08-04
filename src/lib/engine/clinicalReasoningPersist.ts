@@ -3,6 +3,7 @@ import { Prisma } from "@/generated/prisma";
 import { buildReasoningAssessment, detectSetConflicts, type ReasoningAssessment, type ReasoningItem } from "@/lib/engine/clinicalReasoning";
 import type { DossierCase, DossierChronoEvent, DossierCondition, DossierInterview } from "@/lib/engine/medicalNecessity";
 import type { CondInput } from "@/lib/engine/integrity";
+import { diffAssessmentFingerprintCategories, type BindingAssessmentRow } from "@/lib/engine/attestationBinding";
 
 // Server-side persistence for the Clinical Reasoning Engine (CRE v1). Kept
 // apart from the pure engine (clinicalReasoning.ts) so that module can be
@@ -158,6 +159,22 @@ export async function persistCaseReasoning(caseId: string, firmId: string, opts:
         },
       });
       await prisma.clinicalReasoningAssessment.update({ where: { id: prior.id }, data: { status: "SUPERSEDED", supersededById: created.id } });
+      // Clinical-binding audit (attestationBinding.ts): name WHICH fingerprint
+      // CATEGORY of clinical material changed (e.g. citations, evidence,
+      // duration) — category names only, no PHI. Written on EVERY material
+      // supersession so a later fingerprint mismatch is explainable.
+      const fingerprintCategories = diffAssessmentFingerprintCategories(
+        prior as unknown as Partial<BindingAssessmentRow>,
+        toRow(a) as unknown as Partial<BindingAssessmentRow>,
+      );
+      await prisma.auditLog.create({
+        data: {
+          firmId, caseId, userId: opts.actorUserId ?? null,
+          action: "reasoning.material_change",
+          targetType: "clinicalReasoningAssessment", targetId: created.id,
+          meta: j({ recommendationId: it.id, priorAssessmentId: prior.id, categories: fingerprintCategories, invalidatedApproval: wasApproved }),
+        },
+      }).catch(() => {}); // audit is best-effort; never blocks the assessment
       if (wasApproved) {
         await prisma.auditLog.create({
           data: {

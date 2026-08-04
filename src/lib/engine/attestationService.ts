@@ -15,6 +15,12 @@ import {
   type AttestableItem,
   type AttestationScopeEntry,
 } from "./attestation";
+import {
+  loadClinicalBindingState,
+  aggregateClinicalFingerprint,
+  CLINICAL_FINGERPRINT_VERSION,
+  DEFAULT_ATTESTATION_OPINION_SCOPES,
+} from "./attestationBinding";
 
 function currentItemsFor(caseId: string) {
   return prisma.futureCareItem.findMany({
@@ -111,6 +117,19 @@ export async function signAttestation(opts: {
   });
   const contentHash = attestationContentHash(statementText, scope);
 
+  // Clinical binding (attestationBinding.ts): pin the exact clinical evidence
+  // reviewed for each covered item at signing. Per-item fingerprints ride in
+  // the stored scope entries; the versioned aggregate lives on the row. The
+  // contentHash mechanics above are untouched — the binding is additive.
+  const bindingState = await loadClinicalBindingState(firmId, caseId);
+  const boundScope: AttestationScopeEntry[] = scope.map((e) => ({
+    ...e,
+    clinicalFingerprint: bindingState.get(e.itemId)?.clinicalFingerprint ?? null,
+  }));
+  const clinicalFingerprint = aggregateClinicalFingerprint(
+    scope.map((e) => ({ itemId: e.itemId, clinicalFingerprint: bindingState.get(e.itemId)?.clinicalFingerprint ?? "" })),
+  );
+
   const prior = await prisma.attestation.findMany({ where: { caseId, physicianId: physician.id, status: "ACTIVE" }, select: { id: true } });
   const created = await prisma.attestation.create({
     data: {
@@ -123,11 +142,19 @@ export async function signAttestation(opts: {
       credentialDocs: signer.credentials as never,
       statementText,
       physicianNote: note ?? null,
-      scope: scope as never,
+      scope: boundScope as never,
       itemCount: scope.length,
       totalPresentValue,
       caseVersion: latestSnapshot?.version ?? null,
       contentHash,
+      // Versioned clinical binding — NEVER backfilled onto existing rows;
+      // legacy (null) attestations can never authorize a new final.
+      clinicalFingerprint,
+      bindingVersion: CLINICAL_FINGERPRINT_VERSION,
+      // The existing statement covers necessity + frequency/duration only —
+      // it makes no causation, prognosis, life-expectancy, or financial-
+      // assumption representations.
+      opinionScopes: DEFAULT_ATTESTATION_OPINION_SCOPES as never,
     },
   });
   if (prior.length) {
