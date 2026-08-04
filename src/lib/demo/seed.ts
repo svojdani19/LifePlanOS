@@ -191,7 +191,7 @@ export async function seedDemoFirm(): Promise<DemoSeedSummary> {
 
   const ctx: Ctx = { firmId: firm.id, byEmail: new Map(firm.users.map((x) => [x.email, x])) };
   const firmAdmin = u(ctx, "firm.admin");
-  const caseManager = u(ctx, "case.manager");
+  const caseManager = u(ctx, "paralegal");
   const planner = u(ctx, "planner");
   const physician = u(ctx, "physician");
   const attorney = u(ctx, "attorney");

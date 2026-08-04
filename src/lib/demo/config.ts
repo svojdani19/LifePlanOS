@@ -106,13 +106,15 @@ export const DEMO_PERSONAS: DemoPersona[] = [
       "Retaining attorney: reviews damages posture, decides on expert engagements, and downloads released work product.",
   },
   {
-    email: "case.manager@demo.lifeplanos.com",
+    email: "paralegal@demo.lifeplanos.com",
     name: "Casey Demo-Alvarez",
-    role: "PARALEGAL",
-    templateAssignments: ["CASE_MANAGER"],
-    preferredWorkspace: "CASE_MANAGER",
+    // The paralegal works the matter exactly the way the retaining attorney
+    // does — identical viewpoint and access (attorney seat + template).
+    role: "ATTORNEY_REVIEWER",
+    templateAssignments: ["ATTORNEY_CLIENT"],
+    preferredWorkspace: "ATTORNEY_CLIENT",
     description:
-      "Case manager: moves matters through intake, record collection, assignments, deadlines, and escalations.",
+      "Paralegal: works the matter with the same viewpoint and access as the retaining attorney — intake, records, report ordering, and released work product.",
   },
   {
     email: "records.analyst@demo.lifeplanos.com",
