@@ -3,17 +3,20 @@ import {
   assumptionsToInputs,
   overridesToPartialInputs,
   economistReadiness,
+  computeScenarioStaleness,
   composeEconomist,
   ECONOMIST_DISCLOSURE,
   NO_CONCLUSION_SENTENCE,
   MEDICAL_OMISSION_NOTE,
   DETERMINISTIC_LABEL,
+  RECOMPUTE_NOTE,
   ASSUMPTION_KEYS,
   REQUIRED_KEYS,
   type AssumptionRow,
   type ScenarioRow,
   type StoredEconResult,
 } from "./economist";
+import { hashEconInputs } from "@/lib/engine/economics";
 import type { Block } from "./doc";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -167,6 +170,63 @@ describe("economistReadiness", () => {
     expect(economistReadiness(REQUIRED_ROWS, [uncomputed], false, false).status).toBe("Expert input required");
     const lowOnly: ScenarioRow = { ...baseScenario(), name: "low" };
     expect(economistReadiness(REQUIRED_ROWS, [lowOnly], false, false).status).toBe("Expert input required");
+  });
+
+  it("REGRESSION: a stale base scenario can NEVER be Ready for final export — even with an active approval", () => {
+    const r = economistReadiness(REQUIRED_ROWS, [baseScenario()], true, true, { baseStale: true });
+    expect(r.status).toBe("Expert input required");
+    expect(r.missing).toEqual([RECOMPUTE_NOTE]);
+  });
+});
+
+// ── computeScenarioStaleness ─────────────────────────────────────────────────
+
+describe("computeScenarioStaleness", () => {
+  const currentInputs = assumptionsToInputs(REQUIRED_ROWS).inputs!;
+
+  const freshBase = (): ScenarioRow => ({
+    name: "base",
+    overrides: {},
+    result: { ...FAKE_RESULT, inputsHash: hashEconInputs(currentInputs), medicalSource: null },
+    computedAt: "2026-07-27T12:00:00Z",
+  });
+
+  it("identical current inputs ⇒ not stale; a changed assumption ⇒ stale", () => {
+    expect(computeScenarioStaleness(REQUIRED_ROWS, [freshBase()], null).get("base")).toBe(false);
+    const changed = REQUIRED_ROWS.map((r0) => (r0.key === "discount_rate" ? { ...r0, value: "5.5" } : r0));
+    expect(computeScenarioStaleness(changed, [freshBase()], null).get("base")).toBe(true);
+  });
+
+  it("a change in WHICH export supplies the medical component is stale even at the same amount", () => {
+    const withMedical = { ...currentInputs, medicalCostPresentValue: 100000 };
+    const scenario: ScenarioRow = {
+      name: "base",
+      overrides: {},
+      result: { ...FAKE_RESULT, inputsHash: hashEconInputs(withMedical), medicalSource: { exportId: "exp-old", reportType: "LIFE_CARE_PLAN", presentValue: 100000 } },
+      computedAt: "2026-07-27T12:00:00Z",
+    };
+    expect(computeScenarioStaleness(REQUIRED_ROWS, [scenario], { exportId: "exp-old", presentValue: 100000 }).get("base")).toBe(false);
+    expect(computeScenarioStaleness(REQUIRED_ROWS, [scenario], { exportId: "exp-new", presentValue: 100000 }).get("base")).toBe(true);
+    expect(computeScenarioStaleness(REQUIRED_ROWS, [scenario], null).get("base")).toBe(true);
+  });
+
+  it("named scenarios are judged with their overrides applied to the CURRENT assumptions", () => {
+    const lowInputs = { ...currentInputs, discountRate: 0.06 };
+    const low: ScenarioRow = {
+      name: "low",
+      overrides: { discount_rate: "6" },
+      result: { ...FAKE_RESULT, inputsHash: hashEconInputs(lowInputs), medicalSource: null },
+      computedAt: "2026-07-27T12:00:00Z",
+    };
+    expect(computeScenarioStaleness(REQUIRED_ROWS, [low], null).get("low")).toBe(false);
+    const changed = REQUIRED_ROWS.map((r0) => (r0.key === "baseline_earnings" ? { ...r0, value: "90,000" } : r0));
+    expect(computeScenarioStaleness(changed, [low], null).get("low")).toBe(true);
+  });
+
+  it("required assumptions that no longer resolve make every stored result stale; uncomputed scenarios are skipped", () => {
+    const map = computeScenarioStaleness(REQUIRED_ROWS.slice(0, 2), [freshBase(), { name: "low", overrides: {}, result: null }], null);
+    expect(map.get("base")).toBe(true);
+    expect(map.has("low")).toBe(false);
   });
 });
 

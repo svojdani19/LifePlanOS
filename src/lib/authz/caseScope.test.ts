@@ -85,6 +85,57 @@ describe("accessibleCaseIds", () => {
     expect(access.cases).toEqual(["c1", "c2"]);
   });
 
+  it("physician surface (/physician and /review share this exact configuration): case-scoped assignment + assignedPhysicianId engagement, nothing wider", async () => {
+    assignmentFindMany.mockResolvedValue([{ caseId: "c3", builtInRole: "PHYSICIAN_REVIEWER" }]);
+    engagementFindMany.mockResolvedValue([{ caseId: "c4" }]);
+    const access = await accessibleCaseIds(ctx("ATTORNEY_REVIEWER"), {
+      firmWideRoles: rolesWithPermission("physician.review"),
+      assignmentTemplates: templatesWithPermission("physician.review"),
+      orgWideAssignmentGrantsAll: true,
+      engagementSlots: ["assignedPhysicianId"],
+    });
+    expect(access.allowed).toBe(true);
+    expect(access.cases).toEqual(["c3", "c4"]);
+    expect(engagementFindMany.mock.calls[0][0].where.OR).toEqual([{ assignedPhysicianId: "u1" }]);
+  });
+
+  it("vocational surface (case-scoped policy): an org-scoped VOCATIONAL_EXPERT assignment never widens to firm-wide — access is exactly the assigned + engaged cases", async () => {
+    assignmentFindMany.mockResolvedValue([
+      { caseId: null, builtInRole: "VOCATIONAL_EXPERT" }, // org-scoped (malformed for this policy)
+      { caseId: "c8", builtInRole: "VOCATIONAL_EXPERT" },
+    ]);
+    engagementFindMany.mockResolvedValue([{ caseId: "c9" }]);
+    const access = await accessibleCaseIds(ctx("ATTORNEY_REVIEWER"), {
+      firmWideRoles: rolesWithPermission("vocational.view"),
+      assignmentTemplates: templatesWithPermission("vocational.view"),
+      orgWideAssignmentGrantsAll: false, // the /vocational surface's setting
+      engagementSlots: ["assignedVocationalExpertId"],
+    });
+    expect(access.allowed).toBe(true);
+    expect(access.cases).toEqual(["c8", "c9"]);
+    expect(engagementFindMany.mock.calls[0][0].where.OR).toEqual([{ assignedVocationalExpertId: "u1" }]);
+    // Cancelled engagements are excluded at the query.
+    expect(engagementFindMany.mock.calls[0][0].where.status).toEqual({ notIn: ["CANCELLED"] });
+  });
+
+  it("economist surface (case-scoped policy): org-scoped FORENSIC_ECONOMIST assignments never widen to firm-wide — access is exactly the assigned + engaged cases", async () => {
+    assignmentFindMany.mockResolvedValue([
+      { caseId: null, builtInRole: "FORENSIC_ECONOMIST" }, // org-scoped (malformed for this policy)
+      { caseId: "c5", builtInRole: "FORENSIC_ECONOMIST" },
+    ]);
+    engagementFindMany.mockResolvedValue([{ caseId: "c8" }]);
+    const access = await accessibleCaseIds(ctx("ATTORNEY_REVIEWER"), {
+      firmWideRoles: rolesWithPermission("economic.view"),
+      assignmentTemplates: templatesWithPermission("economic.view"),
+      orgWideAssignmentGrantsAll: false, // the /economist surface's setting
+      engagementSlots: ["assignedEconomistId"],
+    });
+    expect(access.allowed).toBe(true);
+    expect(access.cases).toEqual(["c5", "c8"]);
+    expect(engagementFindMany.mock.calls[0][0].where.OR).toEqual([{ assignedEconomistId: "u1" }]);
+    expect(engagementFindMany.mock.calls[0][0].where.status).toEqual({ notIn: ["CANCELLED"] });
+  });
+
   it("treats an org-scoped assignment as firm-wide only when the surface allows it", async () => {
     assignmentFindMany.mockResolvedValue([{ caseId: null, builtInRole: "QUALITY_ASSURANCE_REVIEWER" }]);
     const internal = await accessibleCaseIds(ctx("PHYSICIAN_REVIEWER"), {

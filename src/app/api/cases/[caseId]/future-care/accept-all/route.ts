@@ -24,13 +24,21 @@ export async function POST(_req: Request, { params: paramsPromise }: { params: P
       where: { caseId: params.caseId, physicianStatus: "PENDING", supersededAt: null },
       select: { id: true, lineageId: true, lifecycleStatus: true },
     });
-    const res = await prisma.futureCareItem.updateMany({
-      where: { id: { in: pending.map((p) => p.id) } },
-      data: { physicianStatus: "APPROVED" },
-    });
-    if (pending.length > 0) {
+    // Each approval is conditional on the exact item version the confirmation
+    // covered: an item that was decided, changed, or superseded between the
+    // snapshot and the write is REFUSED (skipped), never silently approved —
+    // and the ledger records only decisions that actually took effect.
+    const approved: typeof pending = [];
+    for (const p of pending) {
+      const res = await prisma.futureCareItem.updateMany({
+        where: { id: p.id, physicianStatus: "PENDING", supersededAt: null },
+        data: { physicianStatus: "APPROVED" },
+      });
+      if (res.count === 1) approved.push(p);
+    }
+    if (approved.length > 0) {
       await prisma.recommendationTransition.createMany({
-        data: pending.map((p) => ({
+        data: approved.map((p) => ({
           caseId: params.caseId,
           firmId: ctx.firm.id,
           lineageId: p.lineageId,
@@ -47,8 +55,8 @@ export async function POST(_req: Request, { params: paramsPromise }: { params: P
 
     // Reviews reference physician status, so refresh them once after the batch.
     await generateReviews(params.caseId);
-    await audit(ctx, "physician.review", { type: "case", id: params.caseId, caseId: params.caseId, meta: { action: "accept-all", count: res.count } });
-    return ok({ count: res.count });
+    await audit(ctx, "physician.review", { type: "case", id: params.caseId, caseId: params.caseId, meta: { action: "accept-all", count: approved.length, refusedStale: pending.length - approved.length } });
+    return ok({ count: approved.length });
   } catch (err) {
     return handleError(err);
   }

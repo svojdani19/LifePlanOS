@@ -1,4 +1,6 @@
 import { prisma } from "@/lib/db";
+import { computeEconomicLoss, ECON_ENGINE_VERSION } from "@/lib/engine/economics";
+import { assumptionsToInputs, MEDICAL_OMISSION_NOTE } from "@/lib/reports/economist";
 import { hashPassword } from "@/lib/auth/password";
 import { ingestDocument } from "@/lib/documents/ingest";
 import { generatePlan } from "@/lib/engine/generate";
@@ -605,11 +607,11 @@ PLAN: Annual radiographic surveillance; revision arthroplasty anticipated within
   });
   await prisma.vocationalEntry.createMany({
     data: [
-      { firmId: firm.id, caseId: case8.id, kind: "employment", title: "CNC machinist — Demo Precision Works LLC (2011-2025)", detail: json({ employer: "Demo Precision Works LLC", role: "CNC machinist", wage: "$32.90/hr", exertion: "Medium-heavy" }), startDate: new Date("2011-04-01"), endDate: new Date("2025-06-30"), source: "Employment records, Demo Precision Works LLC (synthetic)", enteredById: vocational.id, verification: "VERIFIED" },
-      { firmId: firm.id, caseId: case8.id, kind: "education", title: "High school diploma; machining certificate program", detail: json({ level: "HS diploma + vocational certificate", year: 2010 }), source: "Client interview 04/2026 and transcript (synthetic)", enteredById: vocational.id, verification: "VERIFIED" },
-      { firmId: firm.id, caseId: case8.id, kind: "certification", title: "NIMS Level I machining credential", detail: json({ issuer: "NIMS", status: "Current" }), source: "Certificate on file (synthetic)", enteredById: vocational.id, verification: "VERIFIED" },
-      { firmId: firm.id, caseId: case8.id, kind: "functional_capacity", title: "FCE: no forceful gripping or fine manipulation with the right hand", detail: json({ grip: "12 percent of contralateral", lifting: "10 lb occasional", manipulation: "No sustained fine manipulation right hand" }), source: "Functional capacity evaluation 03/2026 (synthetic)", enteredById: vocational.id, verification: "VERIFIED" },
-      { firmId: firm.id, caseId: case8.id, kind: "restriction", title: "Permanent restriction from machine-tending and vibration exposure", detail: json({ basis: "Hand surgeon permanent-and-stationary report" }), source: "P&S report, Demo Hand Center 02/2026 (synthetic)", enteredById: vocational.id, verification: "VERIFIED" },
+      { firmId: firm.id, caseId: case8.id, kind: "employment", title: "CNC machinist — Demo Precision Works LLC (2011-2025)", detail: json({ employer: "Demo Precision Works LLC", role: "CNC machinist", wage: "$32.90/hr", exertion: "Medium-heavy" }), startDate: new Date("2011-04-01"), endDate: new Date("2025-06-30"), source: "Employment records, Demo Precision Works LLC (synthetic)", enteredById: vocational.id, verification: "VERIFIED", verifiedById: vocational.id, verifiedAt: now, verifiedCredential: "Certified Rehabilitation Counselor (DEMO-CRC-2210)" },
+      { firmId: firm.id, caseId: case8.id, kind: "education", title: "High school diploma; machining certificate program", detail: json({ level: "HS diploma + vocational certificate", year: 2010 }), source: "Client interview 04/2026 and transcript (synthetic)", enteredById: vocational.id, verification: "VERIFIED", verifiedById: vocational.id, verifiedAt: now, verifiedCredential: "Certified Rehabilitation Counselor (DEMO-CRC-2210)" },
+      { firmId: firm.id, caseId: case8.id, kind: "certification", title: "NIMS Level I machining credential", detail: json({ issuer: "NIMS", status: "Current" }), source: "Certificate on file (synthetic)", enteredById: vocational.id, verification: "VERIFIED", verifiedById: vocational.id, verifiedAt: now, verifiedCredential: "Certified Rehabilitation Counselor (DEMO-CRC-2210)" },
+      { firmId: firm.id, caseId: case8.id, kind: "functional_capacity", title: "FCE: no forceful gripping or fine manipulation with the right hand", detail: json({ grip: "12 percent of contralateral", lifting: "10 lb occasional", manipulation: "No sustained fine manipulation right hand" }), source: "Functional capacity evaluation 03/2026 (synthetic)", enteredById: vocational.id, verification: "VERIFIED", verifiedById: vocational.id, verifiedAt: now, verifiedCredential: "Certified Rehabilitation Counselor (DEMO-CRC-2210)" },
+      { firmId: firm.id, caseId: case8.id, kind: "restriction", title: "Permanent restriction from machine-tending and vibration exposure", detail: json({ basis: "Hand surgeon permanent-and-stationary report" }), source: "P&S report, Demo Hand Center 02/2026 (synthetic)", enteredById: vocational.id, verification: "VERIFIED", verifiedById: vocational.id, verifiedAt: now, verifiedCredential: "Certified Rehabilitation Counselor (DEMO-CRC-2210)" },
       { firmId: firm.id, caseId: case8.id, kind: "transferable_skill", title: "Blueprint reading, CAM programming exposure, quality inspection", detail: json({ skills: ["blueprint reading", "CAM programming (basic)", "quality inspection"] }), source: "Vocational interview 04/2026 (synthetic)", enteredById: vocational.id },
       { firmId: firm.id, caseId: case8.id, kind: "labor_market", title: "Regional survey: quality-inspection and CNC-programming roles", detail: json({ region: "Fresno MSA", medianWage: "$23.10/hr", openings: 41 }), source: "Demo labor-market survey, Q1 2026 (synthetic)", enteredById: vocational.id },
       { firmId: firm.id, caseId: case8.id, kind: "scenario", title: "Return-to-work scenario: quality inspector after retraining", detail: json({ pathway: "12-month metrology retraining", projectedWage: "$24.50/hr", probability: "probable" }), source: "Vocational analysis (synthetic)", enteredById: vocational.id },
@@ -622,19 +624,48 @@ PLAN: Annual radiographic surveillance; revision arthroplasty anticipated within
       { firmId: firm.id, caseId: case8.id, key: "earnings_growth", value: "2.8", unit: "percent", source: "Demo BLS ECI series (synthetic)", expertId: economist.id },
       { firmId: firm.id, caseId: case8.id, key: "benefits_rate", value: "21", unit: "percent", source: "Demo ECEC employer-cost tables (synthetic)", expertId: economist.id },
       { firmId: firm.id, caseId: case8.id, key: "worklife_expectancy", value: "17.4", unit: "years", source: "Demo worklife tables, male, HS education (synthetic)", expertId: economist.id },
-      { firmId: firm.id, caseId: case8.id, key: "loss_start", value: "2025-06-30", unit: "date", source: "Date of injury per employer records", expertId: economist.id },
+      { firmId: firm.id, caseId: case8.id, key: "loss_start", value: "1.1", unit: "years", source: "Date of injury 2025-06-30 per employer records (synthetic)", expertId: economist.id },
       { firmId: firm.id, caseId: case8.id, key: "discount_rate", value: "3.0", unit: "percent", source: "Demo Treasury real-yield ladder (synthetic)", expertId: economist.id, rationale: "Net discount consistent with jurisdictional practice." },
       { firmId: firm.id, caseId: case8.id, key: "inflation_rate", value: "3.2", unit: "percent", source: "Demo medical CPI series (synthetic)", expertId: economist.id },
       { firmId: firm.id, caseId: case8.id, key: "household_services_hours", value: "5", unit: "hours/week", source: "Client and spouse interview 04/2026 (synthetic)", expertId: economist.id, rationale: "Reduced yard, maintenance, and repair contributions." },
     ],
   });
-  await prisma.economicScenario.createMany({
-    data: [
-      { firmId: firm.id, caseId: case8.id, name: "base", overrides: json({}), result: json({ pastLoss: 71400, futureLoss: 262300, benefits: 70100, householdServices: 48200, medicalPV: 0, total: 452000, inputsHash: "demo-base" }), computedAt: now },
-      { firmId: firm.id, caseId: case8.id, name: "low", overrides: json({ earnings_growth: "2.2", worklife_expectancy: "15.0" }), result: json({ pastLoss: 71400, futureLoss: 214800, benefits: 60100, householdServices: 41500, medicalPV: 0, total: 387800, inputsHash: "demo-low" }), computedAt: now },
-      { firmId: firm.id, caseId: case8.id, name: "high", overrides: json({ earnings_growth: "3.4", worklife_expectancy: "19.5" }), result: json({ pastLoss: 71400, futureLoss: 311900, benefits: 80400, householdServices: 55600, medicalPV: 0, total: 519300, inputsHash: "demo-high" }), computedAt: now },
-    ],
-  });
+  // Scenario results come from the REAL deterministic engine over the seeded
+  // assumptions — never fabricated numbers. Hashes therefore match what the
+  // staleness check recomputes, so the seeded runs read as CURRENT. No final
+  // medical-cost export exists for this case, so the component is omitted and
+  // disclosed, exactly as the engine would do live.
+  {
+    const case8Assumptions = await prisma.economicAssumption.findMany({
+      where: { caseId: case8.id, supersededById: null },
+    });
+    const mapped = assumptionsToInputs(case8Assumptions);
+    if (!mapped.inputs) {
+      throw new Error(`Demo seed integrity failure: case 8 economic assumptions do not map to engine inputs (${mapped.missing.join(", ")})`);
+    }
+    const storedResult = (r: ReturnType<typeof computeEconomicLoss>) =>
+      json({
+        pastLoss: r.pastLoss,
+        futureLoss: r.futureLoss,
+        benefits: r.benefits,
+        householdServices: r.householdServices,
+        medicalCostPresentValue: r.medicalCostPresentValue,
+        totalPresentValue: r.totalPresentValue,
+        inputsHash: r.inputsHash,
+        inputs: r.inputs,
+        medicalSource: null,
+        medicalNote: MEDICAL_OMISSION_NOTE,
+        engineVersion: ECON_ENGINE_VERSION,
+      });
+    const baseInputs = mapped.inputs;
+    await prisma.economicScenario.createMany({
+      data: [
+        { firmId: firm.id, caseId: case8.id, name: "base", overrides: json({}), result: storedResult(computeEconomicLoss(baseInputs)), computedAt: now, computedById: economist.id },
+        { firmId: firm.id, caseId: case8.id, name: "low", overrides: json({ earnings_growth: "2.2", worklife_expectancy: "15.0" }), result: storedResult(computeEconomicLoss({ ...baseInputs, earningsGrowthRate: 0.022, worklifeYearsRemaining: 15 })), computedAt: now, computedById: economist.id },
+        { firmId: firm.id, caseId: case8.id, name: "high", overrides: json({ earnings_growth: "3.4", worklife_expectancy: "19.5" }), result: storedResult(computeEconomicLoss({ ...baseInputs, earningsGrowthRate: 0.034, worklifeYearsRemaining: 19.5 })), computedAt: now, computedById: economist.id },
+      ],
+    });
+  }
   const eng8a = await prisma.caseEngagement.create({
     data: {
       firmId: firm.id, caseId: case8.id, requestedById: attorney.id, authorizedById: attorney.id,

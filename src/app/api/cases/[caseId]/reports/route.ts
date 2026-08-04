@@ -18,7 +18,7 @@ import { convertDocxToPdf } from "@/lib/export/pdf";
 import { ok, handleError } from "@/lib/api";
 import { reportEnabled } from "@/lib/flags";
 import { composeVocational, vocationalReadiness, type VocEntry } from "@/lib/reports/vocational";
-import { composeEconomist, economistReadiness, type AssumptionRow, type ScenarioRow } from "@/lib/reports/economist";
+import { composeEconomist, economistReadiness, computeScenarioStaleness, type AssumptionRow, type ScenarioRow } from "@/lib/reports/economist";
 import { changesSection, isMaterialDiff } from "@/lib/reports/versionDiff";
 import { diffSnapshots, type SnapshotPayload } from "@/lib/engine/snapshot";
 import type { RDValidationFinding } from "@/lib/reports/sections";
@@ -90,15 +90,35 @@ async function vocationalState(caseId: string) {
 }
 
 async function economistState(caseId: string) {
-  const [assumptions, scenarios, approval] = await Promise.all([
+  const [assumptions, scenarios, approval, medicalExport] = await Promise.all([
     prisma.economicAssumption.findMany({ where: { caseId, supersededById: null }, orderBy: { createdAt: "asc" } }),
-    prisma.economicScenario.findMany({ where: { caseId }, orderBy: { createdAt: "asc" } }),
+    // Current (non-superseded) scenario runs only — history stays recoverable
+    // but never composes into a report.
+    prisma.economicScenario.findMany({ where: { caseId, supersededById: null }, orderBy: { createdAt: "asc" } }),
     prisma.reportApproval.findFirst({ where: { caseId, expertRole: "economist", kind: "APPROVAL", status: "ACTIVE" }, orderBy: { createdAt: "desc" } }),
+    // The export currently eligible to supply the medical component — must
+    // match the criteria the economics API uses when computing.
+    prisma.reportExport.findFirst({
+      where: { caseId, draft: false, supersededById: null, contentSha256: { not: null }, reportType: { in: ["LIFE_CARE_PLAN", "MEDICAL_COST_PROJECTION"] } },
+      orderBy: { createdAt: "desc" },
+    }),
   ]);
+  // Fail-closed currency: a stored result whose input hash no longer matches
+  // the current assumptions (or whose medical-cost source export is no longer
+  // the eligible one) is STALE — it can never make the case final-ready, and
+  // an ACTIVE approval over a stale substrate does not approve current work.
+  const rows = scenarios as unknown as ScenarioRow[];
+  const staleness = computeScenarioStaleness(
+    assumptions as unknown as AssumptionRow[],
+    rows,
+    medicalExport ? { exportId: medicalExport.id, presentValue: medicalExport.totalPresentValue } : null,
+  );
+  const baseStale = staleness.get("base") === true;
+  const approvedCurrent = !!approval && !baseStale;
   // The economist's approval statement doubles as the entered conclusion text —
   // conclusions never exist without the responsible expert's signature.
-  const readiness = economistReadiness(assumptions as unknown as AssumptionRow[], scenarios as unknown as ScenarioRow[], !!approval, !!approval);
-  return { assumptions: assumptions as unknown as AssumptionRow[], scenarios: scenarios as unknown as ScenarioRow[], approval, readiness };
+  const readiness = economistReadiness(assumptions as unknown as AssumptionRow[], rows, approvedCurrent, approvedCurrent, { baseStale });
+  return { assumptions: assumptions as unknown as AssumptionRow[], scenarios: rows, approval: approvedCurrent ? approval : null, readiness };
 }
 
 // Opinion scopes each physician-required report renders. A causation report

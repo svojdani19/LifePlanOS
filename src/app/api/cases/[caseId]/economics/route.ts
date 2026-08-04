@@ -8,6 +8,7 @@ import {
   computeEconomicLoss,
   scenarioCompare,
   sensitivityTable,
+  ECON_ENGINE_VERSION,
   type EconInputs,
   type EconResult,
 } from "@/lib/engine/economics";
@@ -15,10 +16,12 @@ import {
   assumptionsToInputs,
   overridesToPartialInputs,
   economistReadiness,
+  computeScenarioStaleness,
   ASSUMPTION_KEYS,
   MEDICAL_OMISSION_NOTE,
   type StoredEconResult,
   type ScenarioRow,
+  type MedicalSource,
 } from "@/lib/reports/economist";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -39,12 +42,49 @@ import {
 //                        with no such export the component is omitted with an
 //                        explicit note.
 //
-// Writing requires the economist seat (physician.review — experts occupy
-// PHYSICIAN_REVIEWER seats for the pilot, docs/25) or futurecare.edit.
+// Writing requires the canonical, case-scoped, feature-gated `economic.edit`
+// permission — the FORENSIC_ECONOMIST assignment or engagement provides the
+// expert authority; no legacy seat shortcut exists.
 // ─────────────────────────────────────────────────────────────────────────────
 
 function requireEconomistSeat(ctx: TenantContext, caseId: string): void {
   requireCanonicalPermission(ctx, "economic.edit", { caseId });
+}
+
+const KNOWN_KEYS = new Set(ASSUMPTION_KEYS.map((k) => k.key));
+
+/** The schema explicitly supports `custom:*` keys as NON-computational,
+ *  disclosed assumptions: they render in the report's assumption table with
+ *  full provenance but never feed the calculation engine. */
+const isCustomKey = (key: string) => key.startsWith("custom:") && key.length > "custom:".length;
+
+/** Economic work product changed materially — any ACTIVE economist report
+ *  approval/attestation no longer covers current work. Disclosed as STALE. */
+async function staleEconomistApprovals(caseId: string, firmId: string, reason: string): Promise<void> {
+  await prisma.reportApproval.updateMany({
+    where: { caseId, firmId, expertRole: "economist", status: "ACTIVE" },
+    data: { status: "STALE", invalidReason: reason },
+  });
+}
+
+/**
+ * The single export currently eligible to supply the medical-cost component:
+ * the newest FINAL, non-superseded LCP/MCP export for THIS case in THIS tenant
+ * that carries a content hash. Anything else — drafts, superseded versions,
+ * hashless legacy rows — is ineligible; with none, the component is omitted.
+ */
+async function eligibleMedicalExport(caseId: string, firmId: string) {
+  return prisma.reportExport.findFirst({
+    where: {
+      caseId,
+      firmId,
+      draft: false,
+      supersededById: null,
+      contentSha256: { not: null },
+      reportType: { in: ["LIFE_CARE_PLAN", "MEDICAL_COST_PROJECTION"] },
+    },
+    orderBy: { createdAt: "desc" },
+  });
 }
 
 async function loadCurrentAssumptions(caseId: string, firmId: string) {
@@ -68,20 +108,41 @@ export async function GET(_req: Request, { params: paramsPromise }: { params: Pr
     await requireCase(ctx, params.caseId);
     requireCanonicalPermission(ctx, "economic.view", { caseId: params.caseId });
 
-    const [assumptions, scenarios] = await Promise.all([
+    const [assumptions, scenarios, medicalExport] = await Promise.all([
       loadCurrentAssumptions(params.caseId, ctx.firm.id),
-      prisma.economicScenario.findMany({ where: { caseId: params.caseId, firmId: ctx.firm.id }, orderBy: { createdAt: "asc" } }),
+      // Current (non-superseded) scenario rows only; history stays queryable.
+      prisma.economicScenario.findMany({
+        where: { caseId: params.caseId, firmId: ctx.firm.id, supersededById: null },
+        orderBy: { createdAt: "asc" },
+      }),
+      eligibleMedicalExport(params.caseId, ctx.firm.id),
     ]);
     const { missing } = assumptionsToInputs(assumptions);
+    // Fail-closed currency: recompute the hash the CURRENT inputs would
+    // produce and compare with each stored result — a mismatch is STALE and is
+    // reported as such, never presented as current.
+    const rows: ScenarioRow[] = scenarios.map((s) => ({
+      name: s.name,
+      overrides: s.overrides as Record<string, unknown>,
+      result: s.result as StoredEconResult | null,
+      computedAt: s.computedAt,
+    }));
+    const staleness = computeScenarioStaleness(
+      assumptions,
+      rows,
+      medicalExport ? { exportId: medicalExport.id, presentValue: medicalExport.totalPresentValue } : null,
+    );
+    const baseStale = staleness.get("base") === true;
     // Pre-approval readiness for the workspace banner (report-level economist
     // approval/attestation is layered on by the report workflow, not here).
-    const readiness = economistReadiness(
+    const readiness = economistReadiness(assumptions, rows, false, false, { baseStale });
+    return ok({
       assumptions,
-      scenarios.map((s) => ({ name: s.name, result: s.result as StoredEconResult | null, computedAt: s.computedAt })),
-      false,
-      false,
-    );
-    return ok({ assumptions, scenarios, missing, readiness, keys: ASSUMPTION_KEYS });
+      scenarios: scenarios.map((s) => ({ ...s, stale: staleness.get(s.name) === true })),
+      missing,
+      readiness,
+      keys: ASSUMPTION_KEYS,
+    });
   } catch (err) {
     return handleError(err);
   }
@@ -130,31 +191,55 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
     if (isCompute) return compute(ctx, params.caseId, await req.json());
 
     const input = assumptionSchema.parse(await req.json());
+    // Unknown computational keys are refused — a stored assumption must either
+    // map deterministically to a supported input or be an explicitly disclosed
+    // non-computational `custom:*` assumption. Nothing is silently ignored.
+    if (!KNOWN_KEYS.has(input.key) && !isCustomKey(input.key)) {
+      return ok(
+        {
+          error: `Unknown assumption key "${input.key}". Use one of the supported computational keys, or a "custom:" prefixed key for a disclosed non-computational assumption.`,
+          keys: [...KNOWN_KEYS],
+        },
+        422,
+      );
+    }
     const prior = await prisma.economicAssumption.findFirst({
       where: { caseId: params.caseId, firmId: ctx.firm.id, key: input.key, supersededById: null },
     });
     const priorCount = await prisma.economicAssumption.count({
       where: { caseId: params.caseId, firmId: ctx.firm.id, key: input.key },
     });
-    const created = await prisma.economicAssumption.create({
-      data: {
-        firmId: ctx.firm.id,
-        caseId: params.caseId,
-        key: input.key,
-        value: input.value,
-        unit: input.unit,
-        source: input.source,
-        effectiveDate: input.effectiveDate ? new Date(input.effectiveDate) : null,
-        expertId: ctx.user.id,
-        rationale: input.rationale ?? null,
-        origin: "USER",
-        version: priorCount + 1,
-      },
+    // Transactional supersede-on-edit: the new version and the supersession of
+    // EVERY other current row for this key commit atomically, so a partial
+    // failure or a concurrent entry can never leave two current versions.
+    const created = await prisma.$transaction(async (tx) => {
+      const row = await tx.economicAssumption.create({
+        data: {
+          firmId: ctx.firm.id,
+          caseId: params.caseId,
+          key: input.key,
+          value: input.value,
+          unit: input.unit,
+          source: input.source,
+          effectiveDate: input.effectiveDate ? new Date(input.effectiveDate) : null,
+          expertId: ctx.user.id,
+          rationale: input.rationale ?? null,
+          origin: "USER",
+          version: priorCount + 1,
+        },
+      });
+      await tx.economicAssumption.updateMany({
+        where: { caseId: params.caseId, firmId: ctx.firm.id, key: input.key, supersededById: null, NOT: { id: row.id } },
+        data: { supersededById: row.id },
+      });
+      return row;
     });
-    // Supersede-on-edit: the prior current row for this key now points at its
-    // successor; history is never deleted.
-    if (prior) {
-      await prisma.economicAssumption.update({ where: { id: prior.id }, data: { supersededById: created.id } });
+    // A substantive change to the assumption substrate means any signed
+    // economist report no longer covers current work.
+    const substanceChanged =
+      !prior || prior.value !== input.value || prior.unit !== input.unit || prior.source !== input.source;
+    if (substanceChanged && KNOWN_KEYS.has(input.key)) {
+      await staleEconomistApprovals(params.caseId, ctx.firm.id, "economic assumptions changed after signature");
     }
     await audit(ctx, "economics.assumption", {
       type: "economicAssumption",
@@ -183,28 +268,36 @@ function toStored(result: EconResult, extra: Pick<StoredEconResult, "medicalSour
     medicalSource: extra.medicalSource ?? null,
     ...(extra.medicalNote !== undefined ? { medicalNote: extra.medicalNote } : {}),
     ...(extra.sensitivity !== undefined ? { sensitivity: extra.sensitivity } : {}),
+    engineVersion: ECON_ENGINE_VERSION,
   };
   // Strip undefined values for the Json column.
   return JSON.parse(JSON.stringify(stored)) as Prisma.InputJsonValue;
 }
 
-async function upsertScenario(
+/**
+ * Immutable calculation history: each compute CREATES a new scenario row and
+ * atomically points the prior current row of the same name at its successor.
+ * A prior result is never overwritten in place — every historical calculation
+ * remains recoverable with its inputs, hash, and provenance.
+ */
+async function recordScenarioRun(
   caseId: string,
   firmId: string,
   name: string,
   overrides: Record<string, unknown>,
   result: Prisma.InputJsonValue,
   computedAt: Date,
+  computedById: string,
 ) {
-  const existing = await prisma.economicScenario.findFirst({ where: { caseId, firmId, name } });
-  if (existing) {
-    return prisma.economicScenario.update({
-      where: { id: existing.id },
-      data: { overrides: overrides as Prisma.InputJsonValue, result, computedAt },
+  return prisma.$transaction(async (tx) => {
+    const row = await tx.economicScenario.create({
+      data: { caseId, firmId, name, overrides: overrides as Prisma.InputJsonValue, result, computedAt, computedById },
     });
-  }
-  return prisma.economicScenario.create({
-    data: { caseId, firmId, name, overrides: overrides as Prisma.InputJsonValue, result, computedAt },
+    await tx.economicScenario.updateMany({
+      where: { caseId, firmId, name, supersededById: null, NOT: { id: row.id } },
+      data: { supersededById: row.id },
+    });
+    return row;
   });
 }
 
@@ -213,6 +306,12 @@ async function compute(ctx: TenantContext, caseId: string, body: unknown) {
   const requested = input.scenarios ?? [];
   if (requested.some((s) => s.name === "base")) {
     return ok({ error: 'Scenario name "base" is reserved — the base scenario is always computed from the current assumptions.' }, 422);
+  }
+  // One request must not carry the same scenario name twice — the second would
+  // silently supersede the first inside a single run.
+  const names = requested.map((s) => s.name);
+  if (new Set(names).size !== names.length) {
+    return ok({ error: "Scenario names must be unique within a request." }, 422);
   }
 
   const assumptions = await loadCurrentAssumptions(caseId, ctx.firm.id);
@@ -225,18 +324,20 @@ async function compute(ctx: TenantContext, caseId: string, body: unknown) {
     );
   }
 
-  // Medical PV: ONLY from the latest FINAL LCP/MCP export for this case.
-  const medicalExport = await prisma.reportExport.findFirst({
-    where: {
-      caseId,
-      firmId: ctx.firm.id,
-      draft: false,
-      reportType: { in: ["LIFE_CARE_PLAN", "MEDICAL_COST_PROJECTION"] },
-    },
-    orderBy: { createdAt: "desc" },
-  });
-  const medicalSource = medicalExport
-    ? { exportId: medicalExport.id, reportType: medicalExport.reportType ?? "LIFE_CARE_PLAN", presentValue: medicalExport.totalPresentValue }
+  // Medical PV: ONLY from the currently eligible FINAL, non-superseded LCP/MCP
+  // export with a valid content hash. Full provenance is stored so the source
+  // remains identifiable and a superseded source makes the result stale.
+  const medicalExport = await eligibleMedicalExport(caseId, ctx.firm.id);
+  const computedAtStamp = new Date();
+  const medicalSource: MedicalSource | null = medicalExport
+    ? {
+        exportId: medicalExport.id,
+        reportType: medicalExport.reportType ?? "LIFE_CARE_PLAN",
+        presentValue: medicalExport.totalPresentValue,
+        contentSha256: medicalExport.contentSha256,
+        version: medicalExport.version,
+        selectedAt: computedAtStamp.toISOString(),
+      }
     : null;
   const baseInputs: EconInputs = {
     ...mapped.inputs,
@@ -272,19 +373,30 @@ async function compute(ctx: TenantContext, caseId: string, body: unknown) {
   }
 
   const medicalNote = medicalSource ? undefined : MEDICAL_OMISSION_NOTE;
-  const computedAt = new Date();
+  const computedAt = computedAtStamp;
+  // If this run's base inputs differ from the previously current base result,
+  // the substrate under any signed economist report has changed — stale the
+  // signatures before recording the new run.
+  const priorBase = await prisma.economicScenario.findFirst({
+    where: { caseId, firmId: ctx.firm.id, name: "base", supersededById: null },
+  });
+  const priorBaseHash = (priorBase?.result as StoredEconResult | null)?.inputsHash ?? null;
+  if (priorBaseHash !== baseResult.inputsHash) {
+    await staleEconomistApprovals(caseId, ctx.firm.id, "economic calculations changed after signature");
+  }
   const saved = [
-    await upsertScenario(caseId, ctx.firm.id, "base", {}, toStored(baseResult, { medicalSource, medicalNote, sensitivity }), computedAt),
+    await recordScenarioRun(caseId, ctx.firm.id, "base", {}, toStored(baseResult, { medicalSource, medicalNote, sensitivity }), computedAt, ctx.user.id),
   ];
   for (const s of requested) {
     saved.push(
-      await upsertScenario(
+      await recordScenarioRun(
         caseId,
         ctx.firm.id,
         s.name,
         s.overrides,
         toStored(scenarioResults[s.name], { medicalSource, medicalNote }),
         computedAt,
+        ctx.user.id,
       ),
     );
   }

@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit, recordUsage } from "@/lib/tenant";
+import { isAttorneyPresentationForCase } from "@/lib/authz/effective";
 import { ingestDocument } from "@/lib/documents/ingest";
 import { SAMPLE_DOCS } from "@/lib/documents/samples";
 import { putObject } from "@/lib/storage";
@@ -30,8 +31,11 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
     const ctx = await requireApiContext();
     // The retaining attorney may upload case records (files classify through
     // the normal ingestion pipeline); the text/sample ingestion path stays
-    // behind records.upload.
-    const attorneyUpload = ctx.user.role === "ATTORNEY_REVIEWER";
+    // behind records.upload. The allowance follows the genuine attorney
+    // presentation — a specialist on an attorney seat never inherits it.
+    const attorneyUpload =
+      ctx.user.role === "ATTORNEY_REVIEWER" &&
+      (await isAttorneyPresentationForCase({ userId: ctx.user.id, firmId: ctx.firm.id, role: ctx.user.role, caseId: params.caseId }));
     if (attorneyUpload) {
       requirePermission(ctx, "case.view");
     } else {

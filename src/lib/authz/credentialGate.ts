@@ -62,6 +62,25 @@ export async function hasVerifiedCredential(actor: Actor, category: CredentialCa
 }
 
 /**
+ * The label of the actor's qualifying verified, unexpired credential of
+ * `category`, for snapshotting onto the record of a professional act
+ * (e.g. a vocational verification). Null when none qualifies — callers
+ * gate first with assertVerifiedCredential; this is attribution, not authz.
+ */
+export async function verifiedCredentialLabel(actor: Actor, category: CredentialCategory): Promise<string | null> {
+  const { userId, firmId } = actorIds(actor);
+  const rows = await prisma.userCredential.findMany({
+    where: { userId, firmId },
+    select: { category: true, status: true, expiresAt: true, label: true },
+  });
+  const now = Date.now();
+  const match = rows.find(
+    (r) => r.category === category && VERIFIED_STATUSES.has(r.status) && (!r.expiresAt || r.expiresAt.getTime() > now),
+  );
+  return (match as { label?: string | null } | undefined)?.label ?? (match ? "verified credential on file" : null);
+}
+
+/**
  * STRICT gate for attestation-class writes. Throws the standard API authz
  * error (403 FORBIDDEN) unless the actor holds a matching verified,
  * unexpired credential. Always enforced — no feature flag can soften it.

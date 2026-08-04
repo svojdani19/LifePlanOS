@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit } from "@/lib/tenant";
+import { isAttorneyPresentationForCase } from "@/lib/authz/effective";
 import { recomputeCosts } from "@/lib/engine/generate";
 import { ok, handleError } from "@/lib/api";
 
@@ -54,10 +55,14 @@ export async function PATCH(req: Request, { params: paramsPromise }: { params: P
   try {
     const ctx = await requireApiContext();
     const rawInput = patchSchema.parse(await req.json());
+    // The intake allowance belongs to the genuine attorney presentation only —
+    // a specialist (vocational/physician/planner assignment) occupying an
+    // attorney seat must use their own permissions, not the attorney's.
     const attorneyIntakePatch =
       ctx.user.role === "ATTORNEY_REVIEWER" &&
       Object.keys(rawInput).length > 0 &&
-      Object.keys(rawInput).every((k) => ATTORNEY_INTAKE_KEYS.has(k));
+      Object.keys(rawInput).every((k) => ATTORNEY_INTAKE_KEYS.has(k)) &&
+      (await isAttorneyPresentationForCase({ userId: ctx.user.id, firmId: ctx.firm.id, role: ctx.user.role, caseId: params.caseId }));
     if (attorneyIntakePatch) {
       requirePermission(ctx, "case.view");
     } else {

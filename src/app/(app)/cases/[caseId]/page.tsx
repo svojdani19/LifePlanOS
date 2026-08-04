@@ -4,6 +4,7 @@ import { ArrowLeft } from "lucide-react";
 import { requireContext, requireCase, caseAccessFor } from "@/lib/tenant";
 import { prisma } from "@/lib/db";
 import { ROLE_PERMISSIONS } from "@/lib/rbac";
+import { effectiveLegacyPermissions, effectiveAssignmentTemplates, isAttorneyPresentation } from "@/lib/authz/effective";
 import { assumptionsFor } from "@/lib/engine/generate";
 import { rankPrecedents } from "@/lib/precedents/match";
 import { CaseWorkspace } from "@/components/case/CaseWorkspace";
@@ -16,9 +17,23 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
   // server-rendered resource.
   await requireCase(ctx, params.caseId);
   const caseAccess = await caseAccessFor(ctx);
-  // Firm administrators see the individual case exactly as the retaining
-  // attorney does — the attorney presentation IS the case view for both roles.
-  const attorneyView = ctx.user.role === "ATTORNEY_REVIEWER" || ctx.user.role === "ADMIN";
+  // Effective permissions: the user's legacy seat UNION their currently
+  // effective role-template assignments applicable to THIS case (org-wide or
+  // case-scoped) — so an assignment-based Life Care Planner authors with full
+  // clinical permissions regardless of the seat they occupy. Firm admins and
+  // attorney seats WITHOUT clinical-authoring authority get the attorney
+  // presentation; clinical authors always get the normal clinical view.
+  const scopeInput = {
+    userId: ctx.user.id,
+    firmId: ctx.firm.id,
+    role: ctx.user.role,
+    caseId: params.caseId,
+  };
+  const [effectivePermissions, effectiveTemplates] = await Promise.all([
+    effectiveLegacyPermissions(scopeInput),
+    effectiveAssignmentTemplates(scopeInput),
+  ]);
+  const attorneyView = isAttorneyPresentation(ctx.user.role, effectivePermissions, effectiveTemplates);
   // Firm admins see who the assigned attorney(s) on the matter are, right in
   // the case banner (case-scoped attorney assignments).
   let assignedAttorneys: string[] = [];
@@ -92,14 +107,14 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
         data={JSON.parse(JSON.stringify(c))}
         assumptions={assumptions}
         totals={{ totalLifetime, totalPresentValue }}
-        permissions={caseAccess.platformAdminReadOnly ? [] : attorneyView ? ROLE_PERMISSIONS.ATTORNEY_REVIEWER : ROLE_PERMISSIONS[ctx.user.role]}
+        permissions={caseAccess.platformAdminReadOnly ? [] : attorneyView ? ROLE_PERMISSIONS.ATTORNEY_REVIEWER : effectivePermissions}
         precedents={JSON.parse(JSON.stringify(ranked))}
         physicians={JSON.parse(JSON.stringify(physicians))}
         // Attorney-facing view: range-only pricing, condensed clinical detail,
-        // no evidence tab, and the provider attorney-input surface. Firm admins
-        // can preview it per case via ?viewAs=attorney (presentation only —
-        // permissions are swapped to the attorney's set for a faithful preview,
-        // while server-side authorization still runs against the real session).
+        // no evidence tab, and the provider attorney-input surface. Applies to
+        // firm admins and attorney seats without clinical authority; users with
+        // an effective clinical grant (planner or physician assignment) always
+        // get the full clinical view their professional work requires.
         attorneyView={attorneyView}
         assignedAttorneys={Array.from(new Set(assignedAttorneys))}
         pendingResolution={pendingResolution}

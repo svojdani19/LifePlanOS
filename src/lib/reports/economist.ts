@@ -1,4 +1,4 @@
-import { roundCurrency, type EconInputs } from "@/lib/engine/economics";
+import { roundCurrency, hashEconInputs, type EconInputs } from "@/lib/engine/economics";
 import type { Block, ReportDoc } from "./doc";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -93,6 +93,12 @@ export interface MedicalSource {
   exportId: string;
   reportType: string;
   presentValue: number;
+  /** Content hash of the referenced export at selection time (null on legacy rows). */
+  contentSha256?: string | null;
+  /** ReportExport.version at selection time. */
+  version?: number;
+  /** ISO timestamp of when this export was selected as the medical source. */
+  selectedAt?: string;
 }
 
 /** Shape persisted into EconomicScenario.result by the economics API. */
@@ -111,6 +117,8 @@ export interface StoredEconResult {
   medicalNote?: string;
   /** Discount-rate sensitivity rows (stored on the base scenario only). */
   sensitivity?: { param: string; rows: { value: number; totalPresentValue: number }[] };
+  /** Calculation-engine version that produced this result (absent on legacy rows). */
+  engineVersion?: string;
 }
 
 export interface ScenarioRow {
@@ -233,6 +241,64 @@ export function overridesToPartialInputs(
   return { partial, errors };
 }
 
+// ── Staleness (fail-closed currency check) ───────────────────────────────────
+
+export const RECOMPUTE_NOTE =
+  "Assumptions or the medical-cost source changed after the last calculation — recompute the scenarios. Stale results are never used in a final report.";
+
+/** The medical source currently eligible to supply the pass-through PV. */
+export interface CurrentMedicalRef {
+  exportId: string;
+  presentValue: number;
+}
+
+/**
+ * Deterministic currency check: for each stored scenario result, recompute the
+ * input hash that the CURRENT assumptions (plus the currently eligible
+ * medical-cost export) would produce and compare it with the stored
+ * `inputsHash`. A mismatch — or a change in which export supplies the medical
+ * component, or assumptions that no longer map to valid inputs — marks the
+ * scenario STALE. Pure: no I/O, no clock. A stale scenario must never be
+ * treated as current or feed a final report.
+ */
+export function computeScenarioStaleness(
+  assumptions: AssumptionInput[],
+  scenarios: ScenarioRow[],
+  medical: CurrentMedicalRef | null,
+): Map<string, boolean> {
+  const out = new Map<string, boolean>();
+  const mapped = assumptionsToInputs(assumptions);
+  const baseInputs: EconInputs | null = mapped.inputs
+    ? { ...mapped.inputs, ...(medical ? { medicalCostPresentValue: medical.presentValue } : {}) }
+    : null;
+
+  for (const s of scenarios) {
+    if (!s.result) continue; // never computed — nothing to be stale
+    // Required assumptions no longer resolve → every stored result is stale.
+    if (!baseInputs) {
+      out.set(s.name, true);
+      continue;
+    }
+    // The identity of the medical source must match, not just its amount.
+    const storedMedicalId = s.result.medicalSource?.exportId ?? null;
+    if (storedMedicalId !== (medical?.exportId ?? null)) {
+      out.set(s.name, true);
+      continue;
+    }
+    if (s.name === "base") {
+      out.set(s.name, s.result.inputsHash !== hashEconInputs(baseInputs));
+      continue;
+    }
+    const r = overridesToPartialInputs(assumptions, (s.overrides ?? {}) as Record<string, number | string>);
+    if (!r.partial) {
+      out.set(s.name, true); // overrides no longer resolve against current assumptions
+      continue;
+    }
+    out.set(s.name, s.result.inputsHash !== hashEconInputs({ ...baseInputs, ...r.partial }));
+  }
+  return out;
+}
+
 // ── Readiness ladder ─────────────────────────────────────────────────────────
 
 export type EconomistStatus =
@@ -261,11 +327,16 @@ export function economistReadiness(
   scenarios: ScenarioRow[],
   hasVerifiedConclusion: boolean,
   approved: boolean,
+  currency?: { baseStale: boolean },
 ): EconomistReadiness {
   const { missing } = assumptionsToInputs(assumptions);
   if (missing.length > 0) return { status: "Intake incomplete", missing };
   const base = scenarios.find((s) => s.name === "base" && s.result != null && s.computedAt != null);
   if (!base) return { status: "Expert input required", missing: [] };
+  // Fail closed on currency: a stale base scenario means the stored numbers no
+  // longer describe the current inputs — the ladder drops back to requiring a
+  // recomputation, and any approval rung above it is unreachable until then.
+  if (currency?.baseStale) return { status: "Expert input required", missing: [RECOMPUTE_NOTE] };
   if (!hasVerifiedConclusion) return { status: "Draft support package available", missing: [] };
   if (!approved) return { status: "Expert review required", missing: [] };
   return { status: "Ready for final export", missing: [] };

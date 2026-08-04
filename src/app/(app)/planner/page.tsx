@@ -116,11 +116,20 @@ export default async function PlannerWorkspacePage() {
     return parts.length ? parts.join(" · ") : "no items yet";
   };
 
+  // Identity for the hero — the signed-in person's name with their working
+  // title from the LIFE_CARE_PLANNER assignment (same identity-resolution
+  // pattern as the attorney workspace); defaults to the professional title.
+  const titleGrant = await prisma.userRoleAssignment.findFirst({
+    where: { firmId: ctx.firm.id, userId: ctx.user.id, status: "ACTIVE", builtInRole: "LIFE_CARE_PLANNER", caseId: null, responsibility: { not: null } },
+    select: { responsibility: true },
+  });
+  const plannerTitle = titleGrant?.responsibility ?? "Life Care Planner";
+
   return (
     <div>
       <PageHeader
-        title="Planner Workspace"
-        subtitle={`${cases.length} open case${cases.length === 1 ? "" : "s"} across ${stages.length} stage${stages.length === 1 ? "" : "s"}`}
+        title={ctx.user.name}
+        subtitle={`${plannerTitle} — ${cases.length} open case${cases.length === 1 ? "" : "s"} across ${stages.length} stage${stages.length === 1 ? "" : "s"}`}
         metrics={[
           { label: "Awaiting MD Review", value: String(totalPending) },
           { label: "Blocking Findings", value: String(totalBlocking) },

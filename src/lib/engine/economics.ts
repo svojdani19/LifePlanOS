@@ -46,6 +46,13 @@ import { createHash } from "node:crypto";
 // presentation boundary, via `roundCurrency`.
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Calculation-engine version stamped into every stored result. Bump when any
+ * formula, convention, or hashing rule above changes meaning — a stored result
+ * is only comparable to a recomputation under the same version.
+ */
+export const ECON_ENGINE_VERSION = "econ-1";
+
 export interface EconInputs {
   /** Annual earnings in the first year of the loss period (USD). Required. */
   baselineAnnualEarnings: number;

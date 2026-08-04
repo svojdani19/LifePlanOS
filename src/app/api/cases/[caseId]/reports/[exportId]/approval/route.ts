@@ -68,7 +68,26 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
       await enforceReviewCredential(ctx, requiredCredential, { action: "report.approve", caseId: params.caseId });
     }
 
-    if (record.draft) return ok({ error: "Draft exports cannot be approved or attested — only final exports carry a signature." }, 409);
+    // Physician-required reports never sign drafts. Vocational/economist
+    // reports are the expert's OWN work product and are definitionally drafts
+    // until the expert signs (the final gate requires the signature), so the
+    // expert may sign the NEWEST draft of their report — the signature is
+    // still bound to that exact content hash, and a later regeneration leaves
+    // it verifiably attached to the version actually reviewed.
+    const expertWorkflowDraft = record.draft && (expertRole === "vocational" || expertRole === "economist");
+    if (record.draft && !expertWorkflowDraft) {
+      return ok({ error: "Draft exports cannot be approved or attested — only final exports carry a signature." }, 409);
+    }
+    if (expertWorkflowDraft) {
+      const newest = await prisma.reportExport.findFirst({
+        where: { caseId: params.caseId, firmId: ctx.firm.id, reportType: record.reportType, supersededById: null },
+        orderBy: { createdAt: "desc" },
+        select: { id: true },
+      });
+      if (!newest || newest.id !== record.id) {
+        return ok({ error: "Only the most recent export of this report can carry the expert's signature. Regenerate and review the current version." }, 409);
+      }
+    }
     if (!record.contentSha256) {
       return ok({ error: "This export has no content hash to bind the signature to; regenerate it first." }, 409);
     }

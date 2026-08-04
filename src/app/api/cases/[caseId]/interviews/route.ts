@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { prisma } from "@/lib/db";
-import { requireApiContext, requirePermission, requireCase, audit } from "@/lib/tenant";
+import { requireApiContext, requirePermission, requireCanonicalPermission, requireCase, audit } from "@/lib/tenant";
 import { ok, handleError } from "@/lib/api";
 
 // Interview findings (EPIC-011) — patient or treating-provider, categorized or
@@ -37,9 +37,19 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
   const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
-    // Planners/paralegals capture; physician reviewers may add provider opinions.
+    // Planners/paralegals capture; physician reviewers may add provider
+    // opinions. A reviewer whose physician grant is case-scoped (assignment or
+    // engagement) is authorized through the resource-aware canonical check —
+    // the same evaluator the review routes use, so recording a finding and
+    // deciding a recommendation share one authorization boundary.
     const canCapture = (() => { try { requirePermission(ctx, "case.edit"); return true; } catch { return false; } })();
-    if (!canCapture) requirePermission(ctx, "physician.review");
+    if (!canCapture) {
+      try {
+        requirePermission(ctx, "physician.review");
+      } catch {
+        requireCanonicalPermission(ctx, "physician.review", { caseId: params.caseId });
+      }
+    }
     await requireCase(ctx, params.caseId);
     const input = schema.parse(await req.json());
     const finding = await prisma.interviewFinding.create({

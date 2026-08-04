@@ -385,7 +385,10 @@ export function CaseWorkspace({
         {tab === "records" && <RecordsPanel data={data} canEdit={can("records.upload")} canUpload={attorneyView} call={call} busy={busy} />}
         {tab === "chronology" && <ChronologyPanel data={data} canEdit={can("chronology.edit")} call={call} />}
         {tab === "causation" && <CausationPanel data={data} hideConfidence={attorneyView} />}
-        {tab === "providers" && <TreatingProvidersPanel data={data} canEdit={can("case.edit") || can("physician.review")} attorneyView={attorneyView} call={call} />}
+        {/* Roster management stays behind case.edit (matching the server);
+            physician reviewers may RECORD interview/provider findings — the
+            action the interviews route actually authorizes for them. */}
+        {tab === "providers" && <TreatingProvidersPanel data={data} canEdit={can("case.edit")} canInterview={can("case.edit") || can("physician.review")} attorneyView={attorneyView} call={call} />}
         {tab === "evidence" && !attorneyView && <EvidencePanel data={data} />}
         {tab === "futurecare" && <FutureCarePanel data={data} canEdit={can("futurecare.edit")} attorneyView={attorneyView} call={call} focusId={focusId} focusCat={focusCat} />}
         {tab === "costs" && !attorneyView && <CostsPanel data={data} assumptions={assumptions} totals={totals} canEdit={can("case.edit")} canApprove={can("physician.review")} call={call} focusId={focusId} />}
@@ -2786,7 +2789,7 @@ function FindingList({ findings, onDelete, canEdit }: { findings: AnyRec[]; onDe
   );
 }
 
-function TreatingProvidersPanel({ data, canEdit, attorneyView = false, call }: { data: AnyRec; canEdit: boolean; attorneyView?: boolean; call: any }) {
+function TreatingProvidersPanel({ data, canEdit, canInterview = canEdit, attorneyView = false, call }: { data: AnyRec; canEdit: boolean; canInterview?: boolean; attorneyView?: boolean; call: any }) {
   const [providers, setProviders] = useState<AnyRec[] | null>(null);
   const [patient, setPatient] = useState<AnyRec[]>([]);
   const [openProvider, setOpenProvider] = useState<string | null>(null);
@@ -2828,7 +2831,7 @@ function TreatingProvidersPanel({ data, canEdit, attorneyView = false, call }: {
         <h3 className="text-sm font-semibold text-ink-900">Patient Interview</h3>
         <p className="text-xs text-ink-500">Current complaints in the patient&apos;s own words. These populate the report&apos;s Current Complaints section and support the relevant recommendations.</p>
         <FindingList findings={patient} canEdit={canEdit} onDelete={(id) => delFinding(id, loadPatient)} />
-        {canEdit && <InterviewEditor onAdd={(f) => addFinding({ subject: "PATIENT", ...f }, loadPatient)} />}
+        {canInterview && <InterviewEditor onAdd={(f) => addFinding({ subject: "PATIENT", ...f }, loadPatient)} />}
       </div>
 
       {/* Treating provider roster */}
@@ -2860,7 +2863,7 @@ function TreatingProvidersPanel({ data, canEdit, attorneyView = false, call }: {
                 {openProvider === p.id && (
                   <div className="border-t border-ink-100 p-3">
                     {!attorneyView && <FindingList findings={p.interviewFindings ?? []} canEdit={canEdit} onDelete={(id) => delFinding(id, () => loadProviders())} />}
-                    {!attorneyView && canEdit && <InterviewEditor onAdd={(f) => addFinding({ subject: "PROVIDER", providerId: p.id, ...f }, () => loadProviders())} />}
+                    {!attorneyView && canInterview && <InterviewEditor onAdd={(f) => addFinding({ subject: "PROVIDER", providerId: p.id, ...f }, () => loadProviders())} />}
                     {!attorneyView && (p.depositionSummary || p.attorneyNotes) && (
                       <div className="mt-2 rounded-md bg-ink-50 p-2.5 text-sm">
                         <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Attorney-provided context</p>

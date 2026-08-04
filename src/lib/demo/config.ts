@@ -135,6 +135,7 @@ export const DEMO_PERSONAS: DemoPersona[] = [
     role: "PLANNER",
     templateAssignments: ["LIFE_CARE_PLANNER"],
     preferredWorkspace: "LIFE_CARE_PLANNER",
+    assignmentResponsibility: "Life Care Planner",
     description:
       "Life care planner: authors defensible future-care recommendations, costs them, and builds the expert report.",
   },
@@ -144,24 +145,33 @@ export const DEMO_PERSONAS: DemoPersona[] = [
     role: "PHYSICIAN_REVIEWER",
     templateAssignments: ["PHYSICIAN_REVIEWER"],
     preferredWorkspace: "PHYSICIAN_REVIEWER",
+    assignmentResponsibility: "Physician Reviewer",
     description:
       "Physician reviewer: independently reviews medical necessity and signs credential-gated attestations. Holds an org-verified license.",
   },
   {
     email: "vocational@demo.lifeplanos.com",
     name: "Riley Demo-Brooks, CRC",
-    role: "PLANNER",
+    // A read-oriented seat: the expert's authority comes from the case-scoped
+    // VOCATIONAL_EXPERT assignment/engagement, never from a planner seat —
+    // a planner seat would smuggle in life-care-plan authoring powers.
+    role: "ATTORNEY_REVIEWER",
     templateAssignments: ["VOCATIONAL_EXPERT"],
     preferredWorkspace: "VOCATIONAL_EXPERT",
+    assignmentResponsibility: "Vocational Expert",
     description:
       "Vocational expert: analyzes work capacity, transferable skills, and vocational loss for engaged cases. Org-verified CRC credential.",
   },
   {
     email: "economist@demo.lifeplanos.com",
     name: "Cameron Demo-Price, PhD",
-    role: "PLANNER",
+    // Least-privileged compatibility seat: the expert authority comes from the
+    // FORENSIC_ECONOMIST assignment/engagement — a planner seat would smuggle
+    // in clinical authoring and case-management powers.
+    role: "ATTORNEY_REVIEWER",
     templateAssignments: ["FORENSIC_ECONOMIST"],
     preferredWorkspace: "FORENSIC_ECONOMIST",
+    assignmentResponsibility: "Forensic Economist",
     description:
       "Forensic economist: models deterministic present-value loss scenarios from explicitly sourced assumptions. Org-verified credential.",
   },
@@ -198,6 +208,7 @@ export const DEMO_PERSONAS: DemoPersona[] = [
     role: "PHYSICIAN_REVIEWER",
     templateAssignments: ["PHYSICIAN_REVIEWER", "QUALITY_ASSURANCE_REVIEWER"],
     preferredWorkspace: "PHYSICIAN_REVIEWER",
+    assignmentResponsibility: "Medical Director",
     description:
       "Medical director (multi-role): physician reviewer who also carries the QA template — demonstrates multi-assignment workspace switching.",
   },

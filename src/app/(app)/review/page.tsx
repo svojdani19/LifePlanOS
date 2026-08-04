@@ -1,6 +1,7 @@
+import { redirect } from "next/navigation";
 import { requireContext } from "@/lib/tenant";
 import { prisma } from "@/lib/db";
-import { ROLE_PERMISSIONS } from "@/lib/rbac";
+import { accessibleCaseIds, rolesWithPermission, templatesWithPermission } from "@/lib/authz/caseScope";
 import { PageHeader } from "@/components/ui/PageHeader";
 import { PhysicianWorkspace } from "@/components/review/PhysicianWorkspace";
 import { AdminReviewOverview, type AdminReviewGroup } from "@/components/review/AdminReviewOverview";
@@ -89,8 +90,17 @@ export default async function ReviewPage() {
     );
   }
 
-  const canReview = ROLE_PERMISSIONS[ctx.user.role].includes("physician.review");
-  if (!canReview) {
+  // Same centralized case-scope guard as /physician: a legacy reviewer seat or
+  // an org-wide PHYSICIAN_REVIEWER assignment sees the firm-wide queue; a
+  // case-scoped assignment or an engagement (assignedPhysicianId) sees ONLY
+  // those cases. Visiting /review never widens anyone's access.
+  const access = await accessibleCaseIds(ctx, {
+    firmWideRoles: rolesWithPermission("physician.review"),
+    assignmentTemplates: templatesWithPermission("physician.review"),
+    orgWideAssignmentGrantsAll: true,
+    engagementSlots: ["assignedPhysicianId"],
+  });
+  if (!access.allowed) {
     return (
       <div>
         <PageHeader title="Physician Review" subtitle="Cross-case review queue" />
@@ -98,9 +108,18 @@ export default async function ReviewPage() {
       </div>
     );
   }
+  // Platform-admin (view-as) access is observation-only; /physician renders
+  // this same queue with the read-only presentation and no disposition controls.
+  if (access.platformAdminReadOnly) redirect("/physician");
+  const scoped = access.cases === "all" ? null : access.cases;
 
   const items = await prisma.futureCareItem.findMany({
-    where: { supersededAt: null, physicianStatus: "PENDING", case: { firmId: ctx.firm.id, status: { notIn: ["CLOSED", "ARCHIVED"] } } },
+    where: {
+      supersededAt: null,
+      physicianStatus: "PENDING",
+      ...(scoped ? { caseId: { in: scoped } } : {}),
+      case: { firmId: ctx.firm.id, status: { notIn: ["CLOSED", "ARCHIVED"] } },
+    },
     include: { case: { select: { id: true, clientName: true, caseNumber: true } } },
     orderBy: { presentValue: "desc" },
   });

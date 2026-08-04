@@ -120,11 +120,21 @@ export default async function EconomistWorkspacePage({ searchParams: searchParam
       canCanonicalPermission(ctx, "economic.edit", { caseId: selectedId }),
   );
 
+  // Identity for the hero — the signed-in economist's actual name with their
+  // working title from the FORENSIC_ECONOMIST assignment (same identity
+  // resolution as the other expert workspaces); nothing is hardcoded.
+  const titleGrant = await prisma.userRoleAssignment.findFirst({
+    where: { firmId: ctx.firm.id, userId: ctx.user.id, status: "ACTIVE", builtInRole: "FORENSIC_ECONOMIST", responsibility: { not: null } },
+    select: { responsibility: true },
+  });
+  const rawTitle = titleGrant?.responsibility ?? null;
+  const expertTitle = rawTitle && !/^[A-Z_ ]+$/.test(rawTitle) ? rawTitle : "Forensic Economist";
+
   return (
     <div>
       <PageHeader
-        title="Forensic Economist Workspace"
-        subtitle={`${queueCases.length} case${queueCases.length === 1 ? "" : "s"} with entered assumptions · every value is explicitly sourced, nothing is defaulted`}
+        title={ctx.user.name}
+        subtitle={`${expertTitle} — ${queueCases.length} case${queueCases.length === 1 ? "" : "s"} with entered assumptions · every value is explicitly sourced, nothing is defaulted`}
       />
 
       <div className="mt-5 grid gap-6 lg:grid-cols-3">

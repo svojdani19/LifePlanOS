@@ -125,11 +125,23 @@ export default async function PhysicianWorkspacePage() {
     return c ? `${c.clientName} · ${c.caseNumber}` : "Case";
   };
 
+  // Identity for the hero — the signed-in physician's actual name with their
+  // working title from the PHYSICIAN_REVIEWER assignment (same identity
+  // resolution as the planner and attorney workspaces). Raw enum-shaped
+  // responsibilities fall back to the professional title; nothing is hardcoded
+  // to any particular physician.
+  const titleGrant = await prisma.userRoleAssignment.findFirst({
+    where: { firmId: ctx.firm.id, userId: ctx.user.id, status: "ACTIVE", builtInRole: "PHYSICIAN_REVIEWER", caseId: null, responsibility: { not: null } },
+    select: { responsibility: true },
+  });
+  const rawTitle = titleGrant?.responsibility ?? null;
+  const physicianTitle = rawTitle && !/^[A-Z_ ]+$/.test(rawTitle) ? rawTitle : "Physician Reviewer";
+
   return (
     <div>
       <PageHeader
-        title="Physician Workspace"
-        subtitle={`${queue.length} recommendation${queue.length === 1 ? "" : "s"} awaiting review across ${caseIds.length} case${caseIds.length === 1 ? "" : "s"} — weakest first`}
+        title={ctx.user.name}
+        subtitle={`${physicianTitle} — ${queue.length} recommendation${queue.length === 1 ? "" : "s"} awaiting review across ${caseIds.length} case${caseIds.length === 1 ? "" : "s"} — weakest first`}
       />
       {access.platformAdminReadOnly ? (
         // Platform-admin view is strictly read-only: no disposition controls.

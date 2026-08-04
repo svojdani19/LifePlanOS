@@ -122,11 +122,21 @@ export default async function VocationalWorkspacePage({ searchParams: searchPara
       canCanonicalPermission(ctx, "vocational.attest", { caseId: selectedId }),
   );
 
+  // Identity for the hero — the signed-in expert's actual name with their
+  // working title from the VOCATIONAL_EXPERT assignment (same identity
+  // resolution as the planner/physician workspaces); nothing is hardcoded.
+  const titleGrant = await prisma.userRoleAssignment.findFirst({
+    where: { firmId: ctx.firm.id, userId: ctx.user.id, status: "ACTIVE", builtInRole: "VOCATIONAL_EXPERT", responsibility: { not: null } },
+    select: { responsibility: true },
+  });
+  const rawTitle = titleGrant?.responsibility ?? null;
+  const expertTitle = rawTitle && !/^[A-Z_ ]+$/.test(rawTitle) ? rawTitle : "Vocational Expert";
+
   return (
     <div>
       <PageHeader
-        title="Vocational Expert Workspace"
-        subtitle={`${queueCases.length} case${queueCases.length === 1 ? "" : "s"} with vocational intake · every entry carries a source citation`}
+        title={ctx.user.name}
+        subtitle={`${expertTitle} — ${queueCases.length} case${queueCases.length === 1 ? "" : "s"} with vocational intake · every entry carries a source citation`}
       />
 
       {/* ── Queue: readiness per case ────────────────────────────────────────── */}

@@ -1,6 +1,8 @@
 import { redirect } from "next/navigation";
 import { headers } from "next/headers";
 import { prisma } from "@/lib/db";
+import { authorize } from "@/lib/authz/evaluate";
+import { shadowCompare } from "@/lib/authz/shadow";
 import { readSessionContext } from "@/lib/auth/session";
 import { can, type Permission } from "@/lib/rbac";
 import { effectiveLimits, currentPeriod } from "@/lib/subscription/plans";
@@ -141,24 +143,29 @@ export function requirePermission(ctx: TenantContext, permission: Permission): v
   if (!authz && ctx.authzLoadFailed && strictAuthorization) {
     throw new TenantError("Authorization could not be evaluated safely.", "FORBIDDEN", 403);
   }
+  let canonicalAllowed = false;
   if (authz) {
     try {
-      // Lazy import keeps the legacy path dependency-free at module load.
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const { authorize } = require("@/lib/authz/evaluate") as typeof import("@/lib/authz/evaluate");
-      const { shadowCompare } = require("@/lib/authz/shadow") as typeof import("@/lib/authz/shadow");
       const result = authorize({ userId: ctx.user.id, firmId: ctx.firm.id, permission }, authz);
       shadowCompare(legacyAllowed, result, { permission, route: "requirePermission" });
       if (features && features["authorization.enterprise"] === true) {
         if (!result.allowed) throw new TenantError(result.userSafeReason, "FORBIDDEN", 403);
         return; // enterprise verdict is authoritative for opted-in firms
       }
+      canonicalAllowed = result.allowed;
     } catch (err) {
       if (err instanceof TenantError) throw err;
       /* evaluator failure never breaks legacy authorization */
     }
   }
   if (!legacyAllowed) {
+    // Compatibility layer: a currently effective role-template assignment
+    // (evaluated by the canonical system — org scope here, since no resource
+    // is in view) grants the legacy permission its template carries. This is
+    // how an assignment-based Life Care Planner authors on a legacy seat that
+    // lacks the permission. Case-scoped assignments do not widen org-level
+    // checks; resource surfaces (requireCase / caseAccessFor) enforce those.
+    if (canonicalAllowed) return;
     throw new TenantError(`Your role cannot perform: ${permission}`, "FORBIDDEN", 403);
   }
 }
@@ -195,8 +202,6 @@ export function requireCanonicalPermission(
   if (!ctx.authz || ctx.authzLoadFailed) {
     throw new TenantError("Authorization could not be evaluated safely.", "FORBIDDEN", 403);
   }
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const { authorize } = require("@/lib/authz/evaluate") as typeof import("@/lib/authz/evaluate");
   const result = authorize(
     { userId: ctx.user.id, firmId: ctx.firm.id, permission, ...resource },
     ctx.authz,

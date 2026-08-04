@@ -1538,6 +1538,11 @@ model VocationalEntry {
   sourceDocumentId String?
   enteredById      String
   verification     String    @default("UNVERIFIED") // UNVERIFIED | VERIFIED | DISPUTED
+  // Verification attribution — set only by an explicit, credential-gated
+  // verification act; never carried across a material replacement.
+  verifiedById       String?
+  verifiedAt         DateTime?
+  verifiedCredential String? // snapshot of the verifying expert's credential label
   notes            String?
   supersededById   String? // revision history via supersede-not-edit
   createdAt        DateTime  @default(now())
@@ -1577,8 +1582,12 @@ model EconomicScenario {
   caseId     String
   name       String // base | low | high | custom label
   overrides  Json // {key: value} assumption overrides for this scenario
-  result     Json? // deterministic engine output {pastLoss, futureLoss, benefits, householdServices, medicalPV, total, inputsHash}
+  result     Json? // deterministic engine output {pastLoss, futureLoss, benefits, householdServices, medicalPV, total, inputsHash, engineVersion, medicalSource}
   computedAt DateTime?
+  // Immutable calculation history: a recompute creates a NEW row and points
+  // the prior current row of the same name at its successor. Never overwritten.
+  supersededById String?
+  computedById   String?
   createdAt  DateTime  @default(now())
 
   @@index([caseId])

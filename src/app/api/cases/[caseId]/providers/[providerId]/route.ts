@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit } from "@/lib/tenant";
+import { isAttorneyPresentationForCase } from "@/lib/authz/effective";
 import { ok, handleError } from "@/lib/api";
 
 const patchSchema = z.object({
@@ -27,7 +28,8 @@ export async function PATCH(req: Request, { params: paramsPromise }: { params: P
     const attorneyOnlyPatch =
       ctx.user.role === "ATTORNEY_REVIEWER" &&
       Object.keys(input).length > 0 &&
-      Object.keys(input).every((k) => ATTORNEY_FIELDS.has(k));
+      Object.keys(input).every((k) => ATTORNEY_FIELDS.has(k)) &&
+      (await isAttorneyPresentationForCase({ userId: ctx.user.id, firmId: ctx.firm.id, role: ctx.user.role, caseId: params.caseId }));
     if (attorneyOnlyPatch) {
       requirePermission(ctx, "case.view");
     } else {
