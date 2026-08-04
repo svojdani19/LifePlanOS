@@ -1313,6 +1313,16 @@ model Attestation {
   caseVersion       Int? // latest CaseSnapshot version at signing
   contentHash       String // sha-256 over canonical statement + scope
 
+  // Clinical-evidence binding (attestation ↔ reviewed clinical state).
+  // clinicalFingerprint is the versioned aggregate (cfp-1:<sha256>) over the
+  // covered items' per-recommendation clinical fingerprints computed at signing
+  // (see engine/attestationBinding.ts). Per-item fingerprints ride inside the
+  // scope entries ({ ...pinned fields, clinicalFingerprint }). Null on legacy
+  // rows — a legacy (unversioned) attestation can never authorize a new final.
+  clinicalFingerprint String? // cfp-1:<sha256 hex> aggregate at signing
+  bindingVersion      String? // fingerprint algorithm version, e.g. "cfp-1"
+  opinionScopes       Json? // string[] of opinion-scope codes the signed statement covers
+
   status            AttestationStatus @default(ACTIVE)
   invalidatedAt     DateTime?
   invalidatedReason String?
