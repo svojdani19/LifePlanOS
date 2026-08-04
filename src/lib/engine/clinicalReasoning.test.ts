@@ -19,7 +19,11 @@ const kneeStrong: CondInput & DossierCondition & { id: string } = {
   missingInfo: null,
   reasoning: "Attributed to the tibial plateau fracture.",
   physicianConfirmed: false,
-  socAnalysis: { guidelines: [{ title: "AAOS knee osteoarthritis guideline", year: "2023", quote: "Arthroplasty is recommended for end-stage disease.", relevance: { evidenceLevel: 1, evidenceLabel: "Clinical practice guideline", whyRelevant: "guideline; addresses the diagnosis and intervention" } }] },
+  // The guideline quote carries an actual duration-relevant claim (natural
+  // history) — required since the Guideline-Honesty hardening for the guideline
+  // to count toward LIFETIME-DURATION support; a duration-silent efficacy quote
+  // would still support medical necessity but not the duration.
+  socAnalysis: { guidelines: [{ title: "AAOS knee osteoarthritis guideline", year: "2023", quote: "The natural history of post-traumatic osteoarthritis is progressive; arthroplasty is recommended for end-stage disease.", relevance: { evidenceLevel: 1, evidenceLabel: "Clinical practice guideline", whyRelevant: "guideline; addresses the diagnosis and intervention" } }] },
 };
 
 // A knee diagnosis with NO patient-specific support (no records, no objective).

@@ -168,10 +168,11 @@ projection → clinical facts.
   non-lifetime items).
 - **What counts as independent support:** explicit documented chronicity/
   permanence on the condition (anchored in the record), a source-linked
-  prognosis quote, diagnosis-keyed natural-history/clinical guidance, or an
-  ATTRIBUTED professional duration rationale (a note or interview opinion that
-  actually speaks to duration). A generic objective finding (an MRI proving the
-  injury) documents the injury, not the duration, and never counts.
+  prognosis quote, diagnosis-keyed clinical guidance carrying a VERIFIED
+  duration claim (see below), or an ATTRIBUTED professional duration rationale
+  (a note or interview opinion that actually speaks to duration). A generic
+  objective finding (an MRI proving the injury) documents the injury, not the
+  duration, and never counts.
 - **Independent support vs. professional adoption are separate.** Physician
   approval of an item is professional ADOPTION under review policy: it lifts
   the finalized-totals/export block exactly as before, but it is never
@@ -191,4 +192,86 @@ projection → clinical facts.
   duration rationale) feeds the assessment material fingerprint — a change
   supersedes the assessment version and invalidates prior approval per the
   existing lineage policy, with the duration-support field identified in the
-  change set.
+  change set. A newly appearing contradictory-duration guideline also changes
+  the fingerprint, even when the surviving bases are unchanged.
+
+### Guideline duration claims (2026-08-04)
+
+A guideline is evidence of MEDICAL NECESSITY. It never establishes a lifetime
+duration merely because it matches the diagnosis/body region/intervention,
+supports general medical necessity, or sits high on the evidence hierarchy.
+`SUPPORTED_BY_GUIDELINE` requires a verified, structured duration claim on the
+guideline entry (`GuidelineDurationClaim` in
+`src/lib/engine/lifetimeSupport.ts`):
+
+- **The claim shape:** `{ supportsDuration: boolean; durationClaim?; durationType?
+  ("natural_history" | "chronic_recurrence" | "permanence" | "progressive_course" |
+  "long_term_surveillance" | "indefinite_treatment" | "lifetime_replacement" |
+  "continuing_utilization"); sourceId; sourceVersion?; quote?; applicability?;
+  limitations?; serviceSpecific?; contradictsDuration? }`.
+- **The gate:** a guideline counts toward duration ONLY when `supportsDuration`
+  is true AND a `durationType` is present AND actual claim text exists
+  (`durationClaim` or `quote`) AND the entry passed the upstream
+  diagnosis/anatomy (condition-compatibility) gate AND — when `serviceSpecific`
+  — the item's service matches the claim's stated `applicability`
+  (`guidelineServiceMatches`: shared meaningful token, stopwords removed).
+  The resulting basis is cited as `sourceId (sourceVersion)` with the claim
+  text.
+- **Construction-site derivation (never manufactured):** claims are built only
+  in `deriveGuidelineDurationClaim` at the guideline-context construction site
+  (`buildRecommendationDossier`): explicit per-entry `duration` metadata passes
+  through when the stored source structures it; otherwise a conservative
+  deterministic detector runs over the guidance TEXT (the stored quote) for
+  duration-relevant language (natural history, permanen*, chronic recurrence,
+  progressive/progression, lifelong / for life / indefinite, lifetime
+  replacement / expected revision, long-term surveillance, continuing
+  utilization). The TITLE alone is never sufficient, and an entry with no quote
+  derives no claim. The matched sentence becomes `durationClaim`, the full
+  quote is retained, and `sourceId`/`sourceVersion` come from the guideline
+  title/year.
+- **Contradiction policy:** guidance language contradicting a long/lifetime
+  duration (self-limited, time-limited, "long-term … not recommended",
+  no-evidence-for-long-term, should-be-discontinued) sets
+  `contradictsDuration`. A self-contradicting entry never supports duration on
+  its own text. When ANY contradicting guideline exists for the item, the
+  conflict is always surfaced in `uncertaintyNotes`; guideline-based duration
+  support is WITHDRAWN unless another independent non-guideline basis (record
+  chronicity or an attributed professional duration opinion) stands — in that
+  case the guideline basis is retained but the conflict remains disclosed for
+  reconciliation at professional review.
+- **Unchanged:** duration-silent guidelines keep supporting medical necessity,
+  confidence, and probability exactly as before; professional adoption remains
+  a separately labeled workflow fact (a bare approval is never guideline or
+  record evidence), and attributed professional duration opinions remain their
+  own basis kind.
+
+## Attestation ↔ clinical-evidence binding (cfp-1)
+
+An attestation signed today is bound to the EXACT clinical evidence reviewed,
+via a versioned SHA-256 clinical fingerprint (`src/lib/engine/attestationBinding.ts`):
+
+- **Per recommendation**, a canonical (recursively key-sorted, order-independent
+  arrays) fingerprint covers: the item's identity/version and
+  frequency/duration/lifetime; the current assessment's id, methodology version,
+  lifecycle status, evidence-sufficiency verdict, and probability
+  classification; the duration-support material (durationClass +
+  durationRationale); classified evidence items, supporting quotations
+  (document ids + page locators), contradicting evidence, and condition
+  identity; referenced source-document content hashes; chronology events (ids +
+  dates + description hashes); material interview findings; provider opinions
+  (physician item note); literature/guideline identities; clinical assumptions;
+  conflict flags; and material unknowns. Display-only text (narrative
+  summaries, labels, physicianSummary) and financial fields (pinned by the
+  existing scope contentHash) are excluded.
+- **At signing**, per-item fingerprints are stored in the scope entries and an
+  aggregate on `Attestation.clinicalFingerprint` with
+  `bindingVersion = "cfp-1"`, plus the `opinionScopes` the statement actually
+  covers (necessity + frequency/duration; never causation for the current
+  statement). Existing rows are NEVER backfilled.
+- **Verification fail-closes** with PHI-free codes: `ATTESTATION_UNVERSIONED`
+  (legacy rows can never authorize a new final), `CLINICAL_FINGERPRINT_MISMATCH`,
+  `ASSESSMENT_NEEDS_REVIEW`, `ASSESSMENT_INVALID`, `ASSESSMENT_SUPERSEDED`,
+  `ASSESSMENT_MISSING`, `EVIDENCE_INSUFFICIENT`.
+- **On material supersession** of an assessment, a PHI-minimized audit event
+  (`reasoning.material_change`) names WHICH fingerprint categories changed,
+  derived by diffing category-level sub-hashes.

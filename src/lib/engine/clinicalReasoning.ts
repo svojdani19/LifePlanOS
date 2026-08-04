@@ -708,7 +708,11 @@ export function buildReasoningAssessment(
   const durationSupport = assessLifetimeSupport({
     isLifetime: !!item.isLifetime,
     condition,
+    // The dossier's guideline bucket: diagnosis/anatomy-gated, each entry
+    // carrying its structured duration claim only when the guidance text (or
+    // explicit source metadata) actually speaks to duration.
     guidelineEvidence: se.guidelines,
+    service: item.service,
     providerOpinions: se.physicianDocumentation
       .filter((e) => e.source === "provider interview")
       .map((e) => ({ text: e.text })),

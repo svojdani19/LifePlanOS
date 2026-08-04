@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { assessLifetimeSupport, hasDocumentedChronicity, describeLifetimeBasis } from "./lifetimeSupport";
+import { assessLifetimeSupport, hasDocumentedChronicity, describeLifetimeBasis, deriveGuidelineDurationClaim, guidelineServiceMatches } from "./lifetimeSupport";
 import { buildReasoningAssessment, reasoningFindings, type ReasoningItem } from "./clinicalReasoning";
 import { buildRecommendationDossier } from "./medicalNecessity";
 import type { DossierCase, DossierCondition } from "./medicalNecessity";
@@ -149,14 +149,35 @@ describe("assessLifetimeSupport — decision model (#3–#8)", () => {
     expect(hasDocumentedChronicity(fractureChronicPrognosis)).toBe(true);
   });
 
-  it("#6 independently linked, diagnosis-keyed clinical guidance supports it", () => {
+  it("#6 diagnosis-keyed clinical guidance supports it ONLY through a verified duration claim", () => {
     const r = assessLifetimeSupport({
+      isLifetime: true,
+      condition: fractureAcute,
+      guidelineEvidence: [
+        {
+          text: "Lifelong surveillance is recommended after intra-articular fracture — Long-term management of post-traumatic knee injury (2023)",
+          source: "clinical practice guideline",
+          duration: {
+            supportsDuration: true,
+            durationType: "long_term_surveillance",
+            durationClaim: "Lifelong surveillance is recommended after intra-articular fracture.",
+            sourceId: "Long-term management of post-traumatic knee injury",
+            sourceVersion: "2023",
+            quote: "Lifelong surveillance is recommended after intra-articular fracture.",
+          },
+        },
+      ],
+    });
+    expect(r.status).toBe("SUPPORTED_BY_GUIDELINE");
+    expect(r.clinicallySupported).toBe(true);
+    // The SAME guideline without its duration claim never supports the duration.
+    const silent = assessLifetimeSupport({
       isLifetime: true,
       condition: fractureAcute,
       guidelineEvidence: [{ text: "Lifelong surveillance is recommended after intra-articular fracture — Long-term management of post-traumatic knee injury (2023)", source: "clinical practice guideline" }],
     });
-    expect(r.status).toBe("SUPPORTED_BY_GUIDELINE");
-    expect(r.clinicallySupported).toBe(true);
+    expect(silent.clinicallySupported).toBe(false);
+    expect(silent.status).toBe("ASSUMPTION_PENDING_REVIEW");
   });
 
   it("#7 a bare approval flag is professional adoption — never record evidence or chronicity", () => {
@@ -189,7 +210,13 @@ describe("assessLifetimeSupport — decision model (#3–#8)", () => {
     const r = assessLifetimeSupport({
       isLifetime: true,
       condition: fractureChronicPrognosis,
-      guidelineEvidence: [{ text: "Long-term management guideline", source: "clinical practice guideline" }],
+      guidelineEvidence: [
+        {
+          text: "Long-term management guideline",
+          source: "clinical practice guideline",
+          duration: { supportsDuration: true, durationType: "natural_history", durationClaim: "The natural history is progressive post-traumatic degeneration.", sourceId: "Long-term management guideline" },
+        },
+      ],
     });
     expect(r.status).toBe("MULTIPLE_SUPPORTS");
     expect(describeLifetimeBasis(r)).toMatch(/documented chronicity in the condition record .* and diagnosis-keyed clinical guidance/i);
@@ -205,6 +232,205 @@ describe("assessLifetimeSupport — decision model (#3–#8)", () => {
     const asserted: Cond = { ...fractureAcute, id: "cond-x", name: "Chronic pain syndrome", supportingRecords: null, objectiveEvidence: null, evidenceSources: [] };
     const r = assessLifetimeSupport({ isLifetime: true, condition: asserted });
     expect(r.clinicallySupported).toBe(false);
+  });
+});
+
+// ── (21)–(26) Guideline duration claims — a guideline is necessity evidence,
+//    never duration evidence, until it carries a VERIFIED duration claim ──────
+describe("guideline duration claims (#21–#26)", () => {
+  const durationGuideline = {
+    text: "“Lifelong surveillance is recommended after intra-articular fracture.” — Long-term management of post-traumatic knee injury (2023)",
+    source: "Clinical practice guideline",
+    duration: deriveGuidelineDurationClaim({
+      title: "Long-term management of post-traumatic knee injury",
+      year: "2023",
+      quote: "Lifelong surveillance is recommended after intra-articular fracture.",
+    }),
+  };
+
+  it("#21 a generic treatment-efficacy guideline never establishes duration support", () => {
+    // The archetype: diagnosis-matched, hierarchy-topping, duration-silent.
+    const claim = deriveGuidelineDurationClaim({ title: "AAOS knee osteoarthritis guideline", year: "2023", quote: "Arthroplasty is recommended for end-stage disease." });
+    expect(claim).toBeUndefined();
+    const r = assessLifetimeSupport({
+      isLifetime: true,
+      condition: fractureAcute,
+      service: "Total knee arthroplasty",
+      guidelineEvidence: [{ text: "“Arthroplasty is recommended for end-stage disease.” — AAOS knee osteoarthritis guideline (2023)", source: "Clinical practice guideline", duration: claim }],
+    });
+    expect(r.clinicallySupported).toBe(false);
+    expect(r.bases.length).toBe(0);
+    expect(r.status).toBe("ASSUMPTION_PENDING_REVIEW");
+  });
+
+  it("#22 a diagnosis-compatible but duration-silent guideline does not support the duration", () => {
+    // End-to-end: the dossier keeps the guideline for MEDICAL NECESSITY, but
+    // the lifetime verdict stays unsupported.
+    const genericGuideline: Cond = {
+      ...fractureAcute,
+      socAnalysis: { guidelines: [{ title: "Knee injury rehabilitation guideline", year: "2022", quote: "Supervised rehabilitation improves functional outcomes after knee injury.", relevance: { evidenceLevel: 1, evidenceLabel: "Clinical practice guideline" } }] },
+    };
+    const a = buildReasoningAssessment(item(), [genericGuideline], [], kase);
+    expect(a.durationSupport.clinicallySupported).toBe(false);
+    expect(a.durationSupport.status).toBe("ASSUMPTION_PENDING_REVIEW");
+    // …while the guideline still supports necessity elsewhere:
+    const d = buildRecommendationDossier(item(), genericGuideline, [], kase);
+    expect(d.supportingEvidence.guidelines.length).toBe(1);
+    expect(d.supportingEvidence.guidelines[0].duration).toBeUndefined();
+  });
+
+  it("#23 a verified duration claim supports it, and the basis carries sourceId + quote", () => {
+    const a = buildReasoningAssessment(item(), [fractureWithGuideline], [], kase);
+    expect(a.durationSupport.status).toBe("SUPPORTED_BY_GUIDELINE");
+    expect(a.durationSupport.clinicallySupported).toBe(true);
+    const basis = a.durationSupport.bases.find((b) => b.kind === "guideline_natural_history");
+    expect(basis?.source).toBe("Long-term management of post-traumatic knee injury (2023)");
+    expect(basis?.text).toMatch(/lifelong surveillance is recommended after intra-articular fracture/i);
+    expect(a.durationRationale).toMatch(/remaining-lifetime projection is based on diagnosis-keyed clinical guidance/i);
+    // The derived claim itself is structured and attributed:
+    const claim = deriveGuidelineDurationClaim({ title: "Long-term management of post-traumatic knee injury", year: "2023", quote: "Lifelong surveillance is recommended after intra-articular fracture." });
+    expect(claim?.supportsDuration).toBe(true);
+    expect(claim?.durationType).toBe("long_term_surveillance");
+    expect(claim?.sourceId).toBe("Long-term management of post-traumatic knee injury");
+    expect(claim?.quote).toBe("Lifelong surveillance is recommended after intra-articular fracture.");
+  });
+
+  it("#24 a wrong-anatomy guideline is dropped at construction; a wrong-service claim fails the service match", () => {
+    // Wrong anatomy: a shoulder guideline with genuine duration language never
+    // reaches a knee item's duration verdict (upstream anatomy gate).
+    const shoulderGuideline: Cond = {
+      ...fractureAcute,
+      socAnalysis: { guidelines: [{ title: "Rotator cuff tear management guideline", year: "2021", quote: "Progressive degeneration of the shoulder is expected; lifelong surveillance is recommended.", relevance: { evidenceLevel: 1 } }] },
+    };
+    const a = buildReasoningAssessment(item({ service: "Knee brace replacement", category: "MOBILITY_AID" }), [shoulderGuideline], [], kase);
+    expect(a.durationSupport.clinicallySupported).toBe(false);
+    // Wrong service: a service-specific claim counts only when the item's
+    // service matches its stated scope.
+    const serviceClaim = {
+      text: "Prosthesis replacement every 15 years — Arthroplasty implant survivorship guideline (2020)",
+      source: "Clinical practice guideline",
+      duration: {
+        supportsDuration: true,
+        durationType: "lifetime_replacement" as const,
+        durationClaim: "Prosthesis replacement is expected every 15 years within the patient's lifetime.",
+        sourceId: "Arthroplasty implant survivorship guideline",
+        serviceSpecific: true,
+        applicability: "total knee arthroplasty prosthesis replacement",
+      },
+    };
+    const wrongService = assessLifetimeSupport({ isLifetime: true, condition: fractureAcute, service: "Attendant care", guidelineEvidence: [serviceClaim] });
+    expect(wrongService.clinicallySupported).toBe(false);
+    const rightService = assessLifetimeSupport({ isLifetime: true, condition: fractureAcute, service: "Total knee arthroplasty", guidelineEvidence: [serviceClaim] });
+    expect(rightService.status).toBe("SUPPORTED_BY_GUIDELINE");
+  });
+
+  it("#25 an attributed professional duration opinion stays a separately labeled basis, never a guideline", () => {
+    const r = assessLifetimeSupport({
+      isLifetime: true,
+      condition: fractureAcute,
+      guidelineEvidence: [durationGuideline],
+      providerOpinions: [{ text: "She will require lifelong assistance with transfers.", providerName: "Dr. Brandt" }],
+    });
+    expect(r.status).toBe("MULTIPLE_SUPPORTS");
+    const prof = r.bases.find((b) => b.kind === "professional_duration_opinion");
+    expect(prof?.source).toBe("Dr. Brandt (attributed professional opinion)");
+    const guide = r.bases.find((b) => b.kind === "guideline_natural_history");
+    expect(guide?.source).toMatch(/Long-term management of post-traumatic knee injury/);
+  });
+
+  it("#26 a bare approval remains adoption-only even when a duration-silent guideline is present", () => {
+    const r = assessLifetimeSupport({
+      isLifetime: true,
+      condition: fractureAcute,
+      physicianStatus: "APPROVED",
+      guidelineEvidence: [{ text: "“Arthroplasty is recommended for end-stage disease.” — AAOS knee osteoarthritis guideline (2023)", source: "Clinical practice guideline" }],
+    });
+    expect(r.professionalAdoption).toBe(true);
+    expect(r.clinicallySupported).toBe(false);
+    expect(r.status).toBe("INSUFFICIENT");
+    expect(r.mayEnterFinalizedTotals).toBe(true); // adoption policy unchanged
+  });
+});
+
+// ── Contradictory duration language policy ───────────────────────────────────
+describe("contradictory guideline duration language", () => {
+  const supporting = {
+    text: "Natural-history guideline",
+    duration: { supportsDuration: true, durationType: "natural_history" as const, durationClaim: "The natural history is progressive degeneration.", sourceId: "Natural-history guideline" },
+  };
+  const contradicting = {
+    text: "“Long-term bracing is not recommended.” — Bracing guideline (2024)",
+    duration: deriveGuidelineDurationClaim({ title: "Bracing guideline", year: "2024", quote: "Long-term bracing is not recommended; use should be time-limited." }),
+  };
+
+  it("derives contradictsDuration from contradicting guidance text", () => {
+    expect(contradicting.duration?.contradictsDuration).toBe(true);
+    expect(contradicting.duration?.supportsDuration).toBe(false);
+  });
+
+  it("withdraws guideline-only support when a contradicting guideline exists, and says so", () => {
+    const r = assessLifetimeSupport({ isLifetime: true, condition: fractureAcute, guidelineEvidence: [supporting, contradicting] });
+    expect(r.clinicallySupported).toBe(false);
+    expect(r.status).toBe("ASSUMPTION_PENDING_REVIEW");
+    expect(r.uncertaintyNotes.join(" ")).toMatch(/contradictory duration language \(Bracing guideline\).*withdrawn pending reconciliation/i);
+  });
+
+  it("keeps support only on an independent non-guideline basis, with the conflict still surfaced", () => {
+    const r = assessLifetimeSupport({ isLifetime: true, condition: fractureChronicPrognosis, guidelineEvidence: [supporting, contradicting] });
+    expect(r.clinicallySupported).toBe(true);
+    expect(r.bases.some((b) => b.kind === "record_chronicity")).toBe(true);
+    expect(r.bases.some((b) => b.kind === "guideline_natural_history")).toBe(true); // retained, not silent — the note discloses it
+    expect(r.uncertaintyNotes.join(" ")).toMatch(/contradictory duration language.*disclosed for reconciliation/i);
+  });
+
+  it("a newly appearing contradiction changes the fingerprint even when the bases stand", () => {
+    const without = assessLifetimeSupport({ isLifetime: true, condition: fractureChronicPrognosis });
+    const withContradiction = assessLifetimeSupport({ isLifetime: true, condition: fractureChronicPrognosis, guidelineEvidence: [contradicting] });
+    expect(withContradiction.fingerprint).not.toBe(without.fingerprint);
+  });
+});
+
+// ── The deterministic duration-claim detector ────────────────────────────────
+describe("deriveGuidelineDurationClaim — construction-site derivation", () => {
+  it("never manufactures a claim from a title alone", () => {
+    expect(deriveGuidelineDurationClaim({ title: "Lifetime management of chronic progressive knee disease" })).toBeUndefined();
+    expect(deriveGuidelineDurationClaim({ title: "Lifetime management of chronic progressive knee disease", quote: "Weight loss is advised." })).toBeUndefined();
+  });
+
+  it("maps duration-relevant guidance text to its claim type", () => {
+    expect(deriveGuidelineDurationClaim({ title: "G", quote: "The natural history of post-traumatic arthritis is gradual joint deterioration." })?.durationType).toBe("natural_history");
+    expect(deriveGuidelineDurationClaim({ title: "G", quote: "The impairment is permanent." })?.durationType).toBe("permanence");
+    expect(deriveGuidelineDurationClaim({ title: "G", quote: "The condition follows a progressive course." })?.durationType).toBe("progressive_course");
+    expect(deriveGuidelineDurationClaim({ title: "G", quote: "Prosthesis replacement is expected every 15 years." })?.durationType).toBe("lifetime_replacement");
+    expect(deriveGuidelineDurationClaim({ title: "G", quote: "Symptoms are chronic with episodic recurrence over decades." })?.durationType).toBe("chronic_recurrence");
+    expect(deriveGuidelineDurationClaim({ title: "G", quote: "Indefinite maintenance treatment is indicated." })?.durationType).toBe("indefinite_treatment");
+    expect(deriveGuidelineDurationClaim({ title: "G", quote: "Continuing utilization of attendant services is expected." })?.durationType).toBe("continuing_utilization");
+  });
+
+  it("extracts the claim sentence and attributes the source", () => {
+    const c = deriveGuidelineDurationClaim({ title: "Fracture guideline", year: "2023", quote: "Fixation is standard of care. Lifelong surveillance is recommended thereafter." });
+    expect(c?.durationClaim).toBe("Lifelong surveillance is recommended thereafter.");
+    expect(c?.sourceId).toBe("Fracture guideline");
+    expect(c?.sourceVersion).toBe("2023");
+  });
+
+  it("passes explicit per-entry source metadata through, normalized", () => {
+    const c = deriveGuidelineDurationClaim({
+      title: "Implant survivorship guideline",
+      year: "2020",
+      quote: "Revision is anticipated within the patient's lifetime.",
+      duration: { supportsDuration: true, durationType: "lifetime_replacement", durationClaim: "Revision is anticipated within the patient's lifetime.", serviceSpecific: true, applicability: "knee arthroplasty" },
+    });
+    expect(c?.supportsDuration).toBe(true);
+    expect(c?.durationType).toBe("lifetime_replacement");
+    expect(c?.sourceId).toBe("Implant survivorship guideline"); // defaulted from the title
+    expect(c?.serviceSpecific).toBe(true);
+  });
+
+  it("matches service scope conservatively", () => {
+    expect(guidelineServiceMatches("total knee arthroplasty prosthesis replacement", "Total knee arthroplasty")).toBe(true);
+    expect(guidelineServiceMatches("physical therapy maintenance program", "Occupational therapy")).toBe(false);
+    expect(guidelineServiceMatches("", "Attendant care")).toBe(false);
   });
 });
 

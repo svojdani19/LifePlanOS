@@ -20,7 +20,7 @@
 import { bodyRegion, anatomyCompatible } from "./integrity";
 import { citationCompatible, evidenceTier, selectPrimary, structuredConfidence, type ConfidenceLevel } from "./citationQuality";
 import { specialtyLens } from "./specialtyReasoning";
-import { assessLifetimeSupport, type LifetimeSupportResult } from "./lifetimeSupport";
+import { assessLifetimeSupport, deriveGuidelineDurationClaim, type GuidelineDurationClaim, type LifetimeSupportResult } from "./lifetimeSupport";
 
 // ── Inputs (structurally satisfied by the Prisma rows; kept minimal) ─────────
 export interface DossierItem {
@@ -93,6 +93,9 @@ export interface DossierCase {
 
 // ── Output ───────────────────────────────────────────────────────────────────
 export interface EvidenceItem { text: string; source?: string | null }
+/** A guideline evidence line: the rendered text plus, when the underlying
+ *  source actually speaks to duration, its structured duration claim. */
+export interface GuidelineEvidenceItem extends EvidenceItem { duration?: GuidelineDurationClaim }
 export interface DossierLiterature {
   title: string;
   journal?: string;
@@ -135,7 +138,7 @@ export interface RecommendationDossier {
     functionalLimitations: EvidenceItem[];
     physicianDocumentation: EvidenceItem[];
     priorTreatment: EvidenceItem[];
-    guidelines: EvidenceItem[];
+    guidelines: GuidelineEvidenceItem[];
   };
   literature: DossierLiterature[];
   contradictoryEvidence: string[];
@@ -218,7 +221,7 @@ function isCleanFinding(text: string): boolean {
 function evidenceSourcesOf(cond: DossierCondition | null): { filename?: string; page?: number | null; quote?: string }[] {
   return cond && Array.isArray(cond.evidenceSources) ? (cond.evidenceSources as { filename?: string; page?: number | null; quote?: string }[]) : [];
 }
-function guidelinesOf(cond: DossierCondition | null): { title?: string; year?: string; quote?: string; relevance?: { evidenceLevel?: number; evidenceLabel?: string; whyRelevant?: string; limitations?: string | null } }[] {
+function guidelinesOf(cond: DossierCondition | null): { title?: string; year?: string; quote?: string; duration?: unknown; relevance?: { evidenceLevel?: number; evidenceLabel?: string; whyRelevant?: string; limitations?: string | null } }[] {
   const soc = cond?.socAnalysis as { guidelines?: unknown[] } | null;
   return (soc?.guidelines ?? []) as never[];
 }
@@ -307,9 +310,15 @@ export function buildRecommendationDossier(
   // literature: coarse region, spinal level, laterality, and within-joint
   // sub-structure. A condition-level guideline (e.g. rotator-cuff CPG) never
   // surfaces under an item addressing a different structure of that joint.
-  const guidelineEvidence: EvidenceItem[] = guidelines
+  // Each surviving entry additionally carries a structured duration claim ONLY
+  // when the underlying guidance actually speaks to duration — explicit
+  // per-entry metadata when the source structures it, else the conservative
+  // deterministic detector over the guidance TEXT (the quote; the title alone
+  // is never sufficient). Duration-silent guidelines keep supporting medical
+  // necessity but can never establish a lifetime duration.
+  const guidelineEvidence: GuidelineEvidenceItem[] = guidelines
     .filter((g) => g.title && regionOk(`${g.title} ${g.quote ?? ""}`))
-    .map((g) => ({ text: `${g.quote ? `“${g.quote}” — ` : ""}${g.title}${g.year ? ` (${g.year})` : ""}`, source: g.relevance?.evidenceLabel ?? "clinical guideline" }));
+    .map((g) => ({ text: `${g.quote ? `“${g.quote}” — ` : ""}${g.title}${g.year ? ` (${g.year})` : ""}`, source: g.relevance?.evidenceLabel ?? "clinical guideline", duration: deriveGuidelineDurationClaim(g) }));
   const diagnoses: EvidenceItem[] = condition ? [{ text: `${condition.name}${condition.relatedness ? ` — ${condition.relatedness.replace(/_/g, " ").toLowerCase()}` : ""}`, source: condition.reasoning ? "causation analysis" : null }] : [];
 
   // Lifetime-duration support (Lifetime-Honesty sprint): the deterministic
@@ -321,6 +330,7 @@ export function buildRecommendationDossier(
     isLifetime: !!item.isLifetime,
     condition,
     guidelineEvidence,
+    service: item.service,
     providerOpinions: providerOpinions.map((iv) => ({ text: iv.text, providerName: iv.providerName ?? null })),
     physicianNote: item.physicianNote ?? null,
     physicianStatus: item.physicianStatus ?? null,
