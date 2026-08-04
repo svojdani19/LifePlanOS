@@ -10,6 +10,13 @@ import JSZip from "jszip";
 
 const state = vi.hoisted(() => ({ credentialed: true }));
 
+// Clinical-evidence binding has its own dedicated suite; here the verifier is
+// mocked as satisfied so the render exercises gate composition + language.
+vi.mock("@/lib/engine/attestationBinding", () => ({
+  loadClinicalBindingState: vi.fn(async () => new Map()),
+  verifyAttestationClinicalBinding: vi.fn(() => ({ ok: true, reasons: [] })),
+}));
+
 vi.mock("@/lib/db", async () => {
   const { goldenCase, goldenAssessments, GOLDEN_CASE_ID } = await import("./goldenFixture");
   return {
@@ -23,7 +30,7 @@ vi.mock("@/lib/db", async () => {
           where.id === GOLDEN_CASE_ID && where.firmId === "firm-golden" ? { id: GOLDEN_CASE_ID, firmId: "firm-golden" } : null,
       },
       clinicalReasoningAssessment: { findMany: async () => goldenAssessments() },
-      validationFinding: { findMany: async () => [] },
+      validationFinding: { findMany: async () => [], count: async () => 0 },
       futureCareItem: { findMany: async () => goldenCase().futureCareItems },
       condition: { findMany: async () => goldenCase().conditions },
       attestation: { findMany: async () => goldenCase().attestations },

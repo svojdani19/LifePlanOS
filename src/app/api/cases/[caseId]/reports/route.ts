@@ -5,6 +5,12 @@ import { persistCaseValidation } from "@/lib/engine/validation";
 import { buildSnapshotPayload } from "@/lib/engine/snapshot";
 import { assumptionsFor } from "@/lib/engine/generate";
 import { REPORTS, getReport, gateReport, findingRelevance, REPORT_TEMPLATE_VERSION, type ReportDefinition } from "@/lib/reports/registry";
+import {
+  evaluateProfessionalReportAuthority,
+  DEFAULT_PHYSICIAN_SCOPES,
+  type OpinionScope,
+  type VerifiedExpertAuthority,
+} from "@/lib/reports/professionalAuthority";
 import { loadReportData } from "@/lib/reports/data";
 import { storeAndRecord, approvalStale, ExportRecordError } from "@/lib/reports/persist";
 import { renderDocx, renderHtml, renderCsv } from "@/lib/reports/doc";
@@ -94,6 +100,16 @@ async function economistState(caseId: string) {
   const readiness = economistReadiness(assumptions as unknown as AssumptionRow[], scenarios as unknown as ScenarioRow[], !!approval, !!approval);
   return { assumptions: assumptions as unknown as AssumptionRow[], scenarios: scenarios as unknown as ScenarioRow[], approval, readiness };
 }
+
+// Opinion scopes each physician-required report renders. A causation report
+// requires an attestation that EXPLICITLY covers causation conclusions — a
+// future-care attestation never doubles as a causation opinion.
+const REPORT_REQUIRED_SCOPES: Record<string, OpinionScope[]> = {
+  MEDICAL_NECESSITY: DEFAULT_PHYSICIAN_SCOPES,
+  DEFENSE_REBUTTAL: DEFAULT_PHYSICIAN_SCOPES,
+  PHYSICIAN_REVIEW_REPORT: DEFAULT_PHYSICIAN_SCOPES,
+  CAUSATION_ANALYSIS: [...DEFAULT_PHYSICIAN_SCOPES, "CAUSATION"],
+};
 
 function effectiveApproval(def: ReportDefinition, config: unknown) {
   return def.deriveApproval ? def.deriveApproval(config) : def.approval;
@@ -280,11 +296,43 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
     // Expert-workflow reports (vocational/economist) carry their own report-level
     // gates below — the item-level physician gate does not apply to them.
     const hasExpertBranch = def.id === "VOCATIONAL_ASSESSMENT" || def.id === "FORENSIC_ECONOMIST_REPORT";
+    let physAuthority: VerifiedExpertAuthority | null = null;
     if (!hasExpertBranch) {
       const approval = effectiveApproval(def, config);
       const gate = gateReport({ ...def, approval }, { mode: input.mode, blocking: validation.blocking, decidedCount, includedUndecided });
       if (!gate.ok) {
         return ok({ error: gate.reason ?? "Export refused by the report gate.", blocking: validation.blocking, hint: "Resolve blocking findings or export as draft where permitted." }, 422);
+      }
+      // Central professional authority for physician-required FINALS — the
+      // same fail-closed contract as the legacy expert report. Item-level
+      // decision counts (the gate above) are necessary but never sufficient:
+      // final release requires an ACTIVE, clinically-bound attestation whose
+      // opinion scopes cover this report and whose signer is currently
+      // authorized. CUSTOM reports inherit this through effectiveApproval.
+      if (input.mode === "final" && approval === "physician_required") {
+        const authority = await evaluateProfessionalReportAuthority({
+          firmId: ctx.firm.id,
+          caseId: params.caseId,
+          requiredScopes: REPORT_REQUIRED_SCOPES[def.id] ?? DEFAULT_PHYSICIAN_SCOPES,
+          reportKind: def.id,
+        });
+        if (!authority.authorized) {
+          await audit(ctx, "export.final_denied", {
+            type: "case",
+            id: params.caseId,
+            caseId: params.caseId,
+            meta: { reportType: def.id, format: input.format, reasons: authority.reasons },
+          });
+          return ok(
+            {
+              error: "Final release of this report requires current professional approval.",
+              reasons: authority.reasons,
+              hint: 'A draft export (mode: "draft") remains available with worksheet disclosures.',
+            },
+            422,
+          );
+        }
+        physAuthority = authority;
       }
     }
 
@@ -313,6 +361,38 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
       else if (input.format === "PDF") buffer = await convertDocxToPdf(await renderDocx(doc));
       else if (input.format === "CSV") buffer = Buffer.from(renderCsv(doc), "utf8");
       else buffer = Buffer.from(renderHtml(doc), "utf8");
+
+      // Time-of-check/time-of-use: for physician-required finals, re-evaluate
+      // the authority immediately before recording and require the identical
+      // authorized snapshot (attestation + report fingerprint). Drift during
+      // rendering fails safely: no file recorded, no status change.
+      if (physAuthority) {
+        const recheck = await evaluateProfessionalReportAuthority({
+          firmId: ctx.firm.id,
+          caseId: params.caseId,
+          requiredScopes: REPORT_REQUIRED_SCOPES[def.id] ?? DEFAULT_PHYSICIAN_SCOPES,
+          reportKind: def.id,
+        });
+        if (
+          !recheck.authorized ||
+          recheck.attestationId !== physAuthority.attestationId ||
+          recheck.reportFingerprint !== physAuthority.reportFingerprint
+        ) {
+          await audit(ctx, "export.final_denied", {
+            type: "case",
+            id: params.caseId,
+            caseId: params.caseId,
+            meta: { reportType: def.id, format: input.format, reasons: ["PLAN_CHANGED_DURING_GENERATION"] },
+          });
+          return ok(
+            {
+              error: "The plan changed while the report was being generated. Regenerate; if recommendations changed materially, the physician must re-attest.",
+              reasons: ["PLAN_CHANGED_DURING_GENERATION"],
+            },
+            409,
+          );
+        }
+      }
 
       let record: ReportExport;
       try {

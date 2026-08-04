@@ -29,6 +29,14 @@ import JSZip from "jszip";
 // The report's ONLY database access is `prisma` from "@/lib/db" (case +
 // clinicalReasoningAssessment + validationFinding). Stub all three so the test
 // never touches a database.
+// Clinical-evidence binding has its own dedicated suite; here the verifier is
+// mocked as satisfied so the golden render exercises gate composition +
+// language, not fingerprint recomputation.
+vi.mock("@/lib/engine/attestationBinding", () => ({
+  loadClinicalBindingState: vi.fn(async () => new Map()),
+  verifyAttestationClinicalBinding: vi.fn(() => ({ ok: true, reasons: [] })),
+}));
+
 vi.mock("@/lib/db", async () => {
   const { goldenCase, goldenAssessments, GOLDEN_CASE_ID } = await import("./goldenFixture");
   return {
@@ -47,6 +55,7 @@ vi.mock("@/lib/db", async () => {
       },
       validationFinding: {
         findMany: async () => [],
+        count: async () => 0,
       },
       // ── Professional-authority gate lookups (all served from the fixture so
       //    the REAL gate runs and authorizes the golden expert render) ────────

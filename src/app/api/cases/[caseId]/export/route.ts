@@ -63,6 +63,23 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
       );
     }
 
+    // ── CSV is a SUPPORTING export only ──────────────────────────────────────
+    // CSV never provides a path around clinical validation, professional
+    // review, totals inclusion, or case finalization: a final-mode CSV is
+    // rejected outright (never silently reinterpreted), a CSV export never
+    // advances the case, and its stored totals cover only the deterministic
+    // included set with every row carrying disclosure columns.
+    if (format === "CSV" && mode === "final") {
+      return ok(
+        {
+          error: "CSV is a supporting worksheet, not a final release format.",
+          reasons: ["CSV_FINAL_NOT_OFFERED"],
+          hint: 'Request the final DOCX/PDF expert report, or export the CSV as a supporting worksheet (mode: "draft").',
+        },
+        422,
+      );
+    }
+
     // ── Professional-authority gate (final expert release) ───────────────────
     // A FINAL DOCX/PDF is an expert report: first-person medical opinions and
     // a signature block. It may only be released under a current, verified
@@ -99,18 +116,39 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
     let itemCount = 0;
 
     if (format === "DOCX" || format === "PDF") {
-      const r = await buildReportDocx(params.caseId, template, { draft: mode === "draft" });
+      // The renderer receives the EXACT route-verified authority snapshot — it
+      // never independently selects a different attestation.
+      const r = await buildReportDocx(params.caseId, template, {
+        draft: mode === "draft",
+        authority: mode === "final" ? (preAuthority?.authorized ? preAuthority : null) : undefined,
+      });
       if (mode === "final" && preAuthority?.authorized) {
-        // Time-of-check/time-of-use: the plan must be byte-identical (same
-        // included set, same attestation validity) at the moment the artifact
-        // is recorded. Any drift during generation fails safely — regenerate
-        // and, if the plan materially changed, re-attest.
+        // Time-of-check/time-of-use: the authorized snapshot must be identical
+        // at the moment the artifact is recorded — same attestation, same
+        // clinical/financial/report fingerprints, same included ids and count,
+        // and the builder's totals must equal the verified totals under the
+        // single rounding policy (Math.round at the edge). Any drift during
+        // generation fails safely — regenerate and, if the plan materially
+        // changed, re-attest.
         const recheck = await evaluatePhysicianReportAuthority({ firmId: ctx.firm.id, caseId: params.caseId });
+        const sameIds =
+          recheck.authorized &&
+          recheck.includedItemIds.length === preAuthority.includedItemIds.length &&
+          recheck.includedItemIds.every((id, i) => id === preAuthority!.includedItemIds[i]);
         const stable =
           recheck.authorized &&
+          sameIds &&
           recheck.includedFingerprint === preAuthority.includedFingerprint &&
+          recheck.clinicalFingerprint === preAuthority.clinicalFingerprint &&
+          recheck.financialFingerprint === preAuthority.financialFingerprint &&
+          recheck.reportFingerprint === preAuthority.reportFingerprint &&
           recheck.attestationId === preAuthority.attestationId &&
-          Math.round(r.totalPresentValue) === recheck.includedPresentValue;
+          recheck.includedCount === preAuthority.includedCount &&
+          recheck.includedPresentValue === preAuthority.includedPresentValue &&
+          recheck.includedLifetimeCost === preAuthority.includedLifetimeCost &&
+          r.itemCount === recheck.includedCount &&
+          Math.round(r.totalPresentValue) === recheck.includedPresentValue &&
+          Math.round(r.totalLifetime) === recheck.includedLifetimeCost;
         if (!stable) {
           await audit(ctx, "export.final_denied", {
             type: "case",
@@ -132,12 +170,13 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
       totalPresentValue = r.totalPresentValue;
       itemCount = r.itemCount;
     } else {
-      const csv = await buildCostCsv(params.caseId);
-      key = await putObject(Buffer.from(csv, "utf8"), ".csv");
-      const agg = await prisma.futureCareItem.aggregate({ where: { caseId: params.caseId, supersededAt: null }, _sum: { lifetimeCost: true, presentValue: true }, _count: true });
-      totalLifetime = Math.round(agg._sum.lifetimeCost ?? 0);
-      totalPresentValue = Math.round(agg._sum.presentValue ?? 0);
-      itemCount = agg._count;
+      const worksheet = await buildCostCsv(params.caseId);
+      key = await putObject(Buffer.from(worksheet.csv, "utf8"), ".csv");
+      // Stored totals and count come from the actual exported INCLUDED set —
+      // never an aggregate over every active item.
+      totalLifetime = worksheet.totalLifetime;
+      totalPresentValue = worksheet.totalPresentValue;
+      itemCount = worksheet.itemCount;
     }
 
     const record = await prisma.reportExport.create({
@@ -146,7 +185,8 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
         firmId: ctx.firm.id,
         format,
         template,
-        draft: mode === "draft",
+        // A CSV is always a supporting/draft artifact — never a final release.
+        draft: mode === "draft" || format === "CSV",
         version: priorCount + 1,
         storageKey: key,
         generatedById: ctx.user.id,
@@ -158,7 +198,7 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
 
     // Advance the case toward FINAL once a FINAL report has been produced.
     // A draft export leaves the case status untouched (§18).
-    if (mode === "final") {
+    if (mode === "final" && (format === "DOCX" || format === "PDF")) {
       await prisma.case.updateMany({
         where: { id: params.caseId, status: { in: ["FUTURE_CARE", "PRICING", "PHYSICIAN_REVIEW", "DRAFTING"] } },
         data: { status: "FINAL" },

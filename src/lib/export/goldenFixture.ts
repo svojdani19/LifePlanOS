@@ -239,6 +239,12 @@ function goldenAttestation(items: ReturnType<typeof goldenFutureCareItems>) {
     totalPresentValue,
     caseVersion: 1,
     contentHash,
+    // cfp-1 binding fields — the binding VERIFIER is mocked in the golden
+    // suites (it has its own dedicated test suite); the core gate still
+    // requires these to be present and scope-covering.
+    clinicalFingerprint: "cfp-1:golden-fixture",
+    bindingVersion: "cfp-1",
+    opinionScopes: ["FUTURE_CARE_MEDICAL_NECESSITY", "FREQUENCY_AND_DURATION"],
     status: "ACTIVE",
     invalidatedAt: null as Date | null,
     invalidatedReason: null as string | null,

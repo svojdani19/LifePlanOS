@@ -238,6 +238,11 @@ function durationText(i: { isLifetime: boolean; durationYears: number | null }, 
 export interface ReportOptions {
   /** CRE v1 §18 — draft export: DRAFT watermark + unresolved-issues appendix. */
   draft?: boolean;
+  /** The route-verified authority snapshot. When provided, the renderer uses
+   *  EXACTLY this decision — it never independently selects an attestation.
+   *  `null` forces neutral rendering; `undefined` (legacy callers) lets the
+   *  builder evaluate the same server-side gate itself. */
+  authority?: VerifiedExpertAuthority | null;
 }
 
 export async function buildReportDocx(caseId: string, template: CaseSide, reportOpts: ReportOptions = {}): Promise<ReportPayload> {
@@ -327,7 +332,9 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   // attorney, case creator, or administrator — is ever presented as the expert.
   const authorityDecision = reportOpts.draft
     ? null
-    : await evaluatePhysicianReportAuthority({ firmId: c.firmId, caseId }).catch(() => null);
+    : reportOpts.authority !== undefined
+      ? reportOpts.authority
+      : await evaluatePhysicianReportAuthority({ firmId: c.firmId, caseId }).catch(() => null);
   const expertVoice: VerifiedExpertAuthority | null =
     authorityDecision && authorityDecision.authorized ? authorityDecision : null;
   const authorizingAttestation = expertVoice ? c.attestations.find((att) => att.id === expertVoice.attestationId) ?? null : null;
@@ -1099,16 +1106,11 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   body.push(new Paragraph({ spacing: { after: 40 }, children: [new TextRun({ text: fmtDate(new Date()), size: CAPTION, color: GREY })] }));
 
   // ══ PHYSICIAN ATTESTATION (EPIC-005) ═════════════════════════════════════════
-  // Rendered ONLY for attestations that are ACTIVE and still verify against the
-  // CURRENT plan at render time — a signature the plan has drifted away from is
-  // never printed. The statement text is the immutable signed content; the
-  // content hash lets any reader confirm the printed statement is what was
-  // signed.
-  const validAttestations = expertVoice
-    ? c.attestations.filter(
-        (att) => verifyAttestation((att.scope as unknown as AttestationScopeEntry[]) ?? [], items as unknown as AttestableItem[]).valid,
-      )
-    : [];
+  // Rendered ONLY for the exact attestation the professional-authority gate
+  // authorized for this release — never every active drift-free attestation.
+  // The statement text is the immutable signed content; the content hash lets
+  // any reader confirm the printed statement is what was signed.
+  const validAttestations = expertVoice && authorizingAttestation ? [authorizingAttestation] : [];
   if (validAttestations.length) {
     body.push(h1("Physician Attestation", { pageBreak: true }));
     for (const att of validAttestations) {
@@ -1295,21 +1297,98 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     ],
   });
   const buffer = await Packer.toBuffer(doc);
-  return { buffer, totalLifetime, totalPresentValue, itemCount: items.length };
+  // itemCount reports the INCLUDED set — the same rows the totals are computed
+  // from — never the count of every active item.
+  return { buffer, totalLifetime, totalPresentValue, itemCount: reportItems.length };
 }
 
-export async function buildCostCsv(caseId: string): Promise<string> {
-  const items = await prisma.futureCareItem.findMany({ where: { caseId, supersededAt: null }, orderBy: { presentValue: "desc" } });
-  const header = ["Category", "Service", "Specialty", "CPT", "Probability", "Confidence", "Freq/yr", "Duration(yrs)", "UnitCost", "AnnualCost", "LifetimeCost", "PresentValue", "Low", "High", "PricingSource", "EvidenceStrength", "DefenseVulnerability", "PhysicianStatus"];
-  const rows = items.map((i) =>
-    [i.category, i.service, i.specialty ?? "", i.cptCode ?? "", i.probability, i.confidence, i.frequencyPerYear, i.isLifetime ? "lifetime" : i.durationYears ?? "", i.unitCost, i.annualCost, i.lifetimeCost, i.presentValue, i.lowCost, i.highCost, i.pricingSource ?? "", i.evidenceStrength ?? "", i.defenseVulnerability, i.physicianStatus]
-      .map((v) => {
-        const s = String(v);
-        return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-      })
-      .join(","),
+/** CSV cell encoding: standard quoting PLUS spreadsheet-formula-injection
+ *  protection — user-controlled text beginning with =, +, -, or @ (or a
+ *  tab/CR) is prefixed with an apostrophe so spreadsheet apps treat it as
+ *  text, never as a formula. */
+function csvCell(v: unknown): string {
+  let t = String(v ?? "");
+  if (/^[=+\-@\t\r]/.test(t)) t = `'${t}`;
+  return /[",\n]/.test(t) ? `"${t.replace(/"/g, '""')}"` : t;
+}
+
+export interface CostCsvPayload {
+  csv: string;
+  /** Rows in the deterministic INCLUDED set — the count and totals recorded
+   *  for the export are computed from these rows only, never from an
+   *  aggregate over every active item. */
+  itemCount: number;
+  totalLifetime: number;
+  totalPresentValue: number;
+}
+
+/**
+ * SUPPORTING cost worksheet (never a final release path). All active items are
+ * listed, but every row discloses its inclusion status, physician review
+ * status, evidence status, probability, duration-assumption status, and open
+ * validation warnings — and the totals cover ONLY the deterministic included
+ * set, matching the report's medical totals.
+ */
+export async function buildCostCsv(caseId: string): Promise<CostCsvPayload> {
+  const [items, conditions, openFindings] = await Promise.all([
+    prisma.futureCareItem.findMany({ where: { caseId, supersededAt: null }, orderBy: { presentValue: "desc" } }),
+    prisma.condition.findMany({ where: { caseId } }),
+    prisma.validationFinding.findMany({ where: { caseId, status: "OPEN" }, select: { service: true, result: true, exportBlocking: true } }),
+  ]);
+  const integrity = runIntegrityCheck({
+    recommendations: items as unknown as RecInput[],
+    conditions: conditions as unknown as CondInput[],
+    hasRecordSupport: (rec, matched) =>
+      hasPatientRecordSupport(rec as never, matched as never),
+  });
+  const includedSet = new Set(items.filter((i) => integrity.perItem.get(i as unknown as RecInput)?.includedInTotal).map((i) => i.id));
+  const warningsFor = (service: string) =>
+    openFindings
+      .filter((f) => f.service === service || f.service.includes(service))
+      .map((f) => `${f.exportBlocking ? "BLOCKING: " : ""}${f.result}`)
+      .join("; ");
+
+  const header = [
+    "Category", "Service", "Specialty", "CPT", "Probability", "Confidence", "Freq/yr", "Duration(yrs)",
+    "DurationBasis", "UnitCost", "AnnualCost", "LifetimeCost", "PresentValue", "Low", "High",
+    "PricingSource", "EvidenceStrength", "DefenseVulnerability", "PhysicianStatus",
+    "IncludedInFinalTotals", "ValidationWarnings",
+  ];
+  const rows = items.map((i) => {
+    const included = includedSet.has(i.id);
+    const warn = warningsFor(i.service);
+    const durationBasis = i.isLifetime
+      ? /lifetime|duration/i.test(warn)
+        ? "lifetime projection — ASSUMPTION pending review"
+        : "lifetime projection horizon"
+      : "stated duration";
+    return [
+      i.category, i.service, i.specialty ?? "", i.cptCode ?? "", i.probability, i.confidence,
+      i.frequencyPerYear, i.isLifetime ? "lifetime" : i.durationYears ?? "", durationBasis,
+      i.unitCost, i.annualCost, i.lifetimeCost, i.presentValue, i.lowCost, i.highCost,
+      i.pricingSource ?? "", i.evidenceStrength ?? "", i.defenseVulnerability, i.physicianStatus,
+      included ? "YES" : "NO — excluded from totals", warn,
+    ].map(csvCell).join(",");
+  });
+
+  const included = items.filter((i) => includedSet.has(i.id));
+  const totalLifetime = Math.round(included.reduce((s, i) => s + i.lifetimeCost, 0));
+  const totalPresentValue = Math.round(included.reduce((s, i) => s + i.presentValue, 0));
+  const totalsRow = [
+    "TOTALS (included set only)", "", "", "", "", "", "", "", "",
+    "", "", totalLifetime, totalPresentValue, "", "", "", "", "", "",
+    `${included.length} of ${items.length} rows included`, "",
+  ].map(csvCell).join(",");
+  const disclosure = csvCell(
+    "SUPPORTING WORKSHEET — not a final release. Totals cover only rows marked IncludedInFinalTotals=YES; excluded rows are disclosed above and are not in totals.",
   );
-  return [header.join(","), ...rows].join("\n");
+
+  return {
+    csv: [disclosure, header.join(","), ...rows, totalsRow].join("\n"),
+    itemCount: included.length,
+    totalLifetime,
+    totalPresentValue,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

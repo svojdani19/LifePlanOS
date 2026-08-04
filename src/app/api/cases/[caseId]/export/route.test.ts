@@ -38,7 +38,7 @@ vi.mock("@/lib/tenant", () => ({
 }));
 vi.mock("@/lib/export/report", () => ({
   buildReportDocx: deps.buildReportDocx,
-  buildCostCsv: vi.fn(async () => "csv"),
+  buildCostCsv: vi.fn(async () => ({ csv: "csv", itemCount: 2, totalLifetime: 2400, totalPresentValue: 2000 })),
 }));
 vi.mock("@/lib/export/pdf", () => ({ convertDocxToPdf: vi.fn(async (b: Buffer) => b) }));
 vi.mock("@/lib/engine/validation", () => ({
@@ -65,8 +65,13 @@ const AUTHORIZED = {
   attestedPresentValue: 2000,
   includedFingerprint: "f1",
   includedItemIds: ["a", "b"],
+  includedCount: 2,
   includedPresentValue: 2000,
   includedLifetimeCost: 2400,
+  clinicalFingerprint: "cf1",
+  financialFingerprint: "ff1",
+  reportFingerprint: "rf1",
+  coveredScopes: ["FUTURE_CARE_MEDICAL_NECESSITY", "FREQUENCY_AND_DURATION"],
 };
 
 function req(body: unknown): Request {
@@ -85,6 +90,34 @@ beforeEach(() => {
   db.caseFindUniqueOrThrow.mockRejectedValue(new Error("no snapshot data"));
   deps.putObject.mockResolvedValue("key-1");
   deps.buildReportDocx.mockResolvedValue({ buffer: Buffer.from("docx"), totalLifetime: 2400, totalPresentValue: 2000, itemCount: 2 });
+});
+
+describe("CSV release semantics", () => {
+  it("rejects a final-mode CSV outright — never silently reinterpreted", async () => {
+    const res = await POST(req({ format: "CSV", mode: "final" }), params);
+    const body = await res.json();
+    expect(res.status).toBe(422);
+    expect(body.reasons).toContain("CSV_FINAL_NOT_OFFERED");
+    expect(deps.putObject).not.toHaveBeenCalled();
+    expect(db.exportCreate).not.toHaveBeenCalled();
+    expect(db.caseUpdateMany).not.toHaveBeenCalled();
+    // The authority gate is never even consulted for a rejected CSV final.
+    expect(deps.evaluate).not.toHaveBeenCalled();
+  });
+
+  it("supporting CSV exports without authority, never advances the case, and records the included-set totals as a draft artifact", async () => {
+    const res = await POST(req({ format: "CSV", mode: "draft" }), params);
+    expect(res.status).toBe(200);
+    expect(deps.evaluate).not.toHaveBeenCalled();
+    expect(db.caseUpdateMany).not.toHaveBeenCalled();
+    const created = db.exportCreate.mock.calls[0][0].data;
+    // Totals/count come from the deterministic included set, not all items.
+    expect(created.itemCount).toBe(2);
+    expect(created.totalLifetimeCost).toBe(2400);
+    expect(created.totalPresentValue).toBe(2000);
+    // A CSV is always a supporting/draft artifact.
+    expect(created.draft).toBe(true);
+  });
 });
 
 describe("final expert export enforcement", () => {
@@ -146,6 +179,25 @@ describe("final expert export enforcement", () => {
     const res = await POST(req({ format: "DOCX", mode: "final" }), params);
     expect(res.status).toBe(409);
     expect(db.exportCreate).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["clinical fingerprint", { clinicalFingerprint: "cf-CHANGED" }],
+    ["financial fingerprint", { financialFingerprint: "ff-CHANGED" }],
+    ["report fingerprint", { reportFingerprint: "rf-CHANGED" }],
+    ["included ids", { includedItemIds: ["a", "c"] }],
+    ["included count", { includedCount: 3 }],
+  ] as const)("fails safely when the %s drifts during generation", async (_label, drift) => {
+    deps.evaluate
+      .mockResolvedValueOnce(AUTHORIZED)
+      .mockResolvedValueOnce({ ...AUTHORIZED, ...drift });
+    const res = await POST(req({ format: "DOCX", mode: "final" }), params);
+    const body = await res.json();
+    expect(res.status).toBe(409);
+    expect(body.reasons).toEqual(["PLAN_CHANGED_DURING_GENERATION"]);
+    expect(deps.putObject).not.toHaveBeenCalled();
+    expect(db.exportCreate).not.toHaveBeenCalled();
+    expect(db.caseUpdateMany).not.toHaveBeenCalled();
   });
 
   it("fails safely when rendered totals do not match the verified included set", async () => {
