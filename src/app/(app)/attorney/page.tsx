@@ -85,10 +85,19 @@ export default async function AttorneyPage() {
     if (key.startsWith("pricing.") && typeof value === "string") pricing[key.slice("pricing.".length)] = value;
   }
 
+  // Working title for the hero: the person's attorney-client assignment can
+  // name their actual role on the team (e.g. "Paralegal"); default "Attorney".
+  const titleGrant = await prisma.userRoleAssignment.findFirst({
+    where: { firmId: ctx.firm.id, userId: ctx.user.id, status: "ACTIVE", builtInRole: "ATTORNEY_CLIENT", caseId: null, responsibility: { not: null } },
+    select: { responsibility: true },
+  });
+  const userTitle = titleGrant?.responsibility ?? "Attorney";
+
   return (
     <AttorneyWorkspace
       firmName={ctx.firm.name}
       userName={ctx.user.name}
+      userTitle={userTitle}
       pricing={pricing}
       cases={cases.map((c) => ({
         id: c.id,

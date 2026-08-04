@@ -215,7 +215,7 @@ export async function seedDemoFirm(): Promise<DemoSeedSummary> {
         firmId: firm.id,
         builtInRole,
         assignedById: firmAdmin.id,
-        responsibility: builtInRole.replace(/_/g, " "),
+        responsibility: p.assignmentResponsibility ?? builtInRole.replace(/_/g, " "),
         assignmentReason: "Synthetic demo persona",
         status: "ACTIVE",
         // Org-scoped (no officeId/caseId) and non-expiring (effectiveUntil null).

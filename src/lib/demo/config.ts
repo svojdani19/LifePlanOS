@@ -55,6 +55,8 @@ export interface DemoPersona {
   /** Workspace key from src/lib/workspaces.ts — drives post-login routing. */
   preferredWorkspace: string;
   description: string;
+  /** Working title stored on the persona's template assignment (hero display). */
+  assignmentResponsibility?: string;
 }
 
 /**
@@ -102,6 +104,7 @@ export const DEMO_PERSONAS: DemoPersona[] = [
     role: "ATTORNEY_REVIEWER",
     templateAssignments: ["ATTORNEY_CLIENT"],
     preferredWorkspace: "ATTORNEY_CLIENT",
+    assignmentResponsibility: "Attorney",
     description:
       "Retaining attorney: reviews damages posture, decides on expert engagements, and downloads released work product.",
   },
@@ -113,6 +116,7 @@ export const DEMO_PERSONAS: DemoPersona[] = [
     role: "ATTORNEY_REVIEWER",
     templateAssignments: ["ATTORNEY_CLIENT"],
     preferredWorkspace: "ATTORNEY_CLIENT",
+    assignmentResponsibility: "Paralegal",
     description:
       "Paralegal: works the matter with the same viewpoint and access as the retaining attorney — intake, records, report ordering, and released work product.",
   },

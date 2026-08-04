@@ -32,6 +32,8 @@ export interface AttorneyCase {
 interface Props {
   firmName: string;
   userName: string;
+  /** Working title shown for the signed-in person (e.g. "Attorney", "Paralegal"). */
+  userTitle?: string;
   cases: AttorneyCase[];
   /** Firm.features["pricing.<REPORT_TYPE>"] placeholders, keyed by report type. */
   pricing: Record<string, string>;
@@ -171,7 +173,7 @@ function ConfidenceBar({ label, value }: { label: string; value: number }) {
 
 // ── Main component ───────────────────────────────────────────────────────────
 
-export default function AttorneyWorkspace({ firmName, userName, cases, pricing }: Props) {
+export default function AttorneyWorkspace({ firmName, userName, userTitle = "Attorney", cases, pricing }: Props) {
   const [tab, setTab] = useState<Tab>("Overview");
   const [caseId, setCaseId] = useState<string | null>(cases[0]?.id ?? null);
   const [orderBusy, setOrderBusy] = useState<string | null>(null);
@@ -271,9 +273,9 @@ export default function AttorneyWorkspace({ firmName, userName, cases, pricing }
       {/* ── Header ───────────────────────────────────────────────────────── */}
       <div className="rounded-2xl border border-ink-200 bg-white p-6 shadow-sm">
         <p className="text-xs font-semibold uppercase tracking-[0.16em] text-brand-700">{firmName}</p>
-        <h1 className="mt-2 text-3xl font-bold tracking-tight text-ink-950">Attorney Workspace</h1>
+        <h1 className="mt-2 text-3xl font-bold tracking-tight text-ink-950">{userName}</h1>
         <p className="mt-2 max-w-3xl text-sm leading-6 text-ink-600">
-          {userName} — case posture, evidence gaps, report options, and released deliverables. This view is read-only:
+          {userTitle} — case posture, evidence gaps, report options, and released deliverables. This view is read-only:
           clinical data is authored and reviewed by the clinical team.
         </p>
       </div>
