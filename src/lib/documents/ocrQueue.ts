@@ -14,6 +14,7 @@ import { getOcrProvider } from "@/lib/documents/ocrProvider";
 import { classifyDocument } from "@/lib/documents/classify";
 import { parseRecordMeta } from "@/lib/documents/meta";
 import { segmentDocument } from "@/lib/documents/segment";
+import { enqueueExtraction } from "@/lib/documents/extractionRun";
 import { Prisma } from "@/generated/prisma";
 import type { DocumentType } from "@/generated/prisma";
 
@@ -117,4 +118,7 @@ async function runJob(job: Job): Promise<void> {
     },
   });
   console.log(`[ocr] done ${doc.filename}: ${r.pageCount} pages (${r.ocredPages} OCR'd) in ${((Date.now() - started) / 1000).toFixed(0)}s, confidence ${(r.confidence * 100).toFixed(0)}%`);
+  // The text is now readable — run the source-grounded extraction pipeline.
+  // (Extraction never runs while OCR is queued/failed; this is the unblock.)
+  enqueueExtraction(doc.id);
 }

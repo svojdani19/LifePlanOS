@@ -2,7 +2,7 @@
 // Chronology emphasis profile — LEARNED FROM A PROFESSIONAL EXEMPLAR.
 //
 // Derived 2026-08-04 from a systematic analysis of a corpus reference case's
-// professionally published Life Care Plan (the McHenry exemplar): how a
+// professionally published Life Care Plan: how a
 // physician life-care planner selects, expands, compresses, and annotates
 // medical-record encounters in the Records and Chronology sections. Only the
 // GENERALIZABLE selection/emphasis rules were carried over — no case content.
@@ -84,15 +84,20 @@ export function expansionVerdict(
  * Neutral, short, still cited.
  */
 export function compressedSummary(enc: EncounterData, recordType: string): string {
+  // ONLY documented content appears — never inferred continuity. "Assessment
+  // unchanged" / "treatment continued" are assertions that require a cited
+  // comparison between prior and current notes; a compressed interval line
+  // states what THIS note documents and nothing more.
   const assessment = firstFragment(enc.diagnosis);
   const response = firstFragment(enc.subjective && RESPONSE_RE.test(enc.subjective) ? enc.subjective : null);
   const treated = firstFragment(enc.treatment);
   const parts = [
     `Interval ${recordType.toLowerCase().replace(/record|report/g, "").trim() || "clinical"} visit`,
     response ? `— ${lc(response)}` : null,
-    assessment ? `— assessment unchanged: ${lc(assessment)}` : null,
-    treated ? `— treatment continued (${lc(treated)})` : "— treatment continued",
+    assessment ? `— documented assessment: ${lc(assessment)}` : null,
+    treated ? `— documented treatment: ${lc(treated)}` : null,
   ].filter(Boolean);
+  if (parts.length === 1) parts.push("— see the cited source page for this encounter");
   return `${parts.join(" ")}.`.replace(/\.\.+$/, ".");
 }
 
@@ -137,13 +142,22 @@ export function statusPostAnchor(eventDate: Date, surgery: { date: Date; label: 
   return `${span} status post ${lc(surgery.label)}`;
 }
 
-/** Care-gap note when consecutive documented encounters sit far apart (§12). */
+/**
+ * Care-gap note when consecutive documented encounters sit far apart (§12).
+ * The ONLY permitted phrasing: an absence of uploaded encounters is never a
+ * claim that no treatment occurred. Callers must additionally gate on "all
+ * documents for the period have completed processing".
+ */
 export function careGapNote(prevDate: Date, nextDate: Date, thresholdDays = 90): string | null {
   const days = Math.round((nextDate.getTime() - prevDate.getTime()) / 86_400_000);
   if (days < thresholdDays) return null;
-  const months = Math.round(days / 30);
-  return `Care gap: no documented treatment for approximately ${months} month${months === 1 ? "" : "s"} preceding this encounter.`;
+  const f = (d: Date) => `${String(d.getUTCMonth() + 1).padStart(2, "0")}/${String(d.getUTCDate()).padStart(2, "0")}/${d.getUTCFullYear()}`;
+  return `No uploaded clinical encounters were identified between ${f(prevDate)} and ${f(nextDate)}. This does not establish that no treatment occurred.`;
 }
+
+/** Explicit post-operative context in the encounter's own text — the ONLY
+ *  basis for attaching a status-post anchor to a later event. */
+export const POST_OP_MENTION_RE = /\bstatus[- ]post\b|\bpost-?op(?:erative)?\b|\bs\/p\b|\bfollowing (?:his|her|their|the) (?:surgery|procedure|operation)\b/i;
 
 /** Normalized diagnosis-list key for "new or changed assessment" tracking (§4). */
 export function diagnosisKey(diagnosis: string | null): string | null {

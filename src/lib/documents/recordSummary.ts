@@ -261,15 +261,15 @@ export function narrativeFor(d: AnyRec): string {
       const wbcNormal = /white blood cell[^.]*?(?:within|normal|reference interval)/i.test(text);
       return paragraph(
         "This laboratory report presents values against their reference ranges",
-        m ? `${m[1].trim().toLowerCase()} was flagged ${m[3].toLowerCase()} at ${m[2]}` : "no critical flags were identified in the extracted text",
+        m ? `${m[1].trim().toLowerCase()} was flagged ${m[3].toLowerCase()} at ${m[2]}` : "no flagged values were extracted — this reflects the parser's read, not a clinical finding; verify against the source report",
         wbcNormal ? "the white blood cell count was within normal limits" : null,
       );
     }
     case "NEUROPSYCHOLOGICAL_EVALUATION": {
       const imp = section(clin, S("impression"), S("summary"), S("conclusions?"));
       return paragraph(
-        "This neuropsychological evaluation was administered using a standardized test battery, with cognitive and memory indices reported alongside documented test validity",
-        imp ? `The examiner's impression is ${lcFirst(imp)}` : null,
+        "This is a neuropsychological evaluation",
+        imp ? `The examiner's impression is ${lcFirst(imp)}` : "no examiner impression could be extracted — human review of the source report is required",
       );
     }
     case "IME_REPORT": {
@@ -277,10 +277,11 @@ export function narrativeFor(d: AnyRec): string {
       const rating = /impairment rating/i.test(text);
       const hx = /history of present injury/i.test(text);
       return paragraph(
-        "This independent medical examination follows a review of the available records and an in-person examination",
+        "This is an independent medical examination report",
         hx ? `the report summarizes the history of the present injury` : null,
         mmi ? "The examiner opines that the claimant has reached maximum medical improvement" : null,
-        rating ? "An impairment rating is provided within a reasonable degree of medical certainty" : null,
+        rating ? "An impairment rating is stated in the report" : null,
+        !hx && !mmi && !rating ? "no findings could be reliably extracted — human review of the source report is required" : null,
       );
     }
     case "PHARMACY_RECORD": {
@@ -307,15 +308,15 @@ export function narrativeFor(d: AnyRec): string {
     case "DEPOSITION": {
       const who = text.match(/deposition of\s+([A-Z][A-Za-z .'-]+?)(?:\s*[—–-]|,|\.)/i)?.[1];
       return paragraph(
-        `This is the sworn deposition transcript${who ? ` of ${who.trim()}` : ""}`,
-        "The witness testified under oath with counsel for the parties present, and the transcript preserves the examination verbatim",
+        `This is a deposition transcript${who ? ` of ${who.trim()}` : ""}`,
+        "See the transcript itself for the testimony; no summary is generated from transcript text",
       );
     }
     default: {
       const body = section(clin, S("impression"), S("assessment"), S("diagnosis"), S("findings"));
       const sents = clinicalSentences(clin, 3);
       const out = paragraph(body, sents && sents !== body ? sents : null);
-      return out || "Record on file; no structured clinical findings were extracted.";
+      return out || "Reliable findings could not be extracted from this record; human review of the source document is required.";
     }
   }
 }

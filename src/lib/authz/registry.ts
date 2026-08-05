@@ -127,6 +127,11 @@ const DEFINITIONS: PermissionDefinition[] = [
     privileged: true,
   }),
   def("records.classify", "Classify records", "Reassign document type/taxonomy labels.", "RECORDS", "LOW"),
+  // Factual record review: confirming, correcting, or rejecting AI-extracted
+  // record facts. This is a FACTUAL act, not a medical opinion — it does not
+  // require a physician credential, and platform/super-admin status alone
+  // never grants it (only the firm role templates below carry it).
+  def("records.verify", "Verify record extraction", "Confirm, correct, supplement, or reject AI-extracted record facts and chronology entries.", "RECORDS", "MODERATE"),
   def("chronology.view", "View chronology", "Read the medical chronology timeline.", "RECORDS", "LOW", {
     externalAssignable: true,
   }),

@@ -2,7 +2,7 @@ import { prisma } from "@/lib/db";
 import { packFor, type CareTemplate } from "@/lib/engine/specialty";
 import { CONDITION_CARE, BASELINE_CARE, resolveConditionKeys } from "@/lib/engine/careLibrary";
 import { project, type CaseAssumptions } from "@/lib/engine/cost";
-import { buildChronologyFromRecords } from "@/lib/engine/chronology";
+import { buildChronologyFromRecords, handleEmptyChronology } from "@/lib/engine/chronology";
 import { locateConditionEvidence } from "@/lib/engine/evidence";
 import { generateStandardOfCare } from "@/lib/engine/standardOfCare";
 import { mapRecommendationToCondition, type CondInput } from "@/lib/engine/integrity";
@@ -208,29 +208,11 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
   // timeline, each described specifically and tied to the causation map & care
   // plan. Falls back to the specialty template only when no relevant records.
   const chronoResult = await buildChronologyFromRecords(caseId, { conditions: conditionNames, careServices: careItems.map((t) => t.service) });
-  let chronologyCount = chronoResult.kept;
-  if (chronologyCount === 0) {
-    for (const e of pack.chronology) {
-      await prisma.chronologyEvent.create({
-        data: {
-          caseId,
-          eventDate: new Date(anchor.getTime() + e.dayOffset * 24 * 3600 * 1000),
-          provider: e.provider,
-          specialty: e.specialty,
-          recordType: e.recordType,
-          summary: e.summary,
-          objectiveFindings: e.objectiveFindings,
-          diagnosis: e.diagnosis,
-          treatment: e.treatment,
-          imagingFindings: e.imagingFindings,
-          relevanceScore: e.relevanceScore,
-          relatedness: "RELATED",
-          sourcePage: 1,
-        },
-      });
-    }
-    chronologyCount = pack.chronology.length;
-  }
+  const chronologyCount = chronoResult.kept;
+  // NO template fallback: when no reliable events extract from the records,
+  // the chronology stays EMPTY and a clear review finding is raised instead.
+  // Fabricated specialty-template timelines are never created.
+  if (chronologyCount === 0) await handleEmptyChronology(caseId);
 
   let totalLifetime = 0;
   let totalPresentValue = 0;

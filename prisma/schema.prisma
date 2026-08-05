@@ -721,6 +721,18 @@ model ChronologyEvent {
   sourcePage       Int?
   sourceQuote      String? // verbatim excerpt from the record supporting the event
   dateInferred     Boolean @default(false) // true when no date appeared in the record
+  // Review lineage (source-grounded pipeline): human work is never destroyed
+  // by a regeneration. AI drafts may be superseded; edited/reviewed/verified
+  // rows persist and go STALE when their source document's bytes change.
+  reviewStatus     String  @default("AI_DRAFT") // AI_DRAFT | HUMAN_EDITED | REVIEWED | VERIFIED | STALE | SUPERSEDED
+  reviewedById     String?
+  reviewedAt       DateTime?
+  verifiedById     String?
+  verifiedAt       DateTime?
+  supersededById   String?
+  staleReason      String?
+  sourceFingerprint String? // sha256 of the source document text at generation
+  extractionId     String? // RecordExtraction run that produced this event
 
   relevanceScore Int         @default(50) // 0–100
   relatedness    Relatedness @default(UNCLEAR)
@@ -1779,4 +1791,163 @@ model Notification {
 
   @@index([userId, readAt])
   @@index([firmId])
+}
+
+// ── Source-grounded record extraction (LLM-assisted, human-verified) ─────────
+// One row per extraction RUN over one document: which model/prompt/schema
+// produced it, over which exact source bytes (fingerprint), and how it ended.
+// Failed or unreliable runs are recorded — never silently replaced by
+// template prose. PHI-bearing prompts/responses are NEVER stored here.
+model RecordExtraction {
+  id               String    @id @default(uuid())
+  firmId           String
+  caseId           String
+  sourceDocumentId String
+  status           String    @default("PENDING") // PENDING | COMPLETE | EXTRACTION_FAILED | BLOCKED_OCR
+  provider         String? // llm provider name
+  model            String? // resolved model identifier
+  promptVersion    String?
+  schemaVersion    String?
+  sourceFingerprint String? // sha256 of the exact extracted text processed
+  truncated        Boolean   @default(false) // source exceeded processing bounds; disclosed
+  chunkCount       Int       @default(0)
+  candidateCount   Int       @default(0) // claims proposed by the model
+  acceptedCount    Int       @default(0) // claims that survived deterministic validation
+  rejectedCount    Int       @default(0)
+  warnings         Json? // string[] — OCR confidence, truncation, rejects (no PHI)
+  error            String? // actionable failure reason (no PHI)
+  // Multi-pass provenance: what the critic and adjudicator contributed.
+  criticFindings   Json? // string[] — PHI-safe critic observations
+  disputedCount    Int      @default(0) // claims the critic contested
+  adjudicatedCount Int      @default(0) // disputes an adjudicator resolved
+  pagesTotal       Int      @default(0)
+  pagesReadable    Int      @default(0)
+  auditResult      String? // document-level audit outcome
+  createdById      String?
+  createdAt        DateTime  @default(now())
+
+  @@index([caseId, sourceDocumentId])
+  @@index([firmId])
+}
+
+// One VALIDATED encounter extracted from one document. Claim-level provenance
+// lives in `claims` (field, value, exact supporting excerpt, page, confidence,
+// warning). Human review is lineage-based: corrections and verifications are
+// never overwritten by a regeneration — a new run supersedes AI drafts only,
+// and marks reviewed rows STALE when the source bytes changed.
+model ExtractedEncounter {
+  id               String    @id @default(uuid())
+  extractionId     String
+  firmId           String
+  caseId           String
+  sourceDocumentId String
+  page             Int? // NULL = unknown page (never coerced to 1)
+  pageEnd          Int?
+  dateStatus       String    @default("UNKNOWN") // DOCUMENTED | INFERRED | UNKNOWN | DISPUTED
+  encounterDate    DateTime?
+  encounterDateEnd DateTime?
+  // Verbatim date text as it appeared in the record, for reviewer comparison.
+  dateSourceText   String?
+  provider            String?
+  providerCredentials String?
+  facility            String?
+  encounterType       String?
+  // Deterministically rendered factual summary (from validated claims only).
+  factualSummary   String
+  // Optional LLM synthesis over the validated claims — clearly labeled in UI.
+  synthesis        String?
+  claims           Json // [{field, value, excerpt, page, confidence, warning?}]
+  ocrConfidence    Float?
+  warnings         Json? // string[]
+  status           String    @default("AI_DRAFT") // AI_DRAFT | AI_AUDIT_PASSED | HUMAN_EDITED | REVIEWED | VERIFIED | STALE | SUPERSEDED | EXTRACTION_FAILED
+  // Adversarial audit outcome for this encounter's draft:
+  // PASS | NEEDS_HUMAN_REVIEW | EXTRACTION_INCOMPLETE | SOURCE_CONFLICT | FAILED
+  auditResult      String?
+  auditFindings    Json? // string[] — PHI-safe reasons the audit raised
+  auditedAt        DateTime?
+  // Sentence -> supporting claim ids for the synthesized summary.
+  sentenceClaimMap Json?
+  // Content hash of the claim set + summary a human verified, so a final
+  // export can prove it is exporting exactly what was verified.
+  verifiedContentHash String?
+  editedFields     Json? // string[] of human-corrected fields
+  reviewNote       String?
+  reviewedById     String?
+  reviewedAt       DateTime?
+  verifiedById     String?
+  verifiedAt       DateTime?
+  supersededById   String?
+  staleReason      String?
+  sourceFingerprint String? // fingerprint of the source at generation time
+  promptVersion    String?
+  schemaVersion    String?
+  model            String?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([caseId, sourceDocumentId])
+  @@index([caseId, status])
+  @@index([firmId])
+}
+
+// One row per SOURCE PAGE. Page identity is server-owned: the model never
+// assigns a page number, filename, document, case or firm — those are bound
+// here from the document being processed and copied onto every claim that
+// cites the page. Page-quality state (blank, unreadable, low-confidence,
+// truncated) is decided BEFORE extraction, so a document with unreadable
+// pages is disclosed as incomplete instead of yielding a confident chronology
+// built on the pages that happened to read.
+model SourcePage {
+  id               String   @id @default(uuid())
+  firmId           String
+  caseId           String
+  sourceDocumentId String
+  filename         String
+  pageNumber       Int
+  text             String   @default("")
+  offsetStart      Int      @default(0)
+  offsetEnd        Int      @default(0)
+  // NATIVE_TEXT | OCR | NONE — how this page's text was obtained. A native
+  // text layer is not assigned an invented OCR confidence.
+  ocrMethod        String   @default("NONE")
+  ocrConfidence    Float? // null when not OCR'd — never a fabricated 0.96
+  contentHash      String
+  // READABLE | BLANK | LOW_CONFIDENCE | UNREADABLE | TRUNCATED | PENDING_OCR | OCR_FAILED
+  status           String   @default("READABLE")
+  truncated        Boolean  @default(false)
+  note             String? // PHI-safe reason for a non-READABLE status
+  createdAt        DateTime @default(now())
+
+  @@unique([sourceDocumentId, pageNumber])
+  @@index([caseId, sourceDocumentId])
+  @@index([firmId])
+  @@index([caseId, status])
+}
+
+// Firm-scoped correction learning: a verified human correction of AI-extracted
+// content, stored as structured field-level differences plus a fact-free
+// guidance category. Exemplars teach formatting and extraction choices for
+// FUTURE drafts in the SAME firm — they never carry patient names, dates,
+// providers, or case facts into another case's prompt.
+model CorrectionExemplar {
+  id            String   @id @default(uuid())
+  firmId        String
+  caseId        String
+  encounterId   String
+  documentType  String? // taxonomy type of the source document
+  category      String // WRONG_FIELD | BOILERPLATE_REMOVED | DATE_CORRECTED | PROVIDER_CORRECTED | EXCERPT_MISMATCH | SUMMARY_REWORDED | OTHER
+  guidance      String // fact-free, deterministic guidance sentence for prompts
+  fieldDiffs    Json // [{field, changeType}] — no values copied across cases
+  draftSnapshot Json // original AI draft (stays in the owning firm/case only)
+  correctedSnapshot Json
+  claimRefs     Json? // claim identifiers within the encounter
+  reviewerId    String
+  promptVersion String?
+  schemaVersion String?
+  model         String?
+  promoted      Boolean  @default(false) // measured as improving accuracy
+  verifiedAt    DateTime @default(now())
+
+  @@index([firmId, documentType])
+  @@index([caseId])
 }

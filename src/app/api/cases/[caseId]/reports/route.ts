@@ -18,6 +18,7 @@ import { convertDocxToPdf } from "@/lib/export/pdf";
 import { ok, handleError } from "@/lib/api";
 import { reportEnabled } from "@/lib/flags";
 import { composeVocational, vocationalReadiness, type VocEntry } from "@/lib/reports/vocational";
+import { factualReviewState } from "@/lib/records/structuredRecord";
 import { composeEconomist, economistReadiness, computeScenarioStaleness, type AssumptionRow, type ScenarioRow } from "@/lib/reports/economist";
 import { changesSection, isMaterialDiff } from "@/lib/reports/versionDiff";
 import { diffSnapshots, type SnapshotPayload } from "@/lib/engine/snapshot";
@@ -469,6 +470,24 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
       await audit(ctx, "export.report", { type: "reportExport", id: record.id, caseId: params.caseId, meta: { reportType: def.id, format: input.format, version: record.version, mode: input.mode } });
       return ok({ export: record });
     };
+
+    // FINAL factual record reports require completion of factual record
+    // review: no unreviewed AI drafts, no stale content, no failed
+    // extractions, no pending OCR. This is a FACTUAL gate — it requires the
+    // review to have happened, never a physician credential (these reports
+    // contain record facts, not medical opinions). Drafts remain available.
+    if ((def.id === "MEDICAL_RECORD_SUMMARY" || def.id === "MEDICAL_CHRONOLOGY") && input.mode === "final") {
+      const review = await factualReviewState(params.caseId, ctx.firm.id);
+      if (!review.complete) {
+        return ok(
+          {
+            error: "Final export requires completion of factual record review. Draft exports remain available.",
+            blockers: review.blockers,
+          },
+          422,
+        );
+      }
+    }
 
     // Vocational Assessment: composed from the structured vocational intake,
     // gated on expert completeness — never the medical-report compose path.

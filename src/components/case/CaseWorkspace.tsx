@@ -61,6 +61,7 @@ import { BookOpenCheck } from "lucide-react";
 import { MEDICAL_SPECIALTIES } from "@/lib/intake/specialties";
 import { attorneyItemsNeeded } from "@/lib/attorneyItems";
 import { US_STATES } from "@/lib/intake/jurisdictions";
+import { dateFromFilename } from "@/lib/documents/filenameDate";
 import { CaseAssistant } from "@/components/case/CaseAssistant";
 
 // Loosely-typed serialized case (dates are ISO strings after JSON round-trip).
@@ -106,6 +107,7 @@ export function CaseWorkspace({
   assumptions,
   totals,
   permissions,
+  canVerifyRecords = false,
   precedents = [],
   physicians = [],
   attorneyView = false,
@@ -116,6 +118,8 @@ export function CaseWorkspace({
   assumptions: { lifeExpectancyYears: number; discountRate: number; medicalInflation: number; geographicFactor: number };
   totals: { totalLifetime: number; totalPresentValue: number };
   permissions: Permission[];
+  /** Server-computed canonical records.verify for THIS case (factual review). */
+  canVerifyRecords?: boolean;
   precedents?: AnyRec[];
   physicians?: AnyRec[];
   /** Attorney-facing view: dollar values are never rendered (data unchanged). */
@@ -382,8 +386,8 @@ export function CaseWorkspace({
 
       <div className="mt-5">
         {tab === "overview" && <IntakePanel data={data} canEdit={can("case.edit") || attorneyView} call={call} />}
-        {tab === "records" && <RecordsPanel data={data} canEdit={can("records.upload")} canUpload={attorneyView} call={call} busy={busy} />}
-        {tab === "chronology" && <ChronologyPanel data={data} canEdit={can("chronology.edit")} call={call} />}
+        {tab === "records" && <RecordsPanel data={data} canEdit={can("records.upload")} canUpload={attorneyView} canVerify={canVerifyRecords} call={call} busy={busy} />}
+        {tab === "chronology" && <ChronologyPanel data={data} canEdit={can("chronology.edit")} canVerify={canVerifyRecords} call={call} />}
         {tab === "causation" && <CausationPanel data={data} hideConfidence={attorneyView} />}
         {/* Roster management stays behind case.edit (matching the server);
             physician reviewers may RECORD interview/provider findings — the
@@ -738,12 +742,20 @@ function RecordMeta({ d, compact }: { d: AnyRec; compact?: boolean }) {
   );
 }
 
-function RecordsPanel({ data, canEdit, canUpload = false, call, busy }: { data: AnyRec; canEdit: boolean; canUpload?: boolean; call: any; busy: string | null }) {
+function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, call, busy }: { data: AnyRec; canEdit: boolean; canUpload?: boolean; canVerify?: boolean; call: any; busy: string | null }) {
   const mayUpload = canEdit || canUpload;
   const [filter, setFilter] = useState<string>("All");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [confirmDelDoc, setConfirmDelDoc] = useState<string | null>(null);
+  // Structured AI-extraction view (source-grounded pipeline): per-document
+  // status + cited encounters + the undated review group.
+  const [extractions, setExtractions] = useState<AnyRec | null>(null);
+  const loadExtractions = useCallback(async () => {
+    const res = await fetch(`/api/cases/${data.id}/records/extractions`);
+    if (res.ok) setExtractions(await res.json());
+  }, [data.id]);
+  useEffect(() => { void loadExtractions(); }, [loadExtractions]);
 
   async function upload(files: FileList | null) {
     if (!files?.length) return;
@@ -782,6 +794,31 @@ function RecordsPanel({ data, canEdit, canUpload = false, call, busy }: { data: 
             {canEdit ? "Each record is auto-labeled by type. Click a record's type icon to reassign it." : "Each record is auto-labeled by type and processed into the case pipeline."}
           </span>
         </div>
+      )}
+
+      {/* Processing limitations the reviewer must see before trusting the set. */}
+      {!!extractions?.limitations?.length && (
+        <div className="card border-amber-200 bg-amber-50/50 p-3">
+          <p className="text-xs font-semibold text-amber-900">Processing and extraction limitations</p>
+          <ul className="mt-1 space-y-0.5">
+            {extractions.limitations.map((l: string, i: number) => (
+              <li key={i} className="text-[11px] text-amber-800">• {l}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Undated group: encounters whose date could not be supported by the
+          record stay VISIBLE here for human dating — they are never placed on
+          the dated chronology, and never silently dropped. */}
+      {!!extractions?.undated?.length && (
+        <UndatedGroup
+          caseId={data.id}
+          undated={extractions.undated}
+          documents={docs}
+          canVerify={!!extractions?.canVerify && canVerify !== false}
+          onChanged={loadExtractions}
+        />
       )}
 
       {docs.length === 0 ? (
@@ -951,6 +988,12 @@ function RecordsPanel({ data, canEdit, canUpload = false, call, busy }: { data: 
                             ) : (
                               <p className="text-xs leading-relaxed text-ink-600">{narrativeFor(d)}</p>
                             )}
+                            <ExtractionBlock
+                              caseId={data.id}
+                              doc={extractions?.documents?.find((x: AnyRec) => x.documentId === d.id) ?? null}
+                              canVerify={!!extractions?.canVerify && canVerify !== false}
+                              onChanged={loadExtractions}
+                            />
                           </div>
                           );
                         })()}
@@ -1028,7 +1071,7 @@ const lcpDate = (v: string | Date) => {
   const d = new Date(v);
   return `${String(d.getUTCMonth() + 1).padStart(2, "0")}/${String(d.getUTCDate()).padStart(2, "0")}/${d.getUTCFullYear()}`;
 };
-function ChronologyPanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; call: any }) {
+function ChronologyPanel({ data, canEdit, canVerify = false, call }: { data: AnyRec; canEdit: boolean; canVerify?: boolean; call: any }) {
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [filter, setFilter] = useState("ALL");
@@ -1099,9 +1142,10 @@ function ChronologyPanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
                     <button className="text-ink-400" onClick={() => setEditing(null)}><X className="h-4 w-4" /></button>
                   </div>
                 ) : (
-                  /* Labeled clinical sections in LCP order. Falls back to the
-                     composed summary when the record had no labeled sections. */
+                  /* Factual encounter summary FIRST, then the labeled clinical
+                     sections in LCP order. */
                   <div className="mt-2 space-y-1 text-sm">
+                    <p className="text-ink-900">{e.summary}</p>
                     {[
                       ["Subjective", e.subjective],
                       ["Past medical history", e.pastMedicalHistory],
@@ -1119,18 +1163,28 @@ function ChronologyPanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
                     ].filter(([, v]) => v).map(([label, v]) => (
                       <p key={label as string} className="text-ink-800"><span className="font-semibold text-ink-600">{label}: </span>{v as string}</p>
                     ))}
-                    {!e.subjective && !e.pastMedicalHistory && !e.objectiveFindings && !e.imagingFindings && !e.diagnosis && !e.treatment && !e.procedure && !e.medications && !e.functionalStatus && !e.workStatus && !e.restrictions && !e.impairmentRating && !e.disposition && (
-                      <p className="text-ink-800">{e.summary}</p>
-                    )}
                   </div>
                 )}
 
-                {/* Clinical significance — ties the event to diagnoses & future care */}
+                {/* System-suggested relevance — a recommendation, never a record fact. */}
                 {e.clinicalSignificance && (
                   <p className="mt-2 rounded-md bg-brand-50 px-2.5 py-1.5 text-xs text-brand-800">
-                    <span className="font-semibold">Significance: </span>{e.clinicalSignificance}
+                    <span className="font-semibold">System-suggested relevance — pending human confirmation: </span>{e.clinicalSignificance}
                   </p>
                 )}
+                {/* Human-review status + factual verification (records.verify). */}
+                <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+                  <span className={cn("rounded-full px-2 py-0.5 font-medium", e.reviewStatus === "VERIFIED" ? "bg-emerald-100 text-emerald-800" : e.reviewStatus === "REVIEWED" ? "bg-sky-100 text-sky-800" : e.reviewStatus === "HUMAN_EDITED" || e.edited ? "bg-amber-100 text-amber-800" : e.reviewStatus === "STALE" ? "bg-red-100 text-red-700" : "bg-slate-100 text-slate-600")}>
+                    {e.reviewStatus === "VERIFIED" ? "Human-verified" : e.reviewStatus === "REVIEWED" ? "Human-reviewed" : e.reviewStatus === "HUMAN_EDITED" || e.edited ? "Human-edited" : e.reviewStatus === "STALE" ? "Stale — source changed" : "AI draft — pending review"}
+                  </span>
+                  {e.staleReason && <span className="text-red-600">{e.staleReason}</span>}
+                  {canVerify && e.reviewStatus !== "VERIFIED" && (
+                    <button className="btn-outline px-2 py-0.5 text-[11px]" onClick={() => call(`/api/cases/${data.id}/chronology/${e.id}`, "POST", { action: "verify" })}>Verify</button>
+                  )}
+                  {canVerify && e.reviewStatus === "VERIFIED" && (
+                    <button className="btn-outline px-2 py-0.5 text-[11px]" onClick={() => call(`/api/cases/${data.id}/chronology/${e.id}`, "POST", { action: "reopen" })}>Reopen</button>
+                  )}
+                </div>
 
                 {/* Source citation for the encounter. */}
                 {e.sourceDocumentId && (
@@ -1195,7 +1249,9 @@ function ChronologyPanel({ data, canEdit, call }: { data: AnyRec; canEdit: boole
             {filtered.map((e) => {
               const s = styleFor(e.eventType);
               const active = selected?.id === e.id;
-              const headline = e.diagnosis || e.procedure || e.imagingFindings || e.summary || "";
+              // The factual event summary is the primary content of the list —
+              // a diagnosis label never substitutes for the event itself.
+              const headline = e.summary || e.procedure || e.imagingFindings || e.diagnosis || "";
               return (
                 <li key={e.id} data-ev={e.id}>
                   <button
@@ -3971,6 +4027,190 @@ function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians 
           </table>
         )}
       </details>
+    </div>
+  );
+}
+
+
+// ── Source-grounded extraction display (Records page) ────────────────────────
+// Per-document: extraction status, validated cited encounters with claim
+// excerpts and page citations, warnings, and human review controls. All
+// verification is server-enforced (canonical records.verify); the button is
+// shown only when the server said the caller may verify.
+// ── Undated / date requires review ──────────────────────────────────────────
+// Encounters whose date the record did not support. They are extracted and
+// cited like any other, but they carry no date the source can back, so they
+// stay OFF the dated chronology until a human supplies one. Listing them here
+// is what keeps "we could not date this" from becoming "this did not happen".
+function UndatedGroup({
+  caseId,
+  undated,
+  documents,
+  canVerify,
+  onChanged,
+}: {
+  caseId: string;
+  undated: AnyRec[];
+  documents: AnyRec[];
+  canVerify: boolean;
+  onChanged: () => void;
+}) {
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [dates, setDates] = useState<Record<string, string>>({});
+
+  async function setDate(encId: string) {
+    const value = dates[encId];
+    if (!value) return;
+    setBusyId(encId);
+    await fetch(`/api/cases/${caseId}/records/encounters/${encId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ encounterDate: value }),
+    });
+    setBusyId(null);
+    onChanged();
+  }
+
+  return (
+    <div className="card border-slate-300 p-3">
+      <p className="text-xs font-semibold text-ink-900">
+        Undated / date requires review · {undated.length}
+      </p>
+      <p className="mt-0.5 text-[11px] text-ink-500">
+        These encounters were extracted from the records but carry no date the source supports. They are not placed on
+        the dated chronology. Assigning a date from the source record moves an entry onto the timeline.
+      </p>
+      <div className="mt-2 space-y-2">
+        {undated.map((e) => {
+          const doc = documents.find((d) => d.id === e.sourceDocumentId);
+          return (
+            <div key={e.id} className="rounded border border-ink-100 bg-white p-2">
+              <div className="flex flex-wrap items-center gap-2 text-[11px] text-ink-600">
+                <span className="font-medium text-ink-800">{doc?.filename ?? "record on file"}</span>
+                <span>{e.page != null ? `p. ${e.page}` : "page unknown"}</span>
+                {e.provider && <span>{e.provider}</span>}
+              </div>
+              <p className="mt-1 text-xs text-ink-800">{e.factualSummary}</p>
+              {(e.warnings ?? []).map((w: string, i: number) => (
+                <p key={i} className="mt-0.5 text-[11px] text-amber-700">{w}</p>
+              ))}
+              {canVerify && (() => {
+                const suggested = dateFromFilename(doc?.filename);
+                return (
+                  <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                    <input
+                      type="date"
+                      className="input py-0.5 text-[11px]"
+                      value={dates[e.id] ?? ""}
+                      onChange={(ev) => setDates((d) => ({ ...d, [e.id]: ev.target.value }))}
+                    />
+                    <button
+                      className="btn-outline px-2 py-0.5 text-[11px]"
+                      disabled={busyId === e.id || !dates[e.id]}
+                      onClick={() => setDate(e.id)}
+                    >
+                      Set documented date
+                    </button>
+                    {suggested && (
+                      // The filename is not the record's own statement of a
+                      // service date — it is offered for confirmation only.
+                      <button
+                        className="text-[11px] text-brand-700 underline"
+                        onClick={() => setDates((d) => ({ ...d, [e.id]: suggested }))}
+                      >
+                        Suggested from filename: {suggested} — confirm against the record
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string; doc: AnyRec | null; canVerify: boolean; onChanged: () => void }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [editingEnc, setEditingEnc] = useState<string | null>(null);
+  const [draftSummary, setDraftSummary] = useState("");
+  if (!doc) return null;
+  const ex = doc.extraction ?? {};
+  const encounters: AnyRec[] = doc.encounters ?? [];
+  const statusChip = (st: string) =>
+    st === "COMPLETE" ? ["AI extraction complete", "bg-emerald-50 text-emerald-700"]
+    : st === "EXTRACTION_FAILED" ? ["Extraction failed — human review required", "bg-red-50 text-red-700"]
+    : st === "BLOCKED_OCR" ? ["Waiting on OCR — not yet extracted", "bg-amber-50 text-amber-800"]
+    : st === "PENDING" ? ["OCR in progress", "bg-amber-50 text-amber-800"]
+    : ["Not yet extracted", "bg-slate-100 text-slate-600"];
+  const [chipLabel, chipCls] = statusChip(ex.status ?? "NOT_RUN");
+
+  async function act(encId: string, method: "POST" | "PATCH", body: AnyRec) {
+    setBusy(encId);
+    await fetch(`/api/cases/${caseId}/records/encounters/${encId}`, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    setBusy(null);
+    setEditingEnc(null);
+    onChanged();
+  }
+
+  const encStatus = (st: string, edited: boolean) =>
+    st === "VERIFIED" ? ["Human-verified", "bg-emerald-100 text-emerald-800"]
+    : st === "REVIEWED" ? ["Human-reviewed", "bg-sky-100 text-sky-800"]
+    : st === "HUMAN_EDITED" || edited ? ["Human-edited", "bg-amber-100 text-amber-800"]
+    : st === "STALE" ? ["Stale — source changed", "bg-red-100 text-red-700"]
+    : ["AI draft — pending review", "bg-slate-100 text-slate-600"];
+
+  return (
+    <div className="mt-2 rounded-md border border-ink-100 bg-ink-50/40 p-2.5">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={cn("rounded-full px-2 py-0.5 text-[11px] font-medium", chipCls)}>{chipLabel}</span>
+        {ex.truncated && <span className="text-[11px] text-amber-700">Partially processed — document exceeds the processing bound</span>}
+      </div>
+      {ex.error && <p className="mt-1 text-[11px] text-red-700">{ex.error}</p>}
+      {encounters.map((e) => {
+        const [lbl, cls] = encStatus(e.status, false);
+        return (
+          <div key={e.id} className="mt-2 rounded border border-ink-100 bg-white p-2">
+            <div className="flex flex-wrap items-center gap-2 text-[11px]">
+              <span className="font-semibold text-ink-900">
+                {e.dateStatus === "UNKNOWN" ? "Undated — date requires review" : `${e.encounterDate}${e.dateStatus === "INFERRED" ? " (inferred)" : ""}`}
+              </span>
+              {e.provider && <span className="text-ink-600">{e.provider}{e.providerCredentials ? `, ${e.providerCredentials}` : ""}</span>}
+              {e.facility && <span className="text-ink-500">{e.facility}</span>}
+              <span className={cn("ml-auto rounded-full px-2 py-0.5 font-medium", cls)}>{lbl}</span>
+            </div>
+            {editingEnc === e.id ? (
+              <div className="mt-1.5 flex gap-2">
+                <textarea className="input w-full py-1 text-xs" rows={2} value={draftSummary} onChange={(ev) => setDraftSummary(ev.target.value)} />
+                <button className="btn-primary px-2 py-0.5 text-[11px]" disabled={busy === e.id} onClick={() => act(e.id, "PATCH", { factualSummary: draftSummary })}>Save</button>
+                <button className="btn-ghost px-2 py-0.5 text-[11px]" onClick={() => setEditingEnc(null)}>Cancel</button>
+              </div>
+            ) : (
+              <p className="mt-1 text-xs text-ink-800">{e.factualSummary}</p>
+            )}
+            {e.synthesis && <p className="mt-1 text-[11px] italic text-ink-500">System-generated synthesis (from validated facts only): {e.synthesis}</p>}
+            {(e.claims ?? []).slice(0, 4).map((c: AnyRec, i: number) => (
+              <p key={i} className="mt-1 text-[11px] text-ink-500">
+                <span className="font-medium text-ink-600">{c.field}: </span>“{c.excerpt}”{c.page != null ? ` (p. ${c.page})` : " (page unknown)"}
+                {c.warning ? <span className="text-amber-700"> — {c.warning}</span> : null}
+              </p>
+            ))}
+            {(e.warnings ?? []).map((w: string, i: number) => (
+              <p key={`w${i}`} className="mt-0.5 text-[11px] text-amber-700">{w}</p>
+            ))}
+            {e.staleReason && <p className="mt-0.5 text-[11px] text-red-700">{e.staleReason}</p>}
+            {canVerify && (
+              <div className="mt-1.5 flex gap-1.5">
+                {e.status !== "VERIFIED" && <button className="btn-outline px-2 py-0.5 text-[11px]" disabled={busy === e.id} onClick={() => act(e.id, "POST", { action: "verify" })}>Verify</button>}
+                <button className="btn-outline px-2 py-0.5 text-[11px]" onClick={() => { setEditingEnc(e.id); setDraftSummary(e.factualSummary); }}>Correct</button>
+                <button className="btn-outline px-2 py-0.5 text-[11px] text-red-700" disabled={busy === e.id} onClick={() => act(e.id, "POST", { action: "reject" })}>Reject</button>
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

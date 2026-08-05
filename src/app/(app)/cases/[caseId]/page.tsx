@@ -1,7 +1,7 @@
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
-import { requireContext, requireCase, caseAccessFor } from "@/lib/tenant";
+import { requireContext, requireCase, caseAccessFor, canCanonicalPermission } from "@/lib/tenant";
 import { prisma } from "@/lib/db";
 import { ROLE_PERMISSIONS } from "@/lib/rbac";
 import { effectiveLegacyPermissions, effectiveAssignmentTemplates, isAttorneyPresentation } from "@/lib/authz/effective";
@@ -34,6 +34,10 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
     effectiveAssignmentTemplates(scopeInput),
   ]);
   const attorneyView = isAttorneyPresentation(ctx.user.role, effectivePermissions, effectiveTemplates);
+  // Factual record verification (records.verify) — canonical, case-scoped,
+  // never satisfied by platform/super-admin status alone; supportMode stays
+  // read-only through the same evaluator.
+  const canVerifyRecords = !caseAccess.platformAdminReadOnly && canCanonicalPermission(ctx, "records.verify", { caseId: params.caseId });
   // Firm admins see who the assigned attorney(s) on the matter are, right in
   // the case banner (case-scoped attorney assignments).
   let assignedAttorneys: string[] = [];
@@ -117,6 +121,7 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
         // get the full clinical view their professional work requires.
         attorneyView={attorneyView}
         assignedAttorneys={Array.from(new Set(assignedAttorneys))}
+        canVerifyRecords={canVerifyRecords}
         pendingResolution={pendingResolution}
       />
     </div>

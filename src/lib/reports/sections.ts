@@ -177,34 +177,120 @@ export function chronology(data: ReportData, config: ChronologyConfig = {}): Blo
   if (config.order === "desc") events.reverse();
   if (!events.length) return notDocumented();
 
+  const reviewLabelOf = (e: (typeof events)[number]) => {
+    const rs = (e as { reviewStatus?: string }).reviewStatus;
+    const edited = (e as { edited?: boolean }).edited;
+    if (rs === "VERIFIED") return "Human-verified";
+    if (rs === "REVIEWED") return "Human-reviewed";
+    if (rs === "HUMAN_EDITED" || edited) return "Human-edited";
+    if (rs === "STALE") return "STALE — source changed after review";
+    return "AI-generated draft — pending human review";
+  };
+  const dateLabel = (e: (typeof events)[number]) =>
+    `${mdY(e.eventDate)}${(e as { dateInferred?: boolean }).dateInferred ? " (inferred date)" : ""}`;
   const blocks: Block[] = [
     {
       kind: "table",
-      header: ["Date", "Provider", "Specialty", "Type", "Finding", "Source"],
+      // The FACTUAL event summary is the primary content — relevance
+      // classification never substitutes for the event itself.
+      header: ["Date", "Provider", "Type", "Factual encounter summary", "Review status", "Source"],
       rows: events.map((e) => {
         const doc = e.sourceDocumentId ? data.case.documents.find((d) => d.id === e.sourceDocumentId) : undefined;
         return [
-          mdY(e.eventDate),
+          dateLabel(e),
           e.provider || "Treating provider",
-          e.specialty || "—",
           e.eventType || e.recordType || "—",
-          e.clinicalSignificance || e.diagnosis || e.summary,
-          `${doc ? doc.filename : "record on file"}${e.sourcePage ? `, p. ${e.sourcePage}` : ""}`,
+          e.summary,
+          reviewLabelOf(e),
+          `${doc ? doc.filename : "record on file"}${e.sourcePage ? `, p. ${e.sourcePage}` : ", p. —"}`,
         ];
       }),
     },
   ];
   for (const e of events) {
+    const details = [e.objectiveFindings ? `Exam: ${e.objectiveFindings}` : null, e.diagnosis ? `Assessment: ${e.diagnosis}` : null, e.treatment ? `Plan: ${e.treatment}` : null]
+      .filter(Boolean)
+      .join("  ");
     const bits = [
       `${e.provider || "Treating provider"}${e.specialty ? ` (${e.specialty})` : ""}${e.facility ? `, ${e.facility}` : ""}`,
       e.eventType || e.recordType ? `[${e.eventType || e.recordType}]` : null,
-      e.clinicalSignificance || e.diagnosis || e.summary,
+      e.summary, // 1) the factual encounter summary leads
+      details || null, // 2) structured details
       config.includeExcerpts && e.sourceQuote ? `Record excerpt: “${e.sourceQuote}”` : null,
-      eventSource(data, e),
+      eventSource(data, e), // 3) citation
+      e.clinicalSignificance ? `System-suggested relevance — pending human confirmation: ${e.clinicalSignificance}` : null, // 4) labeled suggestion, last
+      `Review status: ${reviewLabelOf(e)}.`,
     ].filter(Boolean);
-    blocks.push(labeled(mdY(e.eventDate), bits.join("  ")));
+    blocks.push(labeled(dateLabel(e), bits.join("  ")));
   }
   return blocks;
+}
+
+/** Records reviewed + processing/OCR limitations, from the structured record
+ *  service (the same data the Records page shows). */
+export function recordsReviewed(data: ReportData): Block[] {
+  const docs = data.case.documents;
+  const sr = data.structuredRecord;
+  const totalPages = docs.reduce((s2, d) => s2 + (d.pageCount ?? 0), 0);
+  const blocks: Block[] = [
+    p(`${docs.length} record set${docs.length === 1 ? "" : "s"} totaling ${totalPages.toLocaleString("en-US")} page${totalPages === 1 ? "" : "s"} were reviewed.`),
+    {
+      kind: "table",
+      header: ["Record", "Type", "Service date(s)", "Pages", "Extraction status"],
+      rows: docs.map((d) => {
+        const sd = sr?.documents.find((x) => x.documentId === d.id);
+        const status = sd
+          ? sd.extraction.status === "COMPLETE"
+            ? sd.encounters.some((e) => e.status === "AI_DRAFT")
+              ? "Extracted — pending human review"
+              : "Extracted and reviewed"
+            : sd.extraction.status.replace(/_/g, " ").toLowerCase()
+          : "processed (legacy pipeline)";
+        return [d.filename, (d.type ?? "record").replace(/_/g, " ").toLowerCase(), d.serviceDate ? mdY(d.serviceDate) : "—", String(d.pageCount ?? "—"), status];
+      }),
+    },
+  ];
+  return blocks;
+}
+
+export function processingLimitations(data: ReportData): Block[] {
+  const lims = data.structuredRecord?.limitations ?? [];
+  if (!lims.length) return [p("No processing or OCR limitations were identified for the records as processed.")];
+  return lims.map((l) => ({ kind: "bullet", text: l }) as Block);
+}
+
+/** Diagnoses DOCUMENTED in the records (from encounter assessments), as
+ *  opposed to engine-analyzed conditions — for the factual record summary. */
+export function documentedDiagnoses(data: ReportData): Block[] {
+  const values = new Set<string>();
+  for (const e of data.case.chronologyEvents) {
+    if (e.diagnosis) for (const part of String(e.diagnosis).split(/;\s*/)) if (part.trim().length > 3) values.add(part.trim());
+  }
+  if (!values.size) return notDocumented();
+  return [...values].slice(0, 40).map((v) => ({ kind: "bullet", text: v }) as Block);
+}
+
+/** Undated / requires-review disclosure for the record summary. */
+export function undatedRecords(data: ReportData): Block[] {
+  const undated = data.structuredRecord?.undated ?? [];
+  if (!undated.length) return [p("All extracted encounters carry documented or explicitly inferred dates.")];
+  return [
+    p(`${undated.length} extracted encounter${undated.length === 1 ? "" : "s"} carry no reliable date and require human review; they are listed here and are NOT placed on the dated chronology.`),
+    ...undated.map(
+      (u) =>
+        ({
+          kind: "bullet",
+          text: `${u.provider ?? "Provider not identified"}${u.facility ? `, ${u.facility}` : ""} — ${u.factualSummary} (${u.page ? `p. ${u.page}` : "page unknown"}; status: ${u.status})`,
+        }) as Block,
+    ),
+  ];
+}
+
+/** Medication history documented in the records. */
+export function medicationHistory(data: ReportData): Block[] {
+  const meds = data.case.chronologyEvents.filter((e) => e.medications).map((e) => `${mdY(e.eventDate)} — ${e.medications}`);
+  if (!meds.length) return notDocumented();
+  return [...new Set(meds)].slice(0, 40).map((m) => ({ kind: "bullet", text: m }) as Block);
 }
 
 /** Diagnoses with ICD codes, relatedness, and record citations. */

@@ -52,14 +52,23 @@ describe("expansionVerdict — the exemplar's milestone test", () => {
 });
 
 describe("compressedSummary — the stereotyped interval line", () => {
-  it("carries response, unchanged assessment, and continued treatment", () => {
+  it("states only what THIS note documents — never inferred continuity", () => {
     const s = compressedSummary(
       enc({ subjective: "Feels improved since the last visit.", diagnosis: "Lumbar radiculopathy.", treatment: "Therapeutic exercise continued." }),
       "Chiropractic Record",
     );
     expect(s).toMatch(/^Interval chiropractic visit/i);
-    expect(s).toContain("assessment unchanged: lumbar radiculopathy");
-    expect(s).toContain("treatment continued");
+    expect(s).toContain("documented assessment: lumbar radiculopathy");
+    // "treatment continued" appears ONLY because the source note itself says
+    // "Therapeutic exercise continued" — quoted as documented treatment.
+    expect(s).toContain("documented treatment: therapeutic exercise continued");
+    expect(s).not.toMatch(/assessment unchanged/i);
+  });
+
+  it("never fabricates continuity when the note documents nothing", () => {
+    const s = compressedSummary(enc(), "Chiropractic Record");
+    expect(s).not.toMatch(/treatment continued|assessment unchanged|no documented treatment/i);
+    expect(s).toContain("see the cited source page");
   });
 });
 
@@ -99,9 +108,13 @@ describe("longitudinal devices", () => {
     expect(statusPostAnchor(new Date("2026-01-02T00:00:00Z"), surgery)).toBeNull(); // same admission
   });
 
-  it("careGapNote fires only across a real gap and states months", () => {
+  it("careGapNote uses ONLY the permitted no-inference phrasing", () => {
     expect(careGapNote(new Date("2026-01-01"), new Date("2026-02-15"))).toBeNull();
-    expect(careGapNote(new Date("2026-01-01"), new Date("2026-06-01"))).toMatch(/approximately 5 months/);
+    const gap = careGapNote(new Date("2026-01-01"), new Date("2026-06-01"));
+    expect(gap).toBe(
+      "No uploaded clinical encounters were identified between 01/01/2026 and 06/01/2026. This does not establish that no treatment occurred.",
+    );
+    expect(gap).not.toMatch(/no documented treatment/i);
   });
 
   it("diagnosisKey normalizes so a reworded identical assessment is not 'new'", () => {

@@ -12,6 +12,9 @@ const deps = vi.hoisted(() => ({
   storeAndRecord: vi.fn(),
   loadReportData: vi.fn(),
   caseUpdateMany: vi.fn(),
+  // Factual-review gate inputs (source-grounded pipeline).
+  extractedEncounterFindMany: vi.fn(async () => [] as unknown[]),
+  chronologyEventFindMany: vi.fn(async () => [] as unknown[]),
 }));
 
 vi.mock("@/lib/db", () => ({
@@ -35,6 +38,13 @@ vi.mock("@/lib/db", () => ({
     economicAssumption: { findMany: vi.fn(async () => []) },
     economicScenario: { findMany: vi.fn(async () => []) },
     vocationalEntry: { findMany: vi.fn(async () => []) },
+    // Factual-review gate (source-grounded pipeline): empty state = review
+    // complete, so the authority-gate scenarios stay focused on authority.
+    document: { findMany: vi.fn(async () => []) },
+    recordExtraction: { findMany: vi.fn(async () => []) },
+    extractedEncounter: { findMany: deps.extractedEncounterFindMany },
+    chronologyEvent: { findMany: deps.chronologyEventFindMany },
+    sourcePage: { findMany: vi.fn(async () => [] as { status: string }[]) },
   },
 }));
 vi.mock("@/lib/tenant", () => ({
@@ -163,6 +173,8 @@ beforeEach(() => {
   Object.values(deps).forEach((fn) => fn.mockReset());
   deps.loadReportData.mockResolvedValue(reportData());
   deps.storeAndRecord.mockResolvedValue({ id: "exp-1", version: 1, createdAt: new Date() });
+  deps.extractedEncounterFindMany.mockResolvedValue([]);
+  deps.chronologyEventFindMany.mockResolvedValue([]);
 });
 
 describe("Report Library — physician-required finals use the central authority gate", () => {
@@ -206,6 +218,36 @@ describe("Report Library — physician-required finals use the central authority
     expect(res.status).toBe(200);
     expect(deps.evaluate).not.toHaveBeenCalled();
     expect(deps.storeAndRecord).toHaveBeenCalled();
+  });
+
+  it("a FINAL factual report is blocked until factual record review completes — never by physician authority", async () => {
+    deps.extractedEncounterFindMany.mockResolvedValue([
+      { status: "AI_DRAFT", encounterDate: null, page: null, dateStatus: "UNKNOWN", claims: [], warnings: [] },
+    ]);
+    const res = await POST(req({ reportId: "MEDICAL_RECORD_SUMMARY", format: "HTML", mode: "final" }), params);
+    const body = await res.json();
+    expect(res.status).toBe(422);
+    expect(body.blockers.join(" ")).toMatch(/unreviewed AI draft/);
+    // The block is REVIEW completion, not a credential gate.
+    expect(deps.evaluate).not.toHaveBeenCalled();
+    expect(deps.storeAndRecord).not.toHaveBeenCalled();
+  });
+
+  it("DRAFT factual reports stay available with unreviewed AI-draft content", async () => {
+    deps.extractedEncounterFindMany.mockResolvedValue([
+      { status: "AI_DRAFT", encounterDate: null, page: null, dateStatus: "UNKNOWN", claims: [], warnings: [] },
+    ]);
+    const res = await POST(req({ reportId: "MEDICAL_RECORD_SUMMARY", format: "HTML", mode: "draft" }), params);
+    expect(res.status).toBe(200);
+    expect(deps.storeAndRecord).toHaveBeenCalledWith(expect.anything(), expect.anything(), expect.objectContaining({ draft: true }));
+  });
+
+  it("stale chronology events block the FINAL factual chronology export", async () => {
+    deps.chronologyEventFindMany.mockResolvedValue([{ reviewStatus: "STALE", edited: false }]);
+    const res = await POST(req({ reportId: "MEDICAL_CHRONOLOGY", format: "HTML", mode: "final" }), params);
+    const body = await res.json();
+    expect(res.status).toBe(422);
+    expect(body.blockers.join(" ")).toMatch(/stale/i);
   });
 
   it("drafts of physician-required reports remain available without authority", async () => {

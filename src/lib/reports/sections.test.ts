@@ -291,3 +291,74 @@ describe("executiveSummary", () => {
     expect(text).toContain("1 pending review");
   });
 });
+
+// ── Factual record reporting (source-grounded pipeline) ──────────────────────
+
+describe("chronology report — factual summary first, relevance labeled and last", () => {
+  it("the detail entries lead with the factual event summary, and relevance is a labeled suggestion", () => {
+    const data = buildFixture();
+    const blocks = S.chronology(data);
+    const rows = labeledBlocks(blocks);
+    expect(rows.length).toBeGreaterThan(0);
+    for (const row of rows) {
+      const rowText = row.text ?? "";
+      const ev = data.case.chronologyEvents.find((e) => rowText.includes(e.summary));
+      expect(ev, `entry should contain its event's factual summary: ${rowText.slice(0, 80)}`).toBeTruthy();
+      if (ev?.clinicalSignificance) {
+        const sumIdx = rowText.indexOf(ev.summary);
+        const relIdx = rowText.indexOf("System-suggested relevance — pending human confirmation");
+        expect(relIdx).toBeGreaterThan(sumIdx); // factual summary FIRST
+      }
+    }
+  });
+
+  it("the chronology table's content column is the factual encounter summary, not the diagnosis", () => {
+    const data = buildFixture();
+    const table = tables(S.chronology(data))[0];
+    expect(table.header).toContain("Factual encounter summary");
+    expect(table.header).not.toContain("Finding");
+    const i = table.header.indexOf("Factual encounter summary");
+    for (const [rowIdx, row] of table.rows.entries()) {
+      expect(row[i]).toBe(data.case.chronologyEvents.map((e) => e.summary)[rowIdx] ?? row[i]);
+    }
+  });
+
+  it("every entry carries a human-review status label", () => {
+    const data = buildFixture();
+    const text = textOf(S.chronology(data));
+    expect(text).toMatch(/Review status: (AI-generated draft — pending human review|Human-(verified|reviewed|edited))/);
+  });
+});
+
+describe("Medical Record Summary — factual content only", () => {
+  it("excludes future-care dollar totals and physician-review counts", () => {
+    const data = buildFixture();
+    const def = getReport("MEDICAL_RECORD_SUMMARY")!;
+    const doc = def.compose(data, { detail: "detailed" }, buildFindings(), {});
+    const text = textOf(doc.blocks);
+    expect(text).not.toMatch(/\$\s?[\d,]+/); // no dollar totals
+    expect(text).not.toMatch(/present value|lifetime cost/i);
+    expect(text).not.toMatch(/physician[- ](approved|review(ed)? count|status)/i);
+  });
+
+  it("contains the required factual sections", () => {
+    const data = buildFixture();
+    const def = getReport("MEDICAL_RECORD_SUMMARY")!;
+    const doc = def.compose(data, { detail: "detailed" }, buildFindings(), {});
+    const headers = doc.blocks.filter((b) => b.kind === "h1").map((b) => ("text" in b ? b.text : ""));
+    for (const h of [
+      "Records Reviewed",
+      "Processing and OCR Limitations",
+      "Diagnoses Documented in the Records",
+      "Chronological Clinical Course",
+      "Imaging",
+      "Procedures",
+      "Treatment History",
+      "Medication History",
+      "Contradictory or Adverse Evidence",
+      "Undated or Incompletely Processed Material",
+    ]) {
+      expect(headers).toContain(h);
+    }
+  });
+});

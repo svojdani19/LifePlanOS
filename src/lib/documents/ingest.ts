@@ -4,6 +4,7 @@ import { classifyDocument } from "@/lib/documents/classify";
 import { parseRecordMeta } from "@/lib/documents/meta";
 import { segmentDocument } from "@/lib/documents/segment";
 import { enqueueOcr, MAX_TEXT } from "@/lib/documents/ocrQueue";
+import { enqueueExtraction } from "@/lib/documents/extractionRun";
 import { Prisma } from "@/generated/prisma";
 import type { Document, DocumentType } from "@/generated/prisma";
 
@@ -13,6 +14,9 @@ import type { Document, DocumentType } from "@/generated/prisma";
 // pre-extracted text (demo sample set). Either way, the TYPE comes from the
 // content — the filename is only a fallback for scans with no text layer.
 // ─────────────────────────────────────────────────────────────────────────────
+
+/** Upper bound on a believable page count for one uploaded record set. */
+export const MAX_PLAUSIBLE_PAGES = 5_000;
 
 export interface IngestInput {
   caseId: string;
@@ -71,9 +75,18 @@ export async function ingestDocument(input: IngestInput): Promise<IngestResult> 
   else if (c.method !== "content") flags.push(c.note);
   if (pageCount > 35) flags.push("Large document — confirm no missing pages");
 
-  // A multi-page consolidated record stamps "Page N of M" — trust it for the count.
+  // A multi-page consolidated record stamps "Page N of M" — trust it for the
+  // count, but only when the stamp is PLAUSIBLE. On billing forms the stamp
+  // sits beside account and invoice numbers, and a line-wrapped "Page 1 of"
+  // followed by an account number would otherwise register a document of
+  // millions of pages.
   const pm = text.match(/page\s+\d+\s+of\s+(\d+)/i);
-  if (pm) pageCount = Math.max(pageCount, parseInt(pm[1], 10));
+  if (pm) {
+    const stamped = Number.parseInt(pm[1], 10);
+    if (Number.isFinite(stamped) && stamped > 0 && stamped <= MAX_PLAUSIBLE_PAGES && stamped <= pageCount * 50) {
+      pageCount = Math.max(pageCount, stamped);
+    }
+  }
 
   // 4. Read the record descriptors from the content: documented date(s), the
   //    documenting individual(s), and the location(s), each with page refs.
@@ -115,6 +128,9 @@ export async function ingestDocument(input: IngestInput): Promise<IngestResult> 
   // Kick the background OCR after the row exists; the upload response returns
   // immediately and the document updates in place as pages are read.
   if (needsOcr) enqueueOcr({ documentId: document.id, forcedType: !!input.forcedType });
+  // Readable text straight from ingest → run source-grounded extraction now.
+  // OCR'd documents get their extraction when the OCR queue completes instead.
+  else if (hasText) enqueueExtraction(document.id, input.uploadedById ?? null);
 
   return { document, method: c.method, pages: pageCount };
 }

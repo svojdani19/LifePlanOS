@@ -240,16 +240,31 @@ const MEDICAL_RECORD_SUMMARY: Def = {
   defaultConfig: {},
   compose(data, config, findings, opts) {
     const { detail } = recordSummaryConfig.parse(config ?? {});
-    const blocks: Block[] = [...S.caseHeader(data), { kind: "h1", text: "Summary" }, ...S.executiveSummary(data), { kind: "h1", text: "Diagnoses" }, ...S.diagnoses(data)];
+    // A FACTUAL record summary: built from the same cited, structured
+    // encounter facts as the Records page. It contains NO future-care dollar
+    // totals and NO physician-review status counts — those belong to opinion
+    // and costing reports, not a factual summary of the record.
+    const blocks: Block[] = [
+      ...S.caseHeader(data),
+      { kind: "h1", text: "Records Reviewed" },
+      ...S.recordsReviewed(data),
+      { kind: "h1", text: "Processing and OCR Limitations" },
+      ...S.processingLimitations(data),
+      { kind: "h1", text: "Diagnoses Documented in the Records" },
+      ...S.documentedDiagnoses(data),
+    ];
     if (detail !== "brief") {
-      blocks.push({ kind: "h1", text: "Treatment History" }, ...S.treatmentHistory(data));
+      blocks.push({ kind: "h1", text: "Chronological Clinical Course" }, ...S.chronology(data));
       blocks.push({ kind: "h1", text: "Imaging" }, ...S.imaging(data));
       blocks.push({ kind: "h1", text: "Procedures" }, ...S.procedures(data));
+      blocks.push({ kind: "h1", text: "Treatment History" }, ...S.treatmentHistory(data));
+      blocks.push({ kind: "h1", text: "Medication History" }, ...S.medicationHistory(data));
     }
     if (detail === "detailed") {
-      blocks.push({ kind: "h1", text: "Medical Chronology" }, ...S.chronology(data));
+      blocks.push({ kind: "h1", text: "Contradictory or Adverse Evidence" }, ...S.contradictoryEvidence(data));
       blocks.push({ kind: "h1", text: "Evidence of Record" }, ...S.evidence(data));
     }
+    blocks.push({ kind: "h1", text: "Undated or Incompletely Processed Material" }, ...S.undatedRecords(data));
     return makeDoc(this, data, "Medical Record Summary", `Record summary — ${detail} detail`, blocks, findings, opts);
   },
 };

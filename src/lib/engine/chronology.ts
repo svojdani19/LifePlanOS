@@ -1,4 +1,66 @@
+import { createHash } from "node:crypto";
 import { prisma } from "@/lib/db";
+
+const docFingerprint = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
+
+/** Credentials and honorifics that do not identify a person. */
+const CREDENTIAL_TOKENS = new Set([
+  "md", "do", "dpt", "pt", "ot", "pa", "pac", "np", "rn", "lvn", "dc", "dds", "phd", "psyd", "faaos", "facs",
+  "msn", "crna", "aprn", "jr", "sr", "ii", "iii", "iv", "dr", "mr", "mrs", "ms", "the", "and", "llc", "pllc", "pa",
+]);
+
+/**
+ * Order-independent identity key for a provider name, so the same clinician
+ * written "Paul English, MD" in a chart and "ENGLISH, PAUL W" on a billing
+ * record resolves to one person. Returns "" when no provider is named.
+ */
+/**
+ * Append credentials only when the name does not already carry them — charts
+ * routinely write "Mark Filley, MD" in the name field AND "MD" in the
+ * credential field, which naively joined reads "Mark Filley, MD, MD".
+ */
+export function composeProviderName(name: string | null | undefined, credentials: string | null | undefined): string | null {
+  const n = name?.trim();
+  if (!n) return null;
+  const cred = credentials?.trim();
+  if (!cred) return n;
+  const have = new Set(n.toLowerCase().replace(/[^a-z\s]+/g, " ").split(/\s+/).filter(Boolean));
+  const missing = cred
+    .split(/[,;/]+/)
+    .map((c) => c.trim())
+    .filter((c) => c && !have.has(c.toLowerCase().replace(/[^a-z]+/g, "")));
+  return missing.length ? `${n}, ${missing.join(", ")}` : n;
+}
+
+export function providerIdentityKey(provider: string | null | undefined): string {
+  return providerNameTokens(provider).join(" ");
+}
+
+/** Sorted, credential-free name tokens for a provider string. */
+export function providerNameTokens(provider: string | null | undefined): string[] {
+  if (!provider) return [];
+  const tokens = provider
+    .toLowerCase()
+    .replace(/[^a-z\s]+/g, " ")
+    .split(/\s+/)
+    .filter((t) => t.length >= 3 && !CREDENTIAL_TOKENS.has(t));
+  return [...new Set(tokens)].sort();
+}
+
+/**
+ * Do two provider strings name the same clinician? Charts abbreviate: the
+ * same PA is "BRITTANY R IRWIN, PA-C" on the chart note and "R Irwin, PA-C" on
+ * the billing abstract. One name being a SUBSET of the other is the
+ * abbreviation case; disjoint names are different people. An unnamed side is
+ * missing information, not a different person.
+ */
+export function sameProvider(a: string | null | undefined, b: string | null | undefined): boolean {
+  const ta = providerNameTokens(a);
+  const tb = providerNameTokens(b);
+  if (!ta.length || !tb.length) return true; // one side unnamed
+  const [small, large] = ta.length <= tb.length ? [ta, tb] : [tb, ta];
+  return small.every((t) => large.includes(t));
+}
 import { typeLabel } from "@/lib/documents/taxonomy";
 import { pageForOffset, pageMarks } from "@/lib/documents/meta";
 import { stripChartFurniture } from "@/lib/documents/chartStructure";
@@ -10,6 +72,7 @@ import {
   statusPostAnchor,
   careGapNote,
   diagnosisKey,
+  POST_OP_MENTION_RE,
   isBoilerplate,
   looksLikeProcedureLabel,
 } from "@/lib/engine/chronologyEmphasis";
@@ -546,19 +609,32 @@ export function segmentEncounters(text: string, marks: { offset: number; page: n
 type SegClass = { eventType: EventType; specialty: string; recordType: string };
 const SEG_TYPES: { re: RegExp; eventType: EventType; specialty: string; recordType: string }[] = [
   { re: /surgical pathology|gross description|microscopic|specimen(?:s)?\s*(?:submitted|received)|final (?:pathologic )?diagnosis:|reference (?:range|interval)|\blab(?:oratory)? (?:report|results)\b|troponin|\bcbc\b|metabolic panel/i, eventType: "LAB", specialty: "Laboratory / Pathology", recordType: "Laboratory / Pathology Report" },
+  { re: /transforaminal|epidural steroid|injection performed|radiofrequency ablation|nerve block|arthrocentesis/i, eventType: "CLINIC_VISIT", specialty: "Pain Management", recordType: "Injection / Procedure Note" },
   { re: /operative (?:report|note)|procedure performed|operation performed|surgeon\s*:|anesthesia\s*:|\borif\b|arthroplasty performed|manipulation under anesthesia|revision (?:total )?knee|\bincision\b/i, eventType: "SURGERY", specialty: "Surgery", recordType: "Operative / Procedure Note" },
   { re: /emergency (?:department|room)|\bed\b triage|\btriage\b|chief complaint[\s\S]{0,120}(ambulance|ems\b)|patient care report/i, eventType: "ER_VISIT", specialty: "Emergency", recordType: "Emergency Department Report" },
   { re: /discharge summary|hospital course|history and physical|\bh&p\b|admitted to|admission diagnosis|discharged to|inpatient/i, eventType: "HOSPITALIZATION", specialty: "Inpatient", recordType: "Hospital / Inpatient Record" },
   { re: /\b(mri|ct|x-?ray|radiograph|ultrasound|fluoroscop)\b[\s\S]{0,80}(impression|findings)|technique:[\s\S]{0,40}(imaging|sequences)/i, eventType: "IMAGING", specialty: "Radiology", recordType: "Imaging Report" },
-  { re: /transforaminal|epidural steroid|injection performed|radiofrequency ablation|nerve block|arthrocentesis/i, eventType: "SURGERY", specialty: "Pain Management", recordType: "Injection / Procedure Note" },
+
   { re: /physical therapy|occupational therapy|therapeutic exercise|gait training|home exercise program|therapy progress|plan of care/i, eventType: "THERAPY", specialty: "Rehabilitation", recordType: "Therapy Note" },
 ];
-function classifySegment(text: string): SegClass {
+export function classifySegment(text: string): SegClass {
   let base: SegClass = { eventType: "CLINIC_VISIT", specialty: "Provider", recordType: "Clinical Encounter" };
   for (const s of SEG_TYPES) if (s.re.test(text)) { base = { eventType: s.eventType, specialty: s.specialty, recordType: s.recordType }; break; }
   // Complication is a modifier on the base encounter, not its own record type.
   const lower = text.toLowerCase();
-  if (CONTENT_COMPLICATION.some((k) => lower.includes(k))) return { ...base, eventType: "COMPLICATION" };
+  // Negated mentions ("no complications", "without complication", "denies
+  // infection") never classify the encounter as a complication.
+  const complicationHit = CONTENT_COMPLICATION.some((k) => {
+    let from = 0;
+    for (;;) {
+      const i = lower.indexOf(k, from);
+      if (i === -1) return false;
+      const before = lower.slice(Math.max(0, i - 30), i);
+      if (!/\b(?:no|without|denies|denied|negative for|free of|not?)\s+(?:\w+\s+){0,2}$/.test(before)) return true;
+      from = i + k.length;
+    }
+  });
+  if (complicationHit) return { ...base, eventType: "COMPLICATION" };
   return base;
 }
 
@@ -704,8 +780,60 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
     sourceDocumentId: string;
     sourcePage: number | null;
     dateInferred: boolean;
+    mentionsPostOp?: boolean;
   };
   const drafts: Draft[] = [];
+  const fingerprintByDoc = new Map<string, string>();
+
+  // Source-grounded extraction results take precedence: when a document has a
+  // COMPLETE extraction run, its VALIDATED, claim-cited encounters supply the
+  // timeline for that document and the regex path is skipped. Documents
+  // without completed extractions still flow through the deterministic
+  // extractor, so the program keeps producing initial work either way.
+  const extractionRuns = await prisma.recordExtraction.findMany({
+    where: { caseId, status: "COMPLETE" },
+    orderBy: { createdAt: "desc" },
+    select: { id: true, sourceDocumentId: true },
+  });
+  const latestRunByDoc = new Map<string, string>();
+  for (const r of extractionRuns) if (!latestRunByDoc.has(r.sourceDocumentId)) latestRunByDoc.set(r.sourceDocumentId, r.id);
+  const extractedByDoc = new Map<string, Awaited<ReturnType<typeof prisma.extractedEncounter.findMany>>>();
+  if (latestRunByDoc.size) {
+    const encRows = await prisma.extractedEncounter.findMany({
+      where: {
+        caseId,
+        status: { in: ["AI_DRAFT", "HUMAN_EDITED", "REVIEWED", "VERIFIED"] },
+        dateStatus: { in: ["DOCUMENTED", "INFERRED"] },
+      },
+    });
+    for (const e of encRows) {
+      const arr = extractedByDoc.get(e.sourceDocumentId) ?? [];
+      arr.push(e);
+      extractedByDoc.set(e.sourceDocumentId, arr);
+    }
+  }
+
+  const claimValue = (claims: unknown, field: string): string | null => {
+    const arr = Array.isArray(claims) ? (claims as { field?: string; value?: string }[]) : [];
+    const vals = arr.filter((c) => c.field === field && typeof c.value === "string").map((c) => c.value as string);
+    return vals.length ? [...new Set(vals)].join("; ").slice(0, 600) : null;
+  };
+  const firstExcerpt = (claims: unknown): string | null => {
+    const arr = Array.isArray(claims) ? (claims as { excerpt?: string }[]) : [];
+    return arr.find((c) => typeof c.excerpt === "string")?.excerpt?.slice(0, 400) ?? null;
+  };
+  // Whole-word patterns, most specific first. Substring matching is unsafe
+  // here: a bare "er" makes "Interventional" and "Other" read as ER visits,
+  // and "ct" matches half the words in English.
+  const EXTRACTION_TYPE_RULES: [RegExp, EventType][] = [
+    [/\b(?:operative|operation|surgery|surgical|arthroscop\w*|arthroplast\w*|fusion|discectomy|laminectomy|meniscectomy|orif)\b/, "SURGERY"],
+    [/\b(?:injection|epidural|nerve block|somatic blockade|ablation|rhizotomy|discogram|arthrocentesis|infusion)\b/, "CLINIC_VISIT"],
+    [/\b(?:mri|ct scan|cat scan|x-?ray|radiograph\w*|radiology|ultrasound|imaging|myelogram|emg|ncs|dexa)\b/, "IMAGING"],
+    [/\b(?:lab|labs|laboratory|pathology|urinalysis|blood work|serology)\b/, "LAB"],
+    [/\b(?:emergency|\ber\b|trauma bay|urgent care)\b/, "ER_VISIT"],
+    [/\b(?:hospitalization|hospital|inpatient|admission|discharge)\b/, "HOSPITALIZATION"],
+    [/\b(?:physical therapy|occupational therapy|therapy|rehabilitation|rehab|chiropractic)\b/, "THERAPY"],
+  ];
 
   for (const doc of docs) {
     if (EXCLUDED_TYPES.has(doc.type)) continue; // administrative / legal — not a clinical finding
@@ -713,7 +841,51 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
     // Strip learned page furniture (banners/footers/audit/flowsheet) before
     // building events; a no-op on small single-encounter records.
     const text = stripChartFurniture(doc.extractedText ?? "");
+    fingerprintByDoc.set(doc.id, docFingerprint(doc.extractedText ?? ""));
     const marks = pageMarks(text);
+
+    const extractedEncs = extractedByDoc.get(doc.id);
+    if (extractedEncs?.length) {
+      for (const enc of extractedEncs) {
+        if (!enc.encounterDate) continue; // undated stays out of the dated timeline
+        const typeKey = (enc.encounterType ?? "").toLowerCase();
+        const eventType = EXTRACTION_TYPE_RULES.find(([re]) => re.test(typeKey))?.[1] ?? "CLINIC_VISIT";
+        const hay = `${enc.factualSummary}\n${claimValue(enc.claims, "assessment") ?? ""}`.toLowerCase();
+        drafts.push({
+          eventDate: enc.encounterDate,
+          eventDateEnd: enc.encounterDateEnd,
+          eventType,
+          specialty: enc.encounterType ?? "Provider",
+          provider: composeProviderName(enc.provider, enc.providerCredentials),
+          facility: enc.facility,
+          recordType: enc.encounterType ?? typeLabel(doc.type),
+          // The FACTUAL encounter summary leads; relevance is computed
+          // separately below and stays a labeled system suggestion.
+          summary: enc.factualSummary,
+          subjective: claimValue(enc.claims, "subjective"),
+          pastMedicalHistory: claimValue(enc.claims, "pastMedicalHistory"),
+          objectiveFindings: claimValue(enc.claims, "objectiveFindings"),
+          diagnosis: claimValue(enc.claims, "assessment"),
+          treatment: claimValue(enc.claims, "treatment"),
+          procedure: claimValue(enc.claims, "procedure"),
+          disposition: claimValue(enc.claims, "disposition"),
+          imagingFindings: claimValue(enc.claims, "diagnosticStudies"),
+          medications: claimValue(enc.claims, "medications"),
+          functionalStatus: claimValue(enc.claims, "functionalStatus"),
+          workStatus: claimValue(enc.claims, "workStatus"),
+          restrictions: claimValue(enc.claims, "restrictions"),
+          impairmentRating: null,
+          clinicalSignificance: significance(hay, condNames, careServices),
+          sourceQuote: firstExcerpt(enc.claims),
+          relevanceScore: 60,
+          sourceDocumentId: doc.id,
+          sourcePage: enc.page, // unknown page STAYS null — never coerced to 1
+          dateInferred: enc.dateStatus === "INFERRED",
+          mentionsPostOp: POST_OP_MENTION_RE.test(enc.factualSummary),
+        });
+      }
+      continue; // extraction supplies this document's events
+    }
 
     // Draft one candidate event from a body of text (a whole single-encounter
     // record, or ONE encounter of a consolidated chart). Applies the relevance
@@ -867,6 +1039,7 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
         impairmentRating,
         clinicalSignificance: sig,
         sourceQuote: finding !== summary ? finding : null,
+        mentionsPostOp: POST_OP_MENTION_RE.test(body),
         relevanceScore: compressed
           ? 25
           : Math.min(100, 40 + targetOverlap * 10 + (isPivotal ? 25 : 0) + (sig ? 10 : 0) + verdict.signals.length * 4),
@@ -887,10 +1060,17 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
       }
     } else {
       const iso = extractDates(text)[0];
+      // A record with NO documented date and NO parsed service date carries no
+      // encounter date. It stays visible on the Records page in the
+      // "Undated / date requires review" group — it never silently enters the
+      // dated chronology, and the case-creation date / date of injury /
+      // upload date are NEVER substituted as an encounter date.
+      const eventDate = iso ? new Date(`${iso}T00:00:00Z`) : doc.serviceDate ?? null;
+      if (!eventDate) continue;
       const d = draftFrom(
         text,
         classifyEvent(doc.type, text),
-        iso ? new Date(`${iso}T00:00:00Z`) : (doc.serviceDate ?? anchor),
+        eventDate,
         doc.serviceDateEnd ?? null,
         !iso,
         marks.length ? pageForOffset(0, marks) : null,
@@ -905,6 +1085,44 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
   // records (an ER note ALSO classified as a hospitalization, a therapy note
   // reprinted). Keep the strongest event per (date, summary-prefix) REGARDLESS of
   // event type, so an identical-summary duplicate never appears twice.
+  // ── One real-world encounter = one timeline entry ──────────────────────────
+  // The SAME visit is routinely documented in several uploaded files (a
+  // billing record and a medical record for one ER visit; an affidavit copy of
+  // a note). Those are distinct documents — the Records page rightly shows
+  // each — but the chronology describes the patient's care, so the same
+  // encounter must appear ONCE. Identity is date + provider + event type;
+  // fields are merged, and the richest description wins. Encounters that
+  // differ in provider or type (genuinely distinct same-day visits) stay
+  // separate.
+  const richness = (d: (typeof drafts)[number]) =>
+    [d.diagnosis, d.procedure, d.treatment, d.imagingFindings, d.objectiveFindings, d.subjective, d.disposition, d.medications, d.functionalStatus, d.workStatus, d.restrictions].filter(Boolean).length;
+  const merged: (typeof drafts)[number][] = [];
+  for (const d of [...drafts].sort((a, b) => richness(b) - richness(a) || b.relevanceScore - a.relevanceScore)) {
+    if (!Number.isFinite(d.eventDate.getTime())) continue;
+    const day = d.eventDate.toISOString().slice(0, 10);
+    // Same day + same event type + a compatible provider. "Compatible" means
+    // the same clinician (allowing for abbreviated name forms), or one copy
+    // simply not naming them (a billing abstract of a visit the chart records
+    // in full) — an unnamed provider is missing information, not evidence of a
+    // different encounter. Two named and DIFFERENT clinicians stay distinct.
+    const held = merged.find(
+      (o) => o.eventDate.toISOString().slice(0, 10) === day && o.eventType === d.eventType && sameProvider(o.provider, d.provider),
+    );
+    if (!held) {
+      merged.push(d);
+      continue;
+    }
+    // Merge: the held draft is the richer one; fill only what it is missing.
+    for (const f of ["subjective", "pastMedicalHistory", "objectiveFindings", "diagnosis", "treatment", "procedure", "disposition", "imagingFindings", "medications", "functionalStatus", "workStatus", "restrictions", "impairmentRating", "facility", "sourceQuote"] as const) {
+      if (!held[f] && d[f]) (held as Record<string, unknown>)[f] = d[f];
+    }
+    if (!held.provider && d.provider) held.provider = d.provider;
+    held.relevanceScore = Math.max(held.relevanceScore, d.relevanceScore);
+    if (!held.eventDateEnd && d.eventDateEnd) held.eventDateEnd = d.eventDateEnd;
+  }
+  drafts.length = 0;
+  drafts.push(...merged);
+
   const seenKeys = new Set<string>();
   const deduped = drafts
     // Real-world scans occasionally yield an unparseable date (e.g. an OCR'd
@@ -913,7 +1131,9 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
     .filter((d) => Number.isFinite(d.eventDate.getTime()) && d.eventDate.getTime() <= Date.now() + 86_400_000)
     .sort((a, b) => b.relevanceScore - a.relevanceScore)
     .filter((d) => {
-      const key = `${d.eventDate.toISOString().slice(0, 10)}|${d.summary.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().slice(0, 40)}`;
+      // Provider is part of the key: two clinicians can document the same day
+      // in the same words without it being the same encounter.
+      const key = `${d.eventDate.toISOString().slice(0, 10)}|${providerIdentityKey(d.provider)}|${d.summary.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().slice(0, 40)}`;
       if (seenKeys.has(key)) return false;
       seenKeys.add(key);
       return true;
@@ -928,6 +1148,12 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
   // across encounters: first-visit-with-provider and new/changed-assessment
   // markers, "status post" anchors after a surgery, and explicit care-gap
   // notes — the exemplar never silently bridges a treatment gap.
+  // Gap statements are only permitted once every uploaded document covering
+  // the period has completed processing (no OCR queued/failed, text present).
+  const allDocsProcessed = docs.every((d0) => {
+    const f = d0.flags ?? "";
+    return !/OCR queued|OCR in progress|OCR failed/i.test(f) && (d0.extractedText ?? "").length > 0;
+  });
   const seenProviders = new Set<string>();
   const seenDiagnoses = new Set<string>();
   let lastSurgery: { date: Date; label: string } | null = null;
@@ -944,12 +1170,15 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
       seenDiagnoses.add(dxKey);
       if (seenDiagnoses.size > 1) notes.push("New or changed assessment at this encounter.");
     }
-    if (prevDate) {
+    if (prevDate && allDocsProcessed) {
       const gap = careGapNote(prevDate, d.eventDate);
       if (gap) notes.push(gap);
     }
     if (d.eventType !== "SURGERY") {
-      const anchor = statusPostAnchor(d.eventDate, lastSurgery);
+      // A status-post anchor is attached ONLY when the encounter's own text
+      // documents post-operative context — chronological proximity to a
+      // surgery is never enough to assert a post-operative relationship.
+      const anchor = d.mentionsPostOp ? statusPostAnchor(d.eventDate, lastSurgery) : null;
       if (anchor && !d.summary.toLowerCase().includes("status post")) {
         d.summary = `${d.summary.replace(/\.$/, "")} (${anchor}).`;
       }
@@ -993,14 +1222,73 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
     sourceQuote: d.sourceQuote,
     relevanceScore: d.relevanceScore,
     sourceDocumentId: d.sourceDocumentId,
-    sourcePage: d.sourcePage ?? 1,
+    // An unknown source page STAYS unknown — never coerced to page 1.
+    sourcePage: d.sourcePage,
     dateInferred: d.dateInferred,
-    relatedness: "RELATED" as const,
+    // Causal relatedness is a professional judgment, not an extraction output:
+    // events enter the timeline UNCLEAR until a qualified human (or a gated
+    // medical-opinion workflow) determines otherwise.
+    relatedness: "UNCLEAR" as const,
+    reviewStatus: "AI_DRAFT",
+    sourceFingerprint: fingerprintByDoc.get(d.sourceDocumentId) ?? null,
   }));
+  // ── Preservation-aware swap ────────────────────────────────────────────────
+  // Human work is never destroyed by a regeneration: HUMAN_EDITED / REVIEWED /
+  // VERIFIED events (and legacy `edited` rows) are preserved. When their
+  // source document's bytes changed, they are marked STALE — the fresh draft
+  // generated alongside is the comparison candidate. Only AI drafts are
+  // replaced. A reviewer's correction is never silently overwritten, and
+  // verification never carries to materially changed content.
+  const preserved = await prisma.chronologyEvent.findMany({
+    where: { caseId, OR: [{ edited: true }, { reviewStatus: { in: ["HUMAN_EDITED", "REVIEWED", "VERIFIED", "STALE"] } }] },
+  });
+  for (const h of preserved) {
+    const currentFp = h.sourceDocumentId ? fingerprintByDoc.get(h.sourceDocumentId) ?? null : null;
+    if (h.reviewStatus !== "STALE" && h.sourceFingerprint && currentFp && h.sourceFingerprint !== currentFp) {
+      await prisma.chronologyEvent.update({
+        where: { id: h.id },
+        data: { reviewStatus: "STALE", staleReason: "Source document content changed after review; re-review required." },
+      });
+    }
+  }
+  const preservedKeys = new Set(
+    preserved.map((h) => `${h.eventDate.toISOString().slice(0, 10)}|${(h.provider ?? "").toLowerCase()}|${h.sourceDocumentId ?? ""}`),
+  );
+  const freshRows = rows.filter(
+    (r) => !preservedKeys.has(`${r.eventDate.toISOString().slice(0, 10)}|${(r.provider ?? "").toLowerCase()}|${r.sourceDocumentId ?? ""}`),
+  );
   await prisma.$transaction([
-    prisma.chronologyEvent.deleteMany({ where: { caseId } }),
-    ...(rows.length ? [prisma.chronologyEvent.createMany({ data: rows })] : []),
+    prisma.chronologyEvent.deleteMany({ where: { caseId, edited: false, reviewStatus: { in: ["AI_DRAFT", "SUPERSEDED"] } } }),
+    ...(freshRows.length ? [prisma.chronologyEvent.createMany({ data: freshRows })] : []),
   ]);
 
-  return { kept: drafts.length, screened: docs.length, excluded: docs.length - drafts.length };
+  return { kept: freshRows.length + preserved.length, screened: docs.length, excluded: Math.max(0, docs.length - drafts.length) };
+}
+
+/**
+ * Zero reliable events: raise a clear review finding and leave the chronology
+ * EMPTY. A fabricated specialty-template timeline is never created.
+ */
+export async function handleEmptyChronology(caseId: string): Promise<void> {
+  const c = await prisma.case.findUniqueOrThrow({ where: { id: caseId }, select: { firmId: true } });
+  const existing = await prisma.attentionItem
+    .findFirst({ where: { caseId, validationRuleId: "chronology.empty", status: { not: "RESOLVED" } } })
+    .catch(() => null);
+  if (existing) return;
+  await prisma.attentionItem
+    .create({
+      data: {
+        caseId,
+        firmId: c.firmId,
+        category: "chronology_empty",
+        severity: "HIGH",
+        title: "No reliable chronology events were extracted",
+        summary:
+          "The uploaded records did not yield reliably dated, cited clinical encounters. The chronology has been left empty rather than filled with template content.",
+        whyItMatters: "An empty chronology means the clinical course cannot yet be established from the records as processed.",
+        suggestedAction: "Review the records for readability (OCR state), documented service dates, and classification; re-run extraction once corrected.",
+        validationRuleId: "chronology.empty",
+      },
+    })
+    .catch(() => {});
 }

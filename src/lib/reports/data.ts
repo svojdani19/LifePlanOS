@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { getStructuredRecord } from "@/lib/records/structuredRecord";
 import {
   runIntegrityCheck,
   hasPatientRecordSupport,
@@ -250,6 +251,9 @@ export interface ReportData {
   integrity: IntegrityReport;
   /** FutureCareItem ids the integrity check admits into the damages totals. */
   includedIds: Set<string>;
+  /** Structured, cited record view (source-grounded pipeline) — the same data
+   *  the Records page shows. Optional so pure fixtures need not build it. */
+  structuredRecord?: import("@/lib/records/structuredRecord").StructuredRecord;
 }
 
 // ── Integrity (shared with fixtures/tests — pure) ───────────────────────────
@@ -347,11 +351,14 @@ export async function loadReportData(caseId: string): Promise<ReportData> {
   const caseData = c as unknown as RDCase;
   const { integrity, includedIds } = computeIntegrity(caseData.futureCareItems, caseData.conditions);
 
+  const structuredRecord = await getStructuredRecord(caseId, c.firmId).catch(() => undefined);
+
   return {
     case: caseData,
     assessments: [...latestByRec.values()] as unknown as RDAssessment[],
     transitions: transitions as unknown as RDTransition[],
     integrity,
     includedIds,
+    structuredRecord,
   };
 }

@@ -154,3 +154,94 @@ describe("segmentEncounters — narrative/report-style sources", () => {
     expect(enc.some((e) => e.dateIso === "1972-02-09")).toBe(false);
   });
 });
+
+// ── Classification safety (source-grounded pipeline) ─────────────────────────
+import { classifySegment, providerIdentityKey, composeProviderName, sameProvider } from "./chronology";
+import { POST_OP_MENTION_RE } from "./chronologyEmphasis";
+
+describe("classifySegment — negation and procedure-type discipline", () => {
+  it("'no complications' is NOT classified as a complication", () => {
+    const note = "OPERATIVE REPORT. Procedure performed: arthroscopy. The patient tolerated the procedure well with no complications. Discharged without complication.";
+    expect(classifySegment(note).eventType).not.toBe("COMPLICATION");
+  });
+
+  it("'denies infection' and 'negative for infection' are not complications", () => {
+    expect(classifySegment("Follow-up visit. Patient denies infection or drainage at the incision site.").eventType).not.toBe("COMPLICATION");
+    expect(classifySegment("Wound check: negative for infection.").eventType).not.toBe("COMPLICATION");
+  });
+
+  it("a genuinely documented complication still classifies", () => {
+    const note = "Progress note: the surgical wound shows purulent drainage consistent with deep infection; readmitted for washout.";
+    expect(classifySegment(note).eventType).toBe("COMPLICATION");
+  });
+
+  it("a pain-management injection note is an injection/procedure, NOT surgery, despite 'procedure performed'", () => {
+    const note = "PROCEDURE NOTE. Procedure performed: right L4-L5 transforaminal epidural steroid injection under fluoroscopic guidance.";
+    const c = classifySegment(note);
+    expect(c.eventType).not.toBe("SURGERY");
+    expect(c.recordType).toMatch(/Injection/);
+  });
+
+  it("a true operative report still classifies as surgery", () => {
+    const note = "OPERATIVE REPORT. Operation performed: ORIF of the left distal radius. Surgeon: A. Example, MD. Anesthesia: general.";
+    expect(classifySegment(note).eventType).toBe("SURGERY");
+  });
+});
+
+describe("post-operative anchoring requires explicit support", () => {
+  it("POST_OP_MENTION_RE matches only explicit post-operative language", () => {
+    expect(POST_OP_MENTION_RE.test("Patient is status post lumbar fusion.")).toBe(true);
+    expect(POST_OP_MENTION_RE.test("s/p ORIF, doing well")).toBe(true);
+    expect(POST_OP_MENTION_RE.test("Seen following her surgery for wound check.")).toBe(true);
+    // Chronological proximity alone — an ordinary visit after a surgery date —
+    // carries no post-operative language and must not anchor.
+    expect(POST_OP_MENTION_RE.test("Routine follow-up for knee pain. Continue home exercise program.")).toBe(false);
+  });
+});
+
+describe("providerIdentityKey — one clinician, many spellings", () => {
+  it("resolves chart and billing spellings of the same person to one key", () => {
+    expect(providerIdentityKey("Paul English, MD")).toBe(providerIdentityKey("ENGLISH, PAUL W"));
+    expect(providerIdentityKey("Jose Villalobos, M.D.")).toBe(providerIdentityKey("Villalobos, Jose"));
+  });
+
+  it("keeps genuinely different clinicians distinct", () => {
+    expect(providerIdentityKey("Paul English, MD")).not.toBe(providerIdentityKey("Alexis Chen, MD"));
+  });
+
+  it("credentials and honorifics never carry identity", () => {
+    expect(providerIdentityKey("Dr. Chen, MD, FACS")).toBe("chen");
+    expect(providerIdentityKey(null)).toBe("");
+  });
+});
+
+describe("extraction-driven event typing and provider naming", () => {
+  it("composeProviderName never doubles credentials the name already carries", () => {
+    expect(composeProviderName("Mark Filley, MD", "MD")).toBe("Mark Filley, MD");
+    expect(composeProviderName("Julieta Oneto, MD", "MD, Board Certified")).toBe("Julieta Oneto, MD, Board Certified");
+    expect(composeProviderName("Susan Fan", "MD")).toBe("Susan Fan, MD");
+    expect(composeProviderName(null, "MD")).toBeNull();
+  });
+});
+
+describe("sameProvider — abbreviated chart and billing name forms", () => {
+  it("treats an abbreviated form as the same clinician", () => {
+    expect(sameProvider("BRITTANY R IRWIN, PA-C", "R Irwin, PA-C")).toBe(true);
+    expect(sameProvider("Irwin", "Brittany Irwin, PA-C")).toBe(true);
+  });
+
+  it("keeps different clinicians distinct even when they share a surname", () => {
+    expect(sameProvider("John Smith, MD", "Jane Smith, MD")).toBe(false);
+    expect(sameProvider("Paul English, MD", "Alexis Chen, MD")).toBe(false);
+  });
+
+  it("an unnamed side is missing information, not a different person", () => {
+    expect(sameProvider(null, "Brittany Irwin, PA-C")).toBe(true);
+    expect(sameProvider("Brittany Irwin, PA-C", "")).toBe(true);
+  });
+
+  it("credentials alone never make a match", () => {
+    expect(sameProvider("MD", "PA-C")).toBe(true); // both reduce to no name tokens
+    expect(sameProvider("Chen, MD", "Irwin, PA-C")).toBe(false);
+  });
+});
