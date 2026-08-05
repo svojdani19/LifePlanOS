@@ -25,7 +25,11 @@ export async function textractReadPdf(buffer: Buffer, onProgress?: (p: OcrProgre
   const client = new TextractClient({ region: process.env.AWS_REGION });
 
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  const loadingTask = pdfjs.getDocument({ data: new Uint8Array(buffer), useSystemFonts: true, disableFontFace: true });
+  // JBIG2/JPX-encoded scans (ubiquitous in real medical-record scans) decode
+  // through pdfjs's WASM codecs — without wasmUrl the decoder fails to
+  // initialize in Node and those pages render blank, so OCR reads nothing.
+  const wasmUrl = `${process.cwd()}/node_modules/pdfjs-dist/wasm/`;
+  const loadingTask = pdfjs.getDocument({ data: new Uint8Array(buffer), useSystemFonts: true, disableFontFace: true, wasmUrl });
   const doc = await loadingTask.promise;
   const total = doc.numPages;
 

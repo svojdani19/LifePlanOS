@@ -2,6 +2,17 @@ import { prisma } from "@/lib/db";
 import { typeLabel } from "@/lib/documents/taxonomy";
 import { pageForOffset, pageMarks } from "@/lib/documents/meta";
 import { stripChartFurniture } from "@/lib/documents/chartStructure";
+import {
+  expansionVerdict,
+  compressedSummary,
+  imagingImpression,
+  responseMilestone,
+  statusPostAnchor,
+  careGapNote,
+  diagnosisKey,
+  isBoilerplate,
+  looksLikeProcedureLabel,
+} from "@/lib/engine/chronologyEmphasis";
 import type { Case } from "@/generated/prisma";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -718,19 +729,67 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
       // The finding headlines the event; for records whose value is a structured
       // data point (a pharmacy dispensing line, an IME impairment), fall back to
       // that when no clinical sentence extracts — otherwise the event would drop.
-      const finding = extractFinding(body, complaint) ?? enc.medications ?? enc.impairmentRating ?? enc.diagnosis ?? null;
-      if (!finding) return null;
+      // Exemplar coverage rule: a dated clinical visit with a clean assessment
+      // or treatment line is never dropped merely because no complaint-matching
+      // sentence extracts — the fragment itself anchors a compressed entry.
+      const notBoiler = (v: string | null) => (v && !isBoilerplate(v) ? v : null);
+      const finding =
+        notBoiler(extractFinding(body, complaint)) ?? notBoiler(enc.medications) ?? notBoiler(enc.impairmentRating) ?? notBoiler(enc.diagnosis) ??
+        (!dateInferred && enc.treatment && looksLikeProse(enc.treatment) ? notBoiler(enc.treatment) : null) ??
+        (!dateInferred && enc.subjective && looksLikeProse(enc.subjective) ? notBoiler(enc.subjective) : null);
+      // Exemplar low-content ledger rule: a dated pivotal or core-clinical
+      // record whose text yields no extractable finding (thin scan of an
+      // injection report, a one-page imaging cover) still earns a one-line
+      // ledger entry — "X was performed" — rather than vanishing. Files whose
+      // NAME identifies them as billing artifacts never qualify.
+      if (!finding) {
+        const ledgerEligible =
+          !encounter &&
+          !dateInferred &&
+          (PIVOTAL.has(ev.eventType) || CORE_CLINICAL.has(doc.type)) &&
+          !/\b(bill|invoice|statement|balance|ledger)\b/i.test(doc.filename);
+        if (!ledgerEligible) {
+          if (process.env.CHRONO_DEBUG) console.log(`[chrono-drop] no-finding ${doc.filename.slice(0, 50)}`);
+          return null;
+        }
+        return {
+          eventDate, eventDateEnd, eventType: ev.eventType, specialty: ev.specialty,
+          provider: docProvider ?? null, facility: doc.facility ?? null,
+          recordType: typeLabel(doc.type),
+          summary: `${typeLabel(doc.type)} was performed and is on file; see the cited source record for its contents.`,
+          subjective: null, pastMedicalHistory: null, objectiveFindings: null, diagnosis: null,
+          treatment: null, procedure: null, disposition: null, imagingFindings: null,
+          medications: null, functionalStatus: null, workStatus: null, restrictions: null,
+          impairmentRating: null, clinicalSignificance: null, sourceQuote: null,
+          relevanceScore: 25, sourceDocumentId: doc.id, sourcePage: page, dateInferred,
+        };
+      }
       const hay = `${finding}\n${body}`.toLowerCase();
       const targetOverlap = overlapCount(body, targets);
       const sig = significance(hay, condNames, careServices);
       const isPivotal = PIVOTAL.has(ev.eventType);
-      // A single focused record: keep pivotal events (they establish the injury
-      // course) or anything bearing on a diagnosis/future-care item. A giant
-      // consolidated chart (segmented into many encounters) is different — most
-      // of its "pivotal" ICU/lab encounters are incidental to the injury, so an
-      // encounter must ACTUALLY bear on the case (significance or ≥2 distinctive
-      // target terms) to make the timeline.
-      if (encounter ? !sig && targetOverlap < 2 : !isPivotal && !sig && !keepAnyway) return null;
+      // Exemplar emphasis profile (chronologyEmphasis.ts): does this encounter
+      // carry an expansion signal (imaging, procedure, escalation, response
+      // milestone, medico-legal content, disposition)?
+      const verdict = expansionVerdict(enc, body, { eventType: ev.eventType });
+      // Selection follows the exemplar's COVERAGE-OVER-OMISSION rule: an
+      // encounter that would previously have been dropped as non-significant
+      // is kept as a COMPRESSED interval entry when it is a real, dated
+      // clinical encounter with clean extractable content — the run of routine
+      // visits itself documents the treatment course. Pure noise (no date, no
+      // clean clinical content) still drops.
+      const previousPolicyKeeps = encounter ? !(!sig && targetOverlap < 2) : !(!isPivotal && !sig && !keepAnyway);
+      let compressed = false;
+      if (!previousPolicyKeeps) {
+        const hasCleanContent = [enc.diagnosis, enc.treatment, enc.subjective, enc.medications].some(
+          (v) => v && looksLikeProse(v),
+        );
+        if (dateInferred || !hasCleanContent) { if (process.env.CHRONO_DEBUG) console.log(`[chrono-drop] ${dateInferred ? "date-inferred" : "no-clean-content"} ${doc.filename.slice(0,50)}`); return null; }
+        compressed = !verdict.expanded;
+        // An undated-signal-free fragment of an unrelated chart: keep only when
+        // it reads as a genuine visit (assessment or treatment present).
+        if (compressed && !enc.diagnosis && !enc.treatment) { if (process.env.CHRONO_DEBUG) console.log(`[chrono-drop] compressed-no-dx-tx ${doc.filename.slice(0,50)}`); return null; }
+      }
       const {
         subjective, pastMedicalHistory, objectiveFindings, diagnosis, treatment, procedure,
         disposition, imagingFindings: imaging, medications, functionalStatus, workStatus, restrictions, impairmentRating,
@@ -752,19 +811,36 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
       // For messy segments with no clean labeled sections, headline the sentence
       // that actually speaks to the case rather than an incidental OCR line.
       const caseSentence = !subjective && !objectiveFindings && !diagnosis && !treatment && !procedure ? caseRelevantSentence(body, condNames) : null;
-      let summary = composeSummary(
-        { treatment: prose(procedure ?? treatment), diagnosis: prose(diagnosis), objectiveFindings: prose(subjective ?? objectiveFindings), imaging: prose(imaging), medications },
-        prose(caseSentence) ?? (looksLikeProse(finding) ? finding : "Documented clinical encounter — see the cited page of the source record."),
-      );
+      let summary: string;
+      if (compressed) {
+        // Exemplar §5: the stereotyped interval-visit line — date, response,
+        // unchanged assessment, treatment continued.
+        summary = compressedSummary(enc, ev.recordType ?? typeLabel(doc.type));
+      } else if (ev.eventType === "IMAGING" && prose(imaging)) {
+        // Exemplar §3: imaging survives near-verbatim — levels, laterality,
+        // measurements, root/cord involvement are never paraphrased away.
+        summary = imagingImpression(imaging!);
+      } else {
+        summary = composeSummary(
+          { treatment: prose(procedure ?? treatment), diagnosis: prose(diagnosis), objectiveFindings: prose(subjective ?? objectiveFindings), imaging: prose(imaging), medications },
+          prose(caseSentence) ?? (looksLikeProse(finding) ? finding : "Documented clinical encounter — see the cited page of the source record."),
+        );
+        // Exemplar §10: a quantified treatment response is the follow-up's
+        // load-bearing fact — surface it on the headline when present.
+        const milestone = responseMilestone(subjective);
+        if (milestone && !summary.toLowerCase().includes(milestone.toLowerCase().slice(0, 30))) {
+          summary = `${summary.replace(/\.$/, "")}. Response: ${milestone}.`;
+        }
+      }
       // Final guard: if the OCR headline is still garbled, derive a clean one
       // naming the diagnosis this encounter documents (the significance already
       // establishes the link) so no OCR soup ever surfaces as the summary.
-      if (!isCleanClinical(summary)) {
+      if (!isCleanClinical(summary) || isBoilerplate(summary)) {
         const topCond = condNames.find((n) => documentsDiagnosis(hay, n));
         // A placeholder headline adds nothing — drop the event rather than surface
         // "Documented clinical encounter — see the cited page." When the encounter
         // clearly documents a diagnosis, headline that instead.
-        if (!topCond) return null;
+        if (!topCond) { if (process.env.CHRONO_DEBUG) console.log(`[chrono-drop] garbled-no-cond ${doc.filename.slice(0,50)}`); return null; }
         summary = `${ev.recordType ?? typeLabel(doc.type)} addressing ${topCond.replace(/,\s*initial encounter$/i, "").toLowerCase()}`;
       }
       return {
@@ -791,7 +867,9 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
         impairmentRating,
         clinicalSignificance: sig,
         sourceQuote: finding !== summary ? finding : null,
-        relevanceScore: Math.min(100, 40 + targetOverlap * 10 + (isPivotal ? 25 : 0) + (sig ? 10 : 0)),
+        relevanceScore: compressed
+          ? 25
+          : Math.min(100, 40 + targetOverlap * 10 + (isPivotal ? 25 : 0) + (sig ? 10 : 0) + verdict.signals.length * 4),
         sourceDocumentId: doc.id,
         sourcePage: page,
         dateInferred,
@@ -829,6 +907,10 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
   // event type, so an identical-summary duplicate never appears twice.
   const seenKeys = new Set<string>();
   const deduped = drafts
+    // Real-world scans occasionally yield an unparseable date (e.g. an OCR'd
+    // "13/45/2023") — an event whose date is invalid can never be placed on
+    // the timeline, so it is dropped rather than crashing the build.
+    .filter((d) => Number.isFinite(d.eventDate.getTime()) && d.eventDate.getTime() <= Date.now() + 86_400_000)
     .sort((a, b) => b.relevanceScore - a.relevanceScore)
     .filter((d) => {
       const key = `${d.eventDate.toISOString().slice(0, 10)}|${d.summary.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().slice(0, 40)}`;
@@ -840,6 +922,47 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
   drafts.push(...deduped);
 
   drafts.sort((a, b) => a.eventDate.getTime() - b.eventDate.getTime());
+
+  // ── Longitudinal pass (exemplar emphasis profile §§4, 6, 11, 12) ───────────
+  // Walk the date-sorted timeline once to apply the devices that only exist
+  // across encounters: first-visit-with-provider and new/changed-assessment
+  // markers, "status post" anchors after a surgery, and explicit care-gap
+  // notes — the exemplar never silently bridges a treatment gap.
+  const seenProviders = new Set<string>();
+  const seenDiagnoses = new Set<string>();
+  let lastSurgery: { date: Date; label: string } | null = null;
+  let prevDate: Date | null = null;
+  for (const d of drafts) {
+    const providerKey = d.provider?.toLowerCase().replace(/[^a-z]+/g, " ").trim() ?? null;
+    const notes: string[] = [];
+    if (providerKey && !seenProviders.has(providerKey)) {
+      seenProviders.add(providerKey);
+      if (d.eventType === "CLINIC_VISIT" || d.eventType === "THERAPY") notes.push("Initial encounter with this provider.");
+    }
+    const dxKey = diagnosisKey(d.diagnosis);
+    if (dxKey && !seenDiagnoses.has(dxKey)) {
+      seenDiagnoses.add(dxKey);
+      if (seenDiagnoses.size > 1) notes.push("New or changed assessment at this encounter.");
+    }
+    if (prevDate) {
+      const gap = careGapNote(prevDate, d.eventDate);
+      if (gap) notes.push(gap);
+    }
+    if (d.eventType !== "SURGERY") {
+      const anchor = statusPostAnchor(d.eventDate, lastSurgery);
+      if (anchor && !d.summary.toLowerCase().includes("status post")) {
+        d.summary = `${d.summary.replace(/\.$/, "")} (${anchor}).`;
+      }
+    } else {
+      const label = (d.procedure ?? d.summary).split(/[.;(]/)[0].trim().slice(0, 70);
+      if (looksLikeProcedureLabel(label)) lastSurgery = { date: d.eventDate, label };
+    }
+    if (notes.length) {
+      d.clinicalSignificance = [d.clinicalSignificance, ...notes].filter(Boolean).join(" ");
+      d.relevanceScore = Math.min(100, d.relevanceScore + 5);
+    }
+    prevDate = d.eventDate;
+  }
 
   // Atomic swap: clear the old timeline and insert the new one in one
   // transaction, so a failure never leaves the case with zero events.

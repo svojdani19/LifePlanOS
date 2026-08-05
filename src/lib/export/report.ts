@@ -527,9 +527,15 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   const body: (Paragraph | Table)[] = [];
 
   // ══ TITLE PAGE ═══════════════════════════════════════════════════════════════
-  // §10 — when a critical validation issue remains unresolved, the document is a
-  // DRAFT (visible banner on the title page and in the running header).
-  const isDraft = integrity.blocking;
+  // §10 — when a critical validation issue remains UNRESOLVED, the document is a
+  // DRAFT (visible banner on the title page and in the running header). The
+  // banner honors reviewer dispositions the same way the export gate does: a
+  // finding the clinical team explicitly resolved-as-is (persisted, attributed)
+  // is no longer "unresolved" — only OPEN blocking findings mark the draft.
+  const openBlockingPersisted = integrity.blocking
+    ? await prisma.validationFinding.count({ where: { caseId, exportBlocking: true, status: "OPEN" } })
+    : 0;
+  const isDraft = integrity.blocking && openBlockingPersisted > 0;
   if (isDraft) body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 200, after: 200 }, children: [new TextRun({ text: "DRAFT — CONTAINS UNRESOLVED CRITICAL VALIDATION ISSUES · NOT FOR SERVICE", bold: true, size: 24, color: "B91C1C" })] }));
   body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: isDraft ? 200 : 720, after: 40 }, children: [new TextRun({ text: c.firm.letterhead || c.firm.name, bold: true, size: 26, color: NAVY })] }));
   body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 480 }, children: [new TextRun({ text: c.firm.letterhead ? "" : "Certified Life Care Planning", size: 20, color: GREY })] }));
@@ -719,7 +725,23 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
 
   // ══ MEDICAL RECORDS REVIEWED ═════════════════════════════════════════════════
   body.push(h1("Medical Records Reviewed", { pageBreak: true }));
-  body.push(p(`In forming the opinions expressed in this report, I reviewed and considered the following ${c.documents.length} record${c.documents.length === 1 ? "" : "s"}.`));
+  {
+    // Exemplar-style index header: total volume and the overall first-to-last
+    // visit span, so the reviewed window is stated before the itemization.
+    const totalPages = c.documents.reduce((s, d) => s + (d.pageCount ?? 0), 0);
+    const serviceDates = c.documents
+      .flatMap((d) => [d.serviceDate, d.serviceDateEnd])
+      .filter((x): x is Date => !!x)
+      .sort((a, b) => a.getTime() - b.getTime());
+    const span = serviceDates.length
+      ? ` Dates of visits documented: from ${fmtDate(serviceDates[0])} to ${fmtDate(serviceDates[serviceDates.length - 1])}.`
+      : "";
+    body.push(
+      p(
+        `In forming the opinions expressed in this report, I reviewed and considered the following ${c.documents.length} record${c.documents.length === 1 ? "" : "s"}, totaling ${totalPages.toLocaleString("en-US")} page${totalPages === 1 ? "" : "s"}.${span}`,
+      ),
+    );
+  }
   if (c.documents.length) {
     const rr: TableRow[] = [
       rowOf([
@@ -756,8 +778,8 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   body.push(
     p(
       expertVoice
-        ? `The following chronology sets out the clinically significant encounters bearing on the diagnoses and future care at issue. It is not a recitation of every page in the record; rather, I have selected and organized the ${c.chronologyEvents.length} encounter${c.chronologyEvents.length === 1 ? "" : "s"} that inform my opinions. Each entry closes with my assessment of why the encounter matters to ${subject}'s future care.`
-        : `The following chronology sets out the clinically significant encounters bearing on the diagnoses and future care at issue. It is not a recitation of every page in the record; rather, the ${c.chronologyEvents.length} encounter${c.chronologyEvents.length === 1 ? "" : "s"} that inform the plan's analysis have been selected and organized. Each entry closes with an assessment of why the encounter matters to ${subject}'s future care.`,
+        ? `The following chronology represents the documented clinical course encounter by encounter — ${c.chronologyEvents.length} dated entr${c.chronologyEvents.length === 1 ? "y" : "ies"} in all. Milestone encounters (initial evaluations, imaging, procedures, treatment escalations, work-status determinations, and quantified treatment responses) are set out in detail; routine interval visits are recorded in compressed form so the course and cadence of care remain visible without repetition. Care gaps are noted where the record shows them. Each entry cites its source page and closes with my assessment of why the encounter matters to ${subject}'s future care.`
+        : `The following chronology represents the documented clinical course encounter by encounter — ${c.chronologyEvents.length} dated entr${c.chronologyEvents.length === 1 ? "y" : "ies"} in all. Milestone encounters (initial evaluations, imaging, procedures, treatment escalations, work-status determinations, and quantified treatment responses) are set out in detail; routine interval visits are recorded in compressed form so the course and cadence of care remain visible without repetition. Care gaps are noted where the record shows them. Each entry cites its source page and closes with an assessment of why the encounter matters to ${subject}'s future care.`,
     ),
   );
   if (!c.chronologyEvents.length) body.push(p("No clinical encounters were catalogued from the reviewed records.", { italics: true }));
@@ -1221,7 +1243,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
       );
     });
     body.push(table(icRows));
-    if (integrity.blocking) body.push(p("One or more critical issues remain unresolved. This document is a DRAFT and is not to be served or relied upon until the issues above are corrected.", { bold: true, color: "B91C1C" }));
+    if (isDraft) body.push(p("One or more critical issues remain unresolved. This document is a DRAFT and is not to be served or relied upon until the issues above are corrected.", { bold: true, color: "B91C1C" }));
   }
 
   // ══ APPENDIX G — UNRESOLVED ISSUES (DRAFT ONLY, CRE v1 §18) ══════════════════

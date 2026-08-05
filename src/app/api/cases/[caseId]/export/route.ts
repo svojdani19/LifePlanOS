@@ -3,7 +3,7 @@ import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit, recordUsage } from "@/lib/tenant";
 import { buildReportDocx, buildCostCsv } from "@/lib/export/report";
 import { convertDocxToPdf } from "@/lib/export/pdf";
-import { persistCaseValidation } from "@/lib/engine/validation";
+import { persistCaseValidation, openBlockingCount } from "@/lib/engine/validation";
 import { persistCaseReasoning } from "@/lib/engine/clinicalReasoningPersist";
 import { buildSnapshotPayload } from "@/lib/engine/snapshot";
 import { assumptionsFor } from "@/lib/engine/generate";
@@ -50,8 +50,19 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
       persistCaseReasoning(params.caseId, ctx.firm.id, { actorUserId: ctx.user.id }).catch(() => null),
       persistCaseValidation(params.caseId, ctx.firm.id),
     ]);
-    if ((format === "DOCX" || format === "PDF") && mode === "final" && validation.blocking) {
-      const defects = validation.findings.filter((f) => f.exportBlocking).slice(0, 10);
+    // The gate honors reviewer dispositions: a finding a clinician explicitly
+    // resolved-as-is or ignored (persisted, attributed, and survived the
+    // re-run above) no longer blocks — only OPEN blocking findings gate the
+    // final. The raw engine flag would re-block dispositioned findings forever.
+    const stillOpenBlocking = validation.blocking ? await openBlockingCount(params.caseId) : 0;
+    if ((format === "DOCX" || format === "PDF") && mode === "final" && stillOpenBlocking > 0) {
+      const openRows = await prisma.validationFinding.findMany({
+        where: { caseId: params.caseId, exportBlocking: true, status: "OPEN" },
+        take: 10,
+        select: { service: true, result: true },
+      });
+      const openKeys = new Set(openRows.map((r) => `${r.service}::${r.result}`));
+      const defects = validation.findings.filter((f) => f.exportBlocking && openKeys.has(`${f.service}::${f.result}`)).slice(0, 10);
       return ok(
         {
           error: "Final export blocked by unresolved critical findings.",

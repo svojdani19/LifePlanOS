@@ -99,6 +99,15 @@ export interface PersistOptions {
   recommendationIds?: string[];
   /** Actor id recorded on approval-invalidation audit events. */
   actorUserId?: string | null;
+  /**
+   * The reassessment is being driven by the physician's OWN review decision on
+   * these recommendations. The recorded status is then the engine's computed
+   * verdict — the physician's decision is the review the NEEDS_REVIEW hold
+   * requests, so it is never itself treated as a change that demands another
+   * review (which would make VALIDATED permanently unreachable). Material
+   * changes from any other source still force NEEDS_REVIEW on approved items.
+   */
+  reviewDecision?: boolean;
 }
 
 /**
@@ -141,7 +150,9 @@ export async function persistCaseReasoning(caseId: string, firmId: string, opts:
         await prisma.clinicalReasoningAssessment.create({ data: { ...toRow(a), ...lineage, caseId, firmId, recommendationId: it.id } });
         continue;
       }
-      if (prior.materialHash === a.materialHash && prior.status !== "ERROR" && prior.reasoningChain != null && prior.generatedByModel === "deterministic-reasoning-v7") continue; // cache hit (recompute once per methodology version)
+      // Cache hit (recompute once per methodology version) — except during a
+      // physician review decision, which must always record a fresh verdict.
+      if (!opts.reviewDecision && prior.materialHash === a.materialHash && prior.status !== "ERROR" && prior.reasoningChain != null && prior.generatedByModel === "deterministic-reasoning-v7") continue;
 
       // Material change (§17): supersede the prior row (preserve it), create a
       // new one, and — when the item was physician-approved — force re-review
@@ -154,7 +165,10 @@ export async function persistCaseReasoning(caseId: string, firmId: string, opts:
       const created = await prisma.clinicalReasoningAssessment.create({
         data: {
           ...toRow(a), ...lineage, caseId, firmId, recommendationId: it.id,
-          status: wasApproved ? "NEEDS_REVIEW" : toRow(a).status, // never silently carry approval forward
+          // A third-party material change to an approved item forces re-review
+          // (approval never silently carries forward). The physician's OWN
+          // review decision records the engine's verdict — it IS the review.
+          status: wasApproved && !opts.reviewDecision ? "NEEDS_REVIEW" : toRow(a).status,
           reviewerMetadata: j(reviewerMetadata),
         },
       });

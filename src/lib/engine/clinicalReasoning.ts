@@ -662,7 +662,20 @@ export function buildReasoningAssessment(
 ): ReasoningAssessment {
   const rec = item as unknown as RecInput;
   const mapping = mapRecommendationToCondition(rec, conditions);
-  const condition = (conditions.find((c) => c.id === mapping.conditionId) ?? null) as DossierCondition | null;
+  // Region-neutral services (DME, medications, general therapy) don't name an
+  // anatomy, so the region mapper finds no condition — but the generator (and
+  // the planner curating the plan) persisted the condition the item actually
+  // serves. Honor that link as the fallback so evidence relevance is judged
+  // against the item's real clinical problem instead of "general".
+  const persistedConditionId = (item as { conditionId?: string | null }).conditionId ?? null;
+  const mapped = conditions.find((c) => c.id === mapping.conditionId) ?? null;
+  const persisted = conditions.find((c) => c.id === persistedConditionId) ?? null;
+  // Prefer the persisted link whenever the service+mapped pair carries no
+  // anatomy but the persisted condition does — a TENS unit serving a lumbar
+  // disc injury is spine care, not "general" care.
+  const mappedRegion = bodyRegion(`${(item as { service: string }).service} ${mapped?.name ?? ""}`);
+  const usePersisted = persisted != null && mappedRegion === "general" && bodyRegion(persisted.name) !== "general";
+  const condition = (usePersisted ? persisted : (mapped ?? persisted)) as DossierCondition | null;
   const dossier = buildRecommendationDossier(item, condition, chronology, kase, interviews);
   const code = validateCode(rec);
   const pricing = validatePricing(rec);
@@ -808,6 +821,9 @@ export function buildReasoningAssessment(
     : !frequencySupported || (durationClass === "LIFETIME" && !durationSupport.mayEnterFinalizedTotals) || blockingUnknowns || crossRegionEvidence.length > 0 || probabilityClassification === "INSUFFICIENTLY_SUPPORTED" || !evidenceSufficiencyStandalone(objectiveItems.length, se, physicianApproved)
       ? "NEEDS_REVIEW"
       : "VALIDATED";
+  if (process.env.CRE_DEBUG) {
+    console.log(`[cre] ${item.service}: structural=${structuralDefect} freq=${frequencySupported} lifetimeHold=${durationClass === "LIFETIME" && !durationSupport.mayEnterFinalizedTotals} blockUnknowns=${blockingUnknowns} crossRegion=${crossRegionEvidence.length} prob=${probabilityClassification} standalone=${evidenceSufficiencyStandalone(objectiveItems.length, se, physicianApproved)} → ${lifecycleStatus}`);
+  }
 
   // ── Reasoning Reliability payload ──────────────────────────────────────────
   const regionEvents = chronology.filter((e) => bodyRegion(`${e.diagnosis ?? ""} ${e.procedure ?? ""} ${e.imagingFindings ?? ""}`) === region).length;
