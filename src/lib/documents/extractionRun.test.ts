@@ -1,7 +1,7 @@
 // Extraction-run orchestrator — OCR discipline, fail-closed persistence, and
 // review lineage (human work survives every regeneration). Synthetic records
 // only; a deterministic fake provider stands in for the model.
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const db = vi.hoisted(() => {
   const encounters: Record<string, unknown>[] = [];
@@ -153,7 +153,10 @@ describe("fail-closed extraction", () => {
     expect(db.encounters).toHaveLength(0);
     const run = db.runs.at(-1)!;
     expect(run.status).toBe("EXTRACTION_FAILED");
-    expect(String(run.error)).toMatch(/structured output failed after retry/);
+    // The document-level error states the outcome; the per-section reason is
+    // disclosed in the warnings.
+    expect(String(run.error)).toMatch(/No section of this document could be processed/);
+    expect(JSON.stringify(run.warnings)).toMatch(/structured output failed after retry/);
   });
 });
 
@@ -220,4 +223,78 @@ describe("review lineage across regeneration", () => {
     expect(db.encounters.find((e) => e.id === "enc-human")!.status).toBe("HUMAN_EDITED");
     expect(db.encounters.filter((e) => ["AI_DRAFT", "AI_AUDIT_PASSED"].includes(e.status as string))).toHaveLength(0);
   });
+});
+
+describe("any-size processing: fault containment", () => {
+  // A two-chunk document: the first section is good clinical text, the second
+  // contains a marker the fake provider treats as a poison pill.
+  const GOOD = [
+    "Orthopedic Associates Progress Note. Date of Service: 03/14/2025.",
+    "Provider: Dana Rivers, MD.",
+    "Assessment: Lumbar radiculopathy.",
+    "Plan: Continue physical therapy twice weekly.",
+    ...Array.from({ length: 100 }, (_, i) => `Progress line ${i} of the same encounter with additional detail.`),
+  ].join("\n");
+  const BAD = ["POISON-SECTION", ...Array.from({ length: 100 }, (_, i) => `Later section line ${i} of the record.`)].join("\n");
+  const BIG_TEXT = `${GOOD}\n${BAD}`;
+
+  const contentAware = (onPoison: () => never): (LlmProvider & { calls: number }) => {
+    const p = {
+      name: "fake",
+      calls: 0,
+      async complete({ messages }: { messages: { content: string }[] }) {
+        p.calls++;
+        const user = messages[messages.length - 1]?.content ?? "";
+        if (user.includes("POISON-SECTION")) onPoison();
+        return GOOD_JSON;
+      },
+    };
+    return p as LlmProvider & { calls: number };
+  };
+
+  beforeEach(() => {
+    process.env.RECORD_CRITIC = "off";
+    db.doc = doc({ extractedText: BIG_TEXT });
+  });
+  afterEach(() => {
+    delete process.env.RECORD_CRITIC;
+  });
+
+  it("one failing section is disclosed and contained — the rest of the document survives", async () => {
+    const p = contentAware(() => { throw new Error("kaput"); });
+    const r = await processDocumentExtraction("doc-1", { provider: p, exemplarGuidance: [] });
+    expect(r.status).toBe("COMPLETE");
+    expect(r.accepted).toBeGreaterThan(0); // the good section extracted
+    const run = db.runs.at(-1)!;
+    expect(JSON.stringify(run.warnings)).toMatch(/could not be processed/);
+    // Incomplete content can never present as a complete draft.
+    expect(run.auditResult).toBe("EXTRACTION_INCOMPLETE");
+    for (const e of db.encounters) expect(e.status).toBe("AI_DRAFT");
+  });
+
+  it("every section failing fails the document — a total loss is not a partial result", async () => {
+    const p: LlmProvider = { name: "fake", complete: async () => { throw new Error("kaput"); } };
+    const r = await processDocumentExtraction("doc-1", { provider: p, exemplarGuidance: [] });
+    expect(r.status).toBe("EXTRACTION_FAILED");
+    expect(r.error).toMatch(/No section of this document could be processed/);
+    expect(db.encounters).toHaveLength(0);
+  });
+
+  it("transient provider errors retry with backoff and recover", async () => {
+    let failures = 0;
+    const p: LlmProvider & { calls: number } = {
+      name: "fake",
+      calls: 0,
+      async complete() {
+        p.calls++;
+        if (failures < 3) { failures++; throw new Error("overloaded_error 529"); }
+        return GOOD_JSON;
+      },
+    } as never;
+    db.doc = doc(); // single-chunk doc keeps the retry path deterministic
+    const r = await processDocumentExtraction("doc-1", { provider: p, exemplarGuidance: [] });
+    expect(r.status).toBe("COMPLETE");
+    expect(db.runs.at(-1)!.error ?? null).toBeNull();
+    expect(JSON.stringify(db.runs.at(-1)!.warnings ?? [])).not.toMatch(/could not be processed/);
+  }, 30_000);
 });

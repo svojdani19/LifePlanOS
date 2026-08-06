@@ -240,24 +240,25 @@ const MEDICAL_RECORD_SUMMARY: Def = {
   defaultConfig: {},
   compose(data, config, findings, opts) {
     const { detail } = recordSummaryConfig.parse(config ?? {});
-    // A FACTUAL record summary: built from the same cited, structured
-    // encounter facts as the Records page. It contains NO future-care dollar
-    // totals and NO physician-review status counts — those belong to opinion
-    // and costing reports, not a factual summary of the record.
+    // A FACTUAL record summary in the structure a physician life-care planner
+    // uses: the complete visit ledger with totals, the treating providers'
+    // diagnoses over time, graded per-encounter narratives (prior history in
+    // its own band, admissions as episodes), and a diagnostic-studies section
+    // — every entry claim-backed and page-cited. It contains NO future-care
+    // dollar totals and NO physician-review status counts — those belong to
+    // opinion and costing reports, not a factual summary of the record.
     const blocks: Block[] = [
       ...S.caseHeader(data),
-      { kind: "h1", text: "Records Reviewed" },
-      ...S.recordsReviewed(data),
+      { kind: "h1", text: "Medical Records Reviewed" },
+      ...S.recordsLedger(data),
       { kind: "h1", text: "Processing and OCR Limitations" },
       ...S.processingLimitations(data),
-      { kind: "h1", text: "Diagnoses Documented in the Records" },
-      ...S.documentedDiagnoses(data),
+      { kind: "h1", text: "Treating Providers' Diagnoses" },
+      ...S.providerDiagnoses(data),
     ];
     if (detail !== "brief") {
-      blocks.push({ kind: "h1", text: "Chronological Clinical Course" }, ...S.chronology(data));
-      blocks.push({ kind: "h1", text: "Imaging" }, ...S.imaging(data));
-      blocks.push({ kind: "h1", text: "Procedures" }, ...S.procedures(data));
-      blocks.push({ kind: "h1", text: "Treatment History" }, ...S.treatmentHistory(data));
+      blocks.push({ kind: "h1", text: "Treatment and Encounters" }, ...S.treatmentNarratives(data));
+      blocks.push({ kind: "h1", text: "Diagnostic Studies" }, ...S.diagnosticStudiesSection(data));
       blocks.push({ kind: "h1", text: "Medication History" }, ...S.medicationHistory(data));
     }
     if (detail === "detailed") {

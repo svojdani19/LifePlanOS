@@ -291,6 +291,7 @@ const ORIGIN_LABEL: Record<string, string> = {
   TEMPLATE_CONDITION: "System generated (care library)",
   TEMPLATE_BASELINE: "System generated (baseline)",
   TEMPLATE_SPECIALTY: "System generated (specialty pack)",
+  RECORD_RECOMMENDED: "Documented treating-provider recommendation",
   PHYSICIAN_ADDED: "Physician reviewer",
   PLANNER_ADDED: "Life care planner (manually added)",
   GOLD_IMPORT: "Imported source",

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { prisma } from "@/lib/db";
+import { isTimelineClass } from "@/lib/records/encounterSubstance";
 
 const docFingerprint = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
 
@@ -802,11 +803,18 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
     const encRows = await prisma.extractedEncounter.findMany({
       where: {
         caseId,
-        status: { in: ["AI_DRAFT", "HUMAN_EDITED", "REVIEWED", "VERIFIED"] },
+        status: { in: ["AI_DRAFT", "AI_AUDIT_PASSED", "HUMAN_EDITED", "REVIEWED", "VERIFIED"] },
         dateStatus: { in: ["DOCUMENTED", "INFERRED"] },
       },
     });
     for (const e of encRows) {
+      // The chronology is the story of the patient's CARE. Administrative
+      // paperwork and ancillary logs stay on the Records page (each with its
+      // reviewable exclusion reason) — they never become timeline events. A
+      // NULL class means "not yet classified" and stays visible; a reviewer's
+      // reclassification is simply the stored value, so promoting an excluded
+      // encounter is one PATCH away.
+      if (!isTimelineClass(e.substanceClass)) continue;
       const arr = extractedByDoc.get(e.sourceDocumentId) ?? [];
       arr.push(e);
       extractedByDoc.set(e.sourceDocumentId, arr);

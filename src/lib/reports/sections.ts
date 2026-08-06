@@ -1,6 +1,7 @@
 import { functionalFinding } from "@/lib/engine/integrity";
 import type { Block } from "./doc";
 import { originLabel } from "./data";
+import { buildVisitLedger, buildDiagnosesEvolution, buildNarratives, buildDiagnosticStudies } from "./physicianStructure";
 import type {
   ReportData,
   RDChronoEvent,
@@ -226,6 +227,98 @@ export function chronology(data: ReportData, config: ChronologyConfig = {}): Blo
   return blocks;
 }
 
+// ── Physician-structured record sections ─────────────────────────────────────
+// The four structures a physician life-care planner uses to communicate a
+// record review, rendered from validated cited claims. No item caps: a ledger
+// that stops at row 40 is not a ledger.
+
+/** 1. Complete visit ledger with totals — every substantive visit, cited. */
+export function recordsLedger(data: ReportData): Block[] {
+  const sr = data.structuredRecord;
+  if (!sr) return recordsReviewed(data); // fixture/legacy fallback
+  const ledger = buildVisitLedger(sr);
+  const blocks: Block[] = [
+    p(
+      `${ledger.totalDocuments} record set${ledger.totalDocuments === 1 ? "" : "s"} — ${ledger.totalPages.toLocaleString("en-US")} pages.` +
+        (ledger.visitSpan ? ` Dates of visits: from ${ledger.visitSpan.from} to ${ledger.visitSpan.to}.` : ""),
+    ),
+  ];
+  for (const line of ledger.lines) {
+    blocks.push({ kind: "bullet", text: `${line.date} - ${line.who}${line.procedure ? " - Procedure" : ""} - ${line.cite}` });
+  }
+  if (ledger.undatedCount > 0) {
+    blocks.push(p(`${ledger.undatedCount} additional encounter${ledger.undatedCount === 1 ? "" : "s"} carry no reliable date and are listed under "Undated or Incompletely Processed Material".`));
+  }
+  return blocks;
+}
+
+/** 2. Treating providers' diagnoses — the diagnostic picture over time. */
+export function providerDiagnoses(data: ReportData): Block[] {
+  const sr = data.structuredRecord;
+  if (!sr) return documentedDiagnoses(data);
+  const rows = buildDiagnosesEvolution(sr);
+  if (!rows.length) return notDocumented();
+  return [
+    {
+      kind: "table",
+      header: ["Date", "Provider / Location", "Diagnoses", "Source"],
+      rows: rows.map((r) => [r.date, r.who, r.diagnoses, r.cite]),
+    },
+  ];
+}
+
+function narrativeBlocks(blocksIn: import("./physicianStructure").NarrativeBlock[]): Block[] {
+  const out: Block[] = [];
+  const renderNarrative = (n: import("./physicianStructure").EncounterNarrative, indent = "") => {
+    const body = [
+      ...n.lines.map((l) => `${l.label}: ${l.text}`),
+      n.qualityNote,
+      n.cite,
+    ]
+      .filter(Boolean)
+      .join("  ");
+    out.push(labeled(`${indent}${n.heading}`, body));
+  };
+  for (const b of blocksIn) {
+    if (b.kind === "EPISODE") {
+      out.push(p(`Admission ${b.from} – ${b.to} — ${b.facility}:`));
+      for (const m of b.members) renderNarrative(m, "· ");
+    } else {
+      renderNarrative(b.narrative);
+    }
+  }
+  return out;
+}
+
+/** 3. Graded per-encounter narratives, with prior history in its own band. */
+export function treatmentNarratives(data: ReportData): Block[] {
+  const sr = data.structuredRecord;
+  if (!sr) return chronology(data);
+  const sections = buildNarratives(sr, data.case.dateOfInjury ?? null);
+  const blocks: Block[] = [];
+  if (sections.priorHistory.length) {
+    blocks.push({ kind: "h2", text: "Prior Medical History (before the date of injury)" } as Block);
+    blocks.push(...narrativeBlocks(sections.priorHistory));
+    blocks.push({ kind: "h2", text: "Course Following the Date of Injury" } as Block);
+  }
+  blocks.push(...narrativeBlocks(sections.course));
+  if (!blocks.length) return notDocumented();
+  return blocks;
+}
+
+/** 4. Diagnostic studies — findings and impressions per study. */
+export function diagnosticStudiesSection(data: ReportData): Block[] {
+  const sr = data.structuredRecord;
+  if (!sr) return imaging(data);
+  const studies = buildDiagnosticStudies(sr);
+  if (!studies.length) return notDocumented();
+  const blocks: Block[] = [];
+  for (const s of studies) {
+    blocks.push(labeled(s.heading, [`Findings: ${s.findings.join(". ")}`, s.cite].join("  ")));
+  }
+  return blocks;
+}
+
 /** Records reviewed + processing/OCR limitations, from the structured record
  *  service (the same data the Records page shows). */
 export function recordsReviewed(data: ReportData): Block[] {
@@ -267,7 +360,7 @@ export function documentedDiagnoses(data: ReportData): Block[] {
     if (e.diagnosis) for (const part of String(e.diagnosis).split(/;\s*/)) if (part.trim().length > 3) values.add(part.trim());
   }
   if (!values.size) return notDocumented();
-  return [...values].slice(0, 40).map((v) => ({ kind: "bullet", text: v }) as Block);
+  return [...values].map((v) => ({ kind: "bullet", text: v }) as Block);
 }
 
 /** Undated / requires-review disclosure for the record summary. */
@@ -286,11 +379,24 @@ export function undatedRecords(data: ReportData): Block[] {
   ];
 }
 
-/** Medication history documented in the records. */
+/** Medication history documented in the records. Drawn from ALL extracted
+ *  encounters — ancillary pharmacy/dispensing records feed this section even
+ *  though they are (rightly) not chronology events. */
 export function medicationHistory(data: ReportData): Block[] {
-  const meds = data.case.chronologyEvents.filter((e) => e.medications).map((e) => `${mdY(e.eventDate)} — ${e.medications}`);
+  const meds: string[] = [];
+  for (const d of data.structuredRecord?.documents ?? []) {
+    for (const enc of d.encounters) {
+      for (const c of enc.claims) {
+        if (c.field !== "medications") continue;
+        meds.push(`${enc.encounterDate ?? "Undated"} — ${c.value}`);
+      }
+    }
+  }
+  if (!meds.length) {
+    for (const e of data.case.chronologyEvents) if (e.medications) meds.push(`${mdY(e.eventDate)} — ${e.medications}`);
+  }
   if (!meds.length) return notDocumented();
-  return [...new Set(meds)].slice(0, 40).map((m) => ({ kind: "bullet", text: m }) as Block);
+  return [...new Set(meds)].sort().map((m) => ({ kind: "bullet", text: m }) as Block);
 }
 
 /** Diagnoses with ICD codes, relatedness, and record citations. */

@@ -42,6 +42,9 @@ export interface StructuredEncounter {
   ocrConfidence: number | null;
   warnings: string[];
   status: string;
+  /** CLINICAL | ANCILLARY | ADMINISTRATIVE — null means not yet classified. */
+  substanceClass: string | null;
+  substanceReason: string | null;
   reviewedAt: string | null;
   verifiedAt: string | null;
   staleReason: string | null;
@@ -83,7 +86,8 @@ function toStructuredEncounter(e: {
   id: string; sourceDocumentId: string; dateStatus: string; encounterDate: Date | null; encounterDateEnd: Date | null;
   provider: string | null; providerCredentials: string | null; facility: string | null; encounterType: string | null;
   factualSummary: string; synthesis: string | null; claims: unknown; page: number | null; pageEnd: number | null;
-  ocrConfidence: number | null; warnings: unknown; status: string; reviewedAt: Date | null; verifiedAt: Date | null; staleReason: string | null;
+  ocrConfidence: number | null; warnings: unknown; status: string; substanceClass?: string | null; substanceReason?: string | null;
+  reviewedAt: Date | null; verifiedAt: Date | null; staleReason: string | null;
 }): StructuredEncounter {
   return {
     id: e.id,
@@ -103,6 +107,8 @@ function toStructuredEncounter(e: {
     ocrConfidence: e.ocrConfidence,
     warnings: Array.isArray(e.warnings) ? (e.warnings as string[]) : [],
     status: e.status,
+    substanceClass: e.substanceClass ?? null,
+    substanceReason: e.substanceReason ?? null,
     reviewedAt: e.reviewedAt?.toISOString() ?? null,
     verifiedAt: e.verifiedAt?.toISOString() ?? null,
     staleReason: e.staleReason,
@@ -115,7 +121,7 @@ export async function getStructuredRecord(caseId: string, firmId: string): Promi
     prisma.document.findMany({ where: { caseId, firmId }, orderBy: { createdAt: "asc" } }),
     prisma.recordExtraction.findMany({ where: { caseId, firmId }, orderBy: { createdAt: "desc" } }),
     prisma.extractedEncounter.findMany({
-      where: { caseId, firmId, status: { in: ["AI_DRAFT", "HUMAN_EDITED", "REVIEWED", "VERIFIED", "STALE"] } },
+      where: { caseId, firmId, status: { in: ["AI_DRAFT", "AI_AUDIT_PASSED", "HUMAN_EDITED", "REVIEWED", "VERIFIED", "STALE"] } },
       orderBy: [{ encounterDate: "asc" }, { page: "asc" }],
     }),
   ]);

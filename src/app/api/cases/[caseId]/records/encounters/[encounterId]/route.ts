@@ -10,7 +10,7 @@ import { ok, handleError } from "@/lib/api";
 //            records.verify act (canonical, case-scoped, never satisfied by
 //            platform/super-admin status alone). Corrections verified here
 //            become firm-scoped, fact-free learning exemplars.
-const EDITABLE = ["factualSummary", "provider", "providerCredentials", "facility", "encounterType"] as const;
+const EDITABLE = ["factualSummary", "provider", "providerCredentials", "facility", "encounterType", "substanceClass"] as const;
 
 const patchSchema = z.object({
   factualSummary: z.string().min(3).max(2000).optional(),
@@ -19,6 +19,9 @@ const patchSchema = z.object({
   facility: z.string().max(200).nullable().optional(),
   encounterType: z.string().max(60).nullable().optional(),
   encounterDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
+  // Reviewer reclassification: promote an excluded administrative/ancillary
+  // encounter onto the timeline, or demote a misfiled one off it.
+  substanceClass: z.enum(["CLINICAL", "ANCILLARY", "ADMINISTRATIVE"]).optional(),
   reviewNote: z.string().max(2000).optional(),
 });
 
@@ -57,6 +60,9 @@ export async function PATCH(req: Request, { params: paramsPromise }: Params) {
         ...(input.providerCredentials !== undefined ? { providerCredentials: input.providerCredentials } : {}),
         ...(input.facility !== undefined ? { facility: input.facility } : {}),
         ...(input.encounterType !== undefined ? { encounterType: input.encounterType } : {}),
+        ...(input.substanceClass !== undefined
+          ? { substanceClass: input.substanceClass, substanceReason: "Classified by reviewer." }
+          : {}),
         ...(dateProvided
           ? input.encounterDate
             ? { encounterDate: new Date(`${input.encounterDate}T00:00:00Z`), dateStatus: "DOCUMENTED" }

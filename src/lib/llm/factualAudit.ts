@@ -51,6 +51,12 @@ export interface AuditInput {
   pages: AuditPage[];
   /** Extraction runs that did not complete for this document/case. */
   failedExtractions: number;
+  /** Sections/chunks that could not be processed after retries. */
+  failedSections?: number;
+  /** Dated note-headers the deterministic segmenter found with no extracted encounter. */
+  coverageGaps?: number;
+  /** The source text arrived clipped at the storage cap. */
+  truncatedSource?: boolean;
   /** Claims the critic contested and no adjudicator resolved. */
   unresolvedDisputes: number;
   /** True once every uploaded document covering the period finished processing. */
@@ -117,6 +123,18 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
   if (input.failedExtractions > 0) {
     sawIncomplete = true;
     findings.push(`${input.failedExtractions} document(s) failed extraction; their content is not represented.`);
+  }
+  if ((input.failedSections ?? 0) > 0) {
+    sawIncomplete = true;
+    findings.push(`${input.failedSections} section(s) of the source could not be processed; their content is not represented.`);
+  }
+  if ((input.coverageGaps ?? 0) > 0) {
+    sawIncomplete = true;
+    findings.push(`${input.coverageGaps} dated note header(s) in the source have no extracted encounter; the record may be under-extracted.`);
+  }
+  if (input.truncatedSource) {
+    sawIncomplete = true;
+    findings.push("The source text was clipped at the storage cap; content beyond it is not represented.");
   }
   if (lowConf.length) {
     sawReviewNeeded = true;

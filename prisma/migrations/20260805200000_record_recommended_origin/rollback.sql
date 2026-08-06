@@ -1,0 +1,6 @@
+-- Rollback note: PostgreSQL cannot remove a value from an enum type without
+-- rebuilding it. The added value is harmless when unused; a full rollback
+-- would recreate the enum and remap the column:
+--   1) UPDATE "FutureCareItem" SET "origin"='PLANNER_ADDED' WHERE "origin"='RECORD_RECOMMENDED';
+--   2) recreate the enum without RECORD_RECOMMENDED and ALTER the column type.
+-- Step 1 alone is sufficient for application-level rollback.

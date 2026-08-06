@@ -179,3 +179,17 @@ describe("presentation-level review flags", () => {
     expect(auditFactualRecord(base({ encounters: [], pages: [] })).result).toBe("FAILED");
   });
 });
+
+describe("unprocessed content blocks completeness", () => {
+  it("failed sections make the case EXTRACTION_INCOMPLETE", () => {
+    const r = auditFactualRecord(base({ failedSections: 2 }));
+    expect(r.result).toBe("EXTRACTION_INCOMPLETE");
+    expect(r.findings.join(" ")).toMatch(/section\(s\) of the source could not be processed/);
+  });
+
+  it("a source clipped at the storage cap is EXTRACTION_INCOMPLETE", () => {
+    const r = auditFactualRecord(base({ truncatedSource: true }));
+    expect(r.result).toBe("EXTRACTION_INCOMPLETE");
+    expect(r.findings.join(" ")).toMatch(/clipped at the storage cap/);
+  });
+});

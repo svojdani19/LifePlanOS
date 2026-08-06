@@ -1246,14 +1246,32 @@ function ChronologyPanel({ data, canEdit, canVerify = false, call }: { data: Any
               if (e.key === "Enter") setMobileDetail(true);
             }}
           >
-            {filtered.map((e) => {
+            {filtered.map((e, i) => {
               const s = styleFor(e.eventType);
               const active = selected?.id === e.id;
               // The factual event summary is the primary content of the list —
               // a diagnosis label never substitutes for the event itself.
               const headline = e.summary || e.procedure || e.imagingFindings || e.diagnosis || "";
+              // Prior-history band: care predating the injury is retained (it
+              // is evidence) but presented in its own band, the way a
+              // physician reviewer separates history from the injury course.
+              const doi = data.dateOfInjury ? new Date(data.dateOfInjury).getTime() : null;
+              const isPrior = doi != null && new Date(e.eventDate).getTime() < doi;
+              const prevPrior = doi != null && i > 0 && new Date(filtered[i - 1].eventDate).getTime() < doi;
+              const bandLabel =
+                doi == null ? null
+                : i === 0 && isPrior ? "Prior medical history — before the date of injury"
+                : prevPrior && !isPrior ? "Date of injury forward"
+                : null;
               return (
                 <li key={e.id} data-ev={e.id}>
+                  {bandLabel && (
+                    <div className="my-2 flex items-center gap-2 px-1">
+                      <span className="h-px flex-1 bg-ink-200" />
+                      <span className="text-[11px] font-semibold uppercase tracking-wide text-ink-400">{bandLabel}</span>
+                      <span className="h-px flex-1 bg-ink-200" />
+                    </div>
+                  )}
                   <button
                     onClick={() => { setSelectedId(e.id); setMobileDetail(true); }}
                     aria-current={active ? "true" : undefined}
@@ -4160,7 +4178,15 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
     : st === "REVIEWED" ? ["Human-reviewed", "bg-sky-100 text-sky-800"]
     : st === "HUMAN_EDITED" || edited ? ["Human-edited", "bg-amber-100 text-amber-800"]
     : st === "STALE" ? ["Stale — source changed", "bg-red-100 text-red-700"]
+    : st === "AI_AUDIT_PASSED" ? ["AI draft — audit passed, pending review", "bg-teal-50 text-teal-700"]
     : ["AI draft — pending review", "bg-slate-100 text-slate-600"];
+
+  // Substance chip: whether this encounter is an episode of CARE (on the
+  // chronology) or record-keeping around it (visible here, off the timeline).
+  const substanceChip = (cls: string | null) =>
+    cls === "ADMINISTRATIVE" ? ["Administrative — not on chronology", "bg-zinc-100 text-zinc-600"]
+    : cls === "ANCILLARY" ? ["Ancillary — not on chronology", "bg-indigo-50 text-indigo-700"]
+    : ["Clinical", "bg-emerald-50 text-emerald-700"];
 
   return (
     <div className="mt-2 rounded-md border border-ink-100 bg-ink-50/40 p-2.5">
@@ -4171,6 +4197,7 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
       {ex.error && <p className="mt-1 text-[11px] text-red-700">{ex.error}</p>}
       {encounters.map((e) => {
         const [lbl, cls] = encStatus(e.status, false);
+        const [subLbl, subCls] = substanceChip(e.substanceClass ?? null);
         return (
           <div key={e.id} className="mt-2 rounded border border-ink-100 bg-white p-2">
             <div className="flex flex-wrap items-center gap-2 text-[11px]">
@@ -4179,8 +4206,26 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
               </span>
               {e.provider && <span className="text-ink-600">{e.provider}{e.providerCredentials ? `, ${e.providerCredentials}` : ""}</span>}
               {e.facility && <span className="text-ink-500">{e.facility}</span>}
-              <span className={cn("ml-auto rounded-full px-2 py-0.5 font-medium", cls)}>{lbl}</span>
+              <span className={cn("ml-auto rounded-full px-2 py-0.5 font-medium", subCls)}>{subLbl}</span>
+              <span className={cn("rounded-full px-2 py-0.5 font-medium", cls)}>{lbl}</span>
             </div>
+            {e.substanceClass && e.substanceClass !== "CLINICAL" && e.substanceReason && (
+              <p className="mt-0.5 text-[11px] text-ink-500">{e.substanceReason}</p>
+            )}
+            {canVerify && (
+              <div className="mt-1 flex items-center gap-1.5 text-[11px]">
+                <span className="text-ink-400">Classification:</span>
+                <select
+                  className="input w-auto py-0 text-[11px]"
+                  value={e.substanceClass ?? "CLINICAL"}
+                  onChange={(ev) => act(e.id, "PATCH", { substanceClass: ev.target.value })}
+                >
+                  <option value="CLINICAL">Clinical — on chronology</option>
+                  <option value="ANCILLARY">Ancillary — records only</option>
+                  <option value="ADMINISTRATIVE">Administrative — records only</option>
+                </select>
+              </div>
+            )}
             {editingEnc === e.id ? (
               <div className="mt-1.5 flex gap-2">
                 <textarea className="input w-full py-1 text-xs" rows={2} value={draftSummary} onChange={(ev) => setDraftSummary(ev.target.value)} />

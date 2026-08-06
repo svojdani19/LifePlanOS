@@ -18,7 +18,8 @@ import { enqueueExtraction } from "@/lib/documents/extractionRun";
 import { Prisma } from "@/generated/prisma";
 import type { DocumentType } from "@/generated/prisma";
 
-export const MAX_TEXT = 4_000_000; // chars persisted per document (~2,000 pages of dense chart text)
+import { MAX_TEXT } from "@/lib/documents/textLimits";
+export { MAX_TEXT };
 
 interface Job {
   documentId: string;

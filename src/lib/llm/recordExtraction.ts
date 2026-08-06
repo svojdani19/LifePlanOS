@@ -72,8 +72,14 @@ export interface DocumentChunk extends DocumentChunkMeta {
 // model can read: a dense 7k-char chunk of a real chart yields more structured
 // JSON than one response can hold, and a truncated response is a failed run.
 const CHUNK_TARGET = 4_500; // chars
-export const MAX_CHUNKS = 60; // hard bound; beyond this the run is disclosed as truncated
 export const MAX_OUTPUT_TOKENS = 16_000;
+
+// There is deliberately NO cap on the number of chunks per document: a record
+// review must read the whole record, and a 600-page chart is 600 pages of
+// evidence, not a nuisance to sample. Runaway input is bounded upstream —
+// persisted text is clipped (and flagged) at MAX_TEXT in the OCR layer, which
+// caps the worst case near ~900 chunks. Truncation now means exactly one
+// thing: the SOURCE text itself was clipped at that storage cap.
 
 export function fingerprint(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
@@ -167,8 +173,10 @@ export function chunkDocumentText(text: string, marks: PageMark[], meta: Documen
     c.contentHash = fingerprint(c.text);
   }
 
-  const truncated = chunks.length > MAX_CHUNKS;
-  return { chunks: chunks.slice(0, MAX_CHUNKS), truncated };
+  // Every chunk is returned; `truncated` reflects only whether the SOURCE text
+  // arrived already clipped at the storage cap (decided by the caller, which
+  // knows the raw length — the chunker sees only what it was given).
+  return { chunks, truncated: false };
 }
 
 /** Labeled service-date lines, most specific first. */

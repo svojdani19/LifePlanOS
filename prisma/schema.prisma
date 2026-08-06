@@ -579,6 +579,7 @@ enum RecommendationOrigin {
   TEMPLATE_CONDITION // matched condition bucket in the care library
   TEMPLATE_BASELINE // baseline add-on templates
   TEMPLATE_SPECIALTY // specialty fallback pack
+  RECORD_RECOMMENDED // mined from a documented treating-provider recommendation
   PHYSICIAN_ADDED // authored by a reviewing physician
   PLANNER_ADDED // authored manually by a planner/case team member
   GOLD_IMPORT // imported from a reference/gold case
@@ -1848,6 +1849,11 @@ model ExtractedEncounter {
   encounterDateEnd DateTime?
   // Verbatim date text as it appeared in the record, for reviewer comparison.
   dateSourceText   String?
+  // CLINICAL | ANCILLARY | ADMINISTRATIVE — deterministic substance class
+  // computed from the validated claims; only CLINICAL enters the chronology.
+  // substanceReason is the reviewable explanation for any exclusion.
+  substanceClass   String?
+  substanceReason  String?
   provider            String?
   providerCredentials String?
   facility            String?

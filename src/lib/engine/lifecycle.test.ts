@@ -75,3 +75,25 @@ describe("lifecycle mapping", () => {
     expect(lifecycleFor("APPROVED", { superseded: true })).toBe("SUPERSEDED");
   });
 });
+
+describe("authored origins survive regeneration", () => {
+  const prior = (over: Record<string, unknown>) => ({
+    id: "i1", service: "Svc", lineageId: "l1", version: 1,
+    physicianStatus: "PENDING", edited: false, lifecycleStatus: "ACTIVE", ...over,
+  }) as never;
+
+  it("gold-import, physician-added and planner-added items are retained untouched", () => {
+    for (const origin of ["GOLD_IMPORT", "PHYSICIAN_ADDED", "PLANNER_ADDED"]) {
+      const plan = planRegeneration([prior({ id: origin, origin })]);
+      expect(plan.retain.map((r) => r.id), origin).toEqual([origin]);
+      expect(plan.deleteIds).toEqual([]);
+      expect(plan.supersede).toEqual([]);
+    }
+  });
+
+  it("template drafts still regenerate normally", () => {
+    const plan = planRegeneration([prior({ origin: "TEMPLATE_CONDITION" })]);
+    expect(plan.deleteIds).toEqual(["i1"]);
+    expect(plan.retain).toEqual([]);
+  });
+});

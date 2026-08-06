@@ -70,12 +70,22 @@ export interface PriorItem {
   physicianNote?: string | null;
   edited?: boolean;
   lifecycleStatus: string;
+  origin?: string;
 }
+
+/**
+ * Origins a regeneration never touches: content a human (or a reference plan
+ * standing in for one) authored deliberately. Templates and record-mined
+ * drafts regenerate; authored items persist as-is.
+ */
+export const AUTHORED_ORIGINS = new Set(["GOLD_IMPORT", "PHYSICIAN_ADDED", "PLANNER_ADDED"]);
 export interface RegenPlan {
   /** prior item ids safe to hard-delete (no review history) */
   deleteIds: string[];
   /** prior items to preserve as superseded versions */
   supersede: PriorItem[];
+  /** authored items retained untouched (gold-import / physician / planner) */
+  retain: PriorItem[];
   /** for a new item's service: the lineage it continues (or none) */
   lineageForService: Map<string, { lineageId: string; version: number; priorId: string }>;
 }
@@ -89,8 +99,14 @@ export interface RegenPlan {
 export function planRegeneration(prior: PriorItem[]): RegenPlan {
   const deleteIds: string[] = [];
   const supersede: PriorItem[] = [];
+  const retain: PriorItem[] = [];
   const lineageForService = new Map<string, { lineageId: string; version: number; priorId: string }>();
   for (const it of prior) {
+    if (AUTHORED_ORIGINS.has(it.origin ?? "")) {
+      // Authored content is not the generator's to replace or version.
+      retain.push(it);
+      continue;
+    }
     if (hasReviewHistory(it)) {
       supersede.push(it);
       const key = it.service.trim().toLowerCase();
@@ -101,5 +117,5 @@ export function planRegeneration(prior: PriorItem[]): RegenPlan {
       deleteIds.push(it.id);
     }
   }
-  return { deleteIds, supersede, lineageForService };
+  return { deleteIds, supersede, retain, lineageForService };
 }

@@ -14,7 +14,6 @@ import {
   dateAppearsOutsideArtifactContext,
   lastServiceDateHeader,
   repairJsonEscapes,
-  MAX_CHUNKS,
   fingerprint,
   ExtractionOutputError,
   type DocumentChunk,
@@ -300,20 +299,25 @@ describe("synthesis grounding", () => {
 });
 
 describe("processing bounds and unknown dates", () => {
-  it("a document beyond the chunk bound is truncated AND disclosed — never silently partial", () => {
+  it("a document of ANY size is fully chunked — there is no processing bound", () => {
     const bigPage = "Clinical content line.\n".repeat(400); // ~8.8k chars/page
     const pages: string[] = [];
     const marks: { offset: number; page: number }[] = [];
     let offset = 0;
-    for (let i = 1; i <= MAX_CHUNKS + 5; i++) {
+    for (let i = 1; i <= 200; i++) {
       const header = `--- Page ${i} ---\n`;
       marks.push({ offset, page: i });
       pages.push(header + bigPage);
       offset += header.length + bigPage.length;
     }
-    const { chunks, truncated } = chunkDocumentText(pages.join(""), marks, META);
-    expect(truncated).toBe(true);
-    expect(chunks.length).toBeLessThanOrEqual(MAX_CHUNKS);
+    const text = pages.join("");
+    const { chunks, truncated } = chunkDocumentText(text, marks, META);
+    expect(truncated).toBe(false); // truncation now means ONLY a clipped source
+    // Every character of every page is inside some chunk.
+    const covered = chunks.reduce((s, c) => s + (c.offsetEnd - c.offsetStart), 0);
+    expect(covered).toBe(text.length);
+    const lastPages = new Set(chunks.flatMap((c) => c.pageSlices.map((p) => p.page)));
+    expect(lastPages.has(200)).toBe(true); // the final page is reachable
   });
 
   it("an UNKNOWN-date encounter is accepted with a NULL date for the undated review group", () => {

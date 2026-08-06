@@ -3,11 +3,19 @@ import { packFor, type CareTemplate } from "@/lib/engine/specialty";
 import { CONDITION_CARE, BASELINE_CARE, resolveConditionKeys } from "@/lib/engine/careLibrary";
 import { project, type CaseAssumptions } from "@/lib/engine/cost";
 import { buildChronologyFromRecords, handleEmptyChronology } from "@/lib/engine/chronology";
+import { baselineLifeExpectancy, composeBasis, type BasisSex } from "@/lib/engine/lifeExpectancy";
+import {
+  loadRecordCareSupport,
+  gateTemplateItem,
+  documentedMedications,
+  mineRecommendedItems,
+  citedRationale,
+} from "@/lib/engine/careGrounding";
 import { locateConditionEvidence } from "@/lib/engine/evidence";
 import { generateStandardOfCare } from "@/lib/engine/standardOfCare";
 import { mapRecommendationToCondition, type CondInput } from "@/lib/engine/integrity";
 import { planRegeneration } from "@/lib/engine/lifecycle";
-import { baselineLifeExpectancy } from "@/lib/engine/lifeExpectancy";
+import { servicesMatch } from "@/lib/engine/goldStandard";
 import { resolveUnitCost } from "@/lib/references/pricingProvider";
 import { applyPriors, priorProvenanceNote, scopeKeyOf } from "@/lib/engine/learning";
 import { rebuildEvidenceGraph } from "@/lib/engine/evidenceGraph";
@@ -81,6 +89,18 @@ export interface PlanResult {
 
 export async function generatePlan(caseId: string, actor?: { userId?: string; role?: string }): Promise<PlanResult> {
   const c = await prisma.case.findUniqueOrThrow({ where: { id: caseId } });
+  // Life expectancy: when unset and DOB + sex are documented, the SSA period
+  // life table supplies the actuarial baseline — persisted with its basis so
+  // every projection runs against a sourced figure instead of a default. A
+  // physician-set value is never overwritten.
+  if (c.lifeExpectancyYears == null && c.dateOfBirth) {
+    const ageYears = (Date.now() - c.dateOfBirth.getTime()) / (365.25 * 24 * 3600 * 1000);
+    const sexBasis: BasisSex = c.sex === "MALE" || c.sex === "FEMALE" ? c.sex : "UNKNOWN";
+    const baseline = baselineLifeExpectancy(ageYears, sexBasis);
+    const basis = composeBasis(baseline, [], "Set automatically at plan generation from the actuarial baseline; adjustable on physician review.");
+    await prisma.case.update({ where: { id: caseId }, data: { lifeExpectancyYears: baseline.years, lifeExpectancyBasis: basis as never } });
+    c.lifeExpectancyYears = baseline.years;
+  }
   const a = assumptionsFor(c);
   const pack = packFor(c.injurySpecialty, c.diagnosis);
   const anchor = c.dateOfInjury ?? c.createdAt;
@@ -90,7 +110,7 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
   // actions preserved verbatim); only untouched AI drafts are replaced.
   const priorItems = await prisma.futureCareItem.findMany({
     where: { caseId, supersededAt: null },
-    select: { id: true, service: true, lineageId: true, version: true, physicianStatus: true, physicianNote: true, edited: true, lifecycleStatus: true },
+    select: { id: true, service: true, lineageId: true, version: true, physicianStatus: true, physicianNote: true, edited: true, lifecycleStatus: true, origin: true },
   });
   const regen = planRegeneration(priorItems);
   const now = new Date();
@@ -101,7 +121,10 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
       ? [prisma.futureCareItem.updateMany({ where: { caseId, id: { in: regen.supersede.map((i) => i.id) } }, data: { supersededAt: now, lifecycleStatus: "SUPERSEDED" } })]
       : []),
     prisma.condition.deleteMany({ where: { caseId } }),
-    prisma.chronologyEvent.deleteMany({ where: { caseId } }),
+    // Chronology is NOT wiped here: buildChronologyFromRecords performs its
+    // own preservation-aware swap (human-edited/reviewed/verified events
+    // survive; only AI drafts are replaced). A blanket delete would destroy
+    // reviewer work on every pipeline run.
   ]);
   // Ledger: one supersession transition per preserved item (P2.R1 §4).
   if (regen.supersede.length) {
@@ -173,9 +196,10 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
   let care: CareTemplate[] = [];
   // Provenance: record which generator path + template rule supplies each
   // service so every item carries a persistent origin classification.
-  const originOf = new Map<string, { origin: "TEMPLATE_CONDITION" | "TEMPLATE_BASELINE" | "TEMPLATE_SPECIALTY"; conditionKey: string | null; templateRuleId: string }>();
+  type ItemOrigin = "TEMPLATE_CONDITION" | "TEMPLATE_BASELINE" | "TEMPLATE_SPECIALTY" | "RECORD_RECOMMENDED";
+  const originOf = new Map<string, { origin: ItemOrigin; conditionKey: string | null; templateRuleId: string }>();
   const ruleId = (scope: string, svc: string) => `${scope}:${svc.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
-  const tagOrigin = (t: CareTemplate, origin: "TEMPLATE_CONDITION" | "TEMPLATE_BASELINE" | "TEMPLATE_SPECIALTY", conditionKey: string | null, scope: string) => {
+  const tagOrigin = (t: CareTemplate, origin: ItemOrigin, conditionKey: string | null, scope: string) => {
     const key = t.service.trim().toLowerCase();
     if (!originOf.has(key)) originOf.set(key, { origin, conditionKey, templateRuleId: ruleId(scope, t.service) });
   };
@@ -195,13 +219,104 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
     arr.push({ field: lp.field, learnedValue: lp.learnedValue, sampleSize: lp.sampleSize });
     priorsByScope.set(lp.scopeKey, arr);
   }
-  const seenService = new Set<string>();
-  const careItems = care.filter((t) => {
-    const k = t.service.trim().toLowerCase();
-    if (seenService.has(k)) return false;
-    seenService.add(k);
+  // Dedupe is SEMANTIC, not string-exact: "Pain management office visits" and
+  // "Chronic pain management visits" are one service, and a template must
+  // never duplicate an item a human (or an imported reference plan) authored.
+  const retainedServices = regen.retain.map((r) => r.service);
+  const kept: CareTemplate[] = [];
+  const deduped = care.filter((t) => {
+    if (retainedServices.some((svc) => servicesMatch(svc, t.service))) return false;
+    if (kept.some((k) => k.category === t.category && servicesMatch(k.service, t.service))) return false;
+    kept.push(t);
     return true;
   });
+
+  // ── Record grounding ───────────────────────────────────────────────────────
+  // The draft plan is held to the record standard the rest of the pipeline
+  // lives by. Catastrophic-tier template items need documented functional
+  // dependence; surgical projections need a documented recommendation on the
+  // same anatomy; the flat medication bundle yields to per-drug items built
+  // from the documented regimen; and treating-provider recommendations become
+  // cited draft items in their own right. Everything suppressed is disclosed
+  // for review — a physician can add any of it back, attributed as their own.
+  const support = await loadRecordCareSupport(caseId, c.dateOfInjury);
+  const suppressed: { service: string; reason: string }[] = [];
+  const firstPass: CareTemplate[] = [];
+  for (const t of deduped) {
+    const gate = gateTemplateItem(t, support);
+    if (!gate.allowed) {
+      suppressed.push({ service: t.service, reason: gate.reason ?? "no record support" });
+      continue;
+    }
+    if (gate.citation) {
+      t.rationale = `${t.rationale} ${citedRationale("Grounded in documented recommendation", gate.citation)}`;
+    }
+    firstPass.push(t);
+  }
+  // Second pass: derivative surgical projections stand only on a SURVIVING
+  // primary. Revision surgery and complication management project the
+  // sequelae of an operation — when the operation itself lacked support and
+  // was suppressed, its sequelae have nothing to be sequelae OF.
+  const survivingPrimary = firstPass.some((t) => ["FUTURE_SURGERY", "ORTHOPEDIC_SURGERY", "NEUROSURGERY"].includes(t.category));
+  const gated: CareTemplate[] = [];
+  for (const t of firstPass) {
+    if (["REVISION_SURGERY", "COMPLICATION_MANAGEMENT"].includes(t.category) && !survivingPrimary) {
+      suppressed.push({ service: t.service, reason: "Projects the sequelae of a surgery that is itself not supported in the records." });
+      continue;
+    }
+    gated.push(t);
+  }
+
+  const meds = documentedMedications(support.medications);
+  let careItems: CareTemplate[];
+  if (meds.length) {
+    // The documented regimen replaces every template medication bundle.
+    for (const t of gated.filter((x) => x.category === "MEDICATION")) {
+      suppressed.push({ service: t.service, reason: "Replaced by the documented medication regimen (per-drug items below)." });
+    }
+    careItems = gated.filter((t) => t.category !== "MEDICATION");
+    for (const med of meds) {
+      const template: CareTemplate = {
+        category: "MEDICATION",
+        service: `${med.drug} (documented medication)`,
+        specialty: "Pharmacy",
+        rationale: citedRationale(`Documented on ${med.occurrences} occasions`, med.citation),
+        probability: "PROBABLE",
+        frequencyPerYear: 1,
+        isLifetime: true,
+        unitCost: 300,
+        evidenceStrength: "Documented in the treating records",
+        literatureSupport: "Continuation of a documented regimen.",
+        defenseVulnerability: "LOW",
+        confidence: 80,
+      };
+      careItems.push(template);
+      tagOrigin(template, "RECORD_RECOMMENDED", null, "documented-medication");
+    }
+  } else {
+    careItems = gated;
+  }
+
+  // Treating-provider recommendations not already covered by a surviving item.
+  for (const mined of mineRecommendedItems(support.recommendations, careItems.map((t) => t.service))) {
+    const template: CareTemplate = {
+      category: mined.category as CareTemplate["category"],
+      service: mined.service,
+      specialty: mined.specialty,
+      rationale: citedRationale("Documented treating-provider recommendation", mined.citation),
+      probability: "PROBABLE",
+      frequencyPerYear: mined.frequencyPerYear,
+      durationYears: mined.durationYears,
+      isLifetime: mined.isLifetime,
+      unitCost: mined.unitCost,
+      evidenceStrength: "Documented treating-provider recommendation",
+      literatureSupport: "Recommended in the treating records; pricing requires verification.",
+      defenseVulnerability: "LOW",
+      confidence: 75,
+    };
+    careItems.push(template);
+    tagOrigin(template, "RECORD_RECOMMENDED", null, "record-recommendation");
+  }
 
   // Chronology — records are screened for relevance; only pivotal events and
   // those bearing on a diagnosis or anticipated future-care item go on the
@@ -288,6 +403,31 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
     if (lineage) {
       await prisma.futureCareItem.update({ where: { id: lineage.priorId }, data: { supersededById: created.id } });
     }
+  }
+
+  // Disclose what the record standard kept OUT of the draft. Suppression is
+  // never silent: the planner sees exactly which template services lacked
+  // support and why, and a physician can author any of them deliberately.
+  if (suppressed.length) {
+    const existing = await prisma.attentionItem.findFirst({
+      where: { caseId, validationRuleId: "futurecare.unsupported-template", status: { not: "RESOLVED" } },
+    });
+    const summary =
+      `${suppressed.length} template care item(s) were not drafted for lack of record support: ` +
+      suppressed.map((s) => s.service).join("; ").slice(0, 900) + ".";
+    const data = {
+      caseId,
+      firmId: c.firmId,
+      category: "futurecare_unsupported",
+      severity: "MODERATE" as const,
+      title: "Template care suppressed for lack of record support",
+      summary,
+      whyItMatters: "Care items that no documented finding or recommendation supports inflate the draft and do not survive scrutiny.",
+      suggestedAction: "Review the suppressed services; a physician may add any that clinical judgment supports, attributed as physician-added.",
+      validationRuleId: "futurecare.unsupported-template",
+    };
+    if (existing) await prisma.attentionItem.update({ where: { id: existing.id }, data: { summary: data.summary } }).catch(() => {});
+    else await prisma.attentionItem.create({ data }).catch(() => {});
   }
 
   await generateReviews(caseId);

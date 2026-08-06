@@ -116,6 +116,13 @@ export const CONDITION_CARE: Record<ConditionKey, CareTemplate[]> = {
     item({ category: "INJECTION", service: "Intra-articular knee injections", specialty: "Orthopedics", rationale: "Corticosteroid / viscosupplementation for symptom control.", cptCode: "20610", frequencyPerYear: 2, isLifetime: true, unitCost: 850, probability: "POSSIBLE", confidence: 62 }),
     item({ category: "IMAGING", service: "Implant surveillance radiographs", specialty: "Orthopedics", rationale: "Monitoring for loosening / wear.", frequencyPerYear: 0.5, isLifetime: true, unitCost: 250 }),
     item({ category: "DME", service: "Knee brace & assistive devices", specialty: "Orthopedics", rationale: "Support and mobility aids.", frequencyPerYear: 0.3, isLifetime: true, unitCost: 600 }),
+    // Modalities a physician planner routinely carries for symptomatic
+    // post-traumatic knees that the library previously never proposed
+    // (measured against a physician-authored reference plan).
+    item({ category: "INJECTION", service: "Platelet-rich plasma (PRP) injection series", specialty: "Orthopedics", rationale: "Biologic option for symptomatic post-traumatic degeneration.", cptCode: "P9020", frequencyPerYear: 2, durationYears: 3, unitCost: 1000, probability: "POSSIBLE", evidenceStrength: REG, defenseVulnerability: "MODERATE", confidence: 58 }),
+    item({ category: "INJECTION", service: "Viscosupplementation injection series", specialty: "Orthopedics", rationale: "Hyaluronic-acid series for symptomatic knee arthritis.", cptCode: "99070", frequencyPerYear: 2, durationYears: 3, unitCost: 1605, probability: "POSSIBLE", confidence: 60 }),
+    item({ category: "IMAGING", service: "Knee MRI (interval reassessment)", specialty: "Radiology", rationale: "Reassessment of internal derangement / progression.", cptCode: "73721", frequencyPerYear: 0.2, isLifetime: true, unitCost: 2643, probability: "POSSIBLE", confidence: 62 }),
+    item({ category: "DME", service: "Custom-fitted knee brace (periodic replacement)", specialty: "Orthopedics", rationale: "Unloader/support bracing with periodic replacement.", frequencyPerYear: 0.15, isLifetime: true, unitCost: 1200, probability: "POSSIBLE", confidence: 60 }),
   ],
   HIP: [
     item({ category: "SPECIALIST_VISIT", service: "Orthopedic follow-up visits", specialty: "Orthopedic Surgery", rationale: "Surveillance of post-traumatic hip arthritis.", frequencyPerYear: 2, isLifetime: true, unitCost: 261 }),
@@ -171,6 +178,11 @@ export const CONDITION_CARE: Record<ConditionKey, CareTemplate[]> = {
 export const BASELINE_CARE: CareTemplate[] = [
   item({ category: "PRIMARY_CARE", service: "Primary care coordination visits", specialty: "Family Medicine", rationale: "Ongoing management of injury-related comorbidities and medication oversight.", frequencyPerYear: 2, isLifetime: true, unitCost: 195, confidence: 78 }),
   item({ category: "CASE_MANAGEMENT", service: "RN medical case management", specialty: "Nurse Case Manager", rationale: "Coordination of complex multi-provider care.", frequencyPerYear: 1, durationYears: 5, unitCost: 4800, probability: "POSSIBLE", evidenceStrength: CASE, defenseVulnerability: "MODERATE", confidence: 55, lowerCostAlternative: "Intermittent coordination via treating provider staff." }),
+  // Chronic-pharmacotherapy monitoring and a one-time neuropsychological
+  // baseline: modalities a physician planner routinely carries for chronic
+  // pain that the library previously never proposed.
+  item({ category: "LABS", service: "Comprehensive metabolic profile (medication monitoring)", specialty: "Laboratory", rationale: "Renal/hepatic monitoring under chronic NSAID and analgesic use.", cptCode: "80053", frequencyPerYear: 4, isLifetime: true, unitCost: 28, confidence: 72 }),
+  item({ category: "PSYCH", service: "Neuropsychological evaluation (comprehensive)", specialty: "Neuropsychology", rationale: "Baseline evaluation of cognitive and mood impact of chronic pain.", frequencyPerYear: 1, durationYears: 1, unitCost: 3340, probability: "POSSIBLE", evidenceStrength: CASE, defenseVulnerability: "MODERATE", confidence: 58 }),
 ];
 
 const KEYWORDS: Record<ConditionKey, RegExp> = {

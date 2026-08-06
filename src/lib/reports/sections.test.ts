@@ -347,13 +347,11 @@ describe("Medical Record Summary — factual content only", () => {
     const doc = def.compose(data, { detail: "detailed" }, buildFindings(), {});
     const headers = doc.blocks.filter((b) => b.kind === "h1").map((b) => ("text" in b ? b.text : ""));
     for (const h of [
-      "Records Reviewed",
+      "Medical Records Reviewed",
       "Processing and OCR Limitations",
-      "Diagnoses Documented in the Records",
-      "Chronological Clinical Course",
-      "Imaging",
-      "Procedures",
-      "Treatment History",
+      "Treating Providers' Diagnoses",
+      "Treatment and Encounters",
+      "Diagnostic Studies",
       "Medication History",
       "Contradictory or Adverse Evidence",
       "Undated or Incompletely Processed Material",

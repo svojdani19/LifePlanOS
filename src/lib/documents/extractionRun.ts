@@ -19,6 +19,8 @@
 
 import { prisma } from "@/lib/db";
 import { pageMarks } from "@/lib/documents/meta";
+import { segmentEncounters } from "@/lib/engine/chronology";
+import { MAX_TEXT } from "@/lib/documents/textLimits";
 import { stripChartFurniture } from "@/lib/documents/chartStructure";
 import {
   chunkDocumentText,
@@ -39,6 +41,7 @@ import { fetchExemplarGuidance } from "@/lib/llm/correctionExemplars";
 import { runCritic, adjudicateDisputes, applyAdjudications, isDisputing } from "@/lib/llm/extractionCritic";
 import { auditFactualRecord, type AuditEncounter } from "@/lib/llm/factualAudit";
 import { encounterContentHash } from "@/lib/records/verifiedContent";
+import { classifyEncounterSubstance } from "@/lib/records/encounterSubstance";
 import { LlmConfigError } from "@/lib/llm";
 
 /**
@@ -92,13 +95,17 @@ export async function processDocumentExtraction(documentId: string, opts: Extrac
   }
 
   const marks = pageMarks(text);
-  const { chunks, truncated } = chunkDocumentText(text, marks, {
+  const { chunks } = chunkDocumentText(text, marks, {
     firmId: doc.firmId,
     caseId: doc.caseId,
     sourceDocumentId: doc.id,
     filename: doc.filename,
     ocrConfidence: doc.ocrConfidence ?? null,
   });
+  // "Truncated" means one thing now: the source text itself arrived clipped at
+  // the storage cap. There is no processing bound — every chunk of every
+  // document is read, however large the record.
+  const truncated = rawText.length >= MAX_TEXT;
 
   const exemplarGuidance = opts.exemplarGuidance ?? (await fetchExemplarGuidance(doc.firmId, doc.type).catch(() => []));
 
@@ -108,64 +115,168 @@ export async function processDocumentExtraction(documentId: string, opts: Extrac
   // by an adjudicator against the source or left unresolved — and unresolved
   // means the audit refuses to call the result complete, rather than the
   // pipeline quietly picking a side.
-  const validated: ValidatedEncounter[] = [];
-  const rejects: string[] = [];
-  const criticFindings: string[] = [];
-  let candidateCount = 0;
-  let disputedCount = 0;
-  let adjudicatedCount = 0;
-  let unresolvedDisputes = 0;
-  try {
-    for (const chunk of chunks) {
-      let encounters = await extractEncountersFromChunk(chunk, { provider: opts.provider, exemplarGuidance });
-      candidateCount += encounters.reduce((s, e) => s + e.claims.length, 0);
+  //
+  // Fault containment: on a large record, one chunk's transient failure must
+  // not discard hundreds of good chunks. Provider errors retry with backoff;
+  // a chunk that still fails is recorded as an UNPROCESSED SECTION with its
+  // page range — disclosed, counted, and fatal to the audit's notion of
+  // completeness, but never fatal to the rest of the document. Only a
+  // configuration error (no provider) or every chunk failing fails the run.
+  type ChunkResult = {
+    accepted: ValidatedEncounter[];
+    rejected: string[];
+    critic: string[];
+    candidates: number;
+    disputed: number;
+    adjudicated: number;
+    unresolved: number;
+  };
+  const results: (ChunkResult | { failed: string })[] = new Array(chunks.length);
 
-      if (criticEnabled() && encounters.length) {
-        const critique = await runCritic(chunk, encounters, { provider: opts.provider });
-        rejects.push(...critique.rejected);
-        for (const issue of critique.issues) {
-          // Omissions and boundary problems are reported for human attention;
-          // they cannot be auto-corrected without inventing content.
-          criticFindings.push(`${issue.type}: ${issue.detail}`);
-        }
-        const disputes = critique.issues.filter(isDisputing);
-        disputedCount += disputes.length;
-        if (disputes.length) {
-          const rulings = await adjudicateDisputes(chunk, encounters, disputes, { provider: opts.provider });
-          const applied = applyAdjudications(encounters, rulings);
-          encounters = applied.encounters;
-          adjudicatedCount += rulings.filter((r) => r.ruling !== "UNRESOLVED").length;
-          unresolvedDisputes += applied.unresolved;
-          rejects.push(...applied.notes);
+  const TRANSIENT_RE = /overloaded|rate.?limit|429|5\d\d|timeout|timed out|ECONN|EPIPE|ENOTFOUND|fetch failed|socket|network/i;
+  const backoffs = [2_000, 8_000, 20_000];
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  const processChunk = async (chunk: (typeof chunks)[number]): Promise<ChunkResult> => {
+    let encounters = await extractEncountersFromChunk(chunk, { provider: opts.provider, exemplarGuidance });
+    const candidates = encounters.reduce((s, e) => s + e.claims.length, 0);
+    const rejected: string[] = [];
+    const critic: string[] = [];
+    let disputed = 0;
+    let adjudicated = 0;
+    let unresolved = 0;
+    if (criticEnabled() && encounters.length) {
+      const critique = await runCritic(chunk, encounters, { provider: opts.provider });
+      rejected.push(...critique.rejected);
+      for (const issue of critique.issues) {
+        // Omissions and boundary problems are reported for human attention;
+        // they cannot be auto-corrected without inventing content.
+        critic.push(`${issue.type}: ${issue.detail}`);
+      }
+      const disputes = critique.issues.filter(isDisputing);
+      disputed = disputes.length;
+      if (disputes.length) {
+        const rulings = await adjudicateDisputes(chunk, encounters, disputes, { provider: opts.provider });
+        const applied = applyAdjudications(encounters, rulings);
+        encounters = applied.encounters;
+        adjudicated = rulings.filter((r) => r.ruling !== "UNRESOLVED").length;
+        unresolved = applied.unresolved;
+        rejected.push(...applied.notes);
+      }
+    }
+    const outcome = validateEncounters(chunk, encounters);
+    rejected.push(...outcome.rejected);
+    return { accepted: outcome.accepted, rejected, critic, candidates, disputed, adjudicated, unresolved };
+  };
+
+  const concurrency = Math.max(1, Math.min(8, Number(process.env.RECORD_CHUNK_CONCURRENCY) || 3));
+  let configError: LlmConfigError | ExtractionOutputError | null = null;
+  let cursor = 0;
+  const worker = async () => {
+    for (;;) {
+      const i = cursor++;
+      if (i >= chunks.length || configError) return;
+      const chunk = chunks[i];
+      let lastErr: unknown;
+      for (let attempt = 0; attempt <= backoffs.length; attempt++) {
+        try {
+          results[i] = await processChunk(chunk);
+          lastErr = null;
+          break;
+        } catch (err) {
+          lastErr = err;
+          // A configuration problem affects every chunk equally — stop the run
+          // rather than failing 300 sections one by one.
+          if (err instanceof LlmConfigError) {
+            configError = err;
+            return;
+          }
+          const transient = TRANSIENT_RE.test(err instanceof Error ? err.message : String(err));
+          if (!transient || attempt === backoffs.length) break;
+          await sleep(backoffs[attempt]);
         }
       }
-
-      const outcome = validateEncounters(chunk, encounters);
-      validated.push(...outcome.accepted);
-      rejects.push(...outcome.rejected);
+      if (lastErr) {
+        const pages = chunk.pageStart != null ? `pages ${chunk.pageStart}–${chunk.pageEnd ?? chunk.pageStart}` : `section ${i + 1}`;
+        const reason = lastErr instanceof ExtractionOutputError ? lastErr.message.slice(0, 120) : "provider unavailable after retries";
+        results[i] = { failed: `Content covering ${pages} could not be processed (${reason}); it is not represented in this draft.` };
+      }
     }
-  } catch (err) {
-    const message =
-      err instanceof ExtractionOutputError || err instanceof LlmConfigError
-        ? err.message
-        : "Extraction failed unexpectedly; the document is queued for human review.";
+  };
+  await Promise.all(Array.from({ length: Math.min(concurrency, chunks.length) }, worker));
+
+  if (configError) {
     const run = await record("EXTRACTION_FAILED", {
       sourceFingerprint,
       truncated,
       chunkCount: chunks.length,
-      candidateCount,
-      rejectedCount: rejects.length,
-      warnings: rejects.slice(0, 40) as never,
+      error: (configError as Error).message,
+    });
+    return { extractionId: run.id, status: "EXTRACTION_FAILED", accepted: 0, rejected: 0, error: (configError as Error).message };
+  }
+
+  const validated: ValidatedEncounter[] = [];
+  const rejects: string[] = [];
+  const criticFindings: string[] = [];
+  const failedSections: string[] = [];
+  let candidateCount = 0;
+  let disputedCount = 0;
+  let adjudicatedCount = 0;
+  let unresolvedDisputes = 0;
+  for (const r of results) {
+    if (!r) continue;
+    if ("failed" in r) {
+      failedSections.push(r.failed);
+      continue;
+    }
+    validated.push(...r.accepted);
+    rejects.push(...r.rejected);
+    criticFindings.push(...r.critic);
+    candidateCount += r.candidates;
+    disputedCount += r.disputed;
+    adjudicatedCount += r.adjudicated;
+    unresolvedDisputes += r.unresolved;
+  }
+
+  // Every chunk failing is a document-level failure, not a partial result.
+  if (failedSections.length === chunks.length) {
+    const message = "No section of this document could be processed; the document is queued for human review.";
+    const run = await record("EXTRACTION_FAILED", {
+      sourceFingerprint,
+      truncated,
+      chunkCount: chunks.length,
+      warnings: failedSections.slice(0, 40) as never,
       error: message,
     });
     return { extractionId: run.id, status: "EXTRACTION_FAILED", accepted: 0, rejected: rejects.length, error: message };
+  }
+
+  // ── Recall cross-check ─────────────────────────────────────────────────────
+  // The deterministic segmenter finds dated note-headers with no model
+  // involved. Any header date for which extraction produced NO encounter is a
+  // silent recall gap made loud: two independent methods disagreeing about
+  // what the document contains is a review item, never a shrug. (This is the
+  // critic pattern applied to omissions.)
+  const coverageGaps: string[] = [];
+  try {
+    const headerDates = new Set(segmentEncounters(text, marks).map((s) => s.dateIso).filter(Boolean));
+    const extractedDates = new Set(validated.filter((v) => v.encounterDate).map((v) => v.encounterDate!.toISOString().slice(0, 10)));
+    for (const d of [...headerDates].sort()) {
+      if (!extractedDates.has(d)) {
+        coverageGaps.push(`Coverage check: a dated note header for ${d} appears in this document, but no encounter was extracted for that date; human review required.`);
+      }
+    }
+  } catch {
+    /* the cross-check is an auditor; its failure never blocks extraction */
   }
 
   const encounters = consolidateEncounters(validated);
   const { synthesis, warning: synthesisWarning } = await synthesizeDocumentSummary(encounters, { provider: opts.provider });
 
   const warnings = [
-    ...(truncated ? [`Document exceeds the processing bound — only the first ${chunks.length} sections were processed; the remainder requires human review.`] : []),
+    ...(truncated ? ["The source text was clipped at the storage cap during ingestion; content beyond it is not represented and requires human review."] : []),
+    ...failedSections,
+    ...coverageGaps,
     ...(synthesisWarning ? [synthesisWarning] : []),
     ...rejects.slice(0, 40),
   ];
@@ -196,6 +307,9 @@ export async function processDocumentExtraction(documentId: string, opts: Extrac
     encounters: auditEncounters,
     pages: pageRows.map((p) => ({ pageNumber: p.pageNumber, status: p.status, ocrConfidence: p.ocrConfidence })),
     failedExtractions: 0,
+    failedSections: failedSections.length,
+    coverageGaps: coverageGaps.length,
+    truncatedSource: truncated,
     unresolvedDisputes,
     allDocumentsProcessed: true,
   });
@@ -264,6 +378,12 @@ export async function processDocumentExtraction(documentId: string, opts: Extrac
         claims: e.claims as never,
         ocrConfidence: e.ocrConfidence,
         warnings: e.warnings as never,
+        // Substance class: paperwork and supporting logs stay off the
+        // chronology, with the reason recorded for the reviewer.
+        ...(() => {
+          const verdict = classifyEncounterSubstance({ encounterType: e.encounterType, factualSummary: renderFactualSummary(e), claims: e.claims });
+          return { substanceClass: verdict.class, substanceReason: verdict.reason };
+        })(),
         // A draft that survived the audit is marked as such; anything else
         // stays a plain AI_DRAFT and carries the reasons. Neither is verified —
         // an audit says the system found nothing wrong, which is not the same
