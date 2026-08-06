@@ -26,7 +26,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { prisma } from "@/lib/db";
-import { resolveTimeline, type Resolved, type TemporalFact } from "@/lib/engine/temporalResolution";
+import { resolveTimeline, anatomyKey, type Resolved, type TemporalFact } from "@/lib/engine/temporalResolution";
 import { statedQuantities } from "@/lib/engine/projectionProvenance";
 
 export interface CitedText {
@@ -360,7 +360,20 @@ const MINED_DEFAULTS: { re: RegExp; category: string; specialty: string; unitCos
   { re: /\b(?:fusion|discectomy|laminectomy|decompression|arthroplasty|replacement|arthroscop\w*|orif|kyphoplasty)\b|\bsurger/i, category: "FUTURE_SURGERY", specialty: "Surgery", unitCost: 45_000, frequencyPerYear: 1, durationYears: 0, isLifetime: false, label: (m) => m },
   { re: /\b(?:epidural|injection|nerve block|radiofrequency|ablation|facet)\b/i, category: "INJECTION", specialty: "Pain Management", unitCost: 3_200, frequencyPerYear: 2, durationYears: 3, isLifetime: false, label: (m) => m },
   { re: /\bfunctional restoration\b/i, category: "PAIN_MANAGEMENT", specialty: "Pain Management", unitCost: 30_000, frequencyPerYear: 1, durationYears: 0, isLifetime: false, label: () => "Functional restoration program" },
-  { re: /\b(?:physical therapy|occupational therapy|\bpt\b|rehab)/i, category: "PHYSICAL_THERAPY", specialty: "Rehabilitation", unitCost: 205, frequencyPerYear: 12, durationYears: 2, isLifetime: false, label: () => "Physical therapy (as recommended)" },
+  // Therapy is prescribed under many names. Matching only "physical therapy"
+  // discarded the real recommendations that carried explicit frequencies —
+  // active therapy, chiropractic care, traction — which are precisely the ones
+  // whose quantities the record states rather than the planner assuming them.
+  {
+    re: /\b(?:physical therapy|occupational therapy|active therapy|aquatic therapy|manual therapy|\bpt\/ot\b|\bpt\b|\bot\b|rehab\w*|chiropractic|traction|home health (?:services|care)|therapy)\b/i,
+    category: "PHYSICAL_THERAPY",
+    specialty: "Rehabilitation",
+    unitCost: 205,
+    frequencyPerYear: 12,
+    durationYears: 2,
+    isLifetime: false,
+    label: () => "Therapy (as recommended in the records)",
+  },
   { re: /\b(?:mri|ct scan|x-?ray|emg|ncv|imaging)\b/i, category: "IMAGING", specialty: "Radiology", unitCost: 1_800, frequencyPerYear: 1, durationYears: 1, isLifetime: false, label: (m) => m },
   { re: /\b(?:neuropsych|psycholog|psychiatr|counseling)\b/i, category: "PSYCH", specialty: "Behavioral Health", unitCost: 302, frequencyPerYear: 4, durationYears: 2, isLifetime: false, label: (m) => m },
 ];
@@ -372,52 +385,61 @@ const MINED_DEFAULTS: { re: RegExp; category: string; specialty: string; unitCos
  */
 export function mineRecommendedItems(recommendations: TimedCitation[], existingServices: string[]): MinedItem[] {
   const existing = existingServices.map(norm);
-  const out: MinedItem[] = [];
-  const seen = new Set<string>();
   const MAX_MINED = 12; // a draft, not an inventory — one item per category+anatomy
+  // One item per category+anatomy, but the WINNER is the best-evidenced note,
+  // not whichever came first. A note that states "twice weekly for 6 weeks"
+  // beats one that says "continue therapy", and among equals the most recent
+  // statement governs — otherwise a planning default silently displaces a
+  // quantity the records actually gave.
+  type Candidate = { rule: (typeof MINED_DEFAULTS)[number]; rec: TimedCitation; stated: ReturnType<typeof statedQuantities>; score: number };
+  const byKey = new Map<string, Candidate>();
   for (const rec of recommendations) {
-    if (out.length >= MAX_MINED) break;
     // Temporal resolution has already excluded contingencies ("if symptoms
     // persist"), care already delivered or declined, recommendations a later
     // note withdrew, pre-injury care, and anything undated. They stay visible
     // as documented recommendations; they do not become costed items.
+    // Whether the text recommends care, rather than merely mentioning it, is
+    // decided ONCE — by temporal resolution. A second, narrower verb list here
+    // silently re-filtered what that layer had already accepted, dropping
+    // "continue chiropractic care once a week" after it had been correctly
+    // resolved as ongoing care.
     if (!supportsCare(rec)) continue;
-    // The text must RECOMMEND care, not merely mention it: "stop taking OTC
-    // medications prior to surgery" mentions surgery and prescribes nothing.
-    if (!/\b(?:recommend\w*|advis\w*|candidate for|plan(?:ned)? (?:for|to)|will undergo|scheduled for|refer(?:red|ral)? (?:for|to)|prescrib\w*|order(?:ed)?\b|initiate)\b/i.test(rec.text)) continue;
     // A recommendation about PAPERWORK ("request the missing records",
     // "obtain outside imaging reports") is case administration, not care.
     if (/\b(?:request(?:ing)?\b[^.]{0,40}\brecords?|records? (?:request|be (?:obtained|requested))|obtain(?:ing)?\b[^.]{0,40}\b(?:records?|reports?)|missing records?)\b/i.test(rec.text)) continue;
     for (const rule of MINED_DEFAULTS) {
-      const m = rec.text.match(rule.re);
-      if (!m) continue;
-      const service = rule.label(rec.text.replace(/\s+/g, " ").trim().slice(0, 90));
+      if (!rule.re.test(rec.text)) continue;
       // ONE mined item per category + anatomy: five notes recommending the
       // same lumbar injection series are one recommendation, not five items.
-      const anatomy = [...tokensIn(rec.text, ANATOMY_TOKENS)].sort().join("-") || "general";
-      const key = `${rule.category}|${anatomy}`;
-      if (seen.has(key)) break;
+      const key = `${rule.category}|${anatomyKey(rec.text)}`;
       // Skip when a surviving template already covers this ground.
       const svcTokens = [...tokensIn(rec.text, [...SURGICAL_TOKENS, ...ANATOMY_TOKENS, "therapy", "injection", "mri", "restoration", "psych"])];
       if (existing.some((s) => svcTokens.filter((tok) => s.includes(tok)).length >= 2)) break;
-      seen.add(key);
       // Prefer the quantities the recommendation actually states ("twice
-      // weekly for 12 weeks") over the planning default, and record which of
-      // the two supplied each number.
+      // weekly for 12 weeks") over the planning default.
       const stated = statedQuantities(rec.text);
-      out.push({
-        category: rule.category,
-        service,
-        specialty: rule.specialty,
-        unitCost: rule.unitCost, // always a planning default; pricing is never stated in a note
-        frequencyPerYear: stated.frequencyPerYear ?? rule.frequencyPerYear,
-        durationYears: stated.durationYears ?? rule.durationYears,
-        isLifetime: rule.isLifetime,
-        citation: rec,
-        stated: { frequency: stated.frequencyPerYear !== undefined, duration: stated.durationYears !== undefined },
-      });
+      const score = (stated.frequencyPerYear !== undefined ? 2 : 0) + (stated.durationYears !== undefined ? 1 : 0);
+      const cur = byKey.get(key);
+      if (!cur || score > cur.score || (score === cur.score && (rec.date ?? "") > (cur.rec.date ?? ""))) {
+        byKey.set(key, { rule, rec, stated, score });
+      }
       break; // first matching rule wins for this recommendation
     }
+  }
+
+  const out: MinedItem[] = [];
+  for (const { rule, rec, stated } of [...byKey.values()].slice(0, MAX_MINED)) {
+    out.push({
+      category: rule.category,
+      service: rule.label(rec.text.replace(/\s+/g, " ").trim().slice(0, 90)),
+      specialty: rule.specialty,
+      unitCost: rule.unitCost, // always a planning default; pricing is never stated in a note
+      frequencyPerYear: stated.frequencyPerYear ?? rule.frequencyPerYear,
+      durationYears: stated.durationYears ?? rule.durationYears,
+      isLifetime: rule.isLifetime,
+      citation: rec,
+      stated: { frequency: stated.frequencyPerYear !== undefined, duration: stated.durationYears !== undefined },
+    });
   }
   return out;
 }

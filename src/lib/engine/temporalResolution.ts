@@ -79,15 +79,24 @@ const CANCELLED_RE =
 
 /** Contingent on something that may never happen. */
 const CONDITIONAL_RE =
-  /^\s*(?:if|should)\b|\b(?:if (?:needed|indicated|necessary|conservative (?:care|treatment) fails|symptoms persist|he|she|they|the patient)|as needed only|prn only|possible option|may be (?:considered|an option)|might (?:be )?(?:need|require|consider)|in the event|would be a candidate|consider(?:ation of)? (?:future|possible)|potentially|contingent (?:up)?on|pending (?:insurance|authorization|approval))\b/i;
+  /^\s*(?:if|should)\b|\b(?:if (?:needed|indicated|necessary|conservative (?:care|treatment) fails|symptoms persist|he|she|they|the patient)|as needed only|prn only|possible option|may be (?:considered|an option)|might (?:be )?(?:need|require|consider)|in the event|would be a candidate|consider(?:ation of)? (?:future|possible)|potentially|contingent (?:up)?on|pending (?:insurance|authorization|approval)|if applicable|as clinically indicated)\b/i;
 
 /** Already delivered. */
 const COMPLETED_RE =
   /\b(?:s\/p|status[- ]post|underwent|was performed|were performed|has (?:had|undergone|completed)|had (?:a |an )?(?:successful )?(?:surgery|operation|fusion|discectomy|laminectomy|arthroplasty|replacement|repair|injection)|completed (?:a )?(?:course|series|program)|post[- ]?operative day|previously (?:had|underwent|received)|history of (?:surgery|fusion|arthroplasty))\b/i;
 
-/** Intended and still owed. */
+/**
+ * Intended and still owed.
+ *
+ * The verb list is drawn from how treating physicians actually write, not from
+ * how a specification imagines they do. Measured against a real record set, a
+ * list built only around "recommend/order/refer" discarded a medial-branch-block
+ * series ("proceed with…"), home health PT/OT ("would benefit from…"), cardiac
+ * rehab ("suggest…"), and a therapy prescription stated purely as a frequency
+ * ("Frequency and duration of treatment: two times a week for 6 weeks").
+ */
 const PLANNED_RE =
-  /\b(?:recommend\w*|advis\w*|candidate for|plan(?:ned|s)? (?:for|to|on)|will (?:undergo|need|require|proceed)|scheduled (?:for|to)|refer(?:red|ral)? (?:for|to)|prescrib\w*|order(?:ed|s)?\b|initiate|to be (?:scheduled|performed)|awaiting (?:authorization|scheduling))\b/i;
+  /\b(?:recommend\w*|advis\w*|suggest\w*|candidate for|would benefit from|plan(?:ned|s)? (?:for|to|on)|plan of care includes|will (?:undergo|need|require|proceed)|scheduled (?:for|to)|refer(?:red|ral)? (?:for|to)|prescrib\w*|order(?:ed|s)?\b|initiate|proceed(?:ing)? with|follow(?:s|ed)?[- ]up (?:with|in|at)|to be (?:scheduled|performed|obtained)|awaiting (?:authorization|scheduling)|frequency and duration of treatment)\b/i;
 
 /** Ongoing as of the note. */
 const CURRENT_RE =
@@ -114,6 +123,23 @@ const CLASS_TOKENS: [string, RegExp][] = [
 
 const ANATOMY_TOKENS = ["cervical", "thoracic", "lumbar", "lumbosacral", "knee", "hip", "shoulder", "spine", "wrist", "ankle", "elbow", "foot", "hand"];
 
+/** Spinal levels; each makes the generic "spine" redundant. */
+const SPINE_LEVELS = ["cervical", "thoracic", "lumbar", "lumbosacral"];
+
+/**
+ * The anatomy half of a subject key. "Lumbar" and "lumbar spine" are the same
+ * anatomy — keeping the generic token alongside a specific level made them
+ * different subjects, so the same recommendation written both ways never
+ * deduped.
+ */
+export function anatomyKey(text: string): string {
+  const t = norm(text);
+  const found = ANATOMY_TOKENS.filter((a) => t.includes(a));
+  const specific = found.filter((a) => SPINE_LEVELS.includes(a));
+  const pruned = specific.length ? found.filter((a) => a !== "spine") : found;
+  return pruned.sort().join("-") || "general";
+}
+
 /**
  * The subject a statement is about: care class plus anatomy. Two statements
  * share a subject only when both are identified — a vague statement never
@@ -122,9 +148,7 @@ const ANATOMY_TOKENS = ["cervical", "thoracic", "lumbar", "lumbosacral", "knee",
 export function subjectKey(text: string): string | null {
   const cls = CLASS_TOKENS.find(([, re]) => re.test(text));
   if (!cls) return null;
-  const t = norm(text);
-  const anatomy = ANATOMY_TOKENS.filter((a) => t.includes(a)).sort().join("-") || "general";
-  return `${cls[0]}|${anatomy}`;
+  return `${cls[0]}|${anatomyKey(text)}`;
 }
 
 // ── Resolution ──────────────────────────────────────────────────────────────

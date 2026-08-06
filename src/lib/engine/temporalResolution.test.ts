@@ -175,3 +175,40 @@ describe("later records govern", () => {
     expect(resolved[1].temporal.supportsFutureCare).toBe(false);
   });
 });
+
+describe("phrasings measured against a real record set", () => {
+  // Each of these was classified AMBIGUOUS — and so silently dropped from the
+  // plan — by a verb list built from how a spec imagines physicians write.
+  // They are paraphrased here; the originals are patient records.
+  it("recognizes recommendation verbs beyond recommend/order/refer", () => {
+    for (const text of [
+      "Proceed with bilateral medial branch blocks at T10-T12 and L2-S1.",
+      "Patient would benefit from home health services for PT/OT.",
+      "Suggest cardiac rehabilitation per problem history.",
+      "Frequency and duration of treatment: two times a week for 6 weeks.",
+      "Follow-up with primary care provider for further evaluation and pain management.",
+      "Plan of care includes cardiac catheterization tomorrow.",
+    ]) {
+      expect(rec(text).status, text).toBe("PLANNED");
+    }
+  });
+
+  it("still refuses the instructions and goals that surround them", () => {
+    // These sit line-by-line beside the recommendations above in the same
+    // notes; widening the verb list must not sweep them in.
+    for (const text of [
+      "Patient instructed on good body mechanics and icing at home for 20 minutes following treatment.",
+      "Long-term goals: improve ADLs and overall joint function.",
+      "Progress slowly to normal diet beginning with liquids.",
+      "Rest for the remainder of the day following surgery.",
+      "Patient educated on wound care and return precautions.",
+    ]) {
+      expect(rec(text).supportsFutureCare, text).toBe(false);
+    }
+  });
+
+  it("treats 'if applicable' as the contingency it is", () => {
+    expect(rec("Physical/occupational therapy if applicable.").status).toBe("CONDITIONAL");
+    expect(rec("Repeat imaging as clinically indicated.").status).toBe("CONDITIONAL");
+  });
+});

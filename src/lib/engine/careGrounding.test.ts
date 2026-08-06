@@ -270,3 +270,44 @@ describe("mined items record which quantities the note stated", () => {
     expect(item.frequencyPerYear).toBe(2); // planning default, not a record figure
   });
 });
+
+describe("therapy is prescribed under many names", () => {
+  // Matching only "physical therapy" discarded the real recommendations that
+  // carried explicit frequencies. Paraphrased from a real record set.
+  it("mines active therapy, chiropractic, traction and home health as therapy", () => {
+    for (const text of [
+      "Referral to active therapy for the lumbar spine twice a week for 4 weeks.",
+      "Continue chiropractic care including adjustments and modalities once a week.",
+      "Continue lumbar traction twice a week for the next 3 weeks.",
+      "Patient would benefit from home health services for PT/OT.",
+    ]) {
+      const mined = mineRecommendedItems([cite(text)], []);
+      expect(mined.map((m) => m.category), text).toContain("PHYSICAL_THERAPY");
+    }
+  });
+
+  it("the best-evidenced note wins its subject, not whichever came first", () => {
+    const mined = mineRecommendedItems(
+      [
+        cite("Recommend continue lumbar therapy.", { date: "2026-01-01" }),
+        cite("Referral to active therapy for the lumbar spine twice a week for 4 weeks.", { date: "2026-01-02" }),
+      ],
+      [],
+    );
+    expect(mined).toHaveLength(1);
+    expect(mined[0].frequencyPerYear).toBe(104);
+    expect(mined[0].stated.frequency).toBe(true);
+  });
+
+  it("among equally-evidenced notes the most recent statement governs", () => {
+    const mined = mineRecommendedItems(
+      [
+        cite("Recommend lumbar epidural steroid injection.", { date: "2025-01-01" }),
+        cite("Recommend lumbar epidural steroid injection.", { date: "2026-01-01" }),
+      ],
+      [],
+    );
+    expect(mined).toHaveLength(1);
+    expect(mined[0].citation.date).toBe("2026-01-01");
+  });
+});
