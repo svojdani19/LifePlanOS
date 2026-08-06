@@ -174,3 +174,70 @@ describe("diagnostic studies", () => {
     expect(studies[0].cite).toBe("(Synthetic MR.pdf: p. 11)");
   });
 });
+
+describe("claim-specific page citations", () => {
+  it("a narrative line cites the page its own claims are on, not the note's whole span", () => {
+    // A 40-page admission: the assessment is on p. 31, the exam on p. 12.
+    const sections = buildNarratives(record([
+      enc({
+        page: 4,
+        pageEnd: 43,
+        claims: [
+          { field: "objectiveFindings", value: "Antalgic gait", excerpt: "x", page: 12, confidence: null },
+          { field: "assessment", value: "Lumbar radiculopathy", excerpt: "x", page: 31, confidence: null },
+        ],
+      }),
+    ]), null);
+    const single = sections.course[0];
+    if (single.kind !== "SINGLE") throw new Error("expected single narrative");
+    const byLabel = Object.fromEntries(single.narrative.lines.map((l) => [l.label, l.cite]));
+    expect(byLabel["Exam"]).toBe("(Synthetic MR.pdf: p. 12)");
+    expect(byLabel["Assessment"]).toBe("(Synthetic MR.pdf: p. 31)");
+    // The encounter-level citation still states the span it came from.
+    expect(single.narrative.cite).toBe("(Synthetic MR.pdf: p. 4–43)");
+  });
+
+  it("claims spread over pages cite the pages they are on, compacted", () => {
+    const sections = buildNarratives(record([
+      enc({
+        page: 1,
+        pageEnd: 9,
+        claims: [
+          { field: "assessment", value: "Cervical strain", excerpt: "x", page: 3, confidence: null },
+          { field: "assessment", value: "Lumbar strain", excerpt: "x", page: 4, confidence: null },
+          { field: "assessment", value: "Headache", excerpt: "x", page: 7, confidence: null },
+        ],
+      }),
+    ]), null);
+    const single = sections.course[0];
+    if (single.kind !== "SINGLE") throw new Error("expected single narrative");
+    expect(single.narrative.lines.find((l) => l.label === "Assessment")!.cite).toBe("(Synthetic MR.pdf: p. 3–4, 7)");
+  });
+
+  it("a claim with no page of its own adds no line citation — no page is invented", () => {
+    const sections = buildNarratives(record([
+      enc({ page: 4, pageEnd: 6, claims: [{ field: "assessment", value: "Lumbar radiculopathy", excerpt: "x", page: null, confidence: null }] }),
+    ]), null);
+    const single = sections.course[0];
+    if (single.kind !== "SINGLE") throw new Error("expected single narrative");
+    expect(single.narrative.lines.find((l) => l.label === "Assessment")!.cite).toBeNull();
+  });
+
+  it("the diagnoses table and studies section cite their own claims", () => {
+    const rows = buildDiagnosesEvolution(record([
+      enc({ page: 1, pageEnd: 20, claims: [{ field: "assessment", value: "Contusion of left knee", excerpt: "x", page: 15, confidence: null }] }),
+    ]));
+    expect(rows[0].cite).toBe("(Synthetic MR.pdf: p. 15)");
+    const studies = buildDiagnosticStudies(record([
+      enc({ encounterType: "MRI - Lumbar Spine", page: 1, pageEnd: 20, claims: [{ field: "diagnosticStudies", value: "L2/3 disc herniation", excerpt: "x", page: 18, confidence: null }] }),
+    ]));
+    expect(studies[0].cite).toBe("(Synthetic MR.pdf: p. 18)");
+  });
+
+  it("a procedure ledger line points at the procedure, not the admission span", () => {
+    const ledger = buildVisitLedger(record([
+      enc({ page: 1, pageEnd: 40, claims: [{ field: "procedure", value: "L4-L5 fusion performed", excerpt: "x", page: 22, confidence: null }] }),
+    ]));
+    expect(ledger.lines[0].cite).toBe("(Synthetic MR.pdf: p. 22)");
+  });
+});

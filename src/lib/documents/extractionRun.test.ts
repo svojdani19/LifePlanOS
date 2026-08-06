@@ -11,19 +11,45 @@ const db = vi.hoisted(() => {
     doc: {} as Record<string, unknown>,
     runs: [] as Record<string, unknown>[],
     encounters,
+    pages: new Map<string, Record<string, unknown>>(),
     reset() {
       state.runs.length = 0;
+      state.pages.clear();
       encounters.length = 0;
       runSeq = 0;
       encSeq = 0;
     },
     prisma: {
-      document: { findUniqueOrThrow: async () => state.doc },
+      document: {
+        findUniqueOrThrow: async () => state.doc,
+        // Case-level completeness is derived from the case's documents...
+        findMany: async () => [state.doc],
+      },
       recordExtraction: {
         create: async ({ data }: { data: Record<string, unknown> }) => {
-          const row = { id: `run-${++runSeq}`, ...data };
+          if (data.lockKey && state.runs.some((r) => r.sourceDocumentId === data.sourceDocumentId && r.lockKey === data.lockKey)) {
+            throw Object.assign(new Error("Unique constraint failed"), { code: "P2002" });
+          }
+          const row = { id: `run-${++runSeq}`, createdAt: new Date(), ...data };
           state.runs.push(row);
           return row;
+        },
+        // ...and their latest runs. Newest first, matching the real query.
+        findMany: async () => [...state.runs].reverse().map((r) => ({ sourceDocumentId: r.sourceDocumentId, status: r.status })),
+        // The run lock and the idempotency check both read through findFirst.
+        findFirst: async ({ where }: { where: Record<string, unknown> }) =>
+          state.runs.find((r) => Object.entries(where).every(([k, v]) => r[k] === v)) ?? null,
+        update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
+          const row = state.runs.find((r) => r.id === where.id)!;
+          for (const [k, v] of Object.entries(data)) if (v !== undefined) row[k] = v;
+          return row;
+        },
+        updateMany: async ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
+          const hit = state.runs.filter((r) =>
+            Object.entries(where).every(([k, v]) => (v instanceof Date ? (r[k] as Date | null)?.getTime() === v.getTime() : r[k] === v)),
+          );
+          for (const row of hit) Object.assign(row, data);
+          return { count: hit.length };
         },
       },
       extractedEncounter: {
@@ -45,9 +71,18 @@ const db = vi.hoisted(() => {
         },
       },
       correctionExemplar: { findMany: async () => [] },
-      // Per-page source rows; documents ingested before page tracking report
-      // none, which the audit treats as unknown rather than as clean.
-      sourcePage: { findMany: async () => [] as { pageNumber: number; status: string; ocrConfidence: number | null }[] },
+      // Per-page source rows written by the ledger. Persistence is an upsert
+      // keyed on (document, page), so a re-run rewrites rather than duplicates.
+      sourcePage: {
+        findMany: async () => [...state.pages.values()],
+        upsert: async ({ where, create, update }: { where: { sourceDocumentId_pageNumber: { sourceDocumentId: string; pageNumber: number } }; create: Record<string, unknown>; update: Record<string, unknown> }) => {
+          const k = `${where.sourceDocumentId_pageNumber.sourceDocumentId}#${where.sourceDocumentId_pageNumber.pageNumber}`;
+          const prior = state.pages.get(k);
+          const row = prior ? { ...prior, ...update } : { ...create };
+          state.pages.set(k, row);
+          return row;
+        },
+      },
     },
   };
   return state;
@@ -297,4 +332,147 @@ describe("any-size processing: fault containment", () => {
     expect(db.runs.at(-1)!.error ?? null).toBeNull();
     expect(JSON.stringify(db.runs.at(-1)!.warnings ?? [])).not.toMatch(/could not be processed/);
   }, 30_000);
+});
+
+describe("run lifecycle", () => {
+  // A two-chunk document, so a chunk budget of 1 forces a pause.
+  const TWO_CHUNK = [
+    "Orthopedic Associates Progress Note. Date of Service: 03/14/2025.",
+    "Provider: Dana Rivers, MD.",
+    "Assessment: Lumbar radiculopathy.",
+    "Plan: Continue physical therapy twice weekly.",
+    ...Array.from({ length: 100 }, (_, i) => `Progress line ${i} of the same encounter with additional detail.`),
+    ...Array.from({ length: 100 }, (_, i) => `Later section line ${i} of the record with additional detail.`),
+  ].join("\n");
+
+  beforeEach(() => {
+    process.env.RECORD_CRITIC = "off";
+  });
+  afterEach(() => {
+    delete process.env.RECORD_CRITIC;
+    delete process.env.RECORD_CHUNK_BUDGET;
+  });
+
+  it("the run row exists as RUNNING before any model call, and is only COMPLETE once its output is persisted", async () => {
+    const seen: string[] = [];
+    const p: LlmProvider = {
+      name: "fake",
+      async complete() {
+        // Observed mid-run: the run is already recorded, and recorded as live.
+        seen.push(String(db.runs.at(-1)?.status));
+        return GOOD_JSON;
+      },
+    };
+    await processDocumentExtraction("doc-1", { provider: p, exemplarGuidance: [] });
+    expect(seen[0]).toBe("RUNNING");
+    const run = db.runs.at(-1)!;
+    expect(run.status).toBe("COMPLETE");
+    expect(run.lockKey).toBeNull();
+    expect(run.startedAt).toBeTruthy();
+    expect(run.finishedAt).toBeTruthy();
+  });
+
+  it("a second run while one is in flight is refused — duplicate drafts are how records get double-counted", async () => {
+    db.runs.push({ id: "run-live", sourceDocumentId: "doc-1", caseId: "case-1", firmId: "firm-1", status: "RUNNING", lockKey: "ACTIVE", sourceFingerprint: fingerprint(TEXT), heartbeatAt: new Date(), createdAt: new Date() });
+    const p = provider([GOOD_JSON]);
+    const r = await processDocumentExtraction("doc-1", { provider: p, exemplarGuidance: [] });
+    expect(r.status).toBe("BUSY");
+    expect(p.calls).toBe(0);
+    expect(db.encounters).toHaveLength(0);
+  });
+
+  it("re-running identical work reuses the prior run instead of burning tokens", async () => {
+    const first = provider([GOOD_JSON]);
+    const a = await processDocumentExtraction("doc-1", { provider: first, exemplarGuidance: [] });
+    expect(a.status).toBe("COMPLETE");
+    const second = provider([GOOD_JSON]);
+    const b = await processDocumentExtraction("doc-1", { provider: second, exemplarGuidance: [] });
+    expect(b).toMatchObject({ status: "COMPLETE", idempotent: true, extractionId: a.extractionId });
+    expect(second.calls).toBe(0);
+    expect(db.encounters).toHaveLength(1); // no second set of drafts
+  });
+
+  it("force re-runs the same work when a reviewer asks for it", async () => {
+    await processDocumentExtraction("doc-1", { provider: provider([GOOD_JSON]), exemplarGuidance: [] });
+    const forced = provider([GOOD_JSON]);
+    const r = await processDocumentExtraction("doc-1", { provider: forced, exemplarGuidance: [], force: true });
+    expect(r.idempotent).toBeUndefined();
+    expect(forced.calls).toBeGreaterThan(0);
+  });
+
+  it("a run that hits its chunk budget pauses with a cursor and keeps the lock", async () => {
+    db.doc = doc({ extractedText: TWO_CHUNK });
+    process.env.RECORD_CHUNK_BUDGET = "1";
+    const r = await processDocumentExtraction("doc-1", { provider: provider([GOOD_JSON]), exemplarGuidance: [] });
+    expect(r.status).toBe("PAUSED");
+    expect(r.resumeFrom).toBe(1);
+    const run = db.runs.at(-1)!;
+    expect(run.status).toBe("PAUSED");
+    expect(run.lockKey).toBe("ACTIVE"); // still owns the document
+    expect(run.resumeState).toEqual({ nextChunkIndex: 1 });
+    // Incomplete work can never present as a finished draft.
+    expect(run.auditResult).not.toBe("PASS");
+    for (const e of db.encounters) expect(e.status).toBe("AI_DRAFT");
+  });
+
+  it("resuming finishes the document without duplicating what the first pass already wrote", async () => {
+    db.doc = doc({ extractedText: TWO_CHUNK });
+    process.env.RECORD_CHUNK_BUDGET = "1";
+    const first = await processDocumentExtraction("doc-1", { provider: provider([GOOD_JSON]), exemplarGuidance: [] });
+    expect(first.status).toBe("PAUSED");
+    const afterPause = db.encounters.length;
+
+    let r = first;
+    for (let i = 0; i < 10 && r.status === "PAUSED"; i++) {
+      r = await processDocumentExtraction("doc-1", { provider: provider([GOOD_JSON]), exemplarGuidance: [] });
+    }
+    expect(r.status).toBe("COMPLETE");
+    expect(r.extractionId).toBe(first.extractionId); // one run, continued
+    expect(db.runs).toHaveLength(1);
+    expect(db.encounters).toHaveLength(afterPause); // the same encounter, not a copy per instalment
+    expect(db.encounters.every((e) => e.status !== "SUPERSEDED")).toBe(true); // a resume never supersedes its own output
+    expect(db.runs[0].chunksDone).toBe(db.runs[0].chunksTotal);
+  });
+
+  it("telemetry carries operational counters and no record content", async () => {
+    await processDocumentExtraction("doc-1", { provider: provider([GOOD_JSON]), exemplarGuidance: [] });
+    const t = db.runs.at(-1)!.telemetry as Record<string, unknown>;
+    expect(t.chunksProcessed).toBe(1);
+    expect(typeof t.elapsedMs).toBe("number");
+    const serialized = JSON.stringify(t);
+    expect(serialized).not.toMatch(/Dana Rivers|radiculopathy|03\/14\/2025/i);
+  });
+});
+
+describe("page accounting", () => {
+  const PAGINATED = [
+    "Page 1 of 2",
+    "Orthopedic Associates Progress Note. Date of Service: 03/14/2025.",
+    "Provider: Dana Rivers, MD.",
+    "Assessment: Lumbar radiculopathy.",
+    "Plan: Continue physical therapy twice weekly.",
+    "Page 2 of 2",
+    "Continued discussion of the treatment plan and follow-up interval for this patient.",
+  ].join("\n");
+
+  it("every page of a paginated document gets a durable row, and the run counts them", async () => {
+    db.doc = doc({ extractedText: PAGINATED });
+    await processDocumentExtraction("doc-1", { provider: provider([GOOD_JSON]), exemplarGuidance: [] });
+    const pages = [...db.pages.values()];
+    expect(pages.map((p) => p.pageNumber).sort()).toEqual([1, 2]);
+    for (const p of pages) {
+      expect(p.firmId).toBe("firm-1"); // server-owned tenancy
+      expect(p.caseId).toBe("case-1");
+      expect(p.contentHash).toBeTruthy();
+    }
+    const run = db.runs.at(-1)!;
+    expect(run.pagesTotal).toBe(2);
+    expect(run.pagesReadable).toBe(2);
+  });
+
+  it("a document with no page boundaries gets no invented page rows", async () => {
+    await processDocumentExtraction("doc-1", { provider: provider([GOOD_JSON]), exemplarGuidance: [] });
+    expect(db.pages.size).toBe(0);
+    expect(db.runs.at(-1)!.pagesTotal).toBe(0);
+  });
 });

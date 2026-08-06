@@ -10,7 +10,9 @@ import {
   documentedMedications,
   mineRecommendedItems,
   citedRationale,
+  type TimedCitation,
 } from "@/lib/engine/careGrounding";
+import { ALL_ASSUMED, sealProvenance, projectionNote, type ProjectionInputs } from "@/lib/engine/projectionProvenance";
 import { locateConditionEvidence } from "@/lib/engine/evidence";
 import { generateStandardOfCare } from "@/lib/engine/standardOfCare";
 import { mapRecommendationToCondition, type CondInput } from "@/lib/engine/integrity";
@@ -241,6 +243,12 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
   // for review — a physician can add any of it back, attributed as their own.
   const support = await loadRecordCareSupport(caseId, c.dateOfInjury);
   const suppressed: { service: string; reason: string }[] = [];
+  // Where each of a line's projected numbers came from. Keyed like originOf, so
+  // it survives the dedupe and pricing passes below.
+  const provenanceOf = new Map<string, ProjectionInputs>();
+  const citeOf = (c: TimedCitation) => ({ filename: c.filename, page: c.page, date: c.date, provider: c.provider });
+  const setProvenance = (service: string, p: ProjectionInputs) => provenanceOf.set(service.trim().toLowerCase(), sealProvenance(p));
+
   const firstPass: CareTemplate[] = [];
   for (const t of deduped) {
     const gate = gateTemplateItem(t, support);
@@ -251,6 +259,14 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
     if (gate.citation) {
       t.rationale = `${t.rationale} ${citedRationale("Grounded in documented recommendation", gate.citation)}`;
     }
+    // A template line's quantities are planning convention even when a record
+    // establishes the NEED — the citation supports the service, never the
+    // "twice weekly for two years at $205" beside it.
+    setProvenance(t.service, {
+      ...ALL_ASSUMED,
+      service: gate.citation ? "RECORD_STATED" : "PLANNING_ASSUMPTION",
+      citation: gate.citation ? citeOf(gate.citation) : null,
+    });
     firstPass.push(t);
   }
   // Second pass: derivative surgical projections stand only on a SURVIVING
@@ -292,6 +308,16 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
       };
       careItems.push(template);
       tagOrigin(template, "RECORD_RECOMMENDED", null, "documented-medication");
+      // The DRUG is documented; an annual refill count and a $300 unit price
+      // are the planner's conventions, and the citation says nothing about
+      // either.
+      setProvenance(template.service, {
+        service: "RECORD_STATED",
+        frequency: "PLANNING_ASSUMPTION",
+        duration: "PLANNING_ASSUMPTION",
+        unitCost: "PLANNING_ASSUMPTION",
+        citation: citeOf(med.citation),
+      });
     }
   } else {
     careItems = gated;
@@ -316,6 +342,16 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
     };
     careItems.push(template);
     tagOrigin(template, "RECORD_RECOMMENDED", null, "record-recommendation");
+    // A mined item's service IS the recommendation. Its frequency and duration
+    // are record-stated only when the note actually stated them ("twice weekly
+    // for 12 weeks"); pricing never is.
+    setProvenance(template.service, {
+      service: "RECORD_STATED",
+      frequency: mined.stated.frequency ? "RECORD_STATED" : "PLANNING_ASSUMPTION",
+      duration: mined.stated.duration ? "RECORD_STATED" : "PLANNING_ASSUMPTION",
+      unitCost: "PLANNING_ASSUMPTION",
+      citation: citeOf(mined.citation),
+    });
   }
 
   // Chronology — records are screened for relevance; only pivotal events and
@@ -379,6 +415,10 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
         pricedAt: priced?.live && priced.retrievedAt ? new Date(priced.retrievedAt) : null,
         pricingDetail: priced?.live && priced.detail ? (priced.detail as never) : Prisma.DbNull,
         ...(originOf.get(t.service.trim().toLowerCase()) ?? {}),
+        // Which of this line's numbers the records supplied, and which the
+        // planner did. Persisted with the line so the report can say so and a
+        // reviewer can challenge the right thing.
+        inputProvenance: (provenanceOf.get(t.service.trim().toLowerCase()) ?? ALL_ASSUMED) as never,
         ...(() => {
           const tag = originOf.get(t.service.trim().toLowerCase());
           const scoped = priorsByScope.get(scopeKeyOf(tag?.conditionKey ?? null, t.service)) ?? [];
@@ -425,6 +465,36 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
       whyItMatters: "Care items that no documented finding or recommendation supports inflate the draft and do not survive scrutiny.",
       suggestedAction: "Review the suppressed services; a physician may add any that clinical judgment supports, attributed as physician-added.",
       validationRuleId: "futurecare.unsupported-template",
+    };
+    if (existing) await prisma.attentionItem.update({ where: { id: existing.id }, data: { summary: data.summary } }).catch(() => {});
+    else await prisma.attentionItem.create({ data }).catch(() => {});
+  }
+
+  // Disclose what TEMPORAL resolution kept out: care already delivered,
+  // refused, withdrawn, contingent, pre-injury, or undated. These are the
+  // statements that read like future care and are not, and a planner needs to
+  // see that the engine considered and excluded them — not wonder why a
+  // recommendation in the chart produced no line.
+  if (support.temporallyExcluded.length) {
+    const byStatus = new Map<string, number>();
+    for (const x of support.temporallyExcluded) byStatus.set(x.status, (byStatus.get(x.status) ?? 0) + 1);
+    const breakdown = [...byStatus.entries()].sort((a, b) => b[1] - a[1]).map(([s, n]) => `${n} ${s.replace(/_/g, " ").toLowerCase()}`).join(", ");
+    const existing = await prisma.attentionItem.findFirst({
+      where: { caseId, validationRuleId: "futurecare.temporally-excluded", status: { not: "RESOLVED" } },
+    });
+    const data = {
+      caseId,
+      firmId: c.firmId,
+      category: "futurecare_temporal",
+      severity: "MODERATE" as const,
+      title: "Documented care excluded by temporal resolution",
+      summary:
+        `${support.temporallyExcluded.length} documented statement(s) did not support a projection (${breakdown}). ` +
+        support.temporallyExcluded.slice(0, 8).map((x) => `${x.date ?? "undated"}: ${x.text} — ${x.reason}`).join(" | ").slice(0, 900),
+      whyItMatters:
+        "Care already delivered, declined, withdrawn, contingent, pre-injury, or undated reads like future care in the chart. Projecting it inflates the plan; excluding it silently hides a judgment the reviewer should see.",
+      suggestedAction: "Confirm each exclusion against the source note; a physician may add back any item clinical judgment supports, attributed as physician-added.",
+      validationRuleId: "futurecare.temporally-excluded",
     };
     if (existing) await prisma.attentionItem.update({ where: { id: existing.id }, data: { summary: data.summary } }).catch(() => {});
     else await prisma.attentionItem.create({ data }).catch(() => {});

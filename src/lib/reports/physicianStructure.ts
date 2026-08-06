@@ -21,6 +21,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import type { StructuredRecord, StructuredEncounter, StructuredDocument } from "@/lib/records/structuredRecord";
+import { pageRange } from "@/lib/documents/meta";
 
 const mdY = (iso: string) => {
   const [y, m, d] = iso.split("-");
@@ -47,6 +48,22 @@ function claimValues(enc: StructuredEncounter, field: string): string[] {
 function pageCite(enc: StructuredEncounter, doc: StructuredDocument): string {
   const pages = enc.page != null ? (enc.pageEnd != null && enc.pageEnd !== enc.page ? `p. ${enc.page}–${enc.pageEnd}` : `p. ${enc.page}`) : "page unknown";
   return `(${doc.filename}: ${pages})`;
+}
+
+/** Pages of the claims that produced one field's text. */
+function claimPages(enc: StructuredEncounter, ...fields: string[]): number[] {
+  return enc.claims.filter((c) => fields.includes(c.field) && c.page != null).map((c) => c.page!);
+}
+
+/**
+ * Cite the page the STATEMENT is on, not the span of the encounter that
+ * contains it. On a 40-page operative admission, "(p. 4–43)" tells a reader
+ * nothing they can check; "(p. 31)" sends them to the sentence. Falls back to
+ * the encounter span only when the claims carry no page of their own.
+ */
+function claimCite(enc: StructuredEncounter, doc: StructuredDocument, pages: number[]): string {
+  const compact = pageRange(pages);
+  return compact ? `(${doc.filename}: p. ${compact})` : pageCite(enc, doc);
 }
 
 /** Inline data-quality caveat, physician-style. */
@@ -89,7 +106,9 @@ export function buildVisitLedger(record: StructuredRecord): VisitLedger {
       .filter(Boolean)
       .join(" / "),
     procedure: claimValues(enc, "procedure").length > 0,
-    cite: pageCite(enc, doc),
+    // A procedure line cites the procedure itself; an ordinary visit cites the
+    // note.
+    cite: claimValues(enc, "procedure").length ? claimCite(enc, doc, claimPages(enc, "procedure")) : pageCite(enc, doc),
   }));
   const isoDates = dated.map((r) => r.enc.encounterDate!).sort();
   return {
@@ -120,7 +139,7 @@ export function buildDiagnosesEvolution(record: StructuredRecord): DiagnosisRow[
       date: mdY(enc.encounterDate),
       who: [enc.provider ?? "Provider not identified", enc.facility].filter(Boolean).join(" / "),
       diagnoses: dx.join("; "),
-      cite: pageCite(enc, doc),
+      cite: claimCite(enc, doc, claimPages(enc, "assessment")),
     });
   }
   return out;
@@ -134,8 +153,13 @@ export interface EncounterNarrative {
   date: string | null; // MM/DD/YYYY or null for undated
   heading: string;
   depth: NarrativeDepth;
-  /** Labeled lines, exemplar order: Subjective, Exam, Studies, Assessment, Treatment, Procedure, Plan/Disposition… */
-  lines: { label: string; text: string }[];
+  /**
+   * Labeled lines, exemplar order: Subjective, Exam, Studies, Assessment,
+   * Treatment, Procedure, Plan/Disposition… Each carries the page of the
+   * claims that produced IT, so a reader checking one statement is not sent to
+   * a forty-page span.
+   */
+  lines: { label: string; text: string; cite: string | null }[];
   qualityNote: string | null;
   cite: string;
 }
@@ -203,14 +227,21 @@ function toNarrative(enc: StructuredEncounter, doc: StructuredDocument, depth: N
     .filter(Boolean)
     .join(" ");
   const fields = depth === "EXPANDED" ? NARRATIVE_FIELDS : NARRATIVE_FIELDS.filter(([f]) => ["subjective", "assessment", "treatment", "responseToTreatment"].includes(f));
-  const lines: { label: string; text: string }[] = [];
+  const lines: { label: string; text: string; cite: string | null }[] = [];
+  const encCite = pageCite(enc, doc);
   for (const [field, label] of fields) {
     const vals = claimValues(enc, field);
     if (!vals.length) continue;
     // COMPRESSED keeps the exemplar's interval style: one clause per field.
-    lines.push({ label, text: depth === "EXPANDED" ? vals.join(". ") : vals[0] });
+    const cite = claimCite(enc, doc, claimPages(enc, field));
+    lines.push({
+      label,
+      text: depth === "EXPANDED" ? vals.join(". ") : vals[0],
+      // Suppress a per-line cite that adds nothing beyond the encounter's own.
+      cite: cite === encCite ? null : cite,
+    });
   }
-  if (!lines.length) lines.push({ label: "Record", text: enc.factualSummary });
+  if (!lines.length) lines.push({ label: "Record", text: enc.factualSummary, cite: null });
   return { date: enc.encounterDate ? mdY(enc.encounterDate) : null, heading, depth, lines, qualityNote: qualityNote(enc), cite: pageCite(enc, doc) };
 }
 
@@ -297,7 +328,7 @@ export function buildDiagnosticStudies(record: StructuredRecord): StudyEntry[] {
         .filter(Boolean)
         .join(" "),
       findings,
-      cite: pageCite(enc, doc),
+      cite: claimCite(enc, doc, claimPages(enc, "diagnosticStudies")),
     });
   }
   return out;

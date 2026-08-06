@@ -22,6 +22,7 @@ import { pageMarks } from "@/lib/documents/meta";
 import { segmentEncounters } from "@/lib/engine/chronology";
 import { MAX_TEXT } from "@/lib/documents/textLimits";
 import { buildPageLedger, buildPendingPages, persistPageLedger, caseProcessingFacts } from "@/lib/documents/pageLedger";
+import { claimRun, findIdempotentRun, finishRun, pauseRun, heartbeat, chunkBudget } from "@/lib/documents/runLifecycle";
 import { stripChartFurniture } from "@/lib/documents/chartStructure";
 import {
   chunkDocumentText,
@@ -59,22 +60,34 @@ const OCR_FAILED = /OCR failed/i;
 
 export interface ExtractionRunResult {
   extractionId: string;
-  status: "COMPLETE" | "EXTRACTION_FAILED" | "BLOCKED_OCR";
+  status: "COMPLETE" | "EXTRACTION_FAILED" | "BLOCKED_OCR" | "PAUSED" | "BUSY";
   accepted: number;
   rejected: number;
   error?: string;
+  /** The prior identical run was reused; no model calls were made. */
+  idempotent?: boolean;
+  /** Chunk index this run stopped at; a later invocation resumes there. */
+  resumeFrom?: number;
 }
 
 const encounterKey = (e: { encounterDate: Date | null; provider: string | null; page: number | null }) =>
   `${e.encounterDate?.toISOString().slice(0, 10) ?? "undated"}|${(e.provider ?? "").toLowerCase().trim()}|${e.page ?? "?"}`;
 
-export async function processDocumentExtraction(documentId: string, opts: ExtractOptions & { actorUserId?: string | null } = {}): Promise<ExtractionRunResult> {
+export async function processDocumentExtraction(
+  documentId: string,
+  opts: ExtractOptions & { actorUserId?: string | null; force?: boolean } = {},
+): Promise<ExtractionRunResult> {
+  const startedAt = new Date();
   const doc = await prisma.document.findUniqueOrThrow({ where: { id: documentId } });
   const base = { firmId: doc.firmId, caseId: doc.caseId, sourceDocumentId: doc.id, createdById: opts.actorUserId ?? null };
   const prov = safeProvenance(opts);
 
+  // Terminal runs that never held the lock (OCR gates, unreadable source) are
+  // recorded whole: they start and finish in the same instant.
   const record = async (status: string, extra: Record<string, unknown>) =>
-    prisma.recordExtraction.create({ data: { ...base, status, provider: prov.provider, model: prov.model, promptVersion: PROMPT_VERSION, schemaVersion: SCHEMA_VERSION, ...extra } });
+    prisma.recordExtraction.create({
+      data: { ...base, status, provider: prov.provider, model: prov.model, promptVersion: PROMPT_VERSION, schemaVersion: SCHEMA_VERSION, startedAt, finishedAt: new Date(), ...extra },
+    });
 
   // ── OCR discipline: incomplete or failed OCR never reaches the model ───────
   const flags = doc.flags ?? "";
@@ -109,6 +122,52 @@ export async function processDocumentExtraction(documentId: string, opts: Extrac
   // the storage cap. There is no processing bound — every chunk of every
   // document is read, however large the record.
   const truncated = rawText.length >= MAX_TEXT;
+
+  // ── Run lifecycle: idempotency, then the lock ─────────────────────────────
+  const identity = {
+    firmId: doc.firmId,
+    caseId: doc.caseId,
+    sourceDocumentId: doc.id,
+    sourceFingerprint,
+    promptVersion: PROMPT_VERSION,
+    schemaVersion: SCHEMA_VERSION,
+    provider: prov.provider,
+    model: prov.model,
+    createdById: opts.actorUserId ?? null,
+  };
+  if (!opts.force) {
+    const prior = await findIdempotentRun(identity);
+    if (prior) {
+      // Same bytes, same prompt, same schema, same model — the answer would be
+      // the same. Re-running would only burn tokens and churn draft rows.
+      return { extractionId: prior.id, status: "COMPLETE", accepted: prior.acceptedCount, rejected: 0, idempotent: true };
+    }
+  }
+  const claim = await claimRun(identity);
+  if (claim.kind === "BUSY") {
+    // Another worker owns this document. Two runs writing drafts for the same
+    // document is how duplicate encounters get created; refusing is the point.
+    return {
+      extractionId: claim.runId ?? "",
+      status: "BUSY",
+      accepted: 0,
+      rejected: 0,
+      error: "An extraction run is already in progress for this document; it will finish or be retried automatically.",
+    };
+  }
+  if (claim.kind === "IDEMPOTENT") {
+    return { extractionId: claim.runId, status: "COMPLETE", accepted: claim.accepted, rejected: 0, idempotent: true };
+  }
+  const runId = claim.runId;
+  const startIndex = claim.startIndex;
+  const budget = chunkBudget();
+  const endIndex = budget ? Math.min(chunks.length, startIndex + budget) : chunks.length;
+  const paused = endIndex < chunks.length;
+
+  const fail = async (error: string, extra: Record<string, unknown> = {}) => {
+    await finishRun(runId, "EXTRACTION_FAILED", { sourceFingerprint, truncated, chunkCount: chunks.length, chunksTotal: chunks.length, error, ...extra }, startedAt);
+    return { extractionId: runId, status: "EXTRACTION_FAILED" as const, accepted: 0, rejected: 0, error };
+  };
 
   const exemplarGuidance = opts.exemplarGuidance ?? (await fetchExemplarGuidance(doc.firmId, doc.type).catch(() => []));
 
@@ -174,11 +233,13 @@ export async function processDocumentExtraction(documentId: string, opts: Extrac
 
   const concurrency = Math.max(1, Math.min(8, Number(process.env.RECORD_CHUNK_CONCURRENCY) || 3));
   let configError: LlmConfigError | ExtractionOutputError | null = null;
-  let cursor = 0;
+  let cursor = startIndex;
+  let completedChunks = 0;
+  let retries = 0;
   const worker = async () => {
     for (;;) {
       const i = cursor++;
-      if (i >= chunks.length || configError) return;
+      if (i >= endIndex || configError) return;
       const chunk = chunks[i];
       let lastErr: unknown;
       for (let attempt = 0; attempt <= backoffs.length; attempt++) {
@@ -196,9 +257,14 @@ export async function processDocumentExtraction(documentId: string, opts: Extrac
           }
           const transient = TRANSIENT_RE.test(err instanceof Error ? err.message : String(err));
           if (!transient || attempt === backoffs.length) break;
+          retries++;
           await sleep(backoffs[attempt]);
         }
       }
+      // Keep the lock warm and the progress cursor durable: a long record is
+      // exactly the case where a run must not look like a crash.
+      completedChunks++;
+      if (completedChunks % 10 === 0) await heartbeat(runId, startIndex + completedChunks);
       if (lastErr) {
         const pages = chunk.pageStart != null ? `pages ${chunk.pageStart}–${chunk.pageEnd ?? chunk.pageStart}` : `section ${i + 1}`;
         const reason = lastErr instanceof ExtractionOutputError ? lastErr.message.slice(0, 120) : "provider unavailable after retries";
@@ -209,17 +275,9 @@ export async function processDocumentExtraction(documentId: string, opts: Extrac
       }
     }
   };
-  await Promise.all(Array.from({ length: Math.min(concurrency, chunks.length) }, worker));
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(concurrency, endIndex - startIndex)) }, worker));
 
-  if (configError) {
-    const run = await record("EXTRACTION_FAILED", {
-      sourceFingerprint,
-      truncated,
-      chunkCount: chunks.length,
-      error: (configError as Error).message,
-    });
-    return { extractionId: run.id, status: "EXTRACTION_FAILED", accepted: 0, rejected: 0, error: (configError as Error).message };
-  }
+  if (configError) return fail((configError as Error).message);
 
   const validated: ValidatedEncounter[] = [];
   const rejects: string[] = [];
@@ -247,16 +305,10 @@ export async function processDocumentExtraction(documentId: string, opts: Extrac
   }
 
   // Every chunk failing is a document-level failure, not a partial result.
-  if (failedSections.length === chunks.length) {
+  if (failedSections.length === endIndex - startIndex && !paused && startIndex === 0) {
     const message = "No section of this document could be processed; the document is queued for human review.";
-    const run = await record("EXTRACTION_FAILED", {
-      sourceFingerprint,
-      truncated,
-      chunkCount: chunks.length,
-      warnings: failedSections.slice(0, 40) as never,
-      error: message,
-    });
-    return { extractionId: run.id, status: "EXTRACTION_FAILED", accepted: 0, rejected: rejects.length, error: message };
+    const res = await fail(message, { warnings: failedSections.slice(0, 40) as never });
+    return { ...res, rejected: rejects.length };
   }
 
   // ── Recall cross-check ─────────────────────────────────────────────────────
@@ -294,13 +346,31 @@ export async function processDocumentExtraction(documentId: string, opts: Extrac
   // written idempotently, with failed chunk ranges mapped onto the pages they
   // cover. The audit consumes these persisted facts — completeness is derived,
   // never assumed.
-  const pageRows = buildPageLedger({ doc, text, marks, failedRanges, sourceClipped: truncated });
+  //
+  // A paused run accounts only for the pages it actually reached: the pages
+  // beyond its budget get no row at all, because "no row yet" is the truthful
+  // record and the resumed run fills them in.
+  const coveredPages = paused || startIndex > 0 ? new Set<number>() : null;
+  if (coveredPages) {
+    for (let i = startIndex; i < endIndex; i++) {
+      const c = chunks[i];
+      if (c.pageStart == null) continue;
+      for (let p = c.pageStart; p <= (c.pageEnd ?? c.pageStart); p++) coveredPages.add(p);
+    }
+  }
+  const pageRows = buildPageLedger({ doc, text, marks, failedRanges, sourceClipped: truncated, coveredPages });
   await persistPageLedger(pageRows).catch((e) => {
     // Ledger persistence failing must not lose the extraction, but it MUST be
     // visible: without the ledger the audit cannot call this complete.
     warnings.push(`Page-coverage ledger could not be persisted (${e instanceof Error ? e.message.slice(0, 80) : "error"}); page accounting is incomplete.`);
   });
-  const facts = await caseProcessingFacts(doc.caseId, doc.firmId).catch(() => ({ allDocumentsProcessed: false, failedExtractions: 0 }));
+  // This document's own run has not been written as COMPLETE yet, so the facts
+  // query is told the outcome it is about to persist. Every OTHER document is
+  // read from what is actually stored.
+  const facts = await caseProcessingFacts(doc.caseId, doc.firmId, { documentId: doc.id, processed: !paused }).catch(() => ({
+    allDocumentsProcessed: false,
+    failedExtractions: 0,
+  }));
   const auditEncounters: AuditEncounter[] = encounters.map((e, i) => ({
     id: `pending-${i}`,
     sourceDocumentId: doc.id,
@@ -326,29 +396,19 @@ export async function processDocumentExtraction(documentId: string, opts: Extrac
     allDocumentsProcessed: facts.allDocumentsProcessed,
   });
 
-  const run = await record("COMPLETE", {
-    sourceFingerprint,
-    truncated,
-    chunkCount: chunks.length,
-    candidateCount,
-    acceptedCount: encounters.reduce((s, e) => s + e.claims.length, 0),
-    rejectedCount: rejects.length,
-    warnings: warnings as never,
-    criticFindings: criticFindings.slice(0, 40) as never,
-    disputedCount,
-    adjudicatedCount,
-    pagesTotal: pageRows.length,
-    pagesReadable: pageRows.filter((p) => p.status === "READABLE").length,
-    auditResult: audit.result,
-  });
-
   // ── Persist with review lineage ────────────────────────────────────────────
   const prior = await prisma.extractedEncounter.findMany({ where: { caseId: doc.caseId, sourceDocumentId: doc.id, status: { notIn: ["SUPERSEDED"] } } });
   const priorHuman = prior.filter((p) => ["HUMAN_EDITED", "REVIEWED", "VERIFIED", "STALE"].includes(p.status));
   // Machine-produced drafts — including ones that passed the audit — may be
   // superseded by a newer run. Passing an audit is not human work and earns no
-  // protection from regeneration.
-  const priorDrafts = prior.filter((p) => ["AI_DRAFT", "AI_AUDIT_PASSED", "EXTRACTION_FAILED"].includes(p.status));
+  // protection from regeneration. Drafts belonging to THIS run are the earlier
+  // instalments of a resumed run, not stale output, and are left alone.
+  const priorDrafts = prior.filter((p) => ["AI_DRAFT", "AI_AUDIT_PASSED", "EXTRACTION_FAILED"].includes(p.status) && p.extractionId !== runId);
+  const sameRunKeys = new Set(
+    prior
+      .filter((p) => p.extractionId === runId)
+      .map((p) => encounterKey({ encounterDate: p.encounterDate, provider: p.provider, page: p.page })),
+  );
 
   // Source changed → reviewed content goes STALE (never silently re-verified).
   for (const h of priorHuman) {
@@ -369,10 +429,13 @@ export async function processDocumentExtraction(documentId: string, opts: Extrac
   for (const e of encounters) {
     // A current (non-stale) human row already covers this encounter — do not
     // create a duplicate AI candidate beside preserved human work.
-    if (humanKeys.has(encounterKey({ encounterDate: e.encounterDate, provider: e.provider, page: e.page }))) continue;
+    const key = encounterKey({ encounterDate: e.encounterDate, provider: e.provider, page: e.page });
+    if (humanKeys.has(key)) continue;
+    // An earlier instalment of this same (resumed) run already wrote it.
+    if (sameRunKeys.has(key)) continue;
     const row = await prisma.extractedEncounter.create({
       data: {
-        extractionId: run.id,
+        extractionId: runId,
         firmId: doc.firmId, // server-controlled — never from the model
         caseId: doc.caseId,
         sourceDocumentId: doc.id,
@@ -421,7 +484,44 @@ export async function processDocumentExtraction(documentId: string, opts: Extrac
     });
   }
 
-  return { extractionId: run.id, status: "COMPLETE", accepted: encounters.length, rejected: rejects.length };
+  // ── Close the run ─────────────────────────────────────────────────────────
+  // The run reaches its terminal state only after its output is persisted, so
+  // a crash mid-write leaves an unfinished run — recoverable — rather than a
+  // COMPLETE run missing half its encounters.
+  const runData = {
+    sourceFingerprint,
+    truncated,
+    chunkCount: chunks.length,
+    chunksTotal: chunks.length,
+    chunksDone: endIndex,
+    candidateCount,
+    acceptedCount: encounters.reduce((s, e) => s + e.claims.length, 0),
+    rejectedCount: rejects.length,
+    warnings: warnings as never,
+    criticFindings: criticFindings.slice(0, 40) as never,
+    disputedCount,
+    adjudicatedCount,
+    pagesTotal: pageRows.length,
+    pagesReadable: pageRows.filter((p) => p.status === "READABLE").length,
+    auditResult: audit.result,
+    // Operational counters only — chunk positions and call counts, never
+    // record content.
+    telemetry: {
+      chunksProcessed: endIndex - startIndex,
+      retries,
+      failedChunks: failedSections.length,
+      concurrency,
+      criticEnabled: criticEnabled(),
+      elapsedMs: Date.now() - startedAt.getTime(),
+    } as never,
+  };
+
+  if (paused) {
+    await pauseRun(runId, endIndex, runData);
+    return { extractionId: runId, status: "PAUSED", accepted: encounters.length, rejected: rejects.length, resumeFrom: endIndex };
+  }
+  await finishRun(runId, "COMPLETE", runData, startedAt);
+  return { extractionId: runId, status: "COMPLETE", accepted: encounters.length, rejected: rejects.length };
 }
 
 function safeProvenance(opts: ExtractOptions): { provider: string; model: string | null } {

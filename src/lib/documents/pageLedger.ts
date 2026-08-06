@@ -49,12 +49,22 @@ export interface PageLedgerInput {
   failedRanges?: { pageStart: number | null; pageEnd: number | null; reason: string }[];
   /** The source text arrived clipped at the storage cap. */
   sourceClipped?: boolean;
+  /**
+   * Pages this invocation actually accounted for. When a run pauses at its
+   * chunk budget, the pages it never reached get NO row — the absence of a row
+   * is the honest record of "not yet accounted for", and the resumed run fills
+   * them in. Omit (or null) when the whole document was processed.
+   */
+  coveredPages?: Set<number> | null;
 }
 
 const hash = (s: string) => createHash("sha256").update(s, "utf8").digest("hex");
 
 /** Minimum characters for a page to count as carrying text. */
 const MIN_PAGE_TEXT = 25;
+
+/** Leading page furniture ("Page 4 of 212"), excluded from content. */
+const PAGE_MARKER = /^page\s+\d+(?:\s+of\s+\d+)?\s*/i;
 
 /**
  * Build the ledger rows for one document — pure, so every state rule is unit
@@ -94,8 +104,12 @@ export function buildPageLedger(input: PageLedgerInput): PageLedgerRow[] {
   const seenHashes = new Map<string, number>();
   const lastPage = Math.max(...byPage.keys());
   for (const [page, span] of [...byPage.entries()].sort((a, b) => a[0] - b[0])) {
+    if (input.coveredPages && !input.coveredPages.has(page)) continue;
     const body = text.slice(span.start, span.end);
-    const trimmed = body.replace(/\s+/g, " ").trim();
+    // The page marker itself is furniture, not content: a page carrying only
+    // "Page 12 of 300" is empty, and two identical faxed pages must hash the
+    // same even though their markers differ.
+    const trimmed = body.replace(/\s+/g, " ").trim().replace(PAGE_MARKER, "").trim();
     const contentHash = hash(trimmed);
     let status: PageState;
     let note: string | null = null;
@@ -200,7 +214,16 @@ export async function persistPageLedger(rows: PageLedgerRow[]): Promise<void> {
  * Case-level processing facts, DERIVED from persisted state — the honest
  * inputs the audit consumes instead of hardcoded assumptions.
  */
-export async function caseProcessingFacts(caseId: string, firmId: string): Promise<{ allDocumentsProcessed: boolean; failedExtractions: number }> {
+export async function caseProcessingFacts(
+  caseId: string,
+  firmId: string,
+  /**
+   * The in-flight document: a run computing these facts has not yet written
+   * its own outcome, so it states it here rather than reading a row that does
+   * not exist yet. Every other document is read from what is persisted.
+   */
+  inFlight?: { documentId: string; processed: boolean },
+): Promise<{ allDocumentsProcessed: boolean; failedExtractions: number }> {
   const docs = await prisma.document.findMany({ where: { caseId, firmId }, select: { id: true, flags: true } });
   const pendingOcr = docs.filter((d) => /OCR queued|OCR in progress|OCR failed/i.test(d.flags ?? "")).length;
   const runs = await prisma.recordExtraction.findMany({
@@ -213,8 +236,14 @@ export async function caseProcessingFacts(caseId: string, firmId: string): Promi
   let failed = 0;
   let unprocessed = 0;
   for (const d of docs) {
+    if (inFlight && d.id === inFlight.documentId) {
+      if (!inFlight.processed) unprocessed++;
+      continue;
+    }
     const status = latest.get(d.id);
-    if (!status) unprocessed++;
+    // An unfinished run (RUNNING/PAUSED) is not a processed document, and a
+    // document with no run at all has never been read.
+    if (!status || status === "RUNNING" || status === "PAUSED" || status === "PENDING" || status === "ABANDONED") unprocessed++;
     else if (status === "EXTRACTION_FAILED" || status === "BLOCKED_OCR") failed++;
   }
   return { allDocumentsProcessed: pendingOcr === 0 && unprocessed === 0 && failed === 0, failedExtractions: failed };

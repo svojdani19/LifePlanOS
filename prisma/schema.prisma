@@ -825,6 +825,13 @@ model FutureCareItem {
   // Null if none found/offline.
   citation          Json?
 
+  // Projection-input provenance: for each of the need, frequency, duration and
+  // unit cost — RECORD_STATED or PLANNING_ASSUMPTION — plus the citation that
+  // supports the RECORD_STATED inputs and nothing else. A line whose quantities
+  // are conventional must never present a record citation as their source.
+  // { service, frequency, duration, unitCost, citation }
+  inputProvenance Json?
+
   // Alternatives & adversarial framing.
   lowerCostAlternative String?
   plaintiffValue       String?
@@ -1804,7 +1811,8 @@ model RecordExtraction {
   firmId           String
   caseId           String
   sourceDocumentId String
-  status           String    @default("PENDING") // PENDING | COMPLETE | EXTRACTION_FAILED | BLOCKED_OCR
+  // PENDING | RUNNING | PAUSED | COMPLETE | EXTRACTION_FAILED | BLOCKED_OCR | ABANDONED
+  status           String    @default("PENDING")
   provider         String? // llm provider name
   model            String? // resolved model identifier
   promptVersion    String?
@@ -1827,8 +1835,32 @@ model RecordExtraction {
   createdById      String?
   createdAt        DateTime  @default(now())
 
+  // ── Run lifecycle ─────────────────────────────────────────────────────────
+  // A run row is created when work STARTS, so an interrupted run is visible as
+  // an unfinished run rather than as no run at all.
+  startedAt    DateTime?
+  finishedAt   DateTime?
+  // Liveness for the run lock: a RUNNING row whose heartbeat has gone cold is
+  // a crashed run and may be taken over, so a crash cannot block a document
+  // forever.
+  heartbeatAt  DateTime?
+  durationMs   Int?
+  chunksTotal  Int       @default(0)
+  chunksDone   Int       @default(0)
+  // PHI-free resume cursor: { nextChunkIndex } — chunk positions only, never
+  // record content.
+  resumeState  Json?
+  // PHI-free counters (model calls, retries, timings) for operations.
+  telemetry    Json?
+  // Run lock: "ACTIVE" while a run holds this document, NULL once it reaches a
+  // terminal state. Postgres treats NULLs as distinct, so the unique index
+  // permits unlimited finished runs but only ONE unfinished run per document.
+  lockKey      String?
+
+  @@unique([sourceDocumentId, lockKey])
   @@index([caseId, sourceDocumentId])
   @@index([firmId])
+  @@index([status, heartbeatAt])
 }
 
 // One VALIDATED encounter extracted from one document. Claim-level provenance
@@ -1918,7 +1950,7 @@ model SourcePage {
   ocrMethod        String   @default("NONE")
   ocrConfidence    Float? // null when not OCR'd — never a fabricated 0.96
   contentHash      String
-  // READABLE | BLANK | LOW_CONFIDENCE | UNREADABLE | TRUNCATED | PENDING_OCR | OCR_FAILED
+  // READABLE | BLANK | LOW_CONFIDENCE | UNREADABLE | FAILED | DUPLICATE | PENDING_OCR | OCR_FAILED
   status           String   @default("READABLE")
   truncated        Boolean  @default(false)
   note             String? // PHI-safe reason for a non-READABLE status

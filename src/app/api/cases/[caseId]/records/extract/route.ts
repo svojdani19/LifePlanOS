@@ -4,7 +4,13 @@ import { requireApiContext, requirePermission, requireCase, audit } from "@/lib/
 import { processDocumentExtraction } from "@/lib/documents/extractionRun";
 import { ok, handleError } from "@/lib/api";
 
-const schema = z.object({ documentId: z.string().optional() });
+const schema = z.object({
+  documentId: z.string().optional(),
+  // Re-read a document whose source bytes, prompt, schema and model are all
+  // unchanged. Off by default: repeating identical work only burns tokens and
+  // churns draft rows.
+  force: z.boolean().optional(),
+});
 
 // (Re)run source-grounded extraction for one document or the whole case.
 // Regeneration NEVER destroys human review: drafts are superseded, human work
@@ -23,9 +29,22 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
     if (input.documentId && docs.length === 0) return ok({ error: "Document not found" }, 404);
     const results = [];
     for (const d of docs) {
-      results.push(await processDocumentExtraction(d.id, { actorUserId: ctx.user.id }));
+      results.push(await processDocumentExtraction(d.id, { actorUserId: ctx.user.id, force: input.force }));
     }
-    await audit(ctx, "records.extract", { type: "case", id: params.caseId, caseId: params.caseId, meta: { documents: docs.length } });
+    await audit(ctx, "records.extract", {
+      type: "case",
+      id: params.caseId,
+      caseId: params.caseId,
+      meta: {
+        documents: docs.length,
+        // What actually happened, so a run that was skipped or refused is not
+        // mistaken for a document that was re-read.
+        reused: results.filter((r) => r.idempotent).length,
+        busy: results.filter((r) => r.status === "BUSY").length,
+        paused: results.filter((r) => r.status === "PAUSED").length,
+        forced: !!input.force,
+      },
+    });
     return ok({ results });
   } catch (err) {
     return handleError(err);

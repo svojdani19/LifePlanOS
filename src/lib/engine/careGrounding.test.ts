@@ -11,47 +11,51 @@ import {
   mineRecommendedItems,
   citedRationale,
   type CitedText,
+  type TimedCitation,
   type RecordCareSupport,
 } from "./careGrounding";
+import { resolveTemporal, type StatementKind } from "./temporalResolution";
 
-const cite = (text: string, over: Partial<CitedText> = {}): CitedText => ({
-  text,
-  excerpt: text,
-  filename: "Synthetic MR.pdf",
-  page: 7,
-  date: "2026-03-02",
-  provider: "Dana Rivers, MD",
-  ...over,
-});
+/**
+ * A citation as the loader produces it: cited AND placed in time. Fixtures go
+ * through the same resolution the real path uses, so a fixture can never claim
+ * support the pipeline would refuse.
+ */
+const cite = (text: string, over: Partial<CitedText> = {}, kind: StatementKind = "RECOMMENDATION"): TimedCitation => {
+  const base: CitedText = { text, excerpt: text, filename: "Synthetic MR.pdf", page: 7, date: "2026-03-02", provider: "Dana Rivers, MD", ...over };
+  return { ...base, temporal: resolveTemporal({ text: base.text, date: base.date, kind }) };
+};
+const observed = (text: string, over: Partial<CitedText> = {}) => cite(text, over, "OBSERVATION");
 
 const support = (over: Partial<RecordCareSupport> = {}): RecordCareSupport => ({
   recommendations: [],
   medications: [],
   functionalMarkers: [],
   corpus: "",
+  temporallyExcluded: [],
   ...over,
 });
 
 describe("severity gate — catastrophic care requires documented dependence", () => {
   it("pain and restrictions alone never support wheelchair-tier items", () => {
-    const s = severitySupportsCatastrophic(["Chronic low back pain 8/10", "No lifting over 20 pounds", "Modified duty"]);
+    const s = severitySupportsCatastrophic([observed("Chronic low back pain 8/10"), observed("No lifting over 20 pounds"), observed("Modified duty")]);
     expect(s.supported).toBe(false);
   });
 
   it("documented dependence supports it", () => {
     for (const marker of ["Patient is non-ambulatory", "bed confined, unable to sit", "dependent for ADLs", "maximum assist for transfers"]) {
-      expect(severitySupportsCatastrophic([marker]).supported, marker).toBe(true);
+      expect(severitySupportsCatastrophic([observed(marker)]).supported, marker).toBe(true);
     }
   });
 
   it("gates the catastrophic categories and passes ordinary care", () => {
-    const noSeverity = support({ functionalMarkers: ["Chronic pain"] });
+    const noSeverity = support({ functionalMarkers: [observed("Chronic pain")] });
     expect(gateTemplateItem({ category: "MOBILITY_AID", service: "Wheelchair & mobility equipment" }, noSeverity).allowed).toBe(false);
     expect(gateTemplateItem({ category: "HOME_MODIFICATION", service: "Home accessibility modifications" }, noSeverity).allowed).toBe(false);
     expect(gateTemplateItem({ category: "CASE_MANAGEMENT", service: "RN medical case management" }, noSeverity).allowed).toBe(false);
     expect(gateTemplateItem({ category: "PHYSICAL_THERAPY", service: "Ongoing physical therapy" }, noSeverity).allowed).toBe(true);
     expect(gateTemplateItem({ category: "PAIN_MANAGEMENT", service: "Pain management visits" }, noSeverity).allowed).toBe(true);
-    const withSeverity = support({ functionalMarkers: ["Patient is wheelchair dependent for mobility"] });
+    const withSeverity = support({ functionalMarkers: [observed("Patient is wheelchair dependent for mobility")] });
     expect(gateTemplateItem({ category: "MOBILITY_AID", service: "Wheelchair & mobility equipment" }, withSeverity).allowed).toBe(true);
   });
 
@@ -63,7 +67,7 @@ describe("severity gate — catastrophic care requires documented dependence", (
 });
 
 describe("surgical gate — projections never invent operations", () => {
-  const lumbarRec = cite("Recommend lumbar decompression surgery at L4-L5 if symptoms persist.");
+  const lumbarRec = cite("Recommend lumbar decompression surgery at L4-L5.");
 
   it("a lumbar recommendation grounds lumbar surgery and nothing cervical", () => {
     expect(surgicalSupport("Lumbar decompression / fusion", [lumbarRec]).supported).toBe(true);
@@ -91,13 +95,13 @@ describe("surgical gate — projections never invent operations", () => {
 describe("documented medications replace the bundle", () => {
   it("extracts distinct maintenance drugs (documented more than once)", () => {
     const meds = documentedMedications([
-      cite("Gabapentin 300mg PO TID", { date: "2026-01-15" }),
-      cite("Gabapentin (Neurontin) 300 mg three times daily", { date: "2026-03-02" }),
-      cite("Ibuprofen 800mg PRN; Methocarbamol 500mg", { date: "2026-01-15" }),
-      cite("Ibuprofen 800 mg twice daily", { date: "2026-04-10" }),
-      cite("Ondansetron 4mg once (post-op nausea)", { date: "2026-02-01" }), // one date → not maintenance
-      cite("Tramadol 50mg", { date: "2026-02-01" }),
-      cite("Tramadol 50 mg PRN", { date: "2026-02-01" }), // SAME date twice → one episode, not a regimen
+      observed("Gabapentin 300mg PO TID", { date: "2026-01-15" }),
+      observed("Gabapentin (Neurontin) 300 mg three times daily", { date: "2026-03-02" }),
+      observed("Ibuprofen 800mg PRN; Methocarbamol 500mg", { date: "2026-01-15" }),
+      observed("Ibuprofen 800 mg twice daily", { date: "2026-04-10" }),
+      observed("Ondansetron 4mg once (post-op nausea)", { date: "2026-02-01" }), // one date → not maintenance
+      observed("Tramadol 50mg", { date: "2026-02-01" }),
+      observed("Tramadol 50 mg PRN", { date: "2026-02-01" }), // SAME date twice → one episode, not a regimen
     ]);
     const names = meds.map((m) => m.drug);
     expect(names).toContain("Gabapentin");
@@ -110,7 +114,7 @@ describe("documented medications replace the bundle", () => {
   });
 
   it("ignores list-header noise", () => {
-    expect(documentedMedications([cite("Medications reviewed with patient"), cite("Current medication list attached")])).toEqual([]);
+    expect(documentedMedications([observed("Medications reviewed with patient"), observed("Current medication list attached")])).toEqual([]);
   });
 });
 
@@ -149,12 +153,12 @@ describe("mined recommendations become cited draft items", () => {
 describe("apportionment: non-injury drugs are not costed", () => {
   it("statins and diabetes agents never become plan items, however well documented", () => {
     const meds = documentedMedications([
-      cite("Atorvastatin 40mg daily", { date: "2026-01-01" }),
-      cite("Atorvastatin 40mg daily", { date: "2026-03-01" }),
-      cite("Metformin 1000mg BID", { date: "2026-01-01" }),
-      cite("Metformin 1000mg BID", { date: "2026-03-01" }),
-      cite("Insulin glargine 20 units", { date: "2026-01-01" }),
-      cite("Insulin glargine 20 units", { date: "2026-02-01" }),
+      observed("Atorvastatin 40mg daily", { date: "2026-01-01" }),
+      observed("Atorvastatin 40mg daily", { date: "2026-03-01" }),
+      observed("Metformin 1000mg BID", { date: "2026-01-01" }),
+      observed("Metformin 1000mg BID", { date: "2026-03-01" }),
+      observed("Insulin glargine 20 units", { date: "2026-01-01" }),
+      observed("Insulin glargine 20 units", { date: "2026-02-01" }),
     ]);
     expect(meds).toEqual([]);
   });
@@ -178,7 +182,7 @@ describe("catastrophic CONTENT is severity-gated regardless of category", () => 
   it("an SCI complication package needs documented dependence even under a benign category", () => {
     const g = gateTemplateItem(
       { category: "COMPLICATION_MANAGEMENT", service: "Management of pressure injury / UTI episodes", rationale: "Recurrent complications common to SCI." },
-      support({ functionalMarkers: ["Chronic low back pain"], recommendations: [cite("Recommend lumbar surgery.")] }),
+      support({ functionalMarkers: [observed("Chronic low back pain")], recommendations: [cite("Recommend lumbar surgery.")] }),
     );
     expect(g.allowed).toBe(false);
     expect(g.reason).toMatch(/presupposes major neurological injury/);
@@ -194,5 +198,75 @@ describe("paperwork recommendations are never care items", () => {
   it("requesting missing records is case administration, not imaging", () => {
     expect(mineRecommendedItems([cite("Recommend requesting any missing records to clarify prior imaging and treatment.")], [])).toEqual([]);
     expect(mineRecommendedItems([cite("Recommend records be obtained from the prior chiropractor.")], [])).toEqual([]);
+  });
+});
+
+describe("temporal resolution gates the record support", () => {
+  it("a surgery the patient already had grounds no future surgery", () => {
+    const s = support({ recommendations: [cite("Status post L4-L5 lumbar fusion.")] });
+    expect(gateTemplateItem({ category: "FUTURE_SURGERY", service: "Lumbar decompression / fusion" }, s).allowed).toBe(false);
+  });
+
+  it("a surgery the patient declined grounds no future surgery", () => {
+    const s = support({ recommendations: [cite("Patient declined the recommended lumbar fusion.")] });
+    expect(gateTemplateItem({ category: "FUTURE_SURGERY", service: "Lumbar decompression / fusion" }, s).allowed).toBe(false);
+  });
+
+  it("an UNDATED recommendation never satisfies a gate, however emphatic", () => {
+    const s = support({ recommendations: [cite("Recommend lumbar decompression surgery at L4-L5.", { date: null })] });
+    expect(gateTemplateItem({ category: "FUTURE_SURGERY", service: "Lumbar decompression / fusion" }, s).allowed).toBe(false);
+  });
+
+  it("an undated dependence marker never grounds catastrophic care", () => {
+    const s = support({ functionalMarkers: [observed("Patient is wheelchair dependent for mobility", { date: null })] });
+    expect(gateTemplateItem({ category: "MOBILITY_AID", service: "Wheelchair & mobility equipment" }, s).allowed).toBe(false);
+  });
+
+  it("a deficit a later note records as resolved stops grounding catastrophic care", () => {
+    const s = support({
+      functionalMarkers: [
+        { ...observed("Wheelchair dependent for all mobility.", { date: "2025-08-01" }), temporal: { status: "CONTRADICTED", reason: "Resolved in a later record.", supportsFutureCare: false } },
+      ],
+    });
+    expect(gateTemplateItem({ category: "MOBILITY_AID", service: "Wheelchair & mobility equipment" }, s).allowed).toBe(false);
+  });
+
+  it("a contingent recommendation is not mined into a costed line", () => {
+    expect(mineRecommendedItems([cite("If symptoms persist, recommend lumbar epidural steroid injection.")], [])).toEqual([]);
+  });
+
+  it("an undated recommendation is not mined into a costed line", () => {
+    expect(mineRecommendedItems([cite("Recommend lumbar epidural steroid injection.", { date: null })], [])).toEqual([]);
+  });
+
+  it("a discontinued drug is not projected as a regimen", () => {
+    const meds = documentedMedications([
+      observed("Gabapentin 300mg PO TID", { date: "2026-01-15" }),
+      observed("Gabapentin discontinued.", { date: "2026-03-02" }),
+    ]);
+    expect(meds).toEqual([]);
+  });
+
+  it("an undated medication mention never completes the two-date maintenance pair", () => {
+    const meds = documentedMedications([
+      observed("Gabapentin 300mg PO TID", { date: "2026-01-15" }),
+      observed("Gabapentin 300mg PO TID", { date: null }),
+    ]);
+    expect(meds).toEqual([]);
+  });
+});
+
+describe("mined items record which quantities the note stated", () => {
+  it("a stated frequency and duration are adopted and marked record-stated", () => {
+    const [item] = mineRecommendedItems([cite("Recommend physical therapy twice weekly for 12 weeks.")], []);
+    expect(item.frequencyPerYear).toBe(104);
+    expect(item.durationYears).toBeCloseTo(12 / 52, 5);
+    expect(item.stated).toEqual({ frequency: true, duration: true });
+  });
+
+  it("an unstated quantity falls back to the planning default and is marked as one", () => {
+    const [item] = mineRecommendedItems([cite("Recommend lumbar epidural steroid injection.")], []);
+    expect(item.stated).toEqual({ frequency: false, duration: false });
+    expect(item.frequencyPerYear).toBe(2); // planning default, not a record figure
   });
 });

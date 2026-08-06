@@ -126,6 +126,8 @@ export interface RDFutureCareItem {
   missingSupport?: string | null;
   origin?: string | null;
   templateRuleId?: string | null;
+  /** { service, frequency, duration, unitCost, citation } — see projectionProvenance. */
+  inputProvenance?: unknown;
   physicianStatus: string;
   physicianNote?: string | null;
 }

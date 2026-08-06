@@ -26,6 +26,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { prisma } from "@/lib/db";
+import { resolveTimeline, type Resolved, type TemporalFact } from "@/lib/engine/temporalResolution";
+import { statedQuantities } from "@/lib/engine/projectionProvenance";
 
 export interface CitedText {
   text: string;
@@ -36,16 +38,32 @@ export interface CitedText {
   provider: string | null;
 }
 
+/**
+ * A citation placed in time. Nothing supports a projection on the strength of
+ * its wording alone: care already delivered, refused, withdrawn, contingent,
+ * pre-injury, or undated is carried with the reason it does not count.
+ */
+export type TimedCitation = CitedText & { temporal: TemporalFact };
+
 export interface RecordCareSupport {
-  /** Treating-provider recommended / planned care, cited. */
-  recommendations: CitedText[];
-  /** Medication claims, cited. */
-  medications: CitedText[];
-  /** Functional-status / restriction claim values. */
-  functionalMarkers: string[];
+  /** Treating-provider recommended / planned care, cited and time-resolved. */
+  recommendations: TimedCitation[];
+  /** Medication claims, cited and time-resolved. */
+  medications: TimedCitation[];
+  /** Functional-status / restriction claims, cited and time-resolved. */
+  functionalMarkers: TimedCitation[];
   /** Normalized corpus of all clinical claim text, for support matching. */
   corpus: string;
+  /**
+   * Statements that were excluded by temporal resolution, with the reason —
+   * disclosed for review rather than silently dropped.
+   */
+  temporallyExcluded: { text: string; date: string | null; status: string; reason: string }[];
 }
+
+const timed = (resolved: Resolved<CitedText>[]): TimedCitation[] => resolved.map((r) => ({ ...r.item, temporal: r.temporal }));
+/** Only statements that describe care still owed to the patient. */
+export const supportsCare = (c: TimedCitation) => c.temporal.supportsFutureCare;
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
 
@@ -68,7 +86,7 @@ export async function loadRecordCareSupport(caseId: string, dateOfInjury?: Date 
 
   const recommendations: CitedText[] = [];
   const medications: CitedText[] = [];
-  const functionalMarkers: string[] = [];
+  const functionalMarkers: CitedText[] = [];
   const corpusParts: string[] = [];
 
   for (const e of encounters) {
@@ -99,11 +117,30 @@ export async function loadRecordCareSupport(caseId: string, dateOfInjury?: Date 
       // pre-injury note describes a moment, not the patient's baseline — and
       // catastrophic lifetime care must never be projected from a moment.
       if ((c.field === "functionalStatus" || c.field === "restrictions" || c.claimType === "FUNCTIONAL_STATUS") && !inpatientContext && !preInjury) {
-        functionalMarkers.push(value);
+        functionalMarkers.push(cited);
       }
     }
   }
-  return { recommendations, medications, functionalMarkers, corpus: norm(corpusParts.join(" \n ")) };
+
+  // ── Temporal resolution ───────────────────────────────────────────────────
+  // Wording alone never establishes that care is still owed. Each set is
+  // resolved together so a later note can withdraw an earlier recommendation
+  // or record a deficit as resolved, and so the same recommendation repeated
+  // across many notes counts once — at its most recent statement.
+  const recs = resolveTimeline(recommendations, { dateOfInjury, kind: "RECOMMENDATION" });
+  const meds = resolveTimeline(medications, { dateOfInjury, kind: "OBSERVATION" });
+  const markers = resolveTimeline(functionalMarkers, { dateOfInjury, kind: "OBSERVATION" });
+  const temporallyExcluded = [...recs, ...meds, ...markers]
+    .filter((r) => !r.temporal.supportsFutureCare)
+    .map((r) => ({ text: r.item.text.slice(0, 160), date: r.item.date, status: r.temporal.status, reason: r.temporal.reason }));
+
+  return {
+    recommendations: timed(recs),
+    medications: timed(meds),
+    functionalMarkers: timed(markers),
+    corpus: norm(corpusParts.join(" \n ")),
+    temporallyExcluded,
+  };
 }
 
 // ── Severity gate ────────────────────────────────────────────────────────────
@@ -129,9 +166,13 @@ const SEVERITY_RE =
  * bar is explicit documentation of major functional dependence — not pain,
  * not restrictions, not a diagnosis label.
  */
-export function severitySupportsCatastrophic(functionalMarkers: string[]): { supported: boolean; marker: string | null } {
+export function severitySupportsCatastrophic(functionalMarkers: TimedCitation[]): { supported: boolean; marker: string | null } {
   for (const m of functionalMarkers) {
-    if (SEVERITY_RE.test(m)) return { supported: true, marker: m.slice(0, 160) };
+    // A deficit a later note recorded as resolved, an undated one, or one
+    // predating the injury describes a moment that is no longer the patient —
+    // and lifetime catastrophic care is never projected from a moment.
+    if (!supportsCare(m)) continue;
+    if (SEVERITY_RE.test(m.text)) return { supported: true, marker: m.text.slice(0, 160) };
   }
   return { supported: false, marker: null };
 }
@@ -166,9 +207,12 @@ function tokensIn(text: string, tokens: string[]): Set<string> {
  * about surgery on the SAME anatomy. "Recommend lumbar surgery" grounds a
  * lumbar fusion item; it grounds nothing cervical.
  */
-export function surgicalSupport(service: string, recommendations: CitedText[]): { supported: boolean; citation: CitedText | null } {
+export function surgicalSupport(service: string, recommendations: TimedCitation[]): { supported: boolean; citation: TimedCitation | null } {
   const svcAnatomy = tokensIn(service, ANATOMY_TOKENS);
   for (const rec of recommendations) {
+    // A surgery the patient already had, declined, or that a later note
+    // withdrew grounds nothing; nor does one that cannot be placed in time.
+    if (!supportsCare(rec)) continue;
     const recSurgical = tokensIn(rec.text, SURGICAL_TOKENS);
     if (!recSurgical.size) continue;
     const recAnatomy = tokensIn(rec.text, ANATOMY_TOKENS);
@@ -186,7 +230,7 @@ export function surgicalSupport(service: string, recommendations: CitedText[]): 
 export interface TemplateGate {
   allowed: boolean;
   reason: string | null; // suppression reason (reviewable), null when allowed
-  citation: CitedText | null; // support citation when one grounds the item
+  citation: TimedCitation | null; // support citation when one grounds the item
 }
 
 /**
@@ -246,7 +290,7 @@ export function gateTemplateItem(
 export interface DocumentedMedication {
   drug: string;
   occurrences: number; // distinct DATES documented
-  citation: CitedText;
+  citation: TimedCitation;
 }
 
 /**
@@ -267,9 +311,12 @@ const DRUG_STOP = new Set(["patient", "medication", "medications", "current", "d
  * Non-injury-class drugs are excluded from costing here (they remain fully
  * visible in the medication-history report).
  */
-export function documentedMedications(medClaims: CitedText[]): DocumentedMedication[] {
-  const byDrug = new Map<string, { dates: Set<string>; citation: CitedText }>();
+export function documentedMedications(medClaims: TimedCitation[]): DocumentedMedication[] {
+  const byDrug = new Map<string, { dates: Set<string>; citation: TimedCitation }>();
   for (const claim of medClaims) {
+    // A drug the records show as discontinued, refused, or pre-injury is not a
+    // regimen to project, and an undated mention cannot establish one.
+    if (!supportsCare(claim) || !claim.date) continue;
     // A claim may list several drugs, separated by ; or newline.
     for (const part of claim.text.split(/[;\n]+/)) {
       const m = part.trim().match(/^([A-Za-z][A-Za-z-]{3,})(?:\s+\(([A-Za-z-]{3,})\))?/);
@@ -278,9 +325,10 @@ export function documentedMedications(medClaims: CitedText[]): DocumentedMedicat
       if (DRUG_STOP.has(name)) continue;
       if (!INJURY_MED_RE.test(name)) continue;
       const cur = byDrug.get(name);
-      const date = claim.date ?? "undated";
-      if (cur) cur.dates.add(date);
-      else byDrug.set(name, { dates: new Set([date]), citation: { ...claim, text: part.trim().slice(0, 160) } });
+      // Distinct REAL dates only: two undated mentions are not two days of a
+      // regimen, and an undated one never completes the pair.
+      if (cur) cur.dates.add(claim.date);
+      else byDrug.set(name, { dates: new Set([claim.date]), citation: { ...claim, text: part.trim().slice(0, 160) } });
     }
   }
   return [...byDrug.entries()]
@@ -299,7 +347,12 @@ export interface MinedItem {
   frequencyPerYear: number;
   durationYears: number | null;
   isLifetime: boolean;
-  citation: CitedText;
+  citation: TimedCitation;
+  /**
+   * Which quantities the recommendation itself states. Anything absent here is
+   * a planning default and must be labelled as one.
+   */
+  stated: { frequency: boolean; duration: boolean };
 }
 
 /** Conservative default pricing, always labeled as requiring verification. */
@@ -317,19 +370,18 @@ const MINED_DEFAULTS: { re: RegExp; category: string; specialty: string; unitCos
  * mapping exists. Anything unmappable is NOT invented into a costed line — it
  * remains visible in the records for the planner to act on.
  */
-/** Conditional or hypothetical language: not a recommendation to cost. */
-const HYPOTHETICAL_RE = /^\s*if\b|\b(?:if (?:needed|indicated|necessary|symptoms persist)|possible option|may be considered|in the event|should (?:the|symptoms|it)\b|as needed only)\b/i;
-
-export function mineRecommendedItems(recommendations: CitedText[], existingServices: string[]): MinedItem[] {
+export function mineRecommendedItems(recommendations: TimedCitation[], existingServices: string[]): MinedItem[] {
   const existing = existingServices.map(norm);
   const out: MinedItem[] = [];
   const seen = new Set<string>();
   const MAX_MINED = 12; // a draft, not an inventory — one item per category+anatomy
   for (const rec of recommendations) {
     if (out.length >= MAX_MINED) break;
-    // "If X occurs…" and "a possible option" are contingencies. They stay
-    // visible as documented recommendations; they do not become costed items.
-    if (HYPOTHETICAL_RE.test(rec.text)) continue;
+    // Temporal resolution has already excluded contingencies ("if symptoms
+    // persist"), care already delivered or declined, recommendations a later
+    // note withdrew, pre-injury care, and anything undated. They stay visible
+    // as documented recommendations; they do not become costed items.
+    if (!supportsCare(rec)) continue;
     // The text must RECOMMEND care, not merely mention it: "stop taking OTC
     // medications prior to surgery" mentions surgery and prescribes nothing.
     if (!/\b(?:recommend\w*|advis\w*|candidate for|plan(?:ned)? (?:for|to)|will undergo|scheduled for|refer(?:red|ral)? (?:for|to)|prescrib\w*|order(?:ed)?\b|initiate)\b/i.test(rec.text)) continue;
@@ -349,15 +401,20 @@ export function mineRecommendedItems(recommendations: CitedText[], existingServi
       const svcTokens = [...tokensIn(rec.text, [...SURGICAL_TOKENS, ...ANATOMY_TOKENS, "therapy", "injection", "mri", "restoration", "psych"])];
       if (existing.some((s) => svcTokens.filter((tok) => s.includes(tok)).length >= 2)) break;
       seen.add(key);
+      // Prefer the quantities the recommendation actually states ("twice
+      // weekly for 12 weeks") over the planning default, and record which of
+      // the two supplied each number.
+      const stated = statedQuantities(rec.text);
       out.push({
         category: rule.category,
         service,
         specialty: rule.specialty,
-        unitCost: rule.unitCost,
-        frequencyPerYear: rule.frequencyPerYear,
-        durationYears: rule.durationYears,
+        unitCost: rule.unitCost, // always a planning default; pricing is never stated in a note
+        frequencyPerYear: stated.frequencyPerYear ?? rule.frequencyPerYear,
+        durationYears: stated.durationYears ?? rule.durationYears,
         isLifetime: rule.isLifetime,
         citation: rec,
+        stated: { frequency: stated.frequencyPerYear !== undefined, duration: stated.durationYears !== undefined },
       });
       break; // first matching rule wins for this recommendation
     }

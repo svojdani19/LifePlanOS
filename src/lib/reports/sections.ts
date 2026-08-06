@@ -1,6 +1,7 @@
 import { functionalFinding } from "@/lib/engine/integrity";
 import type { Block } from "./doc";
 import { originLabel } from "./data";
+import { projectionNote, type ProjectionInputs } from "@/lib/engine/projectionProvenance";
 import { buildVisitLedger, buildDiagnosesEvolution, buildNarratives, buildDiagnosticStudies } from "./physicianStructure";
 import type {
   ReportData,
@@ -81,6 +82,21 @@ function durationText(i: RDFutureCareItem, life: number | null | undefined): str
   if (i.isLifetime) return life != null ? `Lifetime (${life.toFixed(1)} yrs)` : "Lifetime";
   if ((i.durationYears ?? 0) <= 0) return "One-time";
   return `${i.durationYears} year${i.durationYears === 1 ? "" : "s"}`;
+}
+
+/**
+ * Which of a line's projected inputs the records state and which are planning
+ * assumptions. An item generated before provenance was recorded says so rather
+ * than implying the records supplied its numbers.
+ */
+function projectionSentence(it: RDFutureCareItem): string {
+  const p = it.inputProvenance as ProjectionInputs | null | undefined;
+  if (!p || typeof p !== "object" || !("frequency" in p)) {
+    return "Projection inputs: the source of this line's frequency, duration, and unit cost was not recorded at generation; treat them as planning assumptions pending physician confirmation.";
+  }
+  const note = projectionNote(p);
+  const c = p.citation;
+  return c ? `${note} Citation: ${c.filename}${c.page != null ? `, p. ${c.page}` : ""}${c.date ? ` (${fmtDate(new Date(c.date))})` : ""}.` : note;
 }
 
 function eventSource(data: ReportData, e: RDChronoEvent): string {
@@ -272,7 +288,9 @@ function narrativeBlocks(blocksIn: import("./physicianStructure").NarrativeBlock
   const out: Block[] = [];
   const renderNarrative = (n: import("./physicianStructure").EncounterNarrative, indent = "") => {
     const body = [
-      ...n.lines.map((l) => `${l.label}: ${l.text}`),
+      // A line that sits on a different page than the note's span carries its
+      // own page, so a reader can check that statement directly.
+      ...n.lines.map((l) => `${l.label}: ${l.text}${l.cite ? ` ${l.cite}` : ""}`),
       n.qualityNote,
       n.cite,
     ]
@@ -581,6 +599,9 @@ export function futureCare(data: ReportData): Block[] {
       ],
     });
     if (it.rationale) blocks.push(labeled("Stated rationale", it.rationale));
+    // Say plainly which numbers above the records supply and which the planner
+    // does, so a citation is never read as supporting a conventional quantity.
+    blocks.push(labeled("Projection inputs", projectionSentence(it)));
   }
   return blocks;
 }
