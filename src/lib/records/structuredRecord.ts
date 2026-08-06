@@ -77,7 +77,22 @@ export interface StructuredRecord {
   undated: StructuredEncounter[];
   /** Case-level processing limitations to disclose in reviews and reports. */
   limitations: string[];
-  counts: { encounters: number; verified: number; reviewed: number; humanEdited: number; aiDraft: number; stale: number; failedDocs: number; pendingOcr: number };
+  counts: {
+    encounters: number;
+    verified: number;
+    reviewed: number;
+    humanEdited: number;
+    /** Plain AI drafts (kept for existing consumers). */
+    aiDraft: number;
+    /** AI drafts that passed the automated audit — still pending a human. */
+    aiAuditPassed: number;
+    /** Everything awaiting HUMAN review: AI_DRAFT + AI_AUDIT_PASSED. An
+     *  automated audit is a quality signal, never a review. */
+    pendingHumanReview: number;
+    stale: number;
+    failedDocs: number;
+    pendingOcr: number;
+  };
 }
 
 const toIso = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null);
@@ -192,6 +207,8 @@ export async function getStructuredRecord(caseId: string, firmId: string): Promi
       reviewed: countBy("REVIEWED"),
       humanEdited: countBy("HUMAN_EDITED"),
       aiDraft: countBy("AI_DRAFT"),
+      aiAuditPassed: countBy("AI_AUDIT_PASSED"),
+      pendingHumanReview: countBy("AI_DRAFT") + countBy("AI_AUDIT_PASSED"),
       stale: countBy("STALE"),
       failedDocs,
       pendingOcr,
@@ -220,7 +237,7 @@ export async function factualReviewState(caseId: string, firmId: string): Promis
     prisma.sourcePage.findMany({ where: { caseId, firmId }, select: { status: true } }).catch(() => [] as { status: string }[]),
   ]);
   const blockers: string[] = [];
-  if (record.counts.aiDraft > 0) blockers.push(`${record.counts.aiDraft} extracted encounter(s) are unreviewed AI drafts.`);
+  if (record.counts.pendingHumanReview > 0) blockers.push(`${record.counts.pendingHumanReview} extracted encounter(s) are pending human review (AI drafts, including audit-passed drafts — an automated audit is not a human review).`);
   if (record.counts.stale > 0) blockers.push(`${record.counts.stale} reviewed encounter(s) are stale after source changes and need re-review.`);
   if (record.counts.failedDocs > 0) blockers.push(`${record.counts.failedDocs} document(s) failed extraction or OCR and need attention.`);
   if (record.counts.pendingOcr > 0) blockers.push(`${record.counts.pendingOcr} document(s) are still being OCR'd.`);

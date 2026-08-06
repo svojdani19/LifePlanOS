@@ -21,6 +21,7 @@ import { prisma } from "@/lib/db";
 import { pageMarks } from "@/lib/documents/meta";
 import { segmentEncounters } from "@/lib/engine/chronology";
 import { MAX_TEXT } from "@/lib/documents/textLimits";
+import { buildPageLedger, buildPendingPages, persistPageLedger, caseProcessingFacts } from "@/lib/documents/pageLedger";
 import { stripChartFurniture } from "@/lib/documents/chartStructure";
 import {
   chunkDocumentText,
@@ -78,10 +79,12 @@ export async function processDocumentExtraction(documentId: string, opts: Extrac
   // ── OCR discipline: incomplete or failed OCR never reaches the model ───────
   const flags = doc.flags ?? "";
   if (OCR_PENDING.test(flags)) {
+    await persistPageLedger(buildPendingPages(doc, "PENDING_OCR")).catch(() => {});
     const run = await record("BLOCKED_OCR", { error: "OCR has not completed for this document; extraction will run once the text is readable." });
     return { extractionId: run.id, status: "BLOCKED_OCR", accepted: 0, rejected: 0, error: run.error ?? undefined };
   }
   if (OCR_FAILED.test(flags)) {
+    await persistPageLedger(buildPendingPages(doc, "OCR_FAILED")).catch(() => {});
     const run = await record("BLOCKED_OCR", { error: "OCR failed for this document; re-run OCR or re-upload a readable copy before extraction." });
     return { extractionId: run.id, status: "BLOCKED_OCR", accepted: 0, rejected: 0, error: run.error ?? undefined };
   }
@@ -131,7 +134,7 @@ export async function processDocumentExtraction(documentId: string, opts: Extrac
     adjudicated: number;
     unresolved: number;
   };
-  const results: (ChunkResult | { failed: string })[] = new Array(chunks.length);
+  const results: (ChunkResult | { failed: string; failedRange?: { pageStart: number | null; pageEnd: number | null; reason: string } })[] = new Array(chunks.length);
 
   const TRANSIENT_RE = /overloaded|rate.?limit|429|5\d\d|timeout|timed out|ECONN|EPIPE|ENOTFOUND|fetch failed|socket|network/i;
   const backoffs = [2_000, 8_000, 20_000];
@@ -199,7 +202,10 @@ export async function processDocumentExtraction(documentId: string, opts: Extrac
       if (lastErr) {
         const pages = chunk.pageStart != null ? `pages ${chunk.pageStart}–${chunk.pageEnd ?? chunk.pageStart}` : `section ${i + 1}`;
         const reason = lastErr instanceof ExtractionOutputError ? lastErr.message.slice(0, 120) : "provider unavailable after retries";
-        results[i] = { failed: `Content covering ${pages} could not be processed (${reason}); it is not represented in this draft.` };
+        results[i] = {
+          failed: `Content covering ${pages} could not be processed (${reason}); it is not represented in this draft.`,
+          failedRange: { pageStart: chunk.pageStart, pageEnd: chunk.pageEnd, reason },
+        };
       }
     }
   };
@@ -223,10 +229,12 @@ export async function processDocumentExtraction(documentId: string, opts: Extrac
   let disputedCount = 0;
   let adjudicatedCount = 0;
   let unresolvedDisputes = 0;
+  const failedRanges: { pageStart: number | null; pageEnd: number | null; reason: string }[] = [];
   for (const r of results) {
     if (!r) continue;
     if ("failed" in r) {
       failedSections.push(r.failed);
+      if (r.failedRange) failedRanges.push(r.failedRange);
       continue;
     }
     validated.push(...r.accepted);
@@ -281,14 +289,18 @@ export async function processDocumentExtraction(documentId: string, opts: Extrac
     ...rejects.slice(0, 40),
   ];
 
-  // ── Adversarial audit over the finished draft ─────────────────────────────
-  // Page state is what makes "complete" meaningful: a chronology built from
-  // the pages that happened to read is not the record. Documents ingested
-  // before per-page tracking existed report no pages, and the audit treats
-  // that as unknown rather than as clean.
-  const pageRows = await Promise.resolve()
-    .then(() => prisma.sourcePage.findMany({ where: { sourceDocumentId: doc.id }, select: { pageNumber: true, status: true, ocrConfidence: true } }))
-    .catch(() => [] as { pageNumber: number; status: string; ocrConfidence: number | null }[]);
+  // ── Page-coverage ledger ──────────────────────────────────────────────────
+  // The proof behind "every page was processed": one durable row per page,
+  // written idempotently, with failed chunk ranges mapped onto the pages they
+  // cover. The audit consumes these persisted facts — completeness is derived,
+  // never assumed.
+  const pageRows = buildPageLedger({ doc, text, marks, failedRanges, sourceClipped: truncated });
+  await persistPageLedger(pageRows).catch((e) => {
+    // Ledger persistence failing must not lose the extraction, but it MUST be
+    // visible: without the ledger the audit cannot call this complete.
+    warnings.push(`Page-coverage ledger could not be persisted (${e instanceof Error ? e.message.slice(0, 80) : "error"}); page accounting is incomplete.`);
+  });
+  const facts = await caseProcessingFacts(doc.caseId, doc.firmId).catch(() => ({ allDocumentsProcessed: false, failedExtractions: 0 }));
   const auditEncounters: AuditEncounter[] = encounters.map((e, i) => ({
     id: `pending-${i}`,
     sourceDocumentId: doc.id,
@@ -306,12 +318,12 @@ export async function processDocumentExtraction(documentId: string, opts: Extrac
   const audit = auditFactualRecord({
     encounters: auditEncounters,
     pages: pageRows.map((p) => ({ pageNumber: p.pageNumber, status: p.status, ocrConfidence: p.ocrConfidence })),
-    failedExtractions: 0,
+    failedExtractions: facts.failedExtractions,
     failedSections: failedSections.length,
     coverageGaps: coverageGaps.length,
     truncatedSource: truncated,
     unresolvedDisputes,
-    allDocumentsProcessed: true,
+    allDocumentsProcessed: facts.allDocumentsProcessed,
   });
 
   const run = await record("COMPLETE", {

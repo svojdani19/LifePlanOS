@@ -185,6 +185,7 @@ export function chronology(data: ReportData, config: ChronologyConfig = {}): Blo
     if (rs === "REVIEWED") return "Human-reviewed";
     if (rs === "HUMAN_EDITED" || edited) return "Human-edited";
     if (rs === "STALE") return "STALE — source changed after review";
+    if (rs === "AI_AUDIT_PASSED") return "AI audited — human verification pending";
     return "AI-generated draft — pending human review";
   };
   const dateLabel = (e: (typeof events)[number]) =>
@@ -334,9 +335,11 @@ export function recordsReviewed(data: ReportData): Block[] {
         const sd = sr?.documents.find((x) => x.documentId === d.id);
         const status = sd
           ? sd.extraction.status === "COMPLETE"
-            ? sd.encounters.some((e) => e.status === "AI_DRAFT")
+            ? sd.encounters.some((e) => e.status === "AI_DRAFT" || e.status === "AI_AUDIT_PASSED")
               ? "Extracted — pending human review"
-              : "Extracted and reviewed"
+              : sd.encounters.length && sd.encounters.every((e) => ["VERIFIED", "REVIEWED"].includes(e.status))
+                ? "Extracted — human reviewed"
+                : "Extracted — review in progress"
             : sd.extraction.status.replace(/_/g, " ").toLowerCase()
           : "processed (legacy pipeline)";
         return [d.filename, (d.type ?? "record").replace(/_/g, " ").toLowerCase(), d.serviceDate ? mdY(d.serviceDate) : "—", String(d.pageCount ?? "—"), status];

@@ -227,7 +227,7 @@ describe("Report Library — physician-required finals use the central authority
     const res = await POST(req({ reportId: "MEDICAL_RECORD_SUMMARY", format: "HTML", mode: "final" }), params);
     const body = await res.json();
     expect(res.status).toBe(422);
-    expect(body.blockers.join(" ")).toMatch(/unreviewed AI draft/);
+    expect(body.blockers.join(" ")).toMatch(/pending human review/);
     // The block is REVIEW completion, not a credential gate.
     expect(deps.evaluate).not.toHaveBeenCalled();
     expect(deps.storeAndRecord).not.toHaveBeenCalled();
@@ -279,5 +279,17 @@ describe("Report Library — physician-required finals use the central authority
     expect(res.status).toBe(200);
     expect(deps.evaluate).toHaveBeenCalledTimes(2);
     expect(deps.storeAndRecord).toHaveBeenCalled();
+  });
+
+
+  it("AI_AUDIT_PASSED content still blocks a FINAL factual report — an automated audit is not a human review", async () => {
+    deps.extractedEncounterFindMany.mockResolvedValue([
+      { status: "AI_AUDIT_PASSED", auditResult: "PASS", encounterDate: null, page: null, dateStatus: "UNKNOWN", claims: [], warnings: [], verifiedContentHash: null },
+    ]);
+    const res = await POST(req({ reportId: "MEDICAL_RECORD_SUMMARY", format: "HTML", mode: "final" }), params);
+    const body = await res.json();
+    expect(res.status).toBe(422);
+    expect(body.blockers.join(" ")).toMatch(/pending human review/);
+    expect(body.blockers.join(" ")).toMatch(/automated audit is not a human review/);
   });
 });
