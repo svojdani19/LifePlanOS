@@ -89,9 +89,17 @@ function durationText(i: RDFutureCareItem, life: number | null | undefined): str
  * assumptions. An item generated before provenance was recorded says so rather
  * than implying the records supplied its numbers.
  */
+const AUTHORED_ORIGINS = new Set(["GOLD_IMPORT", "PHYSICIAN_ADDED", "PLANNER_ADDED"]);
+
 function projectionSentence(it: RDFutureCareItem): string {
   const p = it.inputProvenance as ProjectionInputs | null | undefined;
   if (!p || typeof p !== "object" || !("frequency" in p)) {
+    // An authored item's quantities are its AUTHOR's, not the engine's.
+    // Telling a reader to treat a physician's own figures as machine
+    // assumptions misdescribes who stands behind them.
+    if (AUTHORED_ORIGINS.has(it.origin ?? "")) {
+      return "Projection inputs: this item was authored directly, and its frequency, duration, and unit cost are the author's own figures rather than values the generator derived.";
+    }
     return "Projection inputs: the source of this line's frequency, duration, and unit cost was not recorded at generation; treat them as planning assumptions pending physician confirmation.";
   }
   const note = projectionNote(p);

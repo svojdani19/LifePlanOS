@@ -372,7 +372,14 @@ const MINED_DEFAULTS: { re: RegExp; category: string; specialty: string; unitCos
     frequencyPerYear: 12,
     durationYears: 2,
     isLifetime: false,
-    label: () => "Therapy (as recommended in the records)",
+    // Named by anatomy, matching the dedupe key exactly, so two mined therapy
+    // items can never share a label. A constant label collapsed distinct
+    // regional recommendations into indistinguishable rows AND collided their
+    // provenance, discarding the frequencies the records had stated.
+    label: (m) => {
+      const a = anatomyKey(m);
+      return a === "general" ? "Therapy (as recommended in the records)" : `Therapy — ${a.replace(/-/g, ", ")} (as recommended in the records)`;
+    },
   },
   { re: /\b(?:mri|ct scan|x-?ray|emg|ncv|imaging)\b/i, category: "IMAGING", specialty: "Radiology", unitCost: 1_800, frequencyPerYear: 1, durationYears: 1, isLifetime: false, label: (m) => m },
   { re: /\b(?:neuropsych|psycholog|psychiatr|counseling)\b/i, category: "PSYCH", specialty: "Behavioral Health", unitCost: 302, frequencyPerYear: 4, durationYears: 2, isLifetime: false, label: (m) => m },
