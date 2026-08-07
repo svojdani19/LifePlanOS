@@ -578,3 +578,28 @@ async function runAgainstFakeDb(): Promise<Record<string, unknown>> {
   vi.resetModules();
   return rows[0] ?? {};
 }
+
+// ── Undated material is two different facts ─────────────────────────────────
+
+describe("undated reporting separates a real gap from an expected absence", () => {
+  it("counts clinical gaps apart from material that has no visit date to begin with", () => {
+    const MED = MEDICAL_TIMELINE_CLASSES;
+    const isClinicalGap = (k: string | null) => !k || MED.has(k as never);
+
+    // A clinic note the system could not date IS a gap a person must close.
+    expect(isClinicalGap("CLINICAL_ENCOUNTER")).toBe(true);
+    expect(isClinicalGap("OPERATIVE")).toBe(true);
+    expect(isClinicalGap("THERAPY_COURSE")).toBe(true);
+    expect(isClinicalGap("DIAGNOSTIC_STUDY")).toBe(true);
+    // A consent page, a charge line or a transmittal has no visit date because
+    // it is not a visit. Counting it as a dating failure turned 24 real
+    // problems into an alarming, meaningless 101 on a real case.
+    expect(isClinicalGap("CORRESPONDENCE_OR_GENERIC_EVIDENCE")).toBe(false);
+    expect(isClinicalGap("FINANCIAL")).toBe(false);
+    expect(isClinicalGap("TESTIMONY")).toBe(false);
+    expect(isClinicalGap("LEGAL")).toBe(false);
+    // A legacy row with no recorded kind counts as clinical — the conservative
+    // reading keeps a genuine gap visible rather than filing it as expected.
+    expect(isClinicalGap(null)).toBe(true);
+  });
+});

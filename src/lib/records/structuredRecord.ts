@@ -12,6 +12,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { prisma } from "@/lib/db";
+import { MEDICAL_TIMELINE_CLASSES } from "@/lib/documents/analysisClass";
 import { detectVerificationDrift } from "@/lib/records/verifiedContent";
 
 export interface StructuredClaim {
@@ -76,6 +77,14 @@ export interface StructuredDocument {
   encounters: StructuredEncounter[];
 }
 
+/** Kinds whose rows belong on the medical timeline and therefore need a date. */
+function isMedicalTimelineKind(analysisClass: string | null | undefined): boolean {
+  // A legacy row with no recorded kind is treated as clinical, which is the
+  // conservative reading: it keeps a genuine gap visible rather than hiding it
+  // in the "expected" bucket.
+  return !analysisClass || MEDICAL_TIMELINE_CLASSES.has(analysisClass as never);
+}
+
 export interface StructuredRecord {
   documents: StructuredDocument[];
   /** Encounters with no reliable date — visible, never silently on the timeline. */
@@ -95,6 +104,10 @@ export interface StructuredRecord {
      *  automated audit is a quality signal, never a review. */
     pendingHumanReview: number;
     stale: number;
+    /** Clinical entries the system could not date — a real gap to close. */
+    undatedClinical: number;
+    /** Non-clinical material with no visit date because none applies. */
+    undatedNonClinical: number;
     failedDocs: number;
     pendingOcr: number;
   };
@@ -202,7 +215,20 @@ export async function getStructuredRecord(caseId: string, firmId: string): Promi
       encounters: encByDoc.get(d.id) ?? [],
     };
   });
-  if (undated.length) limitations.push(`${undated.length} extracted encounter${undated.length === 1 ? "" : "s"} carry no reliable date and require human date review; they are not placed on the dated chronology.`);
+  // State the two facts separately. Lumping them together overstates the
+  // problem and hides the part that actually needs a human.
+  const undatedClinical = undated.filter((e) => isMedicalTimelineKind(e.analysisClass));
+  const undatedOther = undated.filter((e) => !isMedicalTimelineKind(e.analysisClass));
+  if (undatedClinical.length) {
+    limitations.push(
+      `${undatedClinical.length} clinical entr${undatedClinical.length === 1 ? "y" : "ies"} carr${undatedClinical.length === 1 ? "ies" : "y"} no reliable date and require human date review; they are not placed on the dated chronology.`,
+    );
+  }
+  if (undatedOther.length) {
+    limitations.push(
+      `${undatedOther.length} non-clinical document${undatedOther.length === 1 ? "" : "s"} (correspondence, consent and registration pages, billing and similar material) carr${undatedOther.length === 1 ? "ies" : "y"} no visit date because none applies. This is expected and requires no action; such material never enters the medical chronology.`,
+    );
+  }
 
   const all = [...encByDoc.values()].flat();
   const countBy = (s: string) => all.filter((e) => e.status === s).length;
@@ -219,6 +245,12 @@ export async function getStructuredRecord(caseId: string, firmId: string): Promi
       aiAuditPassed: countBy("AI_AUDIT_PASSED"),
       pendingHumanReview: countBy("AI_DRAFT") + countBy("AI_AUDIT_PASSED"),
       stale: countBy("STALE"),
+      // Undated is TWO different facts. A clinic note the system could not
+      // date is a gap to close; a consent form or a charge page has no visit
+      // date because it is not a visit, and counting the two together turned
+      // 24 real problems into an alarming, meaningless 101.
+      undatedClinical: undated.filter((e) => isMedicalTimelineKind(e.analysisClass)).length,
+      undatedNonClinical: undated.filter((e) => !isMedicalTimelineKind(e.analysisClass)).length,
       failedDocs,
       pendingOcr,
     },

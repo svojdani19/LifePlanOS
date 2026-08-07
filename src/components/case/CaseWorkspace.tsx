@@ -4090,15 +4090,38 @@ function UndatedGroup({
     onChanged();
   }
 
+  const MEDICAL_KINDS = new Set([
+    "CLINICAL_ENCOUNTER", "THERAPY_COURSE", "OPERATIVE", "ANESTHESIA",
+    "PATHOLOGY_DIAGNOSTIC", "DIAGNOSTIC_STUDY", "INCIDENT",
+  ]);
+  // A row with no recorded kind counts as clinical: the conservative reading
+  // keeps a genuine gap visible rather than filing it under "expected".
+  const isClinicalKind = (e: { analysisClass?: string | null }) => !e.analysisClass || MEDICAL_KINDS.has(e.analysisClass);
+  const clinicalUndated = undated.filter(isClinicalKind);
+  const otherUndated = undated.filter((e) => !isClinicalKind(e));
+
   return (
     <div className="card border-slate-300 p-3">
       <p className="text-xs font-semibold text-ink-900">
-        Undated / date requires review · {undated.length}
+        Undated material · {undated.length}
       </p>
-      <p className="mt-0.5 text-[11px] text-ink-500">
-        These encounters were extracted from the records but carry no date the source supports. They are not placed on
-        the dated chronology. Assigning a date from the source record moves an entry onto the timeline.
-      </p>
+      {/* Two different facts. A clinic note the system could not date is a gap
+          to close; a consent page or a charge line has no visit date because it
+          is not a visit. Reporting one number for both overstates the problem
+          and buries the part that actually needs a person. */}
+      {clinicalUndated.length > 0 && (
+        <p className="mt-1 text-[11px] font-medium text-amber-800">
+          {clinicalUndated.length} clinical {clinicalUndated.length === 1 ? "entry needs" : "entries need"} a date — assigning one from the
+          source record moves it onto the timeline.
+        </p>
+      )}
+      {otherUndated.length > 0 && (
+        <p className="mt-0.5 text-[11px] text-ink-500">
+          {otherUndated.length} non-clinical {otherUndated.length === 1 ? "document carries" : "documents carry"} no visit date because none applies
+          (correspondence, consent and registration pages, billing and similar). Expected; no action needed, and this material never
+          enters the medical chronology.
+        </p>
+      )}
       <div className="mt-2 space-y-2">
         {undated.map((e) => {
           const doc = documents.find((d) => d.id === e.sourceDocumentId);
