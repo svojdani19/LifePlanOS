@@ -21,6 +21,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { prisma } from "@/lib/db";
+import { withDbRetry } from "@/lib/dbRetry";
 
 /** A run whose heartbeat is older than this is presumed dead and reclaimable. */
 export const STALE_LOCK_MS = 30 * 60_000;
@@ -52,7 +53,8 @@ export type RunClaim =
  * draft rows for nothing.
  */
 export async function findIdempotentRun(id: RunIdentity): Promise<{ id: string; acceptedCount: number } | null> {
-  const prior = await prisma.recordExtraction.findFirst({
+  const prior = await withDbRetry(() =>
+    prisma.recordExtraction.findFirst({
     where: {
       sourceDocumentId: id.sourceDocumentId,
       firmId: id.firmId,
@@ -63,8 +65,9 @@ export async function findIdempotentRun(id: RunIdentity): Promise<{ id: string; 
       model: id.model,
     },
     orderBy: { createdAt: "desc" },
-    select: { id: true, acceptedCount: true },
-  });
+      select: { id: true, acceptedCount: true },
+    }),
+  );
   return prior ?? null;
 }
 
@@ -73,9 +76,9 @@ export async function findIdempotentRun(id: RunIdentity): Promise<{ id: string; 
  * already has it. Never blocks and never steals a live run.
  */
 export async function claimRun(id: RunIdentity, now: Date = new Date()): Promise<RunClaim> {
-  const live = await prisma.recordExtraction.findFirst({
-    where: { sourceDocumentId: id.sourceDocumentId, lockKey: ACTIVE },
-  });
+  const live = await withDbRetry(() =>
+    prisma.recordExtraction.findFirst({ where: { sourceDocumentId: id.sourceDocumentId, lockKey: ACTIVE } }),
+  );
 
   if (live) {
     const resumable = live.status === "PAUSED";
@@ -92,6 +95,11 @@ export async function claimRun(id: RunIdentity, now: Date = new Date()): Promise
     } else if (resumable || cold) {
       // Compare-and-set on the exact state we read: if another worker resumed
       // or reclaimed it first, we lose and back off rather than double-run.
+      //
+      // Deliberately NOT retried on a connection failure. A CAS that may or
+      // may not have applied cannot be safely repeated: the retry would match
+      // nothing (we changed the heartbeat) and report BUSY. Failing to claim
+      // is the safe outcome — we simply do not proceed.
       const taken = await prisma.recordExtraction.updateMany({
         where: { id: live.id, lockKey: ACTIVE, status: live.status, heartbeatAt: live.heartbeatAt },
         data: { status: "RUNNING", heartbeatAt: now, ...(cold && !resumable ? { error: null } : {}) },
@@ -149,26 +157,33 @@ export async function heartbeat(runId: string, chunksDone: number): Promise<void
  * instead of starting a competing run.
  */
 export async function pauseRun(runId: string, nextChunkIndex: number, data: Record<string, unknown>): Promise<void> {
-  await prisma.recordExtraction.update({
-    where: { id: runId },
-    data: { ...data, status: "PAUSED", resumeState: { nextChunkIndex }, chunksDone: nextChunkIndex, heartbeatAt: new Date() },
-  });
+  await withDbRetry(() =>
+    prisma.recordExtraction.update({
+      where: { id: runId },
+      data: { ...data, status: "PAUSED", resumeState: { nextChunkIndex }, chunksDone: nextChunkIndex, heartbeatAt: new Date() },
+    }),
+  );
 }
 
 /** Reach a terminal state and release the lock. */
 export async function finishRun(runId: string, status: string, data: Record<string, unknown>, startedAt?: Date | null): Promise<{ id: string; error: string | null }> {
   const now = new Date();
-  return prisma.recordExtraction.update({
+  // Writing the same terminal state twice is harmless, so this retries freely.
+  // Losing it is not harmless: the run would stay RUNNING and hold its lock
+  // until the heartbeat went cold.
+  return withDbRetry(() =>
+    prisma.recordExtraction.update({
     where: { id: runId },
     data: {
       ...data,
       status,
       finishedAt: now,
       ...(startedAt ? { durationMs: now.getTime() - startedAt.getTime() } : {}),
-      resumeState: undefined,
-      lockKey: null,
-    },
-  });
+        resumeState: undefined,
+        lockKey: null,
+      },
+    }),
+  );
 }
 
 /**

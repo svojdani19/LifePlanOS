@@ -18,6 +18,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { prisma } from "@/lib/db";
+import { withDbRetry, createWithDbRetry } from "@/lib/dbRetry";
 import { pageMarks } from "@/lib/documents/meta";
 import { segmentEncounters } from "@/lib/engine/chronology";
 import { MAX_TEXT } from "@/lib/documents/textLimits";
@@ -78,16 +79,24 @@ export async function processDocumentExtraction(
   opts: ExtractOptions & { actorUserId?: string | null; force?: boolean } = {},
 ): Promise<ExtractionRunResult> {
   const startedAt = new Date();
-  const doc = await prisma.document.findUniqueOrThrow({ where: { id: documentId } });
+  // A read, and the one that actually failed in the field: nine documents
+  // died here, before any work, when the pool refused connections.
+  const doc = await withDbRetry(() => prisma.document.findUniqueOrThrow({ where: { id: documentId } }));
   const base = { firmId: doc.firmId, caseId: doc.caseId, sourceDocumentId: doc.id, createdById: opts.actorUserId ?? null };
   const prov = safeProvenance(opts);
 
   // Terminal runs that never held the lock (OCR gates, unreadable source) are
   // recorded whole: they start and finish in the same instant.
   const record = async (status: string, extra: Record<string, unknown>) =>
-    prisma.recordExtraction.create({
-      data: { ...base, status, provider: prov.provider, model: prov.model, promptVersion: PROMPT_VERSION, schemaVersion: SCHEMA_VERSION, startedAt, finishedAt: new Date(), ...extra },
-    });
+    createWithDbRetry(
+      () =>
+        prisma.recordExtraction.create({
+          data: { ...base, status, provider: prov.provider, model: prov.model, promptVersion: PROMPT_VERSION, schemaVersion: SCHEMA_VERSION, startedAt, finishedAt: new Date(), ...extra },
+        }),
+      // `startedAt` is fixed for this invocation, so it identifies OUR row and
+      // answers whether a lost acknowledgement hid a write that landed.
+      () => prisma.recordExtraction.findFirst({ where: { sourceDocumentId: doc.id, startedAt } }),
+    );
 
   // ── OCR discipline: incomplete or failed OCR never reaches the model ───────
   const flags = doc.flags ?? "";
@@ -431,7 +440,9 @@ export async function processDocumentExtraction(
   });
 
   // ── Persist with review lineage ────────────────────────────────────────────
-  const prior = await prisma.extractedEncounter.findMany({ where: { caseId: doc.caseId, sourceDocumentId: doc.id, status: { notIn: ["SUPERSEDED"] } } });
+  const prior = await withDbRetry(() =>
+    prisma.extractedEncounter.findMany({ where: { caseId: doc.caseId, sourceDocumentId: doc.id, status: { notIn: ["SUPERSEDED"] } } }),
+  );
   const priorHuman = prior.filter((p) => ["HUMAN_EDITED", "REVIEWED", "VERIFIED", "STALE"].includes(p.status));
   // Machine-produced drafts — including ones that passed the audit — may be
   // superseded by a newer run. Passing an audit is not human work and earns no
@@ -447,10 +458,12 @@ export async function processDocumentExtraction(
   // Source changed → reviewed content goes STALE (never silently re-verified).
   for (const h of priorHuman) {
     if (h.status !== "STALE" && h.sourceFingerprint && h.sourceFingerprint !== sourceFingerprint) {
-      await prisma.extractedEncounter.update({
-        where: { id: h.id },
-        data: { status: "STALE", staleReason: "Source document content changed after this encounter was reviewed; re-review required." },
-      });
+      await withDbRetry(() =>
+        prisma.extractedEncounter.update({
+          where: { id: h.id },
+          data: { status: "STALE", staleReason: "Source document content changed after this encounter was reviewed; re-review required." },
+        }),
+      );
     }
   }
   const humanKeys = new Set(
@@ -467,63 +480,76 @@ export async function processDocumentExtraction(
     if (humanKeys.has(key)) continue;
     // An earlier instalment of this same (resumed) run already wrote it.
     if (sameRunKeys.has(key)) continue;
-    const row = await prisma.extractedEncounter.create({
-      data: {
-        extractionId: runId,
-        firmId: doc.firmId, // server-controlled — never from the model
-        caseId: doc.caseId,
-        sourceDocumentId: doc.id,
-        page: e.page,
-        pageEnd: e.pageEnd,
-        dateStatus: e.dateStatus,
-        encounterDate: e.encounterDate,
-        encounterDateEnd: e.encounterDateEnd,
-        provider: e.provider,
-        providerCredentials: e.providerCredentials,
-        facility: e.facility,
-        encounterType: e.encounterType,
-        // Document-kind provenance travels with the row, so chronology
-        // admission and report rendering never have to guess from field names.
-        analysisClass: e.analysisClass,
-        segmentKey: e.segmentKey,
-        classificationMethod: e.classificationMethod,
-        classificationConfidence: e.classificationConfidence,
-        attributionName: e.attributionName,
-        attributionRole: e.attributionRole,
-        factualSummary: renderFactualSummary(e),
-        synthesis: encounters.length === 1 ? synthesis : null,
-        claims: e.claims as never,
-        ocrConfidence: e.ocrConfidence,
-        warnings: e.warnings as never,
-        // Substance class: paperwork and supporting logs stay off the
-        // chronology, with the reason recorded for the reviewer.
-        ...(() => {
-          const verdict = classifyEncounterSubstance({ encounterType: e.encounterType, factualSummary: renderFactualSummary(e), claims: e.claims });
-          return { substanceClass: verdict.class, substanceReason: verdict.reason };
-        })(),
-        // A draft that survived the audit is marked as such; anything else
-        // stays a plain AI_DRAFT and carries the reasons. Neither is verified —
-        // an audit says the system found nothing wrong, which is not the same
-        // as a human agreeing the record is right.
-        status: audit.result === "PASS" ? "AI_AUDIT_PASSED" : "AI_DRAFT",
-        auditResult: audit.result,
-        auditFindings: audit.findings.slice(0, 20) as never,
-        auditedAt: new Date(),
-        sourceFingerprint,
-        promptVersion: PROMPT_VERSION,
-        schemaVersion: SCHEMA_VERSION,
-        model: prov.model,
-      },
-    });
+    const summaryText = renderFactualSummary(e);
+    const row = await createWithDbRetry(
+      () =>
+        prisma.extractedEncounter.create({
+          data: {
+            extractionId: runId,
+            firmId: doc.firmId, // server-controlled — never from the model
+            caseId: doc.caseId,
+            sourceDocumentId: doc.id,
+            page: e.page,
+            pageEnd: e.pageEnd,
+            dateStatus: e.dateStatus,
+            encounterDate: e.encounterDate,
+            encounterDateEnd: e.encounterDateEnd,
+            provider: e.provider,
+            providerCredentials: e.providerCredentials,
+            facility: e.facility,
+            encounterType: e.encounterType,
+            // Document-kind provenance travels with the row, so chronology
+            // admission and report rendering never have to guess from field names.
+            analysisClass: e.analysisClass,
+            segmentKey: e.segmentKey,
+            classificationMethod: e.classificationMethod,
+            classificationConfidence: e.classificationConfidence,
+            attributionName: e.attributionName,
+            attributionRole: e.attributionRole,
+            factualSummary: summaryText,
+            synthesis: encounters.length === 1 ? synthesis : null,
+            claims: e.claims as never,
+            ocrConfidence: e.ocrConfidence,
+            warnings: e.warnings as never,
+            // Substance class: paperwork and supporting logs stay off the
+            // chronology, with the reason recorded for the reviewer.
+            ...(() => {
+              const verdict = classifyEncounterSubstance({ analysisClass: e.analysisClass, encounterType: e.encounterType, factualSummary: summaryText, claims: e.claims });
+              return { substanceClass: verdict.class, substanceReason: verdict.reason };
+            })(),
+            // A draft that survived the audit is marked as such; anything else
+            // stays a plain AI_DRAFT and carries the reasons. Neither is verified —
+            // an audit says the system found nothing wrong, which is not the same
+            // as a human agreeing the record is right.
+            status: audit.result === "PASS" ? "AI_AUDIT_PASSED" : "AI_DRAFT",
+            auditResult: audit.result,
+            auditFindings: audit.findings.slice(0, 20) as never,
+            auditedAt: new Date(),
+            sourceFingerprint,
+            promptVersion: PROMPT_VERSION,
+            schemaVersion: SCHEMA_VERSION,
+            model: prov.model,
+          },
+        }),
+      // Identity of THIS row within THIS run: if the insert landed and the
+      // acknowledgement was lost, the probe finds it instead of writing a twin.
+      () =>
+        prisma.extractedEncounter.findFirst({
+          where: { extractionId: runId, sourceDocumentId: doc.id, page: e.page, factualSummary: summaryText },
+        }),
+    );
+
     created.push(row.id);
   }
   // Prior drafts are superseded by this run (pointing at the run's first row
   // when one exists — enough to walk the lineage).
   if (priorDrafts.length) {
-    await prisma.extractedEncounter.updateMany({
-      where: { id: { in: priorDrafts.map((p) => p.id) } },
-      data: { status: "SUPERSEDED", supersededById: created[0] ?? null },
-    });
+    await withDbRetry(() =>
+      prisma.extractedEncounter.updateMany({
+        where: { id: { in: priorDrafts.map((p) => p.id) } },
+        data: { status: "SUPERSEDED", supersededById: created[0] ?? null },
+      }),
+    );
   }
 
   // ── Close the run ─────────────────────────────────────────────────────────
