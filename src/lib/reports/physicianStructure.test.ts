@@ -3,7 +3,16 @@
 // Synthetic data only; every expectation mirrors a device observed in a real
 // physician-authored LCP.
 import { describe, it, expect } from "vitest";
-import { buildVisitLedger, buildDiagnosesEvolution, buildNarratives, buildDiagnosticStudies, narrativeDepth } from "./physicianStructure";
+import {
+  buildVisitLedger,
+  buildDiagnosesEvolution,
+  buildNarratives,
+  buildDiagnosticStudies,
+  buildOperativeReports,
+  buildExpertOpinions,
+  buildAttributedEvidence,
+  narrativeDepth,
+} from "./physicianStructure";
 import type { StructuredRecord, StructuredEncounter, StructuredDocument } from "@/lib/records/structuredRecord";
 
 let seq = 0;
@@ -27,6 +36,9 @@ const enc = (over: Partial<StructuredEncounter>): StructuredEncounter => ({
   status: "AI_DRAFT",
   substanceClass: "CLINICAL",
   substanceReason: null,
+  analysisClass: "CLINICAL_ENCOUNTER",
+  attributionName: null,
+  attributionRole: null,
   reviewedAt: null,
   verifiedAt: null,
   staleReason: null,
@@ -239,5 +251,115 @@ describe("claim-specific page citations", () => {
       enc({ page: 1, pageEnd: 40, claims: [{ field: "procedure", value: "L4-L5 fusion performed", excerpt: "x", page: 22, confidence: null }] }),
     ]));
     expect(ledger.lines[0].cite).toBe("(Synthetic MR.pdf: p. 22)");
+  });
+});
+
+describe("non-clinical kinds are reported, but never as treating care", () => {
+  const kindEnc = (analysisClass: string, over: Partial<StructuredEncounter> = {}) =>
+    enc({ analysisClass, substanceClass: analysisClass === "CLINICAL_ENCOUNTER" ? "CLINICAL" : "ANCILLARY", ...over });
+
+  it("testimony, billing and legal material stay out of the physician ledger", () => {
+    const ledger = buildVisitLedger(record([
+      kindEnc("CLINICAL_ENCOUNTER"),
+      kindEnc("TESTIMONY", { claims: [{ field: "admission", value: "Prior injury acknowledged", excerpt: "x", page: 3, confidence: null }] }),
+      kindEnc("FINANCIAL", { claims: [{ field: "charge", value: "CPT 99214", excerpt: "x", page: 5, confidence: null }] }),
+      kindEnc("LEGAL", { claims: [{ field: "legalAssertion", value: "Defendant denies liability", excerpt: "x", page: 2, confidence: null }] }),
+      kindEnc("UNKNOWN", { substanceClass: "ADMINISTRATIVE", claims: [{ field: "documentContent", value: "A transmittal letter", excerpt: "x", page: 1, confidence: null }] }),
+    ]));
+    expect(ledger.lines).toHaveLength(1); // only the clinical visit
+  });
+
+  it("each of them appears in the attributed-evidence section instead", () => {
+    const evidence = buildAttributedEvidence(record([
+      kindEnc("TESTIMONY", { attributionName: "Jordan Reyes", attributionRole: "deponent", claims: [{ field: "admission", value: "Prior injury acknowledged", excerpt: "x", page: 3, confidence: null }] }),
+      kindEnc("FINANCIAL", { claims: [{ field: "charge", value: "CPT 99214 office visit", excerpt: "x", page: 5, confidence: null }] }),
+      kindEnc("UNKNOWN", { substanceClass: "ADMINISTRATIVE", claims: [{ field: "documentContent", value: "A transmittal letter", excerpt: "x", page: 1, confidence: null }] }),
+    ]));
+    const kinds = evidence.map((e) => e.kind);
+    expect(kinds).toContain("Sworn testimony");
+    expect(kinds).toContain("Billing");
+    expect(kinds).toContain("Unclassified");
+    const depo = evidence.find((e) => e.kind === "Sworn testimony")!;
+    expect(depo.attribution).toBe("Jordan Reyes");
+    expect(depo.attributionRole).toBe("deponent");
+    // Nothing here is formatted as S/O/A/P.
+    expect(depo.lines.map((l) => l.label)).toContain("Admission against interest");
+    expect(evidence.find((e) => e.kind === "Unclassified")!.requiresReview).toBe(true);
+  });
+
+  it("an operative report renders its own fields, one entry per operation", () => {
+    const ops = buildOperativeReports(record([
+      kindEnc("OPERATIVE", {
+        encounterType: "Operative report",
+        attributionName: "Sam Okafor, MD",
+        claims: [
+          { field: "preOperativeDiagnosis", value: "L4-L5 disc herniation", excerpt: "x", page: 3, confidence: null },
+          { field: "postOperativeDiagnosis", value: "L4-L5 disc herniation", excerpt: "x", page: 3, confidence: null },
+          { field: "procedure", value: "L4-L5 microdiscectomy", excerpt: "x", page: 4, confidence: null },
+          { field: "operativeFindings", value: "Extruded disc fragment", excerpt: "x", page: 5, confidence: null },
+          { field: "implants", value: "None", excerpt: "x", page: 5, confidence: null },
+          { field: "complications", value: "None", excerpt: "x", page: 6, confidence: null },
+          { field: "estimatedBloodLoss", value: "Minimal", excerpt: "x", page: 6, confidence: null },
+          { field: "specimen", value: "Disc material to pathology", excerpt: "x", page: 6, confidence: null },
+        ],
+      }),
+    ]));
+    expect(ops).toHaveLength(1);
+    expect(ops[0].surgeon).toBe("Sam Okafor, MD");
+    const labels = ops[0].lines.map((l) => l.label);
+    for (const l of ["Pre-operative diagnosis", "Post-operative diagnosis", "Procedure performed", "Operative findings", "Implants / hardware", "Complications", "Estimated blood loss", "Specimen"]) {
+      expect(labels, l).toContain(l);
+    }
+    // Explicitly documented ABSENCE of complications survives as a fact.
+    expect(ops[0].lines.find((l) => l.label === "Complications")!.text).toBe("None");
+  });
+
+  it("a diagnostic study carries technique, comparison, impression and its interpreter", () => {
+    const studies = buildDiagnosticStudies(record([
+      kindEnc("DIAGNOSTIC_STUDY", {
+        encounterType: "MRI - Lumbar Spine",
+        substanceClass: "CLINICAL",
+        attributionName: "A. Reader, MD",
+        claims: [
+          { field: "studyTechnique", value: "Multiplanar multisequence imaging", excerpt: "x", page: 11, confidence: null },
+          { field: "comparison", value: "None available", excerpt: "x", page: 11, confidence: null },
+          { field: "diagnosticStudies", value: "Disc extrusion at L4-L5", excerpt: "x", page: 12, confidence: null },
+          { field: "impression", value: "L4-L5 disc extrusion with stenosis", excerpt: "x", page: 12, confidence: null },
+        ],
+      }),
+    ]));
+    expect(studies).toHaveLength(1);
+    expect(studies[0].impression).toContain("L4-L5 disc extrusion with stenosis");
+    expect(studies[0].technique).toContain("Multiplanar multisequence imaging");
+    expect(studies[0].comparison).toContain("None available");
+    expect(studies[0].interpretedBy).toBe("A. Reader, MD");
+  });
+
+  it("a study whose only content is its impression is no longer dropped", () => {
+    const studies = buildDiagnosticStudies(record([
+      kindEnc("DIAGNOSTIC_STUDY", {
+        encounterType: "MRI - Lumbar Spine",
+        substanceClass: "CLINICAL",
+        claims: [{ field: "impression", value: "L4-L5 disc extrusion", excerpt: "x", page: 12, confidence: null }],
+      }),
+    ]));
+    expect(studies).toHaveLength(1);
+  });
+
+  it("an expert opinion is rendered as attributed opinion with its role", () => {
+    const experts = buildExpertOpinions(record([
+      kindEnc("EXPERT_OPINION", {
+        attributionName: "R. Vance, MD",
+        attributionRole: "examining expert",
+        claims: [
+          { field: "causationOpinion", value: "Causally related to the collision", excerpt: "x", page: 8, confidence: null },
+          { field: "workStatus", value: "Capable of sedentary work", excerpt: "x", page: 9, confidence: null },
+        ],
+      }),
+    ]));
+    expect(experts).toHaveLength(1);
+    expect(experts[0].expert).toBe("R. Vance, MD");
+    expect(experts[0].role).toBe("examining expert");
+    expect(experts[0].lines.map((l) => l.label)).toContain("Causation / apportionment opinion");
   });
 });

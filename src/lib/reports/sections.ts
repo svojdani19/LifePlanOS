@@ -2,7 +2,15 @@ import { functionalFinding } from "@/lib/engine/integrity";
 import type { Block } from "./doc";
 import { originLabel } from "./data";
 import { projectionNote, type ProjectionInputs } from "@/lib/engine/projectionProvenance";
-import { buildVisitLedger, buildDiagnosesEvolution, buildNarratives, buildDiagnosticStudies } from "./physicianStructure";
+import {
+  buildVisitLedger,
+  buildDiagnosesEvolution,
+  buildNarratives,
+  buildDiagnosticStudies,
+  buildOperativeReports,
+  buildExpertOpinions,
+  buildAttributedEvidence,
+} from "./physicianStructure";
 import type {
   ReportData,
   RDChronoEvent,
@@ -341,7 +349,18 @@ export function diagnosticStudiesSection(data: ReportData): Block[] {
   if (!studies.length) return notDocumented();
   const blocks: Block[] = [];
   for (const s of studies) {
-    blocks.push(labeled(s.heading, [`Findings: ${s.findings.join(". ")}`, s.cite].join("  ")));
+    // Technique, comparison and — above all — the interpreting physician's
+    // IMPRESSION are what the rest of the record relies on. They were being
+    // extracted and then dropped, leaving only "Findings".
+    const parts = [
+      s.technique.length ? `Technique: ${s.technique.join(". ")}` : null,
+      s.comparison.length ? `Comparison: ${s.comparison.join(". ")}` : null,
+      s.findings.length ? `Findings: ${s.findings.join(". ")}` : null,
+      s.impression.length ? `Impression: ${s.impression.join(". ")}` : null,
+      s.interpretedBy ? `Interpreted by ${s.interpretedBy}.` : null,
+      s.cite,
+    ].filter(Boolean) as string[];
+    blocks.push(labeled(s.heading, parts.join("  ")));
   }
   return blocks;
 }
@@ -858,4 +877,76 @@ export function unresolvedIssues(findings: RDValidationFinding[]): Block[] {
       rows: findings.map((f) => [f.service, f.result, f.issue, f.severity, f.exportBlocking ? "Yes — blocks final export" : "No"]),
     },
   ];
+}
+
+/** 5. Operative reports — one entry per operation, in operative vocabulary. */
+export function operativeReportsSection(data: ReportData): Block[] {
+  const sr = data.structuredRecord;
+  if (!sr) return notDocumented();
+  const ops = buildOperativeReports(sr);
+  if (!ops.length) return notDocumented();
+  const blocks: Block[] = [];
+  for (const op of ops) {
+    blocks.push(h2(op.heading));
+    if (op.surgeon) blocks.push(labeled("Surgeon", op.surgeon));
+    for (const l of op.lines) blocks.push(labeled(l.label, `${l.text}${l.cite ? ` ${l.cite}` : ""}`));
+    blocks.push(source(op.cite));
+  }
+  return blocks;
+}
+
+/**
+ * 6. Expert opinions — kept as ATTRIBUTED opinion. Each block names the
+ * examiner and labels the content as their opinion, so nothing here can be
+ * read as a fact the treating record establishes.
+ */
+export function expertOpinionsSection(data: ReportData): Block[] {
+  const sr = data.structuredRecord;
+  if (!sr) return notDocumented();
+  const experts = buildExpertOpinions(sr);
+  if (!experts.length) return notDocumented();
+  const blocks: Block[] = [
+    p(
+      "The following are the STATED OPINIONS of the named examiners, reproduced with their citations. They are opinions attributed to their authors, not findings of the treating record.",
+      true,
+    ),
+  ];
+  for (const e of experts) {
+    blocks.push(h2([e.date ?? "Undated", "-", e.expert ?? "Expert not identified", e.role ? `(${e.role})` : null].filter(Boolean).join(" ")));
+    for (const l of e.lines) blocks.push(labeled(l.label, `${l.text}${l.cite ? ` ${l.cite}` : ""}`));
+    blocks.push(source(e.cite));
+  }
+  return blocks;
+}
+
+/**
+ * 7. Attributed non-clinical evidence — testimony, billing, employment,
+ * insurance, legal, device logs, incident narratives and unclassified
+ * material. Present and searchable, in its own vocabulary, and deliberately
+ * outside the treating medical chronology.
+ */
+export function attributedEvidenceSection(data: ReportData): Block[] {
+  const sr = data.structuredRecord;
+  if (!sr) return notDocumented();
+  const entries = buildAttributedEvidence(sr);
+  if (!entries.length) return notDocumented();
+  const blocks: Block[] = [
+    p(
+      "This material is evidence in the case but is not treating medical care. It is listed here, attributed to its author, and is deliberately excluded from the medical chronology.",
+      true,
+    ),
+  ];
+  const byKind = new Map<string, typeof entries>();
+  for (const e of entries) byKind.set(e.kind, [...(byKind.get(e.kind) ?? []), e]);
+  for (const [kind, rows] of byKind) {
+    blocks.push(h2(`${kind} (${rows.length})`));
+    for (const r of rows) {
+      const who = [r.attribution, r.attributionRole ? `(${r.attributionRole})` : null].filter(Boolean).join(" ");
+      blocks.push(labeled([r.date ?? "Undated", who || null].filter(Boolean).join(" - "), r.lines.map((l) => `${l.label}: ${l.text}${l.cite ? ` ${l.cite}` : ""}`).join("  ")));
+      if (r.requiresReview) {
+        blocks.push(p("The kind of this document could not be established; it requires human classification before any clinical use.", true));
+      }
+    }
+  }
+  return blocks;
 }

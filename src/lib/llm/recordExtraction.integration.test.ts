@@ -17,7 +17,7 @@ import {
 } from "./recordExtraction";
 import type { LlmProvider } from "@/lib/llm";
 
-const META = { firmId: "firm-1", caseId: "case-1", sourceDocumentId: "doc-1", filename: "synthetic-chart.pdf", ocrConfidence: 0.88 };
+const META = { firmId: "firm-1", caseId: "case-1", sourceDocumentId: "doc-1", filename: "synthetic-chart.pdf", ocrConfidence: 0.88, documentType: "MEDICAL_RECORD" };
 
 // Six pages of synthetic chart. Page 4 is a consent form; page 5 is
 // administrative; OCR noise is sprinkled through page 3.

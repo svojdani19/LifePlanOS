@@ -24,12 +24,18 @@ describe("documents are classified by what they actually are", () => {
     expect(analysisClassFor("LEGAL_PLEADING")).toBe("LEGAL");
   });
 
-  it("an unknown or missing type falls back to the most demanding profile", () => {
-    // Conservative: when we do not know what we are reading, require the most
-    // support, not the least.
-    expect(analysisClassFor("SOMETHING_NEW")).toBe("CLINICAL_ENCOUNTER");
-    expect(analysisClassFor(null)).toBe("CLINICAL_ENCOUNTER");
-    expect(analysisClassFor(undefined)).toBe("CLINICAL_ENCOUNTER");
+  it("an unknown or missing type is UNKNOWN — never silently clinical", () => {
+    // "Clinical by default" is how an unlabelled fax acquires a provider, a
+    // diagnosis and a place on the medical timeline it never earned. The
+    // schema default for an untyped upload is OTHER, so this is the common
+    // case, not the exotic one.
+    expect(analysisClassFor("SOMETHING_NEW")).toBe("UNKNOWN");
+    expect(analysisClassFor("OTHER")).toBe("UNKNOWN");
+    expect(analysisClassFor(null)).toBe("UNKNOWN");
+    expect(analysisClassFor(undefined)).toBe("UNKNOWN");
+    // And UNKNOWN can assert almost nothing.
+    expect(fieldAllowed(profileFor("OTHER"), "assessment")).toBe(false);
+    expect(fieldAllowed(profileFor("OTHER"), "documentContent")).toBe(true);
   });
 });
 

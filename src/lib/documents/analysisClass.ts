@@ -23,8 +23,13 @@
 //
 // The classes are deliberately coarse. Sixty document types do not need sixty
 // extraction schemas; they need the handful of genuinely different questions a
-// reviewer asks. Anything unrecognized falls back to the clinical profile,
-// which is the conservative choice: it demands the most support.
+// reviewer asks. The dividing principle is a genuinely different review
+// question, not a different specialty letterhead.
+//
+// Anything unrecognized resolves to UNKNOWN — never to a clinical encounter.
+// "Clinical by default" is precisely how an unlabelled fax or a cover letter
+// acquires a provider, a diagnosis and a slot on the medical timeline it never
+// earned. UNKNOWN keeps the material visible and routes it to a human.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import type { ClaimField } from "@/lib/llm/recordExtraction";
@@ -33,12 +38,19 @@ export type AnalysisClass =
   | "CLINICAL_ENCOUNTER"
   | "THERAPY_COURSE"
   | "OPERATIVE"
+  | "ANESTHESIA"
+  | "PATHOLOGY_DIAGNOSTIC"
+  | "DEVICE_OR_IMPLANT"
   | "DIAGNOSTIC_STUDY"
   | "TESTIMONY"
   | "EXPERT_OPINION"
   | "INCIDENT"
   | "FINANCIAL"
-  | "LEGAL";
+  | "EMPLOYMENT_ECONOMIC"
+  | "INSURANCE_ADMINISTRATIVE"
+  | "LEGAL"
+  | "CORRESPONDENCE_OR_GENERIC_EVIDENCE"
+  | "UNKNOWN";
 
 export interface ClassProfile {
   klass: AnalysisClass;
@@ -105,6 +117,30 @@ const FINANCIAL_FIELDS = [
 
 const LEGAL_FIELDS = [
   "legalAssertion", "reliefSought", "partyPosition", "contradictions",
+] as const satisfies readonly ClaimField[];
+
+const ANESTHESIA_FIELDS = [
+  "anesthesiaType", "anesthesiaEvent", "medications", "complications", "estimatedBloodLoss", "disposition", "contradictions",
+] as const satisfies readonly ClaimField[];
+
+const PATHOLOGY_FIELDS = [
+  "specimen", "grossDescription", "microscopicDescription", "pathologicDiagnosis", "comparison", "contradictions",
+] as const satisfies readonly ClaimField[];
+
+const DEVICE_FIELDS = [
+  "implants", "deviceIdentifier", "manufacturer", "procedure", "contradictions",
+] as const satisfies readonly ClaimField[];
+
+const EMPLOYMENT_FIELDS = [
+  "employer", "employmentStatus", "earnings", "workStatus", "restrictions", "documentContent", "contradictions",
+] as const satisfies readonly ClaimField[];
+
+const INSURANCE_FIELDS = [
+  "coverage", "claimStatus", "authorization", "payer", "billedAmount", "documentContent", "contradictions",
+] as const satisfies readonly ClaimField[];
+
+const GENERIC_FIELDS = [
+  "documentContent", "contradictions",
 ] as const satisfies readonly ClaimField[];
 
 // ── Profiles ────────────────────────────────────────────────────────────────
@@ -220,6 +256,105 @@ export const PROFILES: Record<AnalysisClass, ClassProfile> = {
       NEVER_INVENT_CLINICAL,
   },
 
+  ANESTHESIA: {
+    klass: "ANESTHESIA",
+    unit: "anesthetic record",
+    unitPlural: "anesthetic records",
+    fields: ANESTHESIA_FIELDS,
+    // The anesthesiologist or CRNA authors this record — NOT the surgeon, who
+    // authors the operative note beside it in the same packet.
+    attribution: "anesthesia provider",
+    expectsDate: true,
+    singleUnit: false,
+    leadFields: ["anesthesiaType", "anesthesiaEvent", "complications", "medications"],
+    guidance:
+      "This is an anesthesia record. What matters: the anesthetic technique used, airway management, agents and doses administered, intraoperative events and hemodynamic instability, estimated blood loss, complications (state explicitly when the record says none), and recovery disposition. The author is the anesthesia provider. Do NOT attribute this record to the surgeon and do not restate the operation itself — the operative note documents that.",
+  },
+
+  PATHOLOGY_DIAGNOSTIC: {
+    klass: "PATHOLOGY_DIAGNOSTIC",
+    unit: "pathology report",
+    unitPlural: "pathology reports",
+    fields: PATHOLOGY_FIELDS,
+    attribution: "pathologist",
+    expectsDate: true,
+    singleUnit: false,
+    leadFields: ["pathologicDiagnosis", "microscopicDescription", "grossDescription", "specimen"],
+    guidance:
+      "This is a pathology report — a DIAGNOSTIC interpretation of a specimen, not an operative note. ONE ACCESSION IS ONE ENTRY. What matters: the specimen(s) received and their source, the gross description, the microscopic description, and above all the FINAL PATHOLOGIC DIAGNOSIS, which is the conclusion the rest of the record relies on. The author is the interpreting pathologist, never the operating surgeon. " +
+      NEVER_INVENT_CLINICAL,
+  },
+
+  DEVICE_OR_IMPLANT: {
+    klass: "DEVICE_OR_IMPLANT",
+    unit: "device record",
+    unitPlural: "device records",
+    fields: DEVICE_FIELDS,
+    attribution: null, // an implant log is inventory documentation, not a clinician's note
+    expectsDate: true,
+    singleUnit: false,
+    leadFields: ["implants", "deviceIdentifier", "manufacturer"],
+    guidance:
+      "This is a device or implant record — a log of hardware, not an operation. What matters: the device implanted, its manufacturer, model, lot or serial number, and the site. It documents WHAT WAS USED; it is not itself evidence of an operation's findings or outcome, and it has no clinician to attribute. " +
+      NEVER_INVENT_CLINICAL,
+  },
+
+  EMPLOYMENT_ECONOMIC: {
+    klass: "EMPLOYMENT_ECONOMIC",
+    unit: "employment or earnings record",
+    unitPlural: "employment and earnings records",
+    fields: EMPLOYMENT_FIELDS,
+    attribution: null,
+    expectsDate: true,
+    singleUnit: false,
+    leadFields: ["employmentStatus", "earnings", "employer", "workStatus"],
+    guidance:
+      "This is an employment, wage, or tax record. It is ECONOMIC evidence, not medical billing: it has no CPT codes, no charges for care, and no clinical content. What matters: the employer, dates and status of employment, hours, wage or earnings figures, and any documented time lost from work. Never express this as a medical charge or a clinical fact. " +
+      NEVER_INVENT_CLINICAL,
+  },
+
+  INSURANCE_ADMINISTRATIVE: {
+    klass: "INSURANCE_ADMINISTRATIVE",
+    unit: "insurance record",
+    unitPlural: "insurance records",
+    fields: INSURANCE_FIELDS,
+    attribution: null,
+    expectsDate: true,
+    singleUnit: false,
+    leadFields: ["claimStatus", "coverage", "authorization", "payer"],
+    guidance:
+      "This is an insurance or claims-administration record. What matters: the coverage in force, the policy or claim identifiers, the status of a claim, authorizations granted or denied and for what, and amounts allowed or paid. An authorization or denial is an administrative decision — it is not a clinical judgment about the patient, and a denial is not evidence that care was unnecessary. " +
+      NEVER_INVENT_CLINICAL,
+  },
+
+  CORRESPONDENCE_OR_GENERIC_EVIDENCE: {
+    klass: "CORRESPONDENCE_OR_GENERIC_EVIDENCE",
+    unit: "document",
+    unitPlural: "documents",
+    fields: GENERIC_FIELDS,
+    attribution: "author",
+    expectsDate: true,
+    singleUnit: true,
+    leadFields: ["documentContent"],
+    guidance:
+      "This is correspondence or general case-file material whose kind is not otherwise established — a letter, a memo, a cover page, a transmittal. Record plainly WHAT THE DOCUMENT SAYS and who wrote it, in the document's own terms. Do not classify its content as clinical, legal, or financial fact; a letter that mentions a diagnosis is a letter, not a medical record. " +
+      NEVER_INVENT_CLINICAL,
+  },
+
+  UNKNOWN: {
+    klass: "UNKNOWN",
+    unit: "unclassified record",
+    unitPlural: "unclassified records",
+    fields: GENERIC_FIELDS,
+    attribution: null,
+    expectsDate: false,
+    singleUnit: true,
+    leadFields: ["documentContent"],
+    guidance:
+      "The kind of this document could NOT be established. Record only what the text plainly says, with its citation, and nothing more. Do not infer that it is a clinical note, and do not supply a provider, a diagnosis, an assessment, or a treatment. This material is routed to human review precisely because the system does not know what it is. " +
+      NEVER_INVENT_CLINICAL,
+  },
+
   LEGAL: {
     klass: "LEGAL",
     unit: "legal document",
@@ -268,9 +403,9 @@ const BY_TYPE: Record<string, AnalysisClass> = {
 
   // Operative
   OPERATIVE_NOTE: "OPERATIVE",
-  ANESTHESIA_RECORD: "OPERATIVE",
-  PATHOLOGY_REPORT: "OPERATIVE",
-  IMPLANT_RECORDS: "OPERATIVE",
+  ANESTHESIA_RECORD: "ANESTHESIA",
+  PATHOLOGY_REPORT: "PATHOLOGY_DIAGNOSTIC",
+  IMPLANT_RECORDS: "DEVICE_OR_IMPLANT",
 
   // Diagnostics
   IMAGING_REPORT: "DIAGNOSTIC_STUDY",
@@ -300,33 +435,94 @@ const BY_TYPE: Record<string, AnalysisClass> = {
   // Financial
   BILLING_RECORD: "FINANCIAL",
   PHARMACY_RECORD: "FINANCIAL",
-  INSURANCE_RECORDS: "FINANCIAL",
-  WAGE_LOSS_DOCUMENTATION: "FINANCIAL",
-  TAX_RECORDS: "FINANCIAL",
-  EMPLOYMENT_RECORDS: "FINANCIAL",
+  INSURANCE_RECORDS: "INSURANCE_ADMINISTRATIVE",
+  WAGE_LOSS_DOCUMENTATION: "EMPLOYMENT_ECONOMIC",
+  TAX_RECORDS: "EMPLOYMENT_ECONOMIC",
+  EMPLOYMENT_RECORDS: "EMPLOYMENT_ECONOMIC",
 
   // Legal
   LEGAL_PLEADING: "LEGAL",
   DEMAND_LETTER: "LEGAL",
   SETTLEMENT_AGREEMENT: "LEGAL",
   COURT_ORDER: "LEGAL",
-  CORRESPONDENCE: "LEGAL",
+  CORRESPONDENCE: "CORRESPONDENCE_OR_GENERIC_EVIDENCE",
 };
 
 /**
- * The analysis profile for a document type. Unknown or unclassifiable types
- * fall back to the clinical profile — the most demanding one, which is the
- * conservative default when we do not know what we are reading.
+ * The analysis profile for a document type.
+ *
+ * An unrecognized type — including the literal OTHER — resolves to UNKNOWN,
+ * NOT to a clinical encounter. Defaulting the unknown to "clinical" is what
+ * lets a scanned letter or an unlabelled fax acquire a provider, a diagnosis
+ * and a place on the medical timeline it never earned. UNKNOWN keeps the
+ * material visible and sends it to a human instead.
  */
 export function profileFor(documentType: string | null | undefined): ClassProfile {
-  return PROFILES[BY_TYPE[documentType ?? ""] ?? "CLINICAL_ENCOUNTER"];
+  return PROFILES[analysisClassFor(documentType)];
 }
 
 export function analysisClassFor(documentType: string | null | undefined): AnalysisClass {
-  return BY_TYPE[documentType ?? ""] ?? "CLINICAL_ENCOUNTER";
+  return BY_TYPE[documentType ?? ""] ?? "UNKNOWN";
 }
 
 /** Is this field expressible by this class? */
 export function fieldAllowed(profile: ClassProfile, field: string): boolean {
   return (profile.fields as readonly string[]).includes(field);
+}
+
+/**
+ * Classes whose material is NOT treating medical care, and therefore never
+ * enters the medical chronology on its own. They stay fully visible on the
+ * Records page in their own attributed sections.
+ */
+export const NON_CLINICAL_CLASSES = new Set<AnalysisClass>([
+  "TESTIMONY",
+  "FINANCIAL",
+  "EMPLOYMENT_ECONOMIC",
+  "INSURANCE_ADMINISTRATIVE",
+  "LEGAL",
+  "CORRESPONDENCE_OR_GENERIC_EVIDENCE",
+  "UNKNOWN",
+  "DEVICE_OR_IMPLANT",
+]);
+
+/** Classes that document treating medical care and belong on the timeline. */
+export const MEDICAL_TIMELINE_CLASSES = new Set<AnalysisClass>([
+  "CLINICAL_ENCOUNTER",
+  "THERAPY_COURSE",
+  "OPERATIVE",
+  "ANESTHESIA",
+  "PATHOLOGY_DIAGNOSTIC",
+  "DIAGNOSTIC_STUDY",
+  "INCIDENT", // prehospital care is care; the scene narrative is labelled as such
+]);
+
+/**
+ * An expert evaluation may appear as a dated event, but only ever labelled as
+ * an expert opinion attributed to its author — never restated as treating fact.
+ */
+export const ATTRIBUTED_OPINION_CLASSES = new Set<AnalysisClass>(["EXPERT_OPINION"]);
+
+/** Material that has not been identified and must reach a human. */
+export function requiresHumanClassification(klass: AnalysisClass): boolean {
+  return klass === "UNKNOWN";
+}
+
+/**
+ * How a chunk's class was decided, kept with the row so a reviewer can tell a
+ * deliberate assignment from an inference.
+ */
+export type ClassificationMethod = "DOCUMENT_TYPE" | "SEGMENT_CONTENT" | "FALLBACK_UNKNOWN";
+
+/**
+ * Content-derived class for one segment of a consolidated packet. Content
+ * classification is only trusted above a score floor; below it the segment is
+ * UNKNOWN rather than a guess, because a wrong confident class is worse than
+ * an admitted unknown.
+ */
+export function classFromContent(contentType: string | null, score: number, minScore = 3): { klass: AnalysisClass; method: ClassificationMethod; confidence: number } {
+  if (!contentType || score < minScore) return { klass: "UNKNOWN", method: "FALLBACK_UNKNOWN", confidence: score };
+  const klass = BY_TYPE[contentType];
+  if (!klass) return { klass: "UNKNOWN", method: "FALLBACK_UNKNOWN", confidence: score };
+  return { klass, method: "SEGMENT_CONTENT", confidence: score };
 }

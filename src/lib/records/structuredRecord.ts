@@ -45,6 +45,11 @@ export interface StructuredEncounter {
   /** CLINICAL | ANCILLARY | ADMINISTRATIVE — null means not yet classified. */
   substanceClass: string | null;
   substanceReason: string | null;
+  /** The KIND of document this row came from; null on legacy rows. */
+  analysisClass: string | null;
+  /** Author and role for documents that have one but no treating clinician. */
+  attributionName: string | null;
+  attributionRole: string | null;
   reviewedAt: string | null;
   verifiedAt: string | null;
   staleReason: string | null;
@@ -97,11 +102,12 @@ export interface StructuredRecord {
 
 const toIso = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null);
 
-function toStructuredEncounter(e: {
+export function toStructuredEncounter(e: {
   id: string; sourceDocumentId: string; dateStatus: string; encounterDate: Date | null; encounterDateEnd: Date | null;
   provider: string | null; providerCredentials: string | null; facility: string | null; encounterType: string | null;
   factualSummary: string; synthesis: string | null; claims: unknown; page: number | null; pageEnd: number | null;
   ocrConfidence: number | null; warnings: unknown; status: string; substanceClass?: string | null; substanceReason?: string | null;
+  analysisClass?: string | null; attributionName?: string | null; attributionRole?: string | null;
   reviewedAt: Date | null; verifiedAt: Date | null; staleReason: string | null;
 }): StructuredEncounter {
   return {
@@ -124,6 +130,9 @@ function toStructuredEncounter(e: {
     status: e.status,
     substanceClass: e.substanceClass ?? null,
     substanceReason: e.substanceReason ?? null,
+    analysisClass: e.analysisClass ?? null,
+    attributionName: e.attributionName ?? null,
+    attributionRole: e.attributionRole ?? null,
     reviewedAt: e.reviewedAt?.toISOString() ?? null,
     verifiedAt: e.verifiedAt?.toISOString() ?? null,
     staleReason: e.staleReason,

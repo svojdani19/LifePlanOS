@@ -22,6 +22,7 @@
 
 import type { StructuredRecord, StructuredEncounter, StructuredDocument } from "@/lib/records/structuredRecord";
 import { pageRange } from "@/lib/documents/meta";
+import { admissibleToMedicalTimeline, KIND_LABEL } from "@/lib/records/encounterSubstance";
 
 const mdY = (iso: string) => {
   const [y, m, d] = iso.split("-");
@@ -34,7 +35,24 @@ function substantive(record: StructuredRecord): { enc: StructuredEncounter; doc:
   for (const doc of record.documents) {
     for (const enc of doc.encounters) {
       if (enc.status === "STALE") continue;
-      if (enc.substanceClass && enc.substanceClass !== "CLINICAL") continue;
+      // Admission to the physician's ledger and narratives is decided by the
+      // KIND of document the row came from. Testimony, billing, legal
+      // assertions and unclassified material can no longer reach the treating
+      // record through a field-name fallback.
+      if (!admissibleToMedicalTimeline(enc)) continue;
+      out.push({ enc, doc });
+    }
+  }
+  return out.sort((a, b) => (a.enc.encounterDate ?? "9999").localeCompare(b.enc.encounterDate ?? "9999") || (a.enc.page ?? 0) - (b.enc.page ?? 0));
+}
+
+/** Rows from documents of the given kinds, in date order. */
+function ofClasses(record: StructuredRecord, classes: string[]): { enc: StructuredEncounter; doc: StructuredDocument }[] {
+  const out: { enc: StructuredEncounter; doc: StructuredDocument }[] = [];
+  for (const doc of record.documents) {
+    for (const enc of doc.encounters) {
+      if (enc.status === "STALE") continue;
+      if (!enc.analysisClass || !classes.includes(enc.analysisClass)) continue;
       out.push({ enc, doc });
     }
   }
@@ -306,6 +324,14 @@ export interface StudyEntry {
   date: string | null;
   heading: string;
   findings: string[];
+  /** Protocol or technique, when the report states one. */
+  technique: string[];
+  /** Prior study compared against. */
+  comparison: string[];
+  /** The interpreting physician's conclusion — the part the record relies on. */
+  impression: string[];
+  /** The interpreting radiologist/physician, not a treating provider. */
+  interpretedBy: string | null;
   cite: string;
 }
 
@@ -315,7 +341,12 @@ export function buildDiagnosticStudies(record: StructuredRecord): StudyEntry[] {
   const out: StudyEntry[] = [];
   for (const { enc, doc } of substantive(record)) {
     const findings = claimValues(enc, "diagnosticStudies");
-    if (!findings.length) continue;
+    const impression = claimValues(enc, "impression");
+    const technique = claimValues(enc, "studyTechnique");
+    const comparison = claimValues(enc, "comparison");
+    // An imaging report whose value is its IMPRESSION was previously dropped
+    // entirely when it stated no separate "findings" line.
+    if (!findings.length && !impression.length) continue;
     const isStudyEncounter = STUDY_TYPE_RE.test(enc.encounterType ?? "");
     out.push({
       date: enc.encounterDate ? mdY(enc.encounterDate) : null,
@@ -328,7 +359,210 @@ export function buildDiagnosticStudies(record: StructuredRecord): StudyEntry[] {
         .filter(Boolean)
         .join(" "),
       findings,
-      cite: claimCite(enc, doc, claimPages(enc, "diagnosticStudies")),
+      technique,
+      comparison,
+      impression,
+      // The interpreting physician, not a treating provider.
+      interpretedBy: enc.attributionName ?? enc.provider ?? null,
+      cite: claimCite(enc, doc, claimPages(enc, "diagnosticStudies", "impression", "studyTechnique", "comparison")),
+    });
+  }
+  return out;
+}
+
+// ── 5. Operative reports ─────────────────────────────────────────────────────
+
+export interface OperativeReport {
+  date: string | null;
+  heading: string;
+  surgeon: string | null;
+  /** Labeled operative fields, in the order a surgeon states them. */
+  lines: { label: string; text: string; cite: string | null }[];
+  cite: string;
+}
+
+const OPERATIVE_ORDER: [string, string][] = [
+  ["preOperativeDiagnosis", "Pre-operative diagnosis"],
+  ["postOperativeDiagnosis", "Post-operative diagnosis"],
+  ["procedure", "Procedure performed"],
+  ["operativeFindings", "Operative findings"],
+  ["implants", "Implants / hardware"],
+  ["anesthesia", "Anesthesia"],
+  ["estimatedBloodLoss", "Estimated blood loss"],
+  ["specimen", "Specimen"],
+  ["complications", "Complications"],
+  ["disposition", "Disposition"],
+  ["recommendations", "Post-operative plan"],
+];
+
+/**
+ * One entry per operation, with the fields an operative report actually has.
+ * These were extracted but had nowhere to appear: the narrative renderer only
+ * knew S/O/A/P, so an operation's findings, implants and complications were
+ * captured and then dropped.
+ */
+export function buildOperativeReports(record: StructuredRecord): OperativeReport[] {
+  const out: OperativeReport[] = [];
+  for (const { enc, doc } of ofClasses(record, ["OPERATIVE"])) {
+    const lines: { label: string; text: string; cite: string | null }[] = [];
+    const encCite = pageCite(enc, doc);
+    for (const [field, label] of OPERATIVE_ORDER) {
+      const vals = claimValues(enc, field);
+      if (!vals.length) continue;
+      const cite = claimCite(enc, doc, claimPages(enc, field));
+      lines.push({ label, text: vals.join(". "), cite: cite === encCite ? null : cite });
+    }
+    if (!lines.length) continue;
+    out.push({
+      date: enc.encounterDate ? mdY(enc.encounterDate) : null,
+      heading: [enc.encounterDate ? mdY(enc.encounterDate) : "Undated", "-", enc.encounterType ?? "Operative report", enc.facility ? `- ${enc.facility}` : null]
+        .filter(Boolean)
+        .join(" "),
+      surgeon: enc.attributionName ?? enc.provider ?? null,
+      lines,
+      cite: encCite,
+    });
+  }
+  return out;
+}
+
+// ── 6. Expert opinions ───────────────────────────────────────────────────────
+
+export interface ExpertOpinionSection {
+  date: string | null;
+  expert: string | null;
+  role: string | null;
+  lines: { label: string; text: string; cite: string | null }[];
+  cite: string;
+}
+
+const EXPERT_ORDER: [string, string][] = [
+  ["objectiveFindings", "Examination findings"],
+  ["assessment", "Stated diagnoses"],
+  ["causationOpinion", "Causation / apportionment opinion"],
+  ["opinion", "Stated opinion"],
+  ["workStatus", "Work-capacity opinion"],
+  ["restrictions", "Restrictions"],
+  ["functionalStatus", "Functional status"],
+  ["recommendations", "Future-care opinion"],
+  ["pastMedicalHistory", "History relied upon"],
+];
+
+/**
+ * Expert evaluations, kept ATTRIBUTED. Every line here is what a named
+ * examiner concluded, never a fact the record establishes — an IME's opinion
+ * restated as a finding is the most consequential silent upgrade available in
+ * a medicolegal file.
+ */
+export function buildExpertOpinions(record: StructuredRecord): ExpertOpinionSection[] {
+  const out: ExpertOpinionSection[] = [];
+  for (const { enc, doc } of ofClasses(record, ["EXPERT_OPINION"])) {
+    const lines: { label: string; text: string; cite: string | null }[] = [];
+    const encCite = pageCite(enc, doc);
+    for (const [field, label] of EXPERT_ORDER) {
+      const vals = claimValues(enc, field);
+      if (!vals.length) continue;
+      const cite = claimCite(enc, doc, claimPages(enc, field));
+      lines.push({ label, text: vals.join(". "), cite: cite === encCite ? null : cite });
+    }
+    if (!lines.length) continue;
+    out.push({
+      date: enc.encounterDate ? mdY(enc.encounterDate) : null,
+      expert: enc.attributionName ?? enc.provider ?? null,
+      role: enc.attributionRole ?? "examining or opining expert",
+      lines,
+      cite: encCite,
+    });
+  }
+  return out;
+}
+
+// ── 7. Attributed non-clinical evidence ──────────────────────────────────────
+
+export interface EvidenceEntry {
+  kind: string; // human label for the document kind
+  date: string | null;
+  attribution: string | null;
+  attributionRole: string | null;
+  lines: { label: string; text: string; cite: string | null }[];
+  cite: string;
+  requiresReview: boolean;
+}
+
+const EVIDENCE_LABEL: Record<string, string> = {
+  testimony: "Testimony",
+  admission: "Admission against interest",
+  charge: "Charge",
+  serviceCode: "Service code",
+  billedAmount: "Amount",
+  payer: "Payer",
+  legalAssertion: "Assertion",
+  reliefSought: "Relief sought",
+  partyPosition: "Party position",
+  employer: "Employer",
+  employmentStatus: "Employment status",
+  earnings: "Earnings / wage",
+  coverage: "Coverage",
+  claimStatus: "Claim status",
+  authorization: "Authorization",
+  mechanism: "Mechanism of injury",
+  sceneFindings: "Scene findings",
+  witnessStatement: "Reported statement",
+  documentContent: "Document content",
+  deviceIdentifier: "Device identifier",
+  manufacturer: "Manufacturer",
+  implants: "Device",
+  functionalStatus: "Functional status",
+  workStatus: "Work status",
+  restrictions: "Restrictions",
+  pastMedicalHistory: "History",
+  contradictions: "Contradiction / adverse finding",
+};
+
+const EVIDENCE_CLASSES = [
+  "TESTIMONY",
+  "FINANCIAL",
+  "EMPLOYMENT_ECONOMIC",
+  "INSURANCE_ADMINISTRATIVE",
+  "LEGAL",
+  "DEVICE_OR_IMPLANT",
+  "CORRESPONDENCE_OR_GENERIC_EVIDENCE",
+  "UNKNOWN",
+  "INCIDENT",
+];
+
+/**
+ * Everything that is evidence in the case but is NOT treating medical care:
+ * testimony, billing, employment and economic records, insurance
+ * administration, legal filings, device logs, correspondence, incident
+ * narratives, and material whose kind could not be established.
+ *
+ * It stays fully visible and searchable, in its own vocabulary, attributed to
+ * whoever authored it — and out of the treating chronology.
+ */
+export function buildAttributedEvidence(record: StructuredRecord): EvidenceEntry[] {
+  const out: EvidenceEntry[] = [];
+  for (const { enc, doc } of ofClasses(record, EVIDENCE_CLASSES)) {
+    const encCite = pageCite(enc, doc);
+    const byField = new Map<string, string[]>();
+    for (const c of enc.claims) {
+      const arr = byField.get(c.field) ?? [];
+      arr.push(c.value.replace(/\s+/g, " ").trim());
+      byField.set(c.field, arr);
+    }
+    const lines = [...byField.entries()].map(([field, vals]) => {
+      const cite = claimCite(enc, doc, claimPages(enc, field));
+      return { label: EVIDENCE_LABEL[field] ?? field, text: [...new Set(vals)].join(". "), cite: cite === encCite ? null : cite };
+    });
+    if (!lines.length) lines.push({ label: "Record", text: enc.factualSummary, cite: null });
+    out.push({
+      kind: KIND_LABEL[enc.analysisClass ?? ""] ?? "Evidence",
+      date: enc.encounterDate ? mdY(enc.encounterDate) : null,
+      attribution: enc.attributionName ?? null,
+      attributionRole: enc.attributionRole ?? null,
+      lines,
+      cite: encCite,
+      requiresReview: enc.analysisClass === "UNKNOWN",
     });
   }
   return out;

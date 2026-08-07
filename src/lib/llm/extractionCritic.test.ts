@@ -6,7 +6,7 @@ import { chunkDocumentText, type DocumentChunk, type LlmEncounter } from "./reco
 import { runCritic, adjudicateDisputes, applyAdjudications, buildCriticPrompt, isDisputing, type CriticIssue } from "./extractionCritic";
 import type { LlmProvider } from "@/lib/llm";
 
-const META = { firmId: "firm-1", caseId: "case-1", sourceDocumentId: "doc-1", filename: "synthetic.pdf", ocrConfidence: 0.97 };
+const META = { firmId: "firm-1", caseId: "case-1", sourceDocumentId: "doc-1", filename: "synthetic.pdf", ocrConfidence: 0.97, documentType: "MEDICAL_RECORD" };
 
 const SOURCE = [
   "--- Page 1 ---",

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { prisma } from "@/lib/db";
-import { isTimelineClass } from "@/lib/records/encounterSubstance";
+import { admissibleToMedicalTimeline } from "@/lib/records/encounterSubstance";
 
 const docFingerprint = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
 
@@ -814,7 +814,13 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
       // NULL class means "not yet classified" and stays visible; a reviewer's
       // reclassification is simply the stored value, so promoting an excluded
       // encounter is one PATCH away.
-      if (!isTimelineClass(e.substanceClass)) continue;
+      // Admission is decided by the KIND of document the row came from —
+      // testimony, billing, legal filings, employment records and
+      // unclassified material never become treating timeline events, whatever
+      // their field names look like. A legacy row with no recorded kind keeps
+      // the prior substance-class behaviour so nothing already reviewed
+      // vanishes, and a reviewer's reclassification is still one PATCH away.
+      if (!admissibleToMedicalTimeline(e)) continue;
       const arr = extractedByDoc.get(e.sourceDocumentId) ?? [];
       arr.push(e);
       extractedByDoc.set(e.sourceDocumentId, arr);

@@ -20,6 +20,8 @@
 //      plain transport invoice does not.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { NON_CLINICAL_CLASSES, MEDICAL_TIMELINE_CLASSES } from "@/lib/documents/analysisClass";
+
 export type SubstanceClass = "CLINICAL" | "ANCILLARY" | "ADMINISTRATIVE";
 
 export interface SubstanceVerdict {
@@ -35,6 +37,8 @@ interface ClassifiableClaim {
 }
 
 interface ClassifiableEncounter {
+  /** The kind of document this came from; null on legacy rows. */
+  analysisClass?: string | null;
   encounterType?: string | null;
   factualSummary?: string;
   claims: unknown;
@@ -93,7 +97,32 @@ export function classifyEncounterSubstance(e: ClassifiableEncounter): SubstanceV
   const claims = claimsOf(e);
   const label = `${e.encounterType ?? ""} ${e.factualSummary ?? ""}`;
 
-  // 0. Nothing extracted: whatever this material is, it documents no care.
+  // 0. The document's KIND decides first, because a field name is a weak
+  //    proxy for what a document is. Testimony about a shoulder mentions the
+  //    same anatomy a clinic note does; only the kind separates them, and
+  //    guessing from field names is what let non-clinical material onto the
+  //    medical timeline in the first place.
+  const klass = e.analysisClass ?? null;
+  if (klass === "UNKNOWN") {
+    return {
+      class: "ADMINISTRATIVE",
+      reason: "The kind of this document could not be established; it requires human classification before any clinical use.",
+    };
+  }
+  if (klass && NON_CLINICAL_CLASSES.has(klass as never)) {
+    return {
+      class: "ANCILLARY",
+      reason: `${KIND_LABEL[klass] ?? "Non-clinical"} material — retained and attributed in the records, but it is not treating medical care and does not enter the medical chronology.`,
+    };
+  }
+  if (klass === "EXPERT_OPINION") {
+    return {
+      class: "ANCILLARY",
+      reason: "Expert evaluation — presented as an attributed opinion, never as a treating clinical fact.",
+    };
+  }
+
+  // 0b. Nothing extracted: whatever this material is, it documents no care.
   if (claims.length === 0) {
     return { class: "ADMINISTRATIVE", reason: "No validated claims were extracted from this material." };
   }
@@ -135,3 +164,38 @@ export function classifyEncounterSubstance(e: ClassifiableEncounter): SubstanceV
 export function isTimelineClass(cls: string | null | undefined): boolean {
   return !cls || cls === "CLINICAL";
 }
+
+/**
+ * May this row appear on the MEDICAL chronology at all?
+ *
+ * Driven by the document kind that produced it, not by a field-name fallback.
+ * A legacy row with no recorded class is admitted only if its substance class
+ * says CLINICAL — the pre-existing behaviour — so nothing already reviewed
+ * silently disappears.
+ */
+export function admissibleToMedicalTimeline(e: { analysisClass?: string | null; substanceClass?: string | null }): boolean {
+  const klass = e.analysisClass ?? null;
+  if (!klass) return isTimelineClass(e.substanceClass);
+  if (!MEDICAL_TIMELINE_CLASSES.has(klass as never)) return false;
+  return isTimelineClass(e.substanceClass);
+}
+
+/** Human-facing name for a document kind, for reviewer-visible reasons. */
+export const KIND_LABEL: Record<string, string> = {
+  CLINICAL_ENCOUNTER: "Clinical encounter",
+  THERAPY_COURSE: "Therapy",
+  OPERATIVE: "Operative",
+  ANESTHESIA: "Anesthesia",
+  PATHOLOGY_DIAGNOSTIC: "Pathology",
+  DEVICE_OR_IMPLANT: "Device / implant",
+  DIAGNOSTIC_STUDY: "Diagnostic study",
+  TESTIMONY: "Sworn testimony",
+  EXPERT_OPINION: "Expert opinion",
+  INCIDENT: "Incident / prehospital",
+  FINANCIAL: "Billing",
+  EMPLOYMENT_ECONOMIC: "Employment / economic",
+  INSURANCE_ADMINISTRATIVE: "Insurance / administrative",
+  LEGAL: "Legal",
+  CORRESPONDENCE_OR_GENERIC_EVIDENCE: "Correspondence",
+  UNKNOWN: "Unclassified",
+};

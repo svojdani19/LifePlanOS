@@ -258,8 +258,13 @@ const MEDICAL_RECORD_SUMMARY: Def = {
     ];
     if (detail !== "brief") {
       blocks.push({ kind: "h1", text: "Treatment and Encounters" }, ...S.treatmentNarratives(data));
+      blocks.push({ kind: "h1", text: "Operative Reports" }, ...S.operativeReportsSection(data));
       blocks.push({ kind: "h1", text: "Diagnostic Studies" }, ...S.diagnosticStudiesSection(data));
       blocks.push({ kind: "h1", text: "Medication History" }, ...S.medicationHistory(data));
+      // Attributed opinion and non-treating evidence are reported SEPARATELY
+      // from the treating record, so neither can be read as a finding of it.
+      blocks.push({ kind: "h1", text: "Expert Opinions (Attributed)" }, ...S.expertOpinionsSection(data));
+      blocks.push({ kind: "h1", text: "Other Evidence of Record (Non-Clinical)" }, ...S.attributedEvidenceSection(data));
     }
     if (detail === "detailed") {
       blocks.push({ kind: "h1", text: "Contradictory or Adverse Evidence" }, ...S.contradictoryEvidence(data));

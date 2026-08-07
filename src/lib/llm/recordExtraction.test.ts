@@ -22,7 +22,7 @@ import {
 } from "./recordExtraction";
 import type { LlmProvider } from "@/lib/llm";
 
-const META = { firmId: "firm-1", caseId: "case-1", sourceDocumentId: "doc-1", filename: "synthetic-note.pdf", ocrConfidence: 0.95 };
+const META = { firmId: "firm-1", caseId: "case-1", sourceDocumentId: "doc-1", filename: "synthetic-note.pdf", ocrConfidence: 0.95, documentType: "MEDICAL_RECORD" };
 
 const NOTE = [
   "--- Page 1 ---",

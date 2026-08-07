@@ -33,6 +33,22 @@ export const CLAIM_TYPES = [
   "NEGATIVE_FINDING", // explicitly absent: "no fracture", "denies numbness"
   "CONTRADICTION",
   "ADMINISTRATIVE", // billing/consent/records-request material
+  // ── Non-clinical epistemic types ──────────────────────────────────────────
+  // What KIND of knowledge a statement is. A deponent's account and a
+  // clinician's examination are both "statements about the patient" and are
+  // not remotely the same evidence; collapsing them into PROVIDER_OBSERVATION
+  // is how testimony becomes a medical finding.
+  "SWORN_TESTIMONY", // stated under oath by the deponent
+  "PARTY_ADMISSION", // testimony against the deponent's own interest
+  "EXPERT_OPINION", // an opinion attributed to a retained/examining expert
+  "CAUSATION_OPINION", // an attributed opinion about cause or apportionment
+  "INCIDENT_OBSERVATION", // what a responder or officer observed at the scene
+  "REPORTED_STATEMENT", // what a party or witness said, as reported
+  "DIAGNOSTIC_IMPRESSION", // the interpreting physician's conclusion
+  "OPERATIVE_FINDING", // observed intra-operatively
+  "BILLING_ENTRY", // a charge, code, or amount
+  "EMPLOYMENT_OR_ECONOMIC_RECORD",
+  "LEGAL_ASSERTION",
 ] as const;
 export type ClaimType = (typeof CLAIM_TYPES)[number];
 
@@ -233,4 +249,224 @@ export function checkCertainty(value: string, excerpt: string): ClaimTypeCheck {
     return { ok: false, reason: "cited excerpt hedges this finding; the claim states it as established" };
   }
   return { ok: true };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Analysis class × claim field → claim type
+//
+// The extraction schema has always permitted a claimType, but the prompt never
+// asked for one and validation defaulted whatever was missing to
+// PROVIDER_OBSERVATION. That default is the single most consequential error
+// available to this system: it silently converts sworn testimony, a billing
+// line, a legal assertion and an expert's opinion into a treating clinician's
+// observation of the patient — the exact evidential upgrade that the whole
+// grounding architecture exists to prevent.
+//
+// The type is therefore DERIVED deterministically from the pair (analysis
+// class, claim field) wherever that pair is unambiguous, and a type the model
+// proposes is accepted only where it is compatible with that pair. Nothing
+// here depends on prompt compliance.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The type a (class, field) pair implies when it implies exactly one. */
+const DERIVED: Record<string, ClaimType> = {
+  // Testimony — never a clinical observation, whatever it is about.
+  "TESTIMONY|testimony": "SWORN_TESTIMONY",
+  "TESTIMONY|admission": "PARTY_ADMISSION",
+  "TESTIMONY|functionalStatus": "SWORN_TESTIMONY",
+  "TESTIMONY|workStatus": "SWORN_TESTIMONY",
+  "TESTIMONY|restrictions": "SWORN_TESTIMONY",
+  "TESTIMONY|pastMedicalHistory": "SWORN_TESTIMONY",
+  "TESTIMONY|contradictions": "CONTRADICTION",
+
+  // Expert opinion — attributed opinion, never established fact.
+  "EXPERT_OPINION|opinion": "EXPERT_OPINION",
+  "EXPERT_OPINION|causationOpinion": "CAUSATION_OPINION",
+  "EXPERT_OPINION|assessment": "EXPERT_OPINION",
+  "EXPERT_OPINION|recommendations": "EXPERT_OPINION",
+  "EXPERT_OPINION|functionalStatus": "EXPERT_OPINION",
+  "EXPERT_OPINION|workStatus": "EXPERT_OPINION",
+  "EXPERT_OPINION|restrictions": "EXPERT_OPINION",
+  "EXPERT_OPINION|objectiveFindings": "PROVIDER_OBSERVATION", // the expert's OWN examination
+  "EXPERT_OPINION|diagnosticStudies": "IMAGING_FINDING",
+  "EXPERT_OPINION|pastMedicalHistory": "EXPERT_OPINION",
+
+  // Diagnostic study — findings vs. the interpreting physician's impression.
+  "DIAGNOSTIC_STUDY|impression": "DIAGNOSTIC_IMPRESSION",
+  "DIAGNOSTIC_STUDY|diagnosticStudies": "IMAGING_FINDING",
+  "DIAGNOSTIC_STUDY|studyTechnique": "ADMINISTRATIVE",
+  "DIAGNOSTIC_STUDY|comparison": "ADMINISTRATIVE",
+  "DIAGNOSTIC_STUDY|recommendations": "RECOMMENDED_TREATMENT",
+
+  // Pathology.
+  "PATHOLOGY_DIAGNOSTIC|pathologicDiagnosis": "DIAGNOSTIC_IMPRESSION",
+  "PATHOLOGY_DIAGNOSTIC|grossDescription": "PROVIDER_OBSERVATION",
+  "PATHOLOGY_DIAGNOSTIC|microscopicDescription": "PROVIDER_OBSERVATION",
+  "PATHOLOGY_DIAGNOSTIC|specimen": "ADMINISTRATIVE",
+  "PATHOLOGY_DIAGNOSTIC|comparison": "ADMINISTRATIVE",
+
+  // Operative.
+  "OPERATIVE|operativeFindings": "OPERATIVE_FINDING",
+  "OPERATIVE|preOperativeDiagnosis": "DIAGNOSIS",
+  "OPERATIVE|postOperativeDiagnosis": "DIAGNOSIS",
+  "OPERATIVE|implants": "PROCEDURE_PERFORMED",
+  "OPERATIVE|estimatedBloodLoss": "PROVIDER_OBSERVATION",
+  "OPERATIVE|specimen": "ADMINISTRATIVE",
+  "OPERATIVE|anesthesia": "ADMINISTRATIVE",
+
+  // Anesthesia.
+  "ANESTHESIA|anesthesiaType": "ADMINISTRATIVE",
+  "ANESTHESIA|anesthesiaEvent": "PROVIDER_OBSERVATION",
+  "ANESTHESIA|medications": "MEDICATION",
+  "ANESTHESIA|estimatedBloodLoss": "PROVIDER_OBSERVATION",
+
+  // Device / implant log — inventory documentation.
+  "DEVICE_OR_IMPLANT|implants": "ADMINISTRATIVE",
+  "DEVICE_OR_IMPLANT|deviceIdentifier": "ADMINISTRATIVE",
+  "DEVICE_OR_IMPLANT|manufacturer": "ADMINISTRATIVE",
+  "DEVICE_OR_IMPLANT|procedure": "ADMINISTRATIVE",
+
+  // Incident / prehospital.
+  "INCIDENT|mechanism": "INCIDENT_OBSERVATION",
+  "INCIDENT|sceneFindings": "INCIDENT_OBSERVATION",
+  "INCIDENT|witnessStatement": "REPORTED_STATEMENT",
+  "INCIDENT|objectiveFindings": "PROVIDER_OBSERVATION", // a responder's own assessment
+  "INCIDENT|treatment": "COMPLETED_TREATMENT",
+  "INCIDENT|disposition": "DISPOSITION",
+
+  // Billing / financial — a code on a claim justifies a charge.
+  "FINANCIAL|charge": "BILLING_ENTRY",
+  "FINANCIAL|serviceCode": "BILLING_ENTRY",
+  "FINANCIAL|billedAmount": "BILLING_ENTRY",
+  "FINANCIAL|payer": "BILLING_ENTRY",
+  "FINANCIAL|treatment": "BILLING_ENTRY",
+  "FINANCIAL|procedure": "BILLING_ENTRY",
+  "FINANCIAL|medications": "BILLING_ENTRY",
+
+  // Employment / economic.
+  "EMPLOYMENT_ECONOMIC|employer": "EMPLOYMENT_OR_ECONOMIC_RECORD",
+  "EMPLOYMENT_ECONOMIC|employmentStatus": "EMPLOYMENT_OR_ECONOMIC_RECORD",
+  "EMPLOYMENT_ECONOMIC|earnings": "EMPLOYMENT_OR_ECONOMIC_RECORD",
+  "EMPLOYMENT_ECONOMIC|workStatus": "EMPLOYMENT_OR_ECONOMIC_RECORD",
+  "EMPLOYMENT_ECONOMIC|restrictions": "EMPLOYMENT_OR_ECONOMIC_RECORD",
+  "EMPLOYMENT_ECONOMIC|documentContent": "EMPLOYMENT_OR_ECONOMIC_RECORD",
+
+  // Insurance administration.
+  "INSURANCE_ADMINISTRATIVE|coverage": "ADMINISTRATIVE",
+  "INSURANCE_ADMINISTRATIVE|claimStatus": "ADMINISTRATIVE",
+  "INSURANCE_ADMINISTRATIVE|authorization": "ADMINISTRATIVE",
+  "INSURANCE_ADMINISTRATIVE|payer": "ADMINISTRATIVE",
+  "INSURANCE_ADMINISTRATIVE|billedAmount": "BILLING_ENTRY",
+  "INSURANCE_ADMINISTRATIVE|documentContent": "ADMINISTRATIVE",
+
+  // Legal.
+  "LEGAL|legalAssertion": "LEGAL_ASSERTION",
+  "LEGAL|reliefSought": "LEGAL_ASSERTION",
+  "LEGAL|partyPosition": "LEGAL_ASSERTION",
+
+  // Correspondence / unknown.
+  "CORRESPONDENCE_OR_GENERIC_EVIDENCE|documentContent": "ADMINISTRATIVE",
+  "UNKNOWN|documentContent": "ADMINISTRATIVE",
+};
+
+/**
+ * Types a clinical-encounter or therapy field may legitimately take. These
+ * remain model-proposed (a "treatment" may be completed, recommended, planned
+ * or consent-only, and the excerpt decides which), then checked by the
+ * existing performed-vs-planned validators.
+ */
+const CLINICAL_FIELD_TYPES: Record<string, ClaimType[]> = {
+  subjective: ["PATIENT_REPORT", "NEGATIVE_FINDING"],
+  pastMedicalHistory: ["PATIENT_REPORT", "DIAGNOSIS", "PROVIDER_OBSERVATION"],
+  objectiveFindings: ["PROVIDER_OBSERVATION", "NEGATIVE_FINDING"],
+  diagnosticStudies: ["IMAGING_FINDING", "LAB_FINDING", "DIAGNOSTIC_IMPRESSION", "NEGATIVE_FINDING"],
+  assessment: ["DIAGNOSIS", "PROVIDER_OPINION", "NEGATIVE_FINDING"],
+  treatment: ["COMPLETED_TREATMENT", "RECOMMENDED_TREATMENT", "PLANNED_TREATMENT", "CONSENT_ONLY", "MEDICATION", "PROVIDER_OBSERVATION"],
+  procedure: ["PROCEDURE_PERFORMED", "COMPLETED_TREATMENT", "RECOMMENDED_TREATMENT", "PLANNED_TREATMENT", "CONSENT_ONLY", "PROVIDER_OBSERVATION"],
+  medications: ["MEDICATION"],
+  functionalStatus: ["FUNCTIONAL_STATUS", "PATIENT_REPORT", "PROVIDER_OBSERVATION"],
+  workStatus: ["WORK_STATUS"],
+  restrictions: ["WORK_STATUS", "FUNCTIONAL_STATUS", "PROVIDER_OPINION"],
+  disposition: ["DISPOSITION"],
+  responseToTreatment: ["PROVIDER_OBSERVATION", "PATIENT_REPORT", "NEGATIVE_FINDING"],
+  recommendations: ["RECOMMENDED_TREATMENT", "PLANNED_TREATMENT", "PROVIDER_OPINION"],
+  contradictions: ["CONTRADICTION"],
+  complications: ["PROVIDER_OBSERVATION", "NEGATIVE_FINDING"],
+};
+
+/**
+ * The claim type for one (class, field, proposed type) triple.
+ *
+ * Returns the derived type where the pair is unambiguous — the model's
+ * proposal cannot override it. Where several types are legitimate, a
+ * compatible proposal is kept and an incompatible or absent one falls back to
+ * the field's safest type. Never returns PROVIDER_OBSERVATION by default.
+ */
+/**
+ * For a clinical field with several legitimate types and no honest proposal,
+ * read the EXCERPT rather than assume. Assuming "completed" would assert that
+ * care was delivered on the strength of nothing at all — the precise error the
+ * performed-versus-planned validators exist to catch.
+ */
+function inferFromExcerpt(field: string, excerpt: string | null | undefined): ClaimType | null {
+  if (!excerpt) return null;
+  if (field !== "treatment" && field !== "procedure") return null;
+  if (CONSENT_RE.test(excerpt)) return "CONSENT_ONLY";
+  if (COMPLETED_RE.test(excerpt)) return field === "procedure" ? "PROCEDURE_PERFORMED" : "COMPLETED_TREATMENT";
+  if (RECOMMENDED_RE.test(excerpt)) return "RECOMMENDED_TREATMENT";
+  return null;
+}
+
+export function resolveClaimType(
+  analysisClass: string,
+  field: string,
+  proposed: string | null | undefined,
+  excerpt?: string | null,
+): { claimType: ClaimType; rejected: string | null } {
+  const derived = DERIVED[`${analysisClass}|${field}`];
+  if (derived) {
+    if (proposed && proposed !== derived) {
+      return { claimType: derived, rejected: `claim type "${proposed}" is not available to a ${field} claim in a ${analysisClass} document; recorded as ${derived}` };
+    }
+    return { claimType: derived, rejected: null };
+  }
+  const allowed = CLINICAL_FIELD_TYPES[field];
+  if (allowed?.length) {
+    if (proposed && (allowed as string[]).includes(proposed)) return { claimType: proposed as ClaimType, rejected: null };
+    const inferred = inferFromExcerpt(field, excerpt) ?? (allowed.length === 1 ? allowed[0] : null);
+    // Nothing in the excerpt settles it: record the weakest reading — that the
+    // note says this — rather than asserting delivery or non-delivery.
+    const fallback = inferred ?? (allowed.includes("PROVIDER_OBSERVATION") ? "PROVIDER_OBSERVATION" : allowed[0]);
+    if (proposed) return { claimType: fallback, rejected: `claim type "${proposed}" is not valid for a ${field} claim; recorded as ${fallback}` };
+    return { claimType: fallback, rejected: null };
+  }
+  // An unmapped pair is administrative rather than a clinical observation:
+  // when the system cannot say what kind of knowledge this is, it must not
+  // claim it is a clinician's finding.
+  if (proposed && (CLAIM_TYPES as readonly string[]).includes(proposed)) return { claimType: proposed as ClaimType, rejected: null };
+  return { claimType: "ADMINISTRATIVE", rejected: null };
+}
+
+/** Types that may NEVER arise from a non-clinical document kind. */
+const CLINICAL_ONLY_TYPES = new Set<string>(["DIAGNOSIS", "PROCEDURE_PERFORMED", "COMPLETED_TREATMENT", "PROVIDER_OPINION"]);
+
+const NON_CLINICAL_CLASSES = new Set<string>([
+  "TESTIMONY",
+  "FINANCIAL",
+  "EMPLOYMENT_ECONOMIC",
+  "INSURANCE_ADMINISTRATIVE",
+  "LEGAL",
+  "CORRESPONDENCE_OR_GENERIC_EVIDENCE",
+  "UNKNOWN",
+  "DEVICE_OR_IMPLANT",
+]);
+
+/**
+ * A last structural guard: a non-clinical document can never produce a claim
+ * type that asserts clinical fact. Enforced separately from resolveClaimType so
+ * that a future mapping mistake still cannot promote testimony to a diagnosis.
+ */
+export function claimTypeCompatible(analysisClass: string, claimType: string): boolean {
+  if (NON_CLINICAL_CLASSES.has(analysisClass) && CLINICAL_ONLY_TYPES.has(claimType)) return false;
+  return true;
 }

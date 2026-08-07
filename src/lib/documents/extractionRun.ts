@@ -320,13 +320,44 @@ export async function processDocumentExtraction(
   // silent recall gap made loud: two independent methods disagreeing about
   // what the document contains is a review item, never a shrug. (This is the
   // critic pattern applied to omissions.)
+  // The check is CLASS-SPECIFIC. Dated visit headers are the right recall
+  // expectation for a chart; they are meaningless for a deposition, which has
+  // one date and no visits, and demanding them there produced a stream of
+  // "missing clinical encounter date" findings on documents that are not
+  // clinical charts at all.
   const coverageGaps: string[] = [];
   try {
-    const headerDates = new Set(segmentEncounters(text, marks).map((s) => s.dateIso).filter(Boolean));
-    const extractedDates = new Set(validated.filter((v) => v.encounterDate).map((v) => v.encounterDate!.toISOString().slice(0, 10)));
-    for (const d of [...headerDates].sort()) {
-      if (!extractedDates.has(d)) {
-        coverageGaps.push(`Coverage check: a dated note header for ${d} appears in this document, but no encounter was extracted for that date; human review required.`);
+    const classes = new Set(chunks.slice(startIndex, endIndex).map((c) => c.analysisClass ?? "UNKNOWN"));
+    const datedVisitClasses = ["CLINICAL_ENCOUNTER", "THERAPY_COURSE"];
+    const expectsDatedVisits = datedVisitClasses.some((k) => classes.has(k as never));
+
+    if (expectsDatedVisits) {
+      const headerDates = new Set(segmentEncounters(text, marks).map((s) => s.dateIso).filter(Boolean));
+      const extractedDates = new Set(validated.filter((v) => v.encounterDate).map((v) => v.encounterDate!.toISOString().slice(0, 10)));
+      for (const d of [...headerDates].sort()) {
+        if (!extractedDates.has(d)) {
+          coverageGaps.push(`Coverage check: a dated note header for ${d} appears in this document, but no encounter was extracted for that date; human review required.`);
+        }
+      }
+    }
+    // Every other kind gets the recall question its own kind poses.
+    if (classes.has("UNKNOWN" as never)) {
+      coverageGaps.push(
+        "Coverage check: part of this document could not be identified as any known kind of record. It is retained and visible for review, but no claim is made that it was completely extracted, and it does not enter the medical chronology.",
+      );
+    }
+    for (const [klass, expectation] of [
+      ["OPERATIVE", "each operation documented in it"],
+      ["PATHOLOGY_DIAGNOSTIC", "each specimen accession"],
+      ["DIAGNOSTIC_STUDY", "each study reported in it"],
+      ["TESTIMONY", "the substantive testimony it contains"],
+      ["EXPERT_OPINION", "each stated opinion"],
+      ["INCIDENT", "the incident narrative and the statements it reports"],
+      ["FINANCIAL", "the charge lines it contains"],
+      ["LEGAL", "the assertions and relief it states"],
+    ] as const) {
+      if (classes.has(klass as never) && !validated.some((v) => v.analysisClass === klass)) {
+        coverageGaps.push(`Coverage check: this document contains ${klass.toLowerCase().replace(/_/g, " ")} material, but nothing was extracted from it; ${expectation} requires human review.`);
       }
     }
   } catch {
@@ -451,6 +482,14 @@ export async function processDocumentExtraction(
         providerCredentials: e.providerCredentials,
         facility: e.facility,
         encounterType: e.encounterType,
+        // Document-kind provenance travels with the row, so chronology
+        // admission and report rendering never have to guess from field names.
+        analysisClass: e.analysisClass,
+        segmentKey: e.segmentKey,
+        classificationMethod: e.classificationMethod,
+        classificationConfidence: e.classificationConfidence,
+        attributionName: e.attributionName,
+        attributionRole: e.attributionRole,
         factualSummary: renderFactualSummary(e),
         synthesis: encounters.length === 1 ? synthesis : null,
         claims: e.claims as never,

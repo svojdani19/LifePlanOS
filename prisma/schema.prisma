@@ -1886,8 +1886,35 @@ model ExtractedEncounter {
   // substanceReason is the reviewable explanation for any exclusion.
   substanceClass   String?
   substanceReason  String?
+  // The TREATING clinician only. A deponent, a filing party, a payer, or a
+  // records custodian is not a provider and must never be recorded as one.
   provider            String?
   providerCredentials String?
+
+  // ── Document-kind provenance ──────────────────────────────────────────────
+  // What KIND of document this row came from, and how that was decided. A
+  // consolidated packet holds many kinds behind one filename, so this is
+  // resolved per SEGMENT, not per upload.
+  // CLINICAL_ENCOUNTER | THERAPY_COURSE | OPERATIVE | ANESTHESIA |
+  // PATHOLOGY_DIAGNOSTIC | DEVICE_OR_IMPLANT | DIAGNOSTIC_STUDY | TESTIMONY |
+  // EXPERT_OPINION | INCIDENT | FINANCIAL | EMPLOYMENT_ECONOMIC |
+  // INSURANCE_ADMINISTRATIVE | LEGAL | CORRESPONDENCE_OR_GENERIC_EVIDENCE |
+  // UNKNOWN. Null on rows written before this existed — read as UNKNOWN.
+  analysisClass       String?
+  /// Stable identity of the sub-document within a consolidated packet.
+  segmentKey          String?
+  /// DOCUMENT_TYPE | SEGMENT_CONTENT | FALLBACK_UNKNOWN
+  classificationMethod String?
+  /// Content-classifier score when the class was derived from content.
+  classificationConfidence Float?
+
+  // Generalized authorship for documents that HAVE an author but not a
+  // treating clinician: deponent, surgeon, interpreting physician, expert,
+  // reporting officer, filing party. Kept separate from `provider` so nothing
+  // downstream can mistake one for the other.
+  attributionName     String?
+  /// treating provider | deponent | surgeon | radiologist | expert | officer …
+  attributionRole     String?
   facility            String?
   encounterType       String?
   // Deterministically rendered factual summary (from validated claims only).
@@ -1925,6 +1952,7 @@ model ExtractedEncounter {
 
   @@index([caseId, sourceDocumentId])
   @@index([caseId, status])
+  @@index([caseId, analysisClass])
   @@index([firmId])
 }
 

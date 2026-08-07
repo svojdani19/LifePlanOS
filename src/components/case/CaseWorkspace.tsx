@@ -63,6 +63,7 @@ import { attorneyItemsNeeded } from "@/lib/attorneyItems";
 import { US_STATES } from "@/lib/intake/jurisdictions";
 import { dateFromFilename } from "@/lib/documents/filenameDate";
 import { CaseAssistant } from "@/components/case/CaseAssistant";
+import { KIND_LABEL } from "@/lib/records/encounterSubstance";
 
 // Loosely-typed serialized case (dates are ISO strings after JSON round-trip).
 type AnyRec = Record<string, any>;
@@ -4204,7 +4205,23 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
               <span className="font-semibold text-ink-900">
                 {e.dateStatus === "UNKNOWN" ? "Undated — date requires review" : `${e.encounterDate}${e.dateStatus === "INFERRED" ? " (inferred)" : ""}`}
               </span>
-              {e.provider && <span className="text-ink-600">{e.provider}{e.providerCredentials ? `, ${e.providerCredentials}` : ""}</span>}
+              {/* The document's KIND, so a reviewer can see at a glance that a
+                  row is testimony or a billing line rather than a visit. */}
+              {e.analysisClass && e.analysisClass !== "CLINICAL_ENCOUNTER" && (
+                <span className="rounded-full bg-sky-50 px-2 py-0.5 font-medium text-sky-700">{KIND_LABEL[e.analysisClass] ?? e.analysisClass}</span>
+              )}
+              {e.provider ? (
+                <span className="text-ink-600">{e.provider}{e.providerCredentials ? `, ${e.providerCredentials}` : ""}</span>
+              ) : (
+                /* A deponent, surgeon, radiologist, expert or officer is an
+                   AUTHOR, not the patient's provider, and is labelled by role. */
+                e.attributionName && (
+                  <span className="text-ink-600">
+                    {e.attributionName}
+                    {e.attributionRole ? <span className="text-ink-400"> — {e.attributionRole}</span> : null}
+                  </span>
+                )
+              )}
               {e.facility && <span className="text-ink-500">{e.facility}</span>}
               <span className={cn("ml-auto rounded-full px-2 py-0.5 font-medium", subCls)}>{subLbl}</span>
               <span className={cn("rounded-full px-2 py-0.5 font-medium", cls)}>{lbl}</span>

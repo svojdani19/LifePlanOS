@@ -139,7 +139,7 @@ function doc(over: Record<string, unknown> = {}) {
     firmId: "firm-1",
     caseId: "case-1",
     filename: "synthetic-note.pdf",
-    type: "PROGRESS_NOTE",
+    type: "MEDICAL_RECORD",
     flags: "",
     extractedText: TEXT,
     ocrConfidence: 0.97,

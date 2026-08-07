@@ -44,6 +44,14 @@ export interface DocumentSegment {
   label: string; // display date, e.g. "10/21/2025"
   pageStart: number | null;
   pageEnd: number | null;
+  /**
+   * Character range of this segment within the furniture-stripped text.
+   * Exposed so extraction can align its chunks to real sub-document
+   * boundaries: a consolidated packet's clinic note, operative report and
+   * billing page must not land in one chunk and be analyzed as one kind.
+   */
+  offsetStart: number;
+  offsetEnd: number;
   kind: "clinical" | "administrative";
   /** Classified sub-document type (clinical) or the admin category (administrative). */
   type: string;
@@ -266,6 +274,8 @@ export function segmentDocument(text: string | null | undefined): DocumentSegmen
       label: mmddyyyy(date),
       pageStart,
       pageEnd,
+      offsetStart: off,
+      offsetEnd: end,
       facility: cleanFacility(seg.match(/\b(?:facility|location)\s*:?\s*([^\n]{3,80})/i)?.[1]),
     };
     const pushClinical = (finding: string) => {
