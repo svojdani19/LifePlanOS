@@ -117,6 +117,9 @@ export async function processDocumentExtraction(
     sourceDocumentId: doc.id,
     filename: doc.filename,
     ocrConfidence: doc.ocrConfidence ?? null,
+    // What KIND of document this is — a deposition is not a clinic note, and
+    // must not be asked for a treating provider or a visit date.
+    documentType: doc.type,
   });
   // "Truncated" means one thing now: the source text itself arrived clipped at
   // the storage cap. There is no processing bound — every chunk of every

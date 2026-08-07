@@ -13,6 +13,7 @@ import {
   locateExcerpt,
   dateAppearsOutsideArtifactContext,
   lastServiceDateHeader,
+  looksLikeTranscript,
   repairJsonEscapes,
   fingerprint,
   ExtractionOutputError,
@@ -688,5 +689,46 @@ describe("JSON escape repair (OCR backslashes)", () => {
     const out = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
     expect(out).toHaveLength(1);
     expect(p.calls.length).toBe(1); // repaired on first pass — no retry burned
+  });
+});
+
+describe("transcript line numbering is furniture, not content", () => {
+  it("recognizes deposition-style numbering and leaves ordinary charts alone", () => {
+    const transcript = Array.from({ length: 12 }, (_, i) => ` ${i + 1}   Q. And what happened next?`).join("\n");
+    expect(looksLikeTranscript(transcript)).toBe(true);
+    const chart = ["Assessment: Lumbar radiculopathy.", "Plan:", "1. Continue therapy", "2. Recheck in 4 weeks"].join("\n");
+    expect(looksLikeTranscript(chart)).toBe(false);
+  });
+
+  it("a quotation spanning two numbered lines still matches its source", () => {
+    // The excerpt is verbatim testimony; only the line number sits inside it.
+    const text = [
+      " 13   Q. What did you do to avoid the collision?",
+      " 14   A. I hit the curb trying to avoid",
+      " 15   the accident.",
+      " 16   Q. And then?",
+      " 17   A. I called the police.",
+      " 18   Q. Did they respond?",
+      " 19   A. Yes, about ten minutes later.",
+      " 20   Q. Anything else?",
+    ].join("\n");
+    const chunk = {
+      firmId: "f", caseId: "c", sourceDocumentId: "d", filename: "depo.pdf", ocrConfidence: null,
+      documentType: "DEPOSITION", index: 0, pageStart: 4, pageEnd: 4, offsetStart: 0, offsetEnd: text.length,
+      contentHash: "x", text, pageSlices: [{ page: 4, text }],
+    };
+    const found = locateExcerpt(chunk, "I hit the curb trying to avoid the accident.");
+    expect(found.ok).toBe(true);
+    expect(found.page).toBe(4);
+  });
+
+  it("stripping numbers never invents a match — unquoted text still fails", () => {
+    const text = Array.from({ length: 10 }, (_, i) => ` ${i + 1}   A. Nothing relevant was said here.`).join("\n");
+    const chunk = {
+      firmId: "f", caseId: "c", sourceDocumentId: "d", filename: "depo.pdf", ocrConfidence: null,
+      documentType: "DEPOSITION", index: 0, pageStart: 1, pageEnd: 1, offsetStart: 0, offsetEnd: text.length,
+      contentHash: "x", text, pageSlices: [{ page: 1, text }],
+    };
+    expect(locateExcerpt(chunk, "The deponent admitted fault for the collision.").ok).toBe(false);
   });
 });
