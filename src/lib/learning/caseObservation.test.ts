@@ -4,7 +4,7 @@
 // as falling back, and a fact the planner wants that we cannot produce has to
 // surface as a gap rather than as an emphasis question.
 import { describe, it, expect } from "vitest";
-import { observeCase, mergeObservations, findEmphasisGaps, findDeadClauses, type ObservedEncounter } from "./caseObservation";
+import { observeCase, mergeObservations, findEmphasisGaps, findDeadClauses, deriveNorms, checkAgainstNorms, type ObservedEncounter } from "./caseObservation";
 import type { EmphasisProfile } from "@/lib/llm/summaryEmphasis";
 import type { Proposal } from "./emphasisLearning";
 
@@ -108,6 +108,64 @@ describe("merging observations across cases", () => {
     expect(merged.encounters).toBe(4);
     expect(merged.fieldYield.find((f) => f.field === "assessment")!.yield).toBe(0.75);
     expect(merged.fieldYield.find((f) => f.field === "subjective")!.yield).toBe(0.25);
+  });
+});
+
+describe("checking a case that has no plan to check it against", () => {
+  const healthy = () =>
+    observeCase(
+      Array.from({ length: 20 }, () => enc({ subjective: "reported pain in the lower back", assessment: "Lumbar strain" })),
+      profileFor,
+    );
+
+  it("will not state a norm from too few cases", () => {
+    // Two cases are an anecdote. Deviation from an anecdote means nothing, and
+    // reporting it would train a reviewer to ignore the screen.
+    const norms = deriveNorms([healthy(), healthy()]);
+    expect(norms.CLINICAL_ENCOUNTER).toBeUndefined();
+    expect(deriveNorms([healthy(), healthy(), healthy()]).CLINICAL_ENCOUNTER).toBeDefined();
+  });
+
+  it("says nothing about a case that looks like the others", () => {
+    const norms = deriveNorms([healthy(), healthy(), healthy()]);
+    expect(checkAgainstNorms(healthy(), norms)).toHaveLength(0);
+  });
+
+  it("catches a case whose records produced almost nothing", () => {
+    // The shape of a document set that OCR'd badly: the records are there, the
+    // facts are not. No published plan is needed to see it.
+    const starved = observeCase(
+      Array.from({ length: 20 }, () => enc({ medications: "Atorvastatin 40 mg" })),
+      profileFor,
+    );
+    const anomalies = checkAgainstNorms(starved, deriveNorms([healthy(), healthy(), healthy()]));
+    expect(anomalies.map((a) => a.measure)).toContain("composition misfit");
+    expect(anomalies.some((a) => a.measure === "missing assessment")).toBe(true);
+  });
+
+  it("catches a field that normally arrives and did not", () => {
+    const noAssessment = observeCase(
+      Array.from({ length: 20 }, () => enc({ subjective: "reported pain in the lower back" })),
+      profileFor,
+    );
+    const anomalies = checkAgainstNorms(noAssessment, deriveNorms([healthy(), healthy(), healthy()]));
+    expect(anomalies.find((a) => a.measure === "missing assessment")?.expected).toBe(1);
+  });
+
+  it("stays quiet on a case too small to judge", () => {
+    const tiny = observeCase([enc({ medications: "Atorvastatin 40 mg" })], profileFor);
+    expect(checkAgainstNorms(tiny, deriveNorms([healthy(), healthy(), healthy()]))).toHaveLength(0);
+  });
+
+  it("counts a case that never yielded a field as a zero, not as absent", () => {
+    // Otherwise a field only one case ever produces looks universal, and every
+    // other case gets flagged for missing it.
+    const withImpression = observeCase(
+      Array.from({ length: 20 }, () => enc({ subjective: "reported pain", impression: "L4-L5 extrusion" })),
+      profileFor,
+    );
+    const norms = deriveNorms([withImpression, healthy(), healthy()]);
+    expect(norms.CLINICAL_ENCOUNTER!.medianYield.impression).toBe(0);
   });
 });
 

@@ -261,6 +261,140 @@ export function findEmphasisGaps(
   return gaps.sort((a, b) => b.plannerShare - a.plannerShare - (b.ourYield - a.ourYield));
 }
 
+// ── Checking a case that has no plan to check it against ─────────────────────
+//
+// A published plan is how we know a case was chronicled well. Most cases will
+// never have one, and the program has to be as good on those — which means more
+// than behaving the same way. It means being able to say when something has
+// gone wrong on a case nobody can grade.
+//
+// It can, because a case is never the only case. The cases that DO have plans
+// establish what normal looks like: how often composition finds nothing, how
+// many clauses a summary carries, what each field yields for each kind of
+// record. A new case is then checked against that distribution. This does not
+// prove a case is right — nothing without ground truth can — but it reliably
+// catches the ways a case goes wrong in practice: a document set that OCR'd
+// badly, a record kind our extraction handles poorly, a profile that does not
+// fit the documents in front of it.
+
+export interface KindNorm {
+  kind: AnalysisClass;
+  /** Cases contributing to this norm. */
+  cases: number;
+  medianMisfitRate: number;
+  medianMeanClauses: number;
+  /** Median yield per field across cases. */
+  medianYield: Record<string, number>;
+}
+
+export type Norms = Partial<Record<AnalysisClass, KindNorm>>;
+
+/** A norm needs this many cases before deviation from it means anything. */
+export const MIN_CASES_FOR_NORM = 3;
+
+/** What normal looks like, learned from cases already observed. */
+export function deriveNorms(observations: readonly CaseObservation[]): Norms {
+  const byKind = new Map<AnalysisClass, KindObservation[]>();
+  for (const obs of observations) {
+    for (const [kindKey, o] of Object.entries(obs)) {
+      if (!o || !o.encounters) continue;
+      const kind = kindKey as AnalysisClass;
+      byKind.set(kind, [...(byKind.get(kind) ?? []), o]);
+    }
+  }
+
+  const norms: Norms = {};
+  for (const [kind, list] of byKind) {
+    if (list.length < MIN_CASES_FOR_NORM) continue;
+    const fields = new Set(list.flatMap((o) => o.fieldYield.map((f) => f.field)));
+    const medianYield: Record<string, number> = {};
+    for (const field of fields) {
+      // A case that never produced the field counts as a zero, not as absent —
+      // otherwise a field that only one case ever yields looks universal.
+      medianYield[field] = median(list.map((o) => o.fieldYield.find((f) => f.field === field)?.yield ?? 0));
+    }
+    norms[kind] = {
+      kind,
+      cases: list.length,
+      medianMisfitRate: median(list.map((o) => o.profileMissed / o.encounters)),
+      medianMeanClauses: median(list.map((o) => o.meanClauses)),
+      medianYield,
+    };
+  }
+  return norms;
+}
+
+export interface Anomaly {
+  kind: AnalysisClass;
+  measure: string;
+  value: number;
+  expected: number;
+  detail: string;
+}
+
+/**
+ * Where a case departs from what cases of its kind normally look like.
+ *
+ * Thresholds are deliberately loose. This is a screen that decides where a
+ * reviewer looks first, not a verdict — a case genuinely can hold records
+ * unlike any seen before, and calling that a defect would train a reviewer to
+ * ignore the whole report.
+ */
+export function checkAgainstNorms(observation: CaseObservation, norms: Norms, minEncounters = 10): Anomaly[] {
+  const out: Anomaly[] = [];
+  for (const [kindKey, o] of Object.entries(observation)) {
+    const kind = kindKey as AnalysisClass;
+    const norm = norms[kind];
+    // Without a norm, or with too few records, there is nothing to say. Saying
+    // it anyway is how a screen becomes noise.
+    if (!o || !norm || o.encounters < minEncounters) continue;
+
+    const misfit = o.profileMissed / o.encounters;
+    if (misfit > norm.medianMisfitRate + 0.2) {
+      out.push({
+        kind,
+        measure: "composition misfit",
+        value: round(misfit),
+        expected: round(norm.medianMisfitRate),
+        detail: `${o.profileMissed} of ${o.encounters} records produced no summary; typically ${pctish(norm.medianMisfitRate)}`,
+      });
+    }
+
+    if (o.meanClauses < norm.medianMeanClauses - 0.5) {
+      out.push({
+        kind,
+        measure: "summary thinness",
+        value: o.meanClauses,
+        expected: norm.medianMeanClauses,
+        detail: `summaries average ${o.meanClauses} clauses against a usual ${norm.medianMeanClauses} — records may have extracted poorly`,
+      });
+    }
+
+    for (const [field, expected] of Object.entries(norm.medianYield)) {
+      // Only fields that normally arrive can be conspicuous by their absence.
+      if (expected < 0.3) continue;
+      const actual = o.fieldYield.find((f) => f.field === field)?.yield ?? 0;
+      if (actual < expected / 2) {
+        out.push({
+          kind,
+          measure: `missing ${field}`,
+          value: actual,
+          expected: round(expected),
+          detail: `${field} appears in ${pctish(actual)} of these records; usually ${pctish(expected)}`,
+        });
+      }
+    }
+  }
+  return out;
+}
+
+const median = (xs: number[]): number => {
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return round(s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2);
+};
+const pctish = (n: number) => `${Math.round(n * 100)}%`;
+
 /** Profile clauses that never had anything to say, across every case observed. */
 export function findDeadClauses(observed: CaseObservation): { kind: AnalysisClass; fields: readonly string[]; encounters: number }[] {
   const dead: { kind: AnalysisClass; fields: readonly string[]; encounters: number }[] = [];
