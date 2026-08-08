@@ -24,6 +24,7 @@ import { segmentEncounters } from "@/lib/engine/chronology";
 import { MAX_TEXT } from "@/lib/documents/textLimits";
 import { buildPageLedger, buildPendingPages, persistPageLedger, caseProcessingFacts } from "@/lib/documents/pageLedger";
 import { claimRun, findIdempotentRun, finishRun, pauseRun, heartbeat, chunkBudget } from "@/lib/documents/runLifecycle";
+import { inheritDatesWithinDocument } from "@/lib/documents/dateInheritance";
 import { stripChartFurniture } from "@/lib/documents/chartStructure";
 import {
   chunkDocumentText,
@@ -291,6 +292,7 @@ export async function processDocumentExtraction(
 
   if (configError) return fail((configError as Error).message);
 
+  const warningsSeed: string[] = [];
   const validated: ValidatedEncounter[] = [];
   const rejects: string[] = [];
   const criticFindings: string[] = [];
@@ -373,10 +375,44 @@ export async function processDocumentExtraction(
     /* the cross-check is an auditor; its failure never blocks extraction */
   }
 
-  const encounters = consolidateEncounters(validated);
+  const consolidated = consolidateEncounters(validated);
+
+  // ── Place undated entries within their OWN document ───────────────────────
+  // A service-date header dates a whole note, not just the page it sits on.
+  // An entry from a later page of that note is not a loose, undated record —
+  // it belongs to a dated section already in evidence, and the document itself
+  // says which. Inheritance is INFERRED and carries its basis; it never
+  // crosses a document, and anything the document cannot place stays UNKNOWN.
+  const datedSections = (() => {
+    try {
+      // The segmenter reports where each dated section STARTS. A section runs
+      // until the next one begins, and that extent is what lets an undated
+      // page be attributed to the note it belongs to.
+      const anchors = segmentEncounters(text, marks)
+        .filter((sec) => sec.dateIso && sec.page != null)
+        .map((sec) => ({ date: sec.dateIso as string, page: sec.page as number }))
+        .sort((a, b) => a.page - b.page);
+      return anchors.map((a, i) => ({
+        date: a.date,
+        pageStart: a.page,
+        pageEnd: i + 1 < anchors.length ? Math.max(a.page, anchors[i + 1].page - 1) : null,
+      }));
+    } catch {
+      return [];
+    }
+  })();
+  const inherited = inheritDatesWithinDocument(consolidated, datedSections);
+  const encounters = inherited.entries;
+  if (inherited.placed > 0) {
+    warningsSeed.push(
+      `${inherited.placed} entr${inherited.placed === 1 ? "y" : "ies"} carried no date of their own and were placed by the dated content of this same document; each is marked inferred and names what it was placed by.`,
+    );
+  }
+
   const { synthesis, warning: synthesisWarning } = await synthesizeDocumentSummary(encounters, { provider: opts.provider });
 
   const warnings = [
+    ...warningsSeed,
     ...(truncated ? ["The source text was clipped at the storage cap during ingestion; content beyond it is not represented and requires human review."] : []),
     ...failedSections,
     ...coverageGaps,

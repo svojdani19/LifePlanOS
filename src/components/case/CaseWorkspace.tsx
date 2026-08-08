@@ -809,19 +809,6 @@ function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, cal
         </div>
       )}
 
-      {/* Undated group: encounters whose date could not be supported by the
-          record stay VISIBLE here for human dating — they are never placed on
-          the dated chronology, and never silently dropped. */}
-      {!!extractions?.undated?.length && (
-        <UndatedGroup
-          caseId={data.id}
-          undated={extractions.undated}
-          documents={docs}
-          canVerify={!!extractions?.canVerify && canVerify !== false}
-          onChanged={loadExtractions}
-        />
-      )}
-
       {docs.length === 0 ? (
         <Empty>No records yet. Upload files or add the sample record set to begin.</Empty>
       ) : (
@@ -4081,119 +4068,6 @@ const RECORD_KIND_OPTIONS: [string, string][] = [
 // cited like any other, but they carry no date the source can back, so they
 // stay OFF the dated chronology until a human supplies one. Listing them here
 // is what keeps "we could not date this" from becoming "this did not happen".
-function UndatedGroup({
-  caseId,
-  undated,
-  documents,
-  canVerify,
-  onChanged,
-}: {
-  caseId: string;
-  undated: AnyRec[];
-  documents: AnyRec[];
-  canVerify: boolean;
-  onChanged: () => void;
-}) {
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [dates, setDates] = useState<Record<string, string>>({});
-
-  async function setDate(encId: string) {
-    const value = dates[encId];
-    if (!value) return;
-    setBusyId(encId);
-    await fetch(`/api/cases/${caseId}/records/encounters/${encId}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ encounterDate: value }),
-    });
-    setBusyId(null);
-    onChanged();
-  }
-
-  const MEDICAL_KINDS = new Set([
-    "CLINICAL_ENCOUNTER", "THERAPY_COURSE", "OPERATIVE", "ANESTHESIA",
-    "PATHOLOGY_DIAGNOSTIC", "DIAGNOSTIC_STUDY", "INCIDENT",
-  ]);
-  // A row with no recorded kind counts as clinical: the conservative reading
-  // keeps a genuine gap visible rather than filing it under "expected".
-  const isClinicalKind = (e: { analysisClass?: string | null }) => !e.analysisClass || MEDICAL_KINDS.has(e.analysisClass);
-  const clinicalUndated = undated.filter(isClinicalKind);
-  const otherUndated = undated.filter((e) => !isClinicalKind(e));
-
-  return (
-    <div className="card border-slate-300 p-3">
-      <p className="text-xs font-semibold text-ink-900">
-        Undated material · {undated.length}
-      </p>
-      {/* Two different facts. A clinic note the system could not date is a gap
-          to close; a consent page or a charge line has no visit date because it
-          is not a visit. Reporting one number for both overstates the problem
-          and buries the part that actually needs a person. */}
-      {clinicalUndated.length > 0 && (
-        <p className="mt-1 text-[11px] font-medium text-amber-800">
-          {clinicalUndated.length} clinical {clinicalUndated.length === 1 ? "entry needs" : "entries need"} a date — assigning one from the
-          source record moves it onto the timeline.
-        </p>
-      )}
-      {otherUndated.length > 0 && (
-        <p className="mt-0.5 text-[11px] text-ink-500">
-          {otherUndated.length} non-clinical {otherUndated.length === 1 ? "document carries" : "documents carry"} no visit date because none applies
-          (correspondence, consent and registration pages, billing and similar). Expected; no action needed, and this material never
-          enters the medical chronology.
-        </p>
-      )}
-      <div className="mt-2 space-y-2">
-        {undated.map((e) => {
-          const doc = documents.find((d) => d.id === e.sourceDocumentId);
-          return (
-            <div key={e.id} className="rounded border border-ink-100 bg-white p-2">
-              <div className="flex flex-wrap items-center gap-2 text-[11px] text-ink-600">
-                <span className="font-medium text-ink-800">{doc?.filename ?? "record on file"}</span>
-                <span>{e.page != null ? `p. ${e.page}` : "page unknown"}</span>
-                {e.provider && <span>{e.provider}</span>}
-              </div>
-              <p className="mt-1 text-xs text-ink-800">{e.factualSummary}</p>
-              {(e.warnings ?? []).map((w: string, i: number) => (
-                <p key={i} className="mt-0.5 text-[11px] text-amber-700">{w}</p>
-              ))}
-              {canVerify && (() => {
-                const suggested = dateFromFilename(doc?.filename);
-                return (
-                  <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                    <input
-                      type="date"
-                      className="input py-0.5 text-[11px]"
-                      value={dates[e.id] ?? ""}
-                      onChange={(ev) => setDates((d) => ({ ...d, [e.id]: ev.target.value }))}
-                    />
-                    <button
-                      className="btn-outline px-2 py-0.5 text-[11px]"
-                      disabled={busyId === e.id || !dates[e.id]}
-                      onClick={() => setDate(e.id)}
-                    >
-                      Set documented date
-                    </button>
-                    {suggested && (
-                      // The filename is not the record's own statement of a
-                      // service date — it is offered for confirmation only.
-                      <button
-                        className="text-[11px] text-brand-700 underline"
-                        onClick={() => setDates((d) => ({ ...d, [e.id]: suggested }))}
-                      >
-                        Suggested from filename: {suggested} — confirm against the record
-                      </button>
-                    )}
-                  </div>
-                );
-              })()}
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string; doc: AnyRec | null; canVerify: boolean; onChanged: () => void }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [editingEnc, setEditingEnc] = useState<string | null>(null);
@@ -4258,9 +4132,21 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
         return (
           <div key={e.id} className="mt-2 rounded border border-ink-100 bg-white p-2">
             <div className="flex flex-wrap items-center gap-2 text-[11px]">
-              <span className="font-semibold text-ink-900">
+              <span className={cn("font-semibold", e.dateStatus === "UNKNOWN" ? "text-amber-800" : "text-ink-900")}>
                 {e.dateStatus === "UNKNOWN" ? "Undated — date requires review" : `${e.encounterDate}${e.dateStatus === "INFERRED" ? " (inferred)" : ""}`}
               </span>
+              {/* Dating happens HERE, beside the entry and inside its own
+                  document, where the neighbouring dated entries are visible.
+                  Pulling undated rows into a separate list stripped them of
+                  exactly the context needed to date them. */}
+              {canVerify && e.dateStatus === "UNKNOWN" && (
+                <input
+                  type="date"
+                  className="input w-auto py-0 text-[11px]"
+                  aria-label="Assign a date from the source record"
+                  onChange={(ev) => ev.target.value && act(e.id, "PATCH", { encounterDate: ev.target.value })}
+                />
+              )}
               {/* The document's KIND, so a reviewer can see at a glance that a
                   row is testimony or a billing line rather than a visit. */}
               {e.analysisClass && e.analysisClass !== "CLINICAL_ENCOUNTER" && (
