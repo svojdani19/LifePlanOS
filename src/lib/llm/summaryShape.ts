@@ -29,7 +29,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import type { AnalysisClass } from "@/lib/documents/analysisClass";
-import { emphasisFor, selectClauses } from "@/lib/llm/summaryEmphasis";
+import { emphasisFor, selectClauses, type EmphasisProfile } from "@/lib/llm/summaryEmphasis";
 
 /**
  * Generic patient-education and discharge boilerplate. It is genuinely in the
@@ -110,9 +110,30 @@ export interface SummaryClaim {
  * Returns null when nothing substantive is available, so the caller can fall
  * back rather than print a label with no content behind it.
  */
-export function composeSummary(klass: AnalysisClass | null | undefined, label: string, claims: SummaryClaim[], clip: (s: string, n: number) => string): string | null {
-  const profile = emphasisFor(klass);
-  if (!profile) return null;
+export interface ChosenClause {
+  field: string;
+  prefix: string;
+  share: number;
+  value: string;
+}
+
+/**
+ * Which clauses this record supports and keeps, in reading order.
+ *
+ * Separated from the rendering so that the learning harness can ask what the
+ * program CHOSE to lead with — and score that against what the planner led
+ * with — without parsing the rendered string back apart.
+ *
+ * `override` swaps in a candidate profile, so a proposal derived from one set
+ * of published plans can be scored on plans it never saw.
+ */
+export function chooseSummaryClauses(
+  klass: AnalysisClass | null | undefined,
+  claims: SummaryClaim[],
+  override?: EmphasisProfile | null,
+): ChosenClause[] {
+  const profile = override ?? emphasisFor(klass);
+  if (!profile) return [];
 
   const usable = claims.filter((c) => c.value.trim().length > 2 && !isNonSubstantive(c.value));
   const used = new Set<string>();
@@ -134,7 +155,17 @@ export function composeSummary(klass: AnalysisClass | null | undefined, label: s
 
   // Over the cap, the clauses the planner says most often about this kind of
   // record are the ones that keep their place — never simply the first few.
-  const selected = selectClauses(available, MAX_CLAUSES);
+  return selectClauses(available, MAX_CLAUSES);
+}
+
+export function composeSummary(
+  klass: AnalysisClass | null | undefined,
+  label: string,
+  claims: SummaryClaim[],
+  clip: (s: string, n: number) => string,
+  override?: EmphasisProfile | null,
+): string | null {
+  const selected = chooseSummaryClauses(klass, claims, override);
   const clauses = selected.map((clause, position) => {
     // Clauses are joined with semicolons, so a clause that arrived as a whole
     // sentence sheds its full stop — "…low back pain.; assessment: …" reads as
