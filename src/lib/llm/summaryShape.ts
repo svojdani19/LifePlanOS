@@ -84,9 +84,18 @@ export function isNonSubstantive(value: string): boolean {
   return METADATA_RESTATEMENT_RE.test(value);
 }
 
+/**
+ * Measured, true, and not why the visit happened. Height, weight, cooperation
+ * with the examination and bare vital signs are recorded at almost every
+ * contact; leading a summary with them tells a reviewer nothing about this
+ * visit. They stay in the claims, where they are available in context.
+ */
+const LOW_VALUE_FINDING_RE =
+  /^(?:the )?(?:patient|client|he|she|they)?\s*(?:is|was|stands|weighs|measures)?\s*\d+\s*(?:feet|ft|'|inches|in|cm|kg|pounds|lbs)\b|\b(?:height|weight|bmi|body mass index)\s*[:\-]|\bcooperat\w+ (?:well |fully )?(?:with|during) (?:the )?exam|\b(?:alert and oriented|no acute distress|well[- ]nourished|well[- ]developed)\b\s*\.?\s*$|^\s*(?:vital signs?|vitals)\s*[:\-]/i;
+
 /** True content, but never the headline. */
 export function isBoilerplate(value: string): boolean {
-  return BOILERPLATE_RE.test(value);
+  return BOILERPLATE_RE.test(value) || LOW_VALUE_FINDING_RE.test(value);
 }
 
 /**

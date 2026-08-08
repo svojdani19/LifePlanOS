@@ -98,6 +98,16 @@ function markerCount(text: string, re: RegExp): number {
   return hits.size;
 }
 
+/**
+ * Documents whose IDENTITY is clinical, whatever else is printed on them.
+ * An emergency-department record, a discharge summary, a history and physical
+ * or a consultation is a clinical encounter — filing it as correspondence
+ * because it also carries instructions and demographics loses a real visit
+ * from the timeline.
+ */
+const CLINICAL_DOCUMENT_IDENTITY_RE =
+  /\b(?:emergency (?:department|room) (?:record|visit|note|discharge|summary)|\bed\b visit|discharge summary|discharge instructions and diagnosis|history and physical|\bh&p\b|consultation (?:report|note)|progress note|office visit note|admission (?:note|summary)|operative report|hospital course)\b/i;
+
 /** At least this many distinct clinical markers before a segment can be clinical. */
 const CLINICAL_PROMOTION_MARKERS = 2;
 
@@ -124,6 +134,10 @@ export function carriesClinicalSubstance(text: string): boolean {
  * classifier called it.
  */
 export function readsAsClinicalNote(text: string): boolean {
+  // A document that names itself an ED record, a discharge summary or an H&P
+  // does not have to argue its way past a marker count. Its identity settles
+  // it, provided it carries any clinical substance at all.
+  if (CLINICAL_DOCUMENT_IDENTITY_RE.test(text) && markerCount(text, CLINICAL_SUBSTANCE_RE) >= 1) return true;
   const clinical = markerCount(text, CLINICAL_SUBSTANCE_RE);
   if (clinical < CLINICAL_PROMOTION_MARKERS) return false;
   const billing = markerCount(text, BILLING_SUBSTANCE_RE);

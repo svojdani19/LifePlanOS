@@ -1076,6 +1076,16 @@ function overlap(a: Set<string>, b: Set<string>): number {
  * both sides and differs keeps them apart — a consent is not a therapy visit.
  */
 function typesCompatible(a: string | null, b: string | null): boolean {
+  return valuesCompatible(a, b);
+}
+
+/**
+ * Two free-text values describe the same thing when they match after
+ * normalization, or when either is absent. Absence is missing information, not
+ * a contrary fact — and one chunk of a note routinely omits what the previous
+ * one stated.
+ */
+function valuesCompatible(a: string | null, b: string | null): boolean {
   const na = norm(a ?? "");
   const nb = norm(b ?? "");
   if (!na || !nb) return true;
@@ -1090,8 +1100,13 @@ export function consolidateEncounters(list: ValidatedEncounter[]): ValidatedEnco
       if (o.sourceDocumentId !== e.sourceDocumentId) return false;
       if (o.dateStatus !== e.dateStatus) return false;
       if ((o.encounterDate?.getTime() ?? null) !== (e.encounterDate?.getTime() ?? null)) return false;
-      if (norm(o.provider ?? "") !== norm(e.provider ?? "")) return false;
-      if (norm(o.facility ?? "") !== norm(e.facility ?? "")) return false;
+      // An ABSENT provider or facility is not evidence of a different visit.
+      // One page of a therapy note names the clinic, the next names the
+      // therapist, the third names neither — three views of one visit. Treating
+      // a missing value as a distinguishing one kept them as three entries.
+      // Two DIFFERENT stated names still keep them apart.
+      if (!valuesCompatible(o.provider, e.provider)) return false;
+      if (!valuesCompatible(o.facility, e.facility)) return false;
       // Encounter type is free text the model writes: "Inpatient" and
       // "inpatient" are the same visit, and a missing type is not evidence of
       // a different one. Comparing the raw strings kept an admission split
@@ -1110,6 +1125,13 @@ export function consolidateEncounters(list: ValidatedEncounter[]): ValidatedEnco
       out.push({ ...e, claims: [...e.claims], warnings: [...e.warnings] });
       continue;
     }
+    // Keep the side that actually named something: a merged entry should carry
+    // the therapist and the clinic even when each was stated on a different
+    // page.
+    match.provider ??= e.provider;
+    match.providerCredentials ??= e.providerCredentials;
+    match.facility ??= e.facility;
+    match.encounterType ??= e.encounterType;
     const seen = claimFingerprint(match);
     for (const c of e.claims) if (!seen.has(`${c.field}|${norm(c.excerpt).slice(0, 60)}`)) match.claims.push(c);
     for (const w of e.warnings) if (!match.warnings.includes(w)) match.warnings.push(w);
