@@ -3,6 +3,9 @@ import { prisma } from "@/lib/db";
 import { requireApiContext, requireCanonicalPermission, requireCase, audit } from "@/lib/tenant";
 import { recordCorrectionExemplar, type CorrectionCategory } from "@/lib/llm/correctionExemplars";
 import { encounterContentHash } from "@/lib/records/verifiedContent";
+import { REVIEWER_ASSIGNABLE_CLASSES, requiresDate } from "@/lib/documents/analysisClass";
+import { classifyEncounterSubstance } from "@/lib/records/encounterSubstance";
+import { generatePlan } from "@/lib/engine/generate";
 import { ok, handleError } from "@/lib/api";
 
 // Human verification and correction of one extracted encounter.
@@ -21,7 +24,7 @@ import { ok, handleError } from "@/lib/api";
 // canonical, case-scoped, never satisfied by platform/super-admin status.
 
 /** Fields whose change alters the MEANING a verifier signed off on. */
-const MATERIAL_FIELDS = ["factualSummary", "provider", "providerCredentials", "facility", "encounterType", "encounterDate", "substanceClass"] as const;
+const MATERIAL_FIELDS = ["factualSummary", "provider", "providerCredentials", "facility", "encounterType", "encounterDate", "substanceClass", "analysisClass"] as const;
 
 const patchSchema = z.object({
   factualSummary: z.string().min(3).max(2000).optional(),
@@ -33,6 +36,12 @@ const patchSchema = z.object({
   // Reviewer reclassification: promote an excluded administrative/ancillary
   // encounter onto the timeline, or demote a misfiled one off it.
   substanceClass: z.enum(["CLINICAL", "ANCILLARY", "ADMINISTRATIVE"]).optional(),
+  // Reviewer reclassification of the DOCUMENT KIND. A misfiled record — a
+  // clinic note filed as billing, a fee schedule filed as a chart — is
+  // corrected here, and the correction governs everything downstream:
+  // chronology admission, which fields the row may hold, whether it needs a
+  // date, and where it appears in the report.
+  analysisClass: z.enum(REVIEWER_ASSIGNABLE_CLASSES as unknown as [string, ...string[]]).optional(),
   reviewNote: z.string().max(2000).optional(),
 });
 
@@ -48,6 +57,41 @@ const actionSchema = z.object({
 });
 
 type Params = { params: Promise<{ caseId: string; encounterId: string }> };
+
+/**
+ * Cases with a rebuild already in flight. A reviewer correcting five rows in a
+ * row should cause ONE rebuild after the last of them, not five overlapping
+ * ones racing to write the same plan.
+ */
+const regenerating = new Map<string, { running: boolean; again: boolean }>();
+
+/**
+ * Rebuild the case downstream of a corrected record. Fire-and-forget: the
+ * reviewer's edit must not wait on a full regeneration, and a rebuild that
+ * fails leaves the prior plan in place rather than a half-written one.
+ */
+function scheduleRegeneration(caseId: string, actorUserId: string): void {
+  const state = regenerating.get(caseId);
+  if (state?.running) {
+    // Fold this request into the run already going; one more pass follows.
+    state.again = true;
+    return;
+  }
+  const entry = { running: true, again: false };
+  regenerating.set(caseId, entry);
+  void (async () => {
+    try {
+      do {
+        entry.again = false;
+        await generatePlan(caseId, { userId: actorUserId });
+      } while (entry.again);
+    } catch (e) {
+      console.error(`[records] regeneration after reclassification failed for ${caseId}:`, e instanceof Error ? e.message : e);
+    } finally {
+      regenerating.delete(caseId);
+    }
+  })();
+}
 
 async function load(caseId: string, encounterId: string, firmId: string) {
   return prisma.extractedEncounter.findFirst({ where: { id: encounterId, caseId, firmId } });
@@ -98,6 +142,26 @@ export async function PATCH(req: Request, { params: paramsPromise }: Params) {
         ...(input.substanceClass !== undefined
           ? { substanceClass: input.substanceClass, substanceReason: "Classified by reviewer." }
           : {}),
+        // Reassigning the KIND re-derives the substance class from it, unless
+        // the reviewer set that explicitly in the same edit. Leaving the old
+        // substance behind would keep a corrected row filed where it was.
+        ...(input.analysisClass !== undefined
+          ? {
+              analysisClass: input.analysisClass,
+              classificationMethod: "REVIEWER_ASSIGNED",
+              ...(input.substanceClass === undefined
+                ? (() => {
+                    const v = classifyEncounterSubstance({
+                      analysisClass: input.analysisClass,
+                      encounterType: input.encounterType ?? existing.encounterType,
+                      factualSummary: input.factualSummary ?? existing.factualSummary,
+                      claims: existing.claims as never,
+                    });
+                    return { substanceClass: v.class, substanceReason: `Reclassified by reviewer as ${input.analysisClass.replace(/_/g, " ").toLowerCase()}. ${v.reason}` };
+                  })()
+                : {}),
+            }
+          : {}),
         ...(dateProvided
           ? input.encounterDate
             ? { encounterDate: new Date(`${input.encounterDate}T00:00:00Z`), dateStatus: "DOCUMENTED" }
@@ -122,9 +186,33 @@ export async function PATCH(req: Request, { params: paramsPromise }: Params) {
       type: "extractedEncounter",
       id: existing.id,
       caseId: params.caseId,
-      meta: { fields: [...editedFields], ...(revokesVerification ? { revokedVerification: true, reason: input.reviewNote } : {}) },
+      meta: {
+        fields: [...editedFields],
+        ...(input.analysisClass !== undefined
+          ? { reclassifiedTo: input.analysisClass, from: existing.analysisClass ?? null, requiresDate: requiresDate(input.analysisClass as never) }
+          : {}),
+        ...(revokesVerification ? { revokedVerification: true, reason: input.reviewNote } : {}),
+      },
     });
-    return ok({ encounter: updated });
+    // A reclassification or a newly supplied date changes what the record
+    // SAYS, so everything derived from it — the records outlook, the
+    // chronology, the care plan — is out of date the moment it is saved.
+    // Rebuilding immediately keeps the case coherent; the reviewer is told it
+    // is happening rather than discovering it.
+    const outlookChanged = input.analysisClass !== undefined || dateProvided;
+    if (outlookChanged) scheduleRegeneration(params.caseId, ctx.user.id);
+    return ok({
+      encounter: updated,
+      ...(outlookChanged
+        ? {
+            regenerationTriggered: true,
+            regenerationReason:
+              input.analysisClass !== undefined
+                ? "The record type changed, so the chronology and care plan are being rebuilt from the corrected record."
+                : "A date was assigned, so the chronology and care plan are being rebuilt from the corrected record.",
+          }
+        : {}),
+    });
   } catch (err) {
     return handleError(err);
   }

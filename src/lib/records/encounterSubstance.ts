@@ -197,5 +197,6 @@ export const KIND_LABEL: Record<string, string> = {
   INSURANCE_ADMINISTRATIVE: "Insurance / administrative",
   LEGAL: "Legal",
   CORRESPONDENCE_OR_GENERIC_EVIDENCE: "Correspondence",
+  SUPPORTING_FILE: "Supporting file",
   UNKNOWN: "Unclassified",
 };

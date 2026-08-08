@@ -4056,6 +4056,30 @@ function ReportPanel({ data, canExport, canEdit, call, busy, totals, physicians 
 // excerpts and page citations, warnings, and human review controls. All
 // verification is server-enforced (canonical records.verify); the button is
 // shown only when the server said the caller may verify.
+/**
+ * Record kinds a reviewer may assign. Ordered so the clinical kinds — the ones
+ * that reach the medical chronology — come first.
+ */
+const RECORD_KIND_OPTIONS: [string, string][] = [
+  ["CLINICAL_ENCOUNTER", "Clinical encounter"],
+  ["THERAPY_COURSE", "Therapy"],
+  ["OPERATIVE", "Operative"],
+  ["ANESTHESIA", "Anesthesia"],
+  ["PATHOLOGY_DIAGNOSTIC", "Pathology"],
+  ["DIAGNOSTIC_STUDY", "Diagnostic study"],
+  ["INCIDENT", "Incident / prehospital"],
+  ["DEVICE_OR_IMPLANT", "Device / implant"],
+  ["FINANCIAL", "Billing"],
+  ["INSURANCE_ADMINISTRATIVE", "Insurance / administrative"],
+  ["EMPLOYMENT_ECONOMIC", "Employment / economic"],
+  ["TESTIMONY", "Sworn testimony"],
+  ["EXPERT_OPINION", "Expert opinion"],
+  ["LEGAL", "Legal"],
+  ["CORRESPONDENCE_OR_GENERIC_EVIDENCE", "Correspondence"],
+  ["SUPPORTING_FILE", "Supporting file — no date needed"],
+  ["UNKNOWN", "Unclassified — needs review"],
+];
+
 // ── Undated / date requires review ──────────────────────────────────────────
 // Encounters whose date the record did not support. They are extracted and
 // cited like any other, but they carry no date the source can back, so they
@@ -4178,6 +4202,7 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
   const [busy, setBusy] = useState<string | null>(null);
   const [editingEnc, setEditingEnc] = useState<string | null>(null);
   const [draftSummary, setDraftSummary] = useState("");
+  const [regenNotice, setRegenNotice] = useState<string | null>(null);
   if (!doc) return null;
   const ex = doc.extraction ?? {};
   const encounters: AnyRec[] = doc.encounters ?? [];
@@ -4191,9 +4216,14 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
 
   async function act(encId: string, method: "POST" | "PATCH", body: AnyRec) {
     setBusy(encId);
-    await fetch(`/api/cases/${caseId}/records/encounters/${encId}`, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const res = await fetch(`/api/cases/${caseId}/records/encounters/${encId}`, { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const out = (await res.json().catch(() => ({}))) as { regenerationTriggered?: boolean; regenerationReason?: string };
     setBusy(null);
     setEditingEnc(null);
+    // The server rebuilds the case when a correction changes what the record
+    // says. Say so plainly — a plan that moves without explanation is worse
+    // than the stale one it replaced.
+    setRegenNotice(out.regenerationTriggered ? (out.regenerationReason ?? "The chronology and care plan are being rebuilt.") : null);
     onChanged();
   }
 
@@ -4219,6 +4249,13 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
         {ex.truncated && <span className="text-[11px] text-amber-700">Partially processed — document exceeds the processing bound</span>}
       </div>
       {ex.error && <p className="mt-1 text-[11px] text-red-700">{ex.error}</p>}
+      {regenNotice && (
+        <div className="mt-2 flex items-start gap-2 rounded border border-amber-200 bg-amber-50 p-2 text-[11px] text-amber-900">
+          <span className="font-medium">Re-running the pipeline.</span>
+          <span>{regenNotice} Physician-added and authored items are preserved.</span>
+          <button type="button" className="ml-auto underline" onClick={() => setRegenNotice(null)}>Dismiss</button>
+        </div>
+      )}
       {encounters.map((e) => {
         const [lbl, cls] = encStatus(e.status, false);
         const [subLbl, subCls] = substanceChip(e.substanceClass ?? null);
@@ -4253,7 +4290,24 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
               <p className="mt-0.5 text-[11px] text-ink-500">{e.substanceReason}</p>
             )}
             {canVerify && (
-              <div className="mt-1 flex items-center gap-1.5 text-[11px]">
+              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
+                {/* The KIND governs everything downstream — what the row may
+                    assert, whether it needs a date, and whether it reaches the
+                    medical chronology. A misfiled document is corrected here. */}
+                <span className="text-ink-400">Record type:</span>
+                <select
+                  className="input w-auto py-0 text-[11px]"
+                  value={e.analysisClass ?? "UNKNOWN"}
+                  onChange={(ev) => act(e.id, "PATCH", { analysisClass: ev.target.value })}
+                  title="Changing the record type re-runs the pipeline for this case."
+                >
+                  {RECORD_KIND_OPTIONS.map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
+                {/* Stated before the change, not after: a reviewer should know
+                    a rebuild follows rather than discover their plan moved. */}
+                <span className="text-[10px] text-amber-700">Changing the type or date re-runs the chronology and care plan.</span>
                 <span className="text-ink-400">Classification:</span>
                 <select
                   className="input w-auto py-0 text-[11px]"

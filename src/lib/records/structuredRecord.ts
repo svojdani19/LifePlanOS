@@ -12,7 +12,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { prisma } from "@/lib/db";
-import { MEDICAL_TIMELINE_CLASSES } from "@/lib/documents/analysisClass";
+import { requiresDate } from "@/lib/documents/analysisClass";
 import { detectVerificationDrift } from "@/lib/records/verifiedContent";
 
 export interface StructuredClaim {
@@ -77,12 +77,17 @@ export interface StructuredDocument {
   encounters: StructuredEncounter[];
 }
 
-/** Kinds whose rows belong on the medical timeline and therefore need a date. */
+/**
+ * Does a row of this kind need a date before the record is complete?
+ *
+ * Only material bound for the medical timeline does. A charge ledger, a fee
+ * schedule or a records-request letter is legitimately dateless, and asking a
+ * physician to date it is asking them to invent a fact. A legacy row with no
+ * recorded kind is treated as needing one — the conservative reading keeps a
+ * genuine gap visible rather than excusing it.
+ */
 function isMedicalTimelineKind(analysisClass: string | null | undefined): boolean {
-  // A legacy row with no recorded kind is treated as clinical, which is the
-  // conservative reading: it keeps a genuine gap visible rather than hiding it
-  // in the "expected" bucket.
-  return !analysisClass || MEDICAL_TIMELINE_CLASSES.has(analysisClass as never);
+  return requiresDate(analysisClass as never);
 }
 
 export interface StructuredRecord {

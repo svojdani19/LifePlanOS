@@ -53,6 +53,48 @@ export interface ClassifiedRange {
  */
 const adminKindAllowed = (klass: AnalysisClass) => !MEDICAL_TIMELINE_CLASSES.has(klass);
 
+/**
+ * Kinds that may be promoted to clinical when the text carries a provider's
+ * own analysis. Testimony and legal filings are NOT here: a deposition
+ * discussing an examination is still testimony, not an examination.
+ */
+const PROMOTABLE_TO_CLINICAL = new Set<AnalysisClass>([
+  "FINANCIAL",
+  "INSURANCE_ADMINISTRATIVE",
+  "CORRESPONDENCE_OR_GENERIC_EVIDENCE",
+  "SUPPORTING_FILE",
+  "UNKNOWN",
+]);
+
+/**
+ * Clinical substance inside a document that otherwise looks like billing.
+ *
+ * A charge line is not clinical. But providers routinely file the visit note
+ * and the charge for it in one place, and a superbill or an operative billing
+ * packet can carry the real history, examination, assessment or operative
+ * detail. Classifying the whole segment FINANCIAL on the strength of its
+ * charge columns would discard that clinical content, so a segment that
+ * carries a provider's own analysis is treated as the clinical document it
+ * partly is. Losing a clinical fact is far worse than over-including a page.
+ */
+const CLINICAL_SUBSTANCE_RE =
+  /\b(?:chief complaint|history of present illness|\bhpi\b|physical (?:exam|examination)|on examination|review of systems|\bros\b|assessment and plan|\ba\/p\b|impression(?:\s*(?:and|&)\s*plan)?:|assessment:|plan:|operative (?:report|findings)|preoperative diagnosis|postoperative diagnosis|procedure performed|indications for (?:the )?procedure|range of motion|straight leg raise|neurologic(?:al)? exam|palpation reveal|tenderness (?:to|on) palpation|prescrib\w+|discharge instructions|follow[- ]up in)\b/i;
+
+/** At least this many distinct clinical markers before promoting a segment. */
+const CLINICAL_PROMOTION_MARKERS = 2;
+
+/**
+ * Does this text carry a provider's own clinical analysis — history, exam,
+ * assessment, plan, procedure — rather than only charges for it?
+ */
+export function carriesClinicalSubstance(text: string): boolean {
+  const re = new RegExp(CLINICAL_SUBSTANCE_RE.source, "gi");
+  const hits = new Set<string>();
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) hits.add(m[0].toLowerCase());
+  return hits.size >= CLINICAL_PROMOTION_MARKERS;
+}
+
 /** Minimum content-classifier score to accept a segment's own class. */
 const MIN_SEGMENT_SCORE = 4;
 
@@ -117,7 +159,11 @@ export function classifyRanges(text: string, documentType: string | null | undef
     if (seg.kind === "administrative") {
       const adminContent = classifyByContent(body);
       const admin = classFromContent(adminContent.type, adminContent.score, MIN_SEGMENT_SCORE);
-      const klass = adminKindAllowed(admin.klass) && admin.method === "SEGMENT_CONTENT" ? admin.klass : "CORRESPONDENCE_OR_GENERIC_EVIDENCE";
+      let klass: AnalysisClass = adminKindAllowed(admin.klass) && admin.method === "SEGMENT_CONTENT" ? admin.klass : "CORRESPONDENCE_OR_GENERIC_EVIDENCE";
+      // Even a segment the segmenter called administrative is clinical when it
+      // carries a provider's own analysis — a superbill with the visit note
+      // attached is still the visit note.
+      if (PROMOTABLE_TO_CLINICAL.has(klass) && carriesClinicalSubstance(body)) klass = "CLINICAL_ENCOUNTER";
       ranges.push({
         offsetStart: start,
         offsetEnd: end,
@@ -133,7 +179,14 @@ export function classifyRanges(text: string, documentType: string | null | undef
     // A short segment must clear a higher bar; a long one clears the ordinary
     // one. Either way an unconvincing score falls back rather than guessing.
     const floor = body.length < MIN_SEGMENT_CHARS ? MIN_SHORT_SEGMENT_SCORE : MIN_SEGMENT_SCORE;
-    const derived = classFromContent(content.type, content.score, floor);
+    let derived = classFromContent(content.type, content.score, floor);
+    // A billing segment that also carries the provider's own analysis is a
+    // clinical document with charges attached, not a ledger. Read it as
+    // clinical so the history, exam, assessment or procedure is not thrown
+    // away with the charge columns.
+    if (PROMOTABLE_TO_CLINICAL.has(derived.klass) && carriesClinicalSubstance(body)) {
+      derived = { klass: "CLINICAL_ENCOUNTER", method: derived.method, confidence: derived.confidence };
+    }
     // A confident content class wins for its own segment. Otherwise the
     // packet's declared type applies — and when there is no declared type
     // either, the range stays UNKNOWN rather than becoming clinical.

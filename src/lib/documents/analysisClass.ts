@@ -50,6 +50,7 @@ export type AnalysisClass =
   | "INSURANCE_ADMINISTRATIVE"
   | "LEGAL"
   | "CORRESPONDENCE_OR_GENERIC_EVIDENCE"
+  | "SUPPORTING_FILE"
   | "UNKNOWN";
 
 export interface ClassProfile {
@@ -73,6 +74,15 @@ export interface ClassProfile {
   guidance: string;
   /** Field order for the one-line summary — what a reviewer would name first. */
   leadFields: readonly ClaimField[];
+  /**
+   * Must a reviewer supply a date when the document does not state one?
+   *
+   * Only material that belongs on the medical timeline does. Asking a
+   * physician to date a fee schedule or a records-request letter is asking
+   * them to invent a fact, and it buries the entries that genuinely need
+   * dating among dozens that never will.
+   */
+  requiresDate: boolean;
 }
 
 // ── Field vocabularies ──────────────────────────────────────────────────────
@@ -160,6 +170,7 @@ export const PROFILES: Record<AnalysisClass, ClassProfile> = {
     leadFields: ["assessment", "procedure", "treatment", "objectiveFindings", "subjective", "disposition"],
     guidance:
       "This is a clinical encounter record. Extract one entry per DATED VISIT. What matters: why the patient presented, what was found on examination, what was assessed, what was done or prescribed, and what was planned. Attribute each visit to the clinician who saw the patient and the date of service printed on the note.",
+    requiresDate: true,
   },
 
   THERAPY_COURSE: {
@@ -173,6 +184,7 @@ export const PROFILES: Record<AnalysisClass, ClassProfile> = {
     leadFields: ["responseToTreatment", "objectiveFindings", "treatment", "functionalStatus", "subjective"],
     guidance:
       "This is a therapy record (physical, occupational, chiropractic, or similar). Extract one entry per DATED TREATMENT VISIT. What matters is the INTERVAL CHANGE: measured progress toward goals, objective measures (range of motion, strength, gait), the modalities actually delivered that day, and the patient's documented response. Therapy notes repeat their diagnosis and their standing plan on every visit — that recurring boilerplate is not the visit's content and must not become its summary. If a visit documents no change and no distinguishing content, say so plainly rather than restating the diagnosis. The signing therapist is often initials or absent; do not invent a provider name.",
+    requiresDate: true,
   },
 
   OPERATIVE: {
@@ -186,6 +198,7 @@ export const PROFILES: Record<AnalysisClass, ClassProfile> = {
     leadFields: ["procedure", "postOperativeDiagnosis", "operativeFindings", "complications", "implants"],
     guidance:
       "This is an operative or procedural report. ONE OPERATION IS ONE ENTRY — do not split a single operative report into multiple entries for its separate sections (indications, technique, findings, closure all belong to the same procedure). What matters: the pre- and post-operative diagnoses, the procedure(s) actually performed and at which levels or sites, the operative findings, any implants or hardware with their identifiers, estimated blood loss, specimens sent, complications (state explicitly when the report says none), the anesthesia used, and the surgeon of record. The surgeon is the attributed author, not a 'treating provider' seen at a visit.",
+    requiresDate: true,
   },
 
   DIAGNOSTIC_STUDY: {
@@ -200,6 +213,7 @@ export const PROFILES: Record<AnalysisClass, ClassProfile> = {
     guidance:
       "This is a diagnostic study report (imaging, laboratory, or electrodiagnostic). ONE STUDY IS ONE ENTRY. What matters: which study was performed and of what body part, the technique or protocol, what prior study it was compared against, the reported FINDINGS, and — most important — the radiologist's or interpreting physician's IMPRESSION, which is the conclusion the rest of the record will rely on. Keep findings and impression distinct; do not merge them. The author is the interpreting physician, not a treating provider. " +
       NEVER_INVENT_CLINICAL,
+    requiresDate: true,
   },
 
   TESTIMONY: {
@@ -214,6 +228,7 @@ export const PROFILES: Record<AnalysisClass, ClassProfile> = {
     guidance:
       "This is sworn testimony (a deposition or similar transcript). It is ONE proceeding on ONE date with ONE deponent — it is NOT a series of clinical encounters, and it has no treating provider and no encounter date. Extract substantive PASSAGES OF TESTIMONY, not visits. What matters: who is testifying and in what capacity; what they state about the incident, their symptoms, their functional limitations, their work capacity, and their prior condition; and above all any ADMISSION — testimony against the deponent's own interest, an inconsistency with the medical record, or an acknowledgement of a pre-existing problem. Attribute testimony to the deponent and cite the transcript page. Never convert testimony into a clinical finding: a plaintiff saying their back hurts is testimony, not an examination finding. " +
       NEVER_INVENT_CLINICAL,
+    requiresDate: false,
   },
 
   EXPERT_OPINION: {
@@ -227,6 +242,7 @@ export const PROFILES: Record<AnalysisClass, ClassProfile> = {
     leadFields: ["opinion", "causationOpinion", "assessment", "objectiveFindings", "recommendations"],
     guidance:
       "This is an expert or evaluative report (independent medical examination, peer review, neuropsychological evaluation, functional capacity evaluation, life care plan, or vocational assessment). It is ONE evaluation by ONE examiner, not a series of visits. What matters: who examined or opined and on whose behalf; the findings of their own examination or testing; and their STATED OPINIONS — on diagnosis, on causation and apportionment, on maximum medical improvement, on impairment rating, on work capacity, and on future care. Record an opinion AS an opinion attributed to that examiner; never restate it as an established fact about the patient.",
+    requiresDate: false,
   },
 
   INCIDENT: {
@@ -240,6 +256,7 @@ export const PROFILES: Record<AnalysisClass, ClassProfile> = {
     leadFields: ["mechanism", "sceneFindings", "objectiveFindings", "treatment", "witnessStatement"],
     guidance:
       "This is an incident or prehospital record (police report, EMS run sheet, incident report, or reconstruction). What matters: the MECHANISM of injury as documented — speed, direction, restraint use, point of impact, fall height, surface; the scene findings and conditions; the patient's presentation and complaints at the scene; any treatment given en route; the receiving facility; and witness or party statements, attributed to who made them. Statements by a party are reported statements, never established facts.",
+    requiresDate: true,
   },
 
   FINANCIAL: {
@@ -254,6 +271,7 @@ export const PROFILES: Record<AnalysisClass, ClassProfile> = {
     guidance:
       "This is a billing, pharmacy, or insurance record. It documents what was CHARGED, not what was clinically found. Extract the charge lines: date of service, the service or drug billed, its CPT/HCPCS/NDC code, the amount billed or paid, and the payer. A diagnosis code appearing on a claim line is a BILLING code justifying the charge — it is not a clinical assessment of the patient and must never be recorded as one. This document has no examining clinician; do not attribute one. " +
       NEVER_INVENT_CLINICAL,
+    requiresDate: false,
   },
 
   ANESTHESIA: {
@@ -269,6 +287,7 @@ export const PROFILES: Record<AnalysisClass, ClassProfile> = {
     leadFields: ["anesthesiaType", "anesthesiaEvent", "complications", "medications"],
     guidance:
       "This is an anesthesia record. What matters: the anesthetic technique used, airway management, agents and doses administered, intraoperative events and hemodynamic instability, estimated blood loss, complications (state explicitly when the record says none), and recovery disposition. The author is the anesthesia provider. Do NOT attribute this record to the surgeon and do not restate the operation itself — the operative note documents that.",
+    requiresDate: true,
   },
 
   PATHOLOGY_DIAGNOSTIC: {
@@ -283,6 +302,7 @@ export const PROFILES: Record<AnalysisClass, ClassProfile> = {
     guidance:
       "This is a pathology report — a DIAGNOSTIC interpretation of a specimen, not an operative note. ONE ACCESSION IS ONE ENTRY. What matters: the specimen(s) received and their source, the gross description, the microscopic description, and above all the FINAL PATHOLOGIC DIAGNOSIS, which is the conclusion the rest of the record relies on. The author is the interpreting pathologist, never the operating surgeon. " +
       NEVER_INVENT_CLINICAL,
+    requiresDate: true,
   },
 
   DEVICE_OR_IMPLANT: {
@@ -297,6 +317,7 @@ export const PROFILES: Record<AnalysisClass, ClassProfile> = {
     guidance:
       "This is a device or implant record — a log of hardware, not an operation. What matters: the device implanted, its manufacturer, model, lot or serial number, and the site. It documents WHAT WAS USED; it is not itself evidence of an operation's findings or outcome, and it has no clinician to attribute. " +
       NEVER_INVENT_CLINICAL,
+    requiresDate: false,
   },
 
   EMPLOYMENT_ECONOMIC: {
@@ -311,6 +332,7 @@ export const PROFILES: Record<AnalysisClass, ClassProfile> = {
     guidance:
       "This is an employment, wage, or tax record. It is ECONOMIC evidence, not medical billing: it has no CPT codes, no charges for care, and no clinical content. What matters: the employer, dates and status of employment, hours, wage or earnings figures, and any documented time lost from work. Never express this as a medical charge or a clinical fact. " +
       NEVER_INVENT_CLINICAL,
+    requiresDate: false,
   },
 
   INSURANCE_ADMINISTRATIVE: {
@@ -325,6 +347,7 @@ export const PROFILES: Record<AnalysisClass, ClassProfile> = {
     guidance:
       "This is an insurance or claims-administration record. What matters: the coverage in force, the policy or claim identifiers, the status of a claim, authorizations granted or denied and for what, and amounts allowed or paid. An authorization or denial is an administrative decision — it is not a clinical judgment about the patient, and a denial is not evidence that care was unnecessary. " +
       NEVER_INVENT_CLINICAL,
+    requiresDate: false,
   },
 
   CORRESPONDENCE_OR_GENERIC_EVIDENCE: {
@@ -339,6 +362,7 @@ export const PROFILES: Record<AnalysisClass, ClassProfile> = {
     guidance:
       "This is correspondence or general case-file material whose kind is not otherwise established — a letter, a memo, a cover page, a transmittal. Record plainly WHAT THE DOCUMENT SAYS and who wrote it, in the document's own terms. Do not classify its content as clinical, legal, or financial fact; a letter that mentions a diagnosis is a letter, not a medical record. " +
       NEVER_INVENT_CLINICAL,
+    requiresDate: false,
   },
 
   UNKNOWN: {
@@ -352,6 +376,22 @@ export const PROFILES: Record<AnalysisClass, ClassProfile> = {
     leadFields: ["documentContent"],
     guidance:
       "The kind of this document could NOT be established. Record only what the text plainly says, with its citation, and nothing more. Do not infer that it is a clinical note, and do not supply a provider, a diagnosis, an assessment, or a treatment. This material is routed to human review precisely because the system does not know what it is. " +
+      NEVER_INVENT_CLINICAL,
+    requiresDate: false,
+  },
+
+  SUPPORTING_FILE: {
+    klass: "SUPPORTING_FILE",
+    unit: "supporting file",
+    unitPlural: "supporting files",
+    fields: GENERIC_FIELDS,
+    attribution: null,
+    expectsDate: false,
+    singleUnit: true,
+    requiresDate: false,
+    leadFields: ["documentContent"],
+    guidance:
+      "This is filed case material that is NOT clinical care, NOT billing bearing on the course of care, and NOT needed to understand the medical course — a fee schedule, a records-request letter, a cover sheet, a duplicate index, a privacy notice. Record plainly what it is, in one line, with its citation. Do not extract clinical facts from it and do not supply a date: it has no place on any timeline, and inventing one would put it there. It stays fully accessible for review, and a reviewer who decides it matters can reclassify it. " +
       NEVER_INVENT_CLINICAL,
   },
 
@@ -367,6 +407,7 @@ export const PROFILES: Record<AnalysisClass, ClassProfile> = {
     guidance:
       "This is a legal filing or correspondence (pleading, demand letter, settlement agreement, court order, or letter). What matters: the parties, what is ASSERTED and by whom, the relief or remedy sought, deadlines and operative dates, and the procedural posture. Everything here is a party's position or a court's order — never a medical fact about the patient. " +
       NEVER_INVENT_CLINICAL,
+    requiresDate: false,
   },
 };
 
@@ -446,6 +487,8 @@ const BY_TYPE: Record<string, AnalysisClass> = {
   SETTLEMENT_AGREEMENT: "LEGAL",
   COURT_ORDER: "LEGAL",
   CORRESPONDENCE: "CORRESPONDENCE_OR_GENERIC_EVIDENCE",
+  PHOTOGRAPHS: "SUPPORTING_FILE",
+  SURVEILLANCE_VIDEO: "SUPPORTING_FILE",
 };
 
 /**
@@ -476,6 +519,7 @@ export function fieldAllowed(profile: ClassProfile, field: string): boolean {
  * Records page in their own attributed sections.
  */
 export const NON_CLINICAL_CLASSES = new Set<AnalysisClass>([
+  "SUPPORTING_FILE",
   "TESTIMONY",
   "FINANCIAL",
   "EMPLOYMENT_ECONOMIC",
@@ -502,6 +546,28 @@ export const MEDICAL_TIMELINE_CLASSES = new Set<AnalysisClass>([
  * an expert opinion attributed to its author — never restated as treating fact.
  */
 export const ATTRIBUTED_OPINION_CLASSES = new Set<AnalysisClass>(["EXPERT_OPINION"]);
+
+/**
+ * Does a row of this kind need a date before the record is complete?
+ * Everything else is legitimately dateless and must not be counted as a gap.
+ */
+export function requiresDate(klass: AnalysisClass | null | undefined): boolean {
+  // An unrecorded kind is treated as needing a date: the conservative reading
+  // keeps a real gap visible rather than excusing it.
+  if (!klass) return true;
+  return PROFILES[klass]?.requiresDate ?? true;
+}
+
+/**
+ * Kinds a reviewer may assign by hand. Everything the pipeline can infer is
+ * offered, so a misfiled document can be moved to where it belongs.
+ */
+export const REVIEWER_ASSIGNABLE_CLASSES: AnalysisClass[] = [
+  "CLINICAL_ENCOUNTER", "THERAPY_COURSE", "OPERATIVE", "ANESTHESIA", "PATHOLOGY_DIAGNOSTIC",
+  "DIAGNOSTIC_STUDY", "DEVICE_OR_IMPLANT", "INCIDENT", "TESTIMONY", "EXPERT_OPINION",
+  "FINANCIAL", "EMPLOYMENT_ECONOMIC", "INSURANCE_ADMINISTRATIVE", "LEGAL",
+  "CORRESPONDENCE_OR_GENERIC_EVIDENCE", "SUPPORTING_FILE", "UNKNOWN",
+];
 
 /** Material that has not been identified and must reach a human. */
 export function requiresHumanClassification(klass: AnalysisClass): boolean {

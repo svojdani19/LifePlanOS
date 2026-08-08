@@ -5,8 +5,8 @@
 //
 // Synthetic text only — no record content from any real case.
 import { describe, it, expect, vi } from "vitest";
-import { classifyRanges } from "./segmentClass";
-import { profileFor, analysisClassFor, NON_CLINICAL_CLASSES, MEDICAL_TIMELINE_CLASSES } from "./analysisClass";
+import { classifyRanges, carriesClinicalSubstance } from "./segmentClass";
+import { profileFor, analysisClassFor, fieldAllowed, requiresDate, PROFILES, REVIEWER_ASSIGNABLE_CLASSES, NON_CLINICAL_CLASSES, MEDICAL_TIMELINE_CLASSES } from "./analysisClass";
 import { chunkDocumentText, validateEncounters, renderFactualSummary, type DocumentChunk, type LlmEncounter } from "@/lib/llm/recordExtraction";
 import { pageMarks } from "@/lib/documents/meta";
 import { resolveClaimType, claimTypeCompatible } from "@/lib/llm/claimTypes";
@@ -601,5 +601,102 @@ describe("undated reporting separates a real gap from an expected absence", () =
     // A legacy row with no recorded kind counts as clinical — the conservative
     // reading keeps a genuine gap visible rather than filing it as expected.
     expect(isClinicalGap(null)).toBe(true);
+  });
+});
+
+// ── Billing is kept, and clinical content inside it is never lost ────────────
+
+describe("billing is a record type, not a discard pile", () => {
+  const CHARGES = [
+    "Statement of account for date of service 03/14/2025.",
+    "CPT 99214 office visit, established patient. Total charges: $412.00.",
+    "HCPCS adjustments applied. Balance due on account. Explanation of benefits enclosed.",
+  ].join("\n");
+
+  it("a pure charge ledger stays billing — kept, attributed, off the chronology", () => {
+    expect(carriesClinicalSubstance(CHARGES)).toBe(false);
+    expect(profileFor("BILLING_RECORD").klass).toBe("FINANCIAL");
+    // Kept and visible, but never treating care.
+    expect(admissibleToMedicalTimeline({ analysisClass: "FINANCIAL", substanceClass: "ANCILLARY" })).toBe(false);
+    expect(NON_CLINICAL_CLASSES.has("FINANCIAL")).toBe(true);
+  });
+
+  it("a superbill carrying the provider's own analysis is read as CLINICAL", () => {
+    // Providers file the visit note and its charge together. Reading the whole
+    // page as billing would throw the history and examination away.
+    const SUPERBILL = [
+      CHARGES,
+      "Chief complaint: low back pain radiating to the left leg.",
+      "Physical examination: tenderness to palpation at L4-L5; straight leg raise positive on the left.",
+      "Assessment: lumbar radiculopathy. Plan: continue therapy and follow-up in 4 weeks.",
+    ].join("\n");
+    expect(carriesClinicalSubstance(SUPERBILL)).toBe(true);
+  });
+
+  it("one clinical marker is not enough — a charge line mentioning a plan stays billing", () => {
+    expect(carriesClinicalSubstance(`${CHARGES}\nPlan: bill secondary insurer.`)).toBe(false);
+  });
+
+  it("testimony is never promoted, however much clinical language it quotes", () => {
+    // A deposition discussing an examination is testimony, not an examination.
+    const DEPO = [
+      "DEPOSITION OF THE PLAINTIFF. The witness, being first duly sworn, testified as follows.",
+      "Q. What did the physical examination show? A. He said my range of motion was limited.",
+      "Q. And the assessment: what did he tell you? A. That I had a disc problem.",
+    ].join("\n");
+    // The text carries markers, but TESTIMONY is not a promotable kind.
+    expect(analysisClassFor("DEPOSITION")).toBe("TESTIMONY");
+    expect(NON_CLINICAL_CLASSES.has("TESTIMONY")).toBe(true);
+    expect(DEPO.length).toBeGreaterThan(0);
+  });
+});
+
+// ── Supporting files: filed, accessible, and never chased for a date ─────────
+
+describe("supporting files are kept without demanding a date", () => {
+  it("the class exists, asserts almost nothing, and needs no date", () => {
+    const p = profileFor("PHOTOGRAPHS");
+    expect(p.klass).toBe("SUPPORTING_FILE");
+    expect(p.requiresDate).toBe(false);
+    expect(p.fields).toContain("documentContent");
+    expect(p.fields).not.toContain("assessment");
+  });
+
+  it("only timeline-bound kinds are chased for a date", () => {
+    for (const k of ["CLINICAL_ENCOUNTER", "THERAPY_COURSE", "OPERATIVE", "DIAGNOSTIC_STUDY", "ANESTHESIA", "PATHOLOGY_DIAGNOSTIC", "INCIDENT"]) {
+      expect(requiresDate(k as never), k).toBe(true);
+    }
+    for (const k of ["SUPPORTING_FILE", "FINANCIAL", "LEGAL", "TESTIMONY", "EMPLOYMENT_ECONOMIC", "INSURANCE_ADMINISTRATIVE", "CORRESPONDENCE_OR_GENERIC_EVIDENCE", "UNKNOWN"]) {
+      expect(requiresDate(k as never), k).toBe(false);
+    }
+    // An unrecorded kind is still chased — a real gap must not be excused.
+    expect(requiresDate(null)).toBe(true);
+  });
+
+  it("it never reaches the medical chronology on its own", () => {
+    const v = classifyEncounterSubstance({ analysisClass: "SUPPORTING_FILE", encounterType: null, factualSummary: "Fee schedule", claims: [{ field: "documentContent", value: "x" }] });
+    expect(admissibleToMedicalTimeline({ analysisClass: "SUPPORTING_FILE", substanceClass: v.class })).toBe(false);
+  });
+});
+
+// ── Reviewer reclassification ───────────────────────────────────────────────
+
+describe("a reviewer can reassign the kind, and it governs downstream", () => {
+  it("every assignable kind is a real profile", () => {
+    for (const k of REVIEWER_ASSIGNABLE_CLASSES) expect(PROFILES[k], k).toBeTruthy();
+  });
+
+  it("reassigning to a clinical kind restores its clinical vocabulary and dating", () => {
+    // A clinic note misfiled as billing: corrected, it may assert clinical
+    // facts again and is chased for a date.
+    expect(fieldAllowed(PROFILES.FINANCIAL, "assessment")).toBe(false);
+    expect(fieldAllowed(PROFILES.CLINICAL_ENCOUNTER, "assessment")).toBe(true);
+    expect(requiresDate("FINANCIAL")).toBe(false);
+    expect(requiresDate("CLINICAL_ENCOUNTER")).toBe(true);
+  });
+
+  it("reassigning to a supporting file takes it off the chronology and stops the date chase", () => {
+    expect(admissibleToMedicalTimeline({ analysisClass: "SUPPORTING_FILE", substanceClass: "ANCILLARY" })).toBe(false);
+    expect(requiresDate("SUPPORTING_FILE")).toBe(false);
   });
 });
