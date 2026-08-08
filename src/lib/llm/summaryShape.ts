@@ -15,13 +15,21 @@
 //     the date column, and it displaces the fact that mattered.
 //
 // So the summary is COMPOSED, not picked: the entry's own kind decides which
-// clauses it should carry — an encounter has an assessment, a finding and a
-// plan; a study has an impression; a billing line has a charge; an operation
-// has a procedure and its findings — and non-substantive text is barred from
-// leading, whatever field it arrived in.
+// clauses it should carry — an encounter has a presenting complaint, an
+// assessment and a plan; a study has an impression; a billing line has a
+// charge; an operation has a procedure and the agent given — and
+// non-substantive text is barred from leading, whatever field it arrived in.
+//
+// WHICH clauses a kind carries, and in what order, is no longer asserted here.
+// It is measured from the professionally published plans in the reference
+// corpus; see `summaryEmphasis.ts` for the derivation and what it settled.
+// This file owns the composition rules that are true regardless of kind:
+// boilerplate may not lead, metadata is not a fact, and a summary that lists
+// everything is not a summary.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import type { AnalysisClass } from "@/lib/documents/analysisClass";
+import { emphasisFor, selectClauses } from "@/lib/llm/summaryEmphasis";
 
 /**
  * Generic patient-education and discharge boilerplate. It is genuinely in the
@@ -39,6 +47,38 @@ const BOILERPLATE_RE =
 const METADATA_RESTATEMENT_RE =
   /^\s*(?:encounter|service|visit|admission|discharge|collection|order|report|print(?:ed)?|signed|received|fax)?\s*date\s*(?:of\s*(?:service|birth))?\s*[:\-]|^\s*(?:patient|client)\s*(?:name|id)?\s*[:\-]|^\s*(?:dob|d\.o\.b\.|mrn|medical record (?:number|no)|account (?:number|no)|chart (?:number|no)|visit (?:number|no)|claim (?:number|no))\s*[:\-]|^\s*page\s+\d+\s*(?:of\s*\d+)?\s*$|^\s*(?:facility|location|provider|physician|clinician)\s*[:\-]\s*\S+\s*$/i;
 
+/**
+ * Intake recitals: the smoking, alcohol, allergy, immunisation and social
+ * questions every chart asks at every visit. They are real answers about the
+ * patient and they are not what happened that day — "Encounter — Never smoker"
+ * was a real summary of an emergency visit for a fall. They stay in the claims,
+ * where a reviewer sees them under the history they belong to.
+ */
+// A denial is only a recital when what is denied is an intake TOPIC. "Denies
+// tobacco use" is the smoking question; "denies relief from six weeks of
+// therapy" is a documented treatment failure and among the most useful facts
+// on the page.
+const INTAKE_TOPIC = "(?:tobacco|smoking|nicotine|alcohol|illicit|recreational drug|drug use|substance use|allerg\\w+)";
+const INTAKE_RECITAL_RE = new RegExp(
+  [
+    `^\\s*(?:never|non|not a|former|current)[- ]?smok\\w*`,
+    `^\\s*(?:denies|no history of|negative for)\\b[^.]{0,40}\\b${INTAKE_TOPIC}\\b`,
+    `\\b${INTAKE_TOPIC}\\s*(?:use|abuse|history)?\\s*[:\\-]?\\s*(?:none|never|no|denies|denied|negative|non[- ]?\\w+)\\b`,
+    `^\\s*(?:does not|doesn't) (?:use|drink|smoke)\\b`,
+    `^\\s*(?:no known (?:drug )?allergies|nkda|nka)\\b`,
+    `^\\s*(?:family|social) history\\b`,
+    `\\bvaccin\\w* series\\b`,
+    `\\bimmuniz\\w+ (?:up to date|current)\\b`,
+    `^\\s*(?:marital status|lives (?:alone|with))\\b`,
+  ].join("|"),
+  "i",
+);
+
+/** A standing fact about the patient, not an event of this encounter. */
+export function isIntakeRecital(value: string): boolean {
+  return INTAKE_RECITAL_RE.test(value);
+}
+
 /** Does this value say nothing a reviewer can use? */
 export function isNonSubstantive(value: string): boolean {
   return METADATA_RESTATEMENT_RE.test(value);
@@ -48,89 +88,6 @@ export function isNonSubstantive(value: string): boolean {
 export function isBoilerplate(value: string): boolean {
   return BOILERPLATE_RE.test(value);
 }
-
-/**
- * The clauses a summary of THIS kind of record should carry, in the order a
- * reviewer reads them. Each entry is [field, prefix]; the prefix is empty when
- * the clause reads naturally on its own.
- */
-const SHAPE: Partial<Record<AnalysisClass, [string, string][]>> = {
-  CLINICAL_ENCOUNTER: [
-    ["assessment", ""],
-    ["objectiveFindings", "exam: "],
-    ["procedure", "procedure: "],
-    ["recommendations", "plan: "],
-    ["treatment", "plan: "],
-    ["disposition", "disposition: "],
-  ],
-  THERAPY_COURSE: [
-    ["responseToTreatment", ""],
-    ["objectiveFindings", "measures: "],
-    ["treatment", "delivered: "],
-    ["recommendations", "plan: "],
-  ],
-  OPERATIVE: [
-    ["procedure", ""],
-    ["postOperativeDiagnosis", "post-op dx: "],
-    ["operativeFindings", "findings: "],
-    ["complications", "complications: "],
-    ["implants", "implants: "],
-  ],
-  ANESTHESIA: [
-    ["anesthesiaType", ""],
-    ["anesthesiaEvent", "intraoperative: "],
-    ["complications", "complications: "],
-  ],
-  PATHOLOGY_DIAGNOSTIC: [
-    ["pathologicDiagnosis", ""],
-    ["specimen", "specimen: "],
-    ["microscopicDescription", "microscopic: "],
-  ],
-  DIAGNOSTIC_STUDY: [
-    ["impression", "impression: "],
-    ["diagnosticStudies", "findings: "],
-    ["comparison", "compared with: "],
-  ],
-  TESTIMONY: [
-    ["admission", "admission: "],
-    ["testimony", ""],
-    ["workStatus", "work: "],
-    ["functionalStatus", "function: "],
-  ],
-  EXPERT_OPINION: [
-    ["causationOpinion", "causation opinion: "],
-    ["opinion", "opinion: "],
-    ["assessment", "stated diagnosis: "],
-    ["recommendations", "future care opinion: "],
-  ],
-  INCIDENT: [
-    ["mechanism", ""],
-    ["sceneFindings", "scene: "],
-    ["objectiveFindings", "on assessment: "],
-    ["treatment", "treated: "],
-  ],
-  FINANCIAL: [
-    ["charge", ""],
-    ["serviceCode", "code: "],
-    ["billedAmount", "amount: "],
-    ["payer", "payer: "],
-  ],
-  EMPLOYMENT_ECONOMIC: [
-    ["employmentStatus", ""],
-    ["earnings", "earnings: "],
-    ["employer", "employer: "],
-  ],
-  INSURANCE_ADMINISTRATIVE: [
-    ["claimStatus", ""],
-    ["authorization", "authorization: "],
-    ["coverage", "coverage: "],
-  ],
-  LEGAL: [
-    ["legalAssertion", ""],
-    ["reliefSought", "relief sought: "],
-    ["partyPosition", "position: "],
-  ],
-};
 
 /**
  * Fields whose label states what KIND of statement the clause is, not merely
@@ -154,30 +111,45 @@ export interface SummaryClaim {
  * back rather than print a label with no content behind it.
  */
 export function composeSummary(klass: AnalysisClass | null | undefined, label: string, claims: SummaryClaim[], clip: (s: string, n: number) => string): string | null {
-  const shape = SHAPE[(klass ?? "CLINICAL_ENCOUNTER") as AnalysisClass];
-  if (!shape) return null;
+  const profile = emphasisFor(klass);
+  if (!profile) return null;
 
   const usable = claims.filter((c) => c.value.trim().length > 2 && !isNonSubstantive(c.value));
-  const clauses: string[] = [];
   const used = new Set<string>();
 
-  for (const [field, prefix] of shape) {
-    if (clauses.length >= MAX_CLAUSES) break;
-    // Boilerplate is barred from the summary entirely: it is available in the
-    // entry's claims, where a reviewer can see it in context.
-    const hit = usable.find((c) => c.field === field && !used.has(c.value) && !isBoilerplate(c.value));
-    if (!hit) continue;
-    used.add(hit.value);
-    const text = clip(hit.value.replace(/^[A-Z][a-z]+:\s*/, "").trim(), 110);
+  // Which of this kind's clauses the record actually supports, in the order the
+  // published plans read them. A clause can arrive under more than one field
+  // name, so the first field that carries usable text wins the slot.
+  const available = profile.clauses.flatMap((clause) => {
+    for (const field of clause.fields) {
+      // Boilerplate is barred from the summary entirely: it is available in the
+      // entry's claims, where a reviewer can see it in context.
+      const hit = usable.find((c) => c.field === field && !used.has(c.value) && !isBoilerplate(c.value) && !isIntakeRecital(c.value));
+      if (!hit) continue;
+      used.add(hit.value);
+      return [{ field, prefix: clause.prefix, share: clause.share, value: hit.value }];
+    }
+    return [];
+  });
+
+  // Over the cap, the clauses the planner says most often about this kind of
+  // record are the ones that keep their place — never simply the first few.
+  const selected = selectClauses(available, MAX_CLAUSES);
+  const clauses = selected.map((clause, position) => {
+    // Clauses are joined with semicolons, so a clause that arrived as a whole
+    // sentence sheds its full stop — "…low back pain.; assessment: …" reads as
+    // a defect. An elision is not a full stop and stays.
+    const sentence = clause.value.replace(/^[A-Z][a-z]+:\s*/, "").trim();
+    const text = clip(position < selected.length - 1 ? sentence.replace(/\.$/, "") : sentence, 110);
     // A headline clause usually needs no label — "Surgery — procedure: X"
     // says "procedure" twice. But some labels are not decoration: an
     // IMPRESSION is the radiologist's conclusion rather than a raw finding,
     // and an ADMISSION is testimony against the deponent's own interest.
     // Dropping those would erase what kind of statement the reader is looking
     // at, so they keep their label wherever they appear.
-    const keepLabel = clauses.length > 0 || EVIDENTIAL_LABELS.has(field);
-    clauses.push(keepLabel ? `${prefix}${text}` : text);
-  }
+    const keepLabel = position > 0 || EVIDENTIAL_LABELS.has(clause.field);
+    return keepLabel ? `${clause.prefix}${text}` : text;
+  });
 
   if (!clauses.length) return null;
   const body = clauses.join("; ");

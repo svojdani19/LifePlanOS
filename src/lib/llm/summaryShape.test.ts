@@ -3,7 +3,7 @@
 // leading the line, a field label restated as a finding, or a record
 // summarized in the wrong vocabulary for what it is. Synthetic text only.
 import { describe, it, expect } from "vitest";
-import { composeSummary, isBoilerplate, isNonSubstantive } from "./summaryShape";
+import { composeSummary, isBoilerplate, isIntakeRecital, isNonSubstantive } from "./summaryShape";
 
 const clip = (s: string, n: number) => (s.length <= n ? s : `${s.slice(0, n - 1)}…`);
 const c = (field: string, value: string) => ({ field, value });
@@ -35,6 +35,44 @@ describe("text that must never lead a summary", () => {
     }
   });
 
+  it("recognizes the intake questions every chart asks at every visit", () => {
+    // Real on a real record: "Emergency Department — Never smoker" summarized a
+    // visit for a fall, because the smoking question is answered in the
+    // subjective of every note in the chart.
+    for (const t of [
+      "Never smoker",
+      "Does not use illicit or recreational drugs",
+      "No known drug allergies",
+      "NKDA",
+      "Denies tobacco use",
+      "Family history of diabetes",
+      "Patient completed COVID-19 vaccine series (Moderna)",
+      "Lives alone in a single-story home",
+    ]) {
+      expect(isIntakeRecital(t), t).toBe(true);
+    }
+  });
+
+  it("does not mistake a presenting complaint for an intake recital", () => {
+    for (const t of [
+      "Reports low back pain radiating to the left leg since the fall",
+      "Chief complaint: neck pain 7/10",
+      "Denies relief from six weeks of physical therapy",
+      "Smoking cessation counselling provided after the injury",
+    ]) {
+      expect(isIntakeRecital(t), t).toBe(false);
+    }
+  });
+
+  it("keeps an intake recital out of the summary and lets the day's facts lead", () => {
+    const out = composeSummary("CLINICAL_ENCOUNTER", "Emergency Department", [
+      c("subjective", "Never smoker"),
+      c("subjective", "Fall from standing, left hip pain"),
+      c("assessment", "Contusions"),
+    ], clip);
+    expect(out).toBe("Emergency Department — Fall from standing, left hip pain; assessment: Contusions.");
+  });
+
   it("does not mistake real clinical content for either", () => {
     for (const t of [
       "Lumbar radiculopathy with left-sided foot drop.",
@@ -49,14 +87,17 @@ describe("text that must never lead a summary", () => {
 });
 
 describe("a summary is composed from what its kind is for", () => {
-  it("an encounter reads assessment, exam, then plan", () => {
+  it("an encounter reads what was reported, what was assessed, then the plan", () => {
+    // The order and the selection are the published planners': they open an
+    // encounter with the presenting complaint in 91% of entries, and under a
+    // three-clause cap the assessment and plan outrank the exam.
     const out = composeSummary("CLINICAL_ENCOUNTER", "Clinic visit", [
       c("subjective", "Reports ongoing low back pain."),
       c("assessment", "Lumbar radiculopathy"),
       c("objectiveFindings", "Positive straight leg raise on the left"),
       c("recommendations", "Referral for epidural steroid injection"),
     ], clip);
-    expect(out).toBe("Clinic visit — Lumbar radiculopathy; exam: Positive straight leg raise on the left; plan: Referral for epidural steroid injection.");
+    expect(out).toBe("Clinic visit — Reports ongoing low back pain; assessment: Lumbar radiculopathy; plan: Referral for epidural steroid injection.");
   });
 
   it("boilerplate never leads, even when it is the only 'treatment'", () => {
