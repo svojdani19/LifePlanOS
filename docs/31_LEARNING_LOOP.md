@@ -4,6 +4,32 @@ How the program gets better at chronicling a case each time a new one is worked
 — and better still when that case arrives with a professionally published Life
 Care Plan beside it.
 
+> ## ⚠️ Never regenerate the emphasis profile without `mergeForAdoption`
+>
+> `src/lib/llm/summaryEmphasis.ts` is derived from the published plans, so
+> re-deriving it looks like a safe, mechanical refresh. It is not. **A bare
+> derivation silently deletes clauses the corpus cannot teach**, and the loss is
+> invisible in every measurement the loop reports.
+>
+> The clearest case is `procedure` on `CLINICAL_ENCOUNTER`. A planner gives a
+> procedure its own chronology entry, so **no encounter entry in any published
+> plan ever labels one** — the measured share is zero because of how planners
+> organize a document, not because a procedure does not matter. Re-derive
+> without merging and the clause disappears, and a visit where an injection was
+> performed stops saying so. Verified against real records, not hypothetical.
+>
+> Clauses in that position are marked **`carried: true`**. `mergeForAdoption`
+> keeps them, keeps any clause over a field the candidate does not cover, and
+> keeps whole the kinds a planner never chronicles at all (billing, depositions,
+> pathology — `basis: "hand-shaped"`).
+>
+> It also cannot preserve **field order inside a clause**. Our therapy `care:`
+> clause prefers the modality *delivered* over the course *advised*; the
+> planner writes one "Plan:" paragraph covering both, so no derivation can see
+> that preference and a naive one reverses it. **The corpus supplies the weight;
+> a human supplies the fields and the wording.** That is why adoption is a diff
+> and not a script.
+
 ## The aim
 
 To reach a pipeline that reproduces what a qualified life-care planner finds,

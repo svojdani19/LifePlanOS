@@ -6,6 +6,34 @@ are fed through the pipeline; the gap between what the engine produced and
 what the professional finalized becomes training signal (learned priors) and
 regression ground truth (gold fixtures).
 
+> ## ⚠️ Reference cases are not reproducible. The seed scripts will destroy them.
+>
+> A reference case carries real records and real PHI. Its documents were
+> ingested and OCR'd once, at cost, and its published plan came from outside the
+> program entirely. Nothing regenerates them.
+>
+> - **`scripts/demo-reset.ts --confirm` deletes the demo firm's data and
+>   reseeds.** Run against a tenant holding reference cases, it destroys them.
+>   The guard is `Firm.isDemo` — which does **not** protect reference cases that
+>   were loaded into a demo tenant, and that is exactly where they tend to live.
+> - **`npm run db:seed`, `npm run setup` and `scripts/demo-seed.ts` create
+>   fabricated cases.** The `prisma/seed.ts` roster (Maria Gonzalez, David Chen,
+>   Patricia Ellis, Robert Ford, Angela White) and `Fredrika J.` from
+>   `scripts/fj-run.ts`, whose records are the synthetic `SAMPLE_DOCS`. They are
+>   harmless until something measures across "all cases" — then they are
+>   fabricated data inside a real measurement.
+>
+> **Telling them apart:** a fabricated case matches a `clientName` AND
+> `dateOfBirth` literal in `prisma/seed.ts` or `scripts/fj-run.ts`. That pair is
+> the only safe test. Never identify one by its case-number prefix — the prefix
+> is assigned at creation and a real case can be given any number.
+>
+> Check the database before running any seed script:
+>
+> ```bash
+> npx tsx -e 'import {prisma} from "./src/lib/db"; prisma.case.findMany({select:{caseNumber:true,clientName:true}}).then(c=>{console.log(c);return prisma.$disconnect()})'
+> ```
+
 ## The loop
 
 1. **Prepare a folder** per case:

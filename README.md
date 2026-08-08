@@ -81,6 +81,31 @@ npm run dev
 (`LifePlanOS-Local-2026!` by default outside production). Other seeded roles
 share that password. The legacy seed refuses to run when `NODE_ENV=production`.
 
+> ### ⚠️ The seed scripts are destructive against a corpus database
+>
+> A working database may hold **reference cases: real, records-bearing matters
+> with real PHI**, worked against professionally published Life Care Plans. They
+> are the program's only ground truth and they are not reproducible — the
+> records were ingested and OCR'd once, and the published plans came from
+> outside.
+>
+> - `npm run db:seed`, `npm run setup` and `scripts/demo-seed.ts` **create
+>   fabricated cases** (the `prisma/seed.ts` roster, plus `Fredrika J.` from
+>   `scripts/fj-run.ts`). They are synthetic — `SAMPLE_DOCS` in
+>   `src/lib/documents/samples.ts` — and they pollute any measurement taken
+>   across "all cases".
+> - `scripts/demo-reset.ts --confirm` **deletes the demo firm's data and
+>   reseeds**. Run against a tenant holding reference cases, it destroys them.
+>
+> Before running any of these, check what is actually in the database:
+>
+> ```bash
+> npx tsx -e 'import {prisma} from "./src/lib/db"; prisma.case.findMany({select:{caseNumber:true,clientName:true}}).then(c=>{console.log(c);return prisma.$disconnect()})'
+> ```
+>
+> Reference cases are described in `docs/24_REFERENCE_CASES.md`; what the
+> program learns from them is in `docs/31_LEARNING_LOOP.md`.
+
 **Guarded demo environment:** set `ENABLE_DEMO_MODE=true`, run
 `npx tsx --env-file=.env scripts/demo-seed.ts`, then open `/demo` for one-click
 sign-in as any of 13 role personas (`@demo.lifeplanos.com`), each landing in a
