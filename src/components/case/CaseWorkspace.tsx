@@ -56,7 +56,7 @@ import { Icd10Search } from "@/components/Icd10Search";
 import { PreExistingConditionsModal } from "@/components/PreExistingConditionsModal";
 import { parseConditions, serializeConditions, findConditionsInRecords } from "@/lib/intake/preExisting";
 import { suggestDiagnoses } from "@/lib/intake/diagnosisSuggest";
-import { confidenceBand, confidenceDefinition } from "@/lib/engine/confidence";
+import { confidenceBand } from "@/lib/engine/confidence";
 import { BookOpenCheck } from "lucide-react";
 import { MEDICAL_SPECIALTIES } from "@/lib/intake/specialties";
 import { attorneyItemsNeeded } from "@/lib/attorneyItems";
@@ -1332,10 +1332,6 @@ function CausationPanel({ data, hideConfidence = false }: { data: AnyRec; hideCo
                   <span className="font-medium text-ink-700">{confidenceBand(c.confidence)} · {c.confidence}%</span>
                   {c.physicianConfirmed && <Badge tone="green">MD confirmed</Badge>}
                 </div>
-                {/* What the determined confidence level means and how it was set. */}
-                <p className="mt-1.5 text-[11px] leading-relaxed text-ink-400">
-                  {confidenceDefinition({ confidence: c.confidence, physicianConfirmed: c.physicianConfirmed, missingInfo: c.missingInfo, evidenceCount: sources.length })}
-                </p>
               </>
             )}
             <p className="mt-3 text-sm text-ink-700">{c.reasoning}</p>
