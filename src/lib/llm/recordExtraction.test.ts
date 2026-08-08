@@ -18,6 +18,7 @@ import {
   fingerprint,
   ExtractionOutputError,
   type DocumentChunk,
+  type ValidatedEncounter,
   type LlmEncounter,
 } from "./recordExtraction";
 import type { LlmProvider } from "@/lib/llm";
@@ -730,5 +731,104 @@ describe("transcript line numbering is furniture, not content", () => {
       contentHash: "x", text, pageSlices: [{ page: 1, text }],
     };
     expect(locateExcerpt(chunk, "The deponent admitted fault for the collision.").ok).toBe(false);
+  });
+});
+
+describe("one visit split across chunks consolidates into one encounter", () => {
+  const base = (over: Partial<ValidatedEncounter>): ValidatedEncounter =>
+    ({
+      dateStatus: "DOCUMENTED",
+      encounterDate: new Date("2024-03-15T00:00:00Z"),
+      encounterDateEnd: null,
+      provider: "Dana Rivers, MD",
+      providerCredentials: null,
+      facility: "St. Synthetic Medical Center",
+      encounterType: "Inpatient",
+      page: 4,
+      pageEnd: 4,
+      claims: [],
+      warnings: [],
+      ocrConfidence: null,
+      sourceDocumentId: "doc-1",
+      firmId: "firm-1",
+      caseId: "case-1",
+      analysisClass: "CLINICAL_ENCOUNTER",
+      segmentKey: null,
+      classificationMethod: null,
+      classificationConfidence: null,
+      attributionName: null,
+      attributionRole: null,
+      ...over,
+    }) as ValidatedEncounter;
+
+  const claim = (field: string, value: string) => ({ field, claimType: "PROVIDER_OBSERVATION", value, excerpt: value, page: null, confidence: 0.9 }) as never;
+
+  it("merges continuations whose claims are COMPLEMENTARY, not overlapping", () => {
+    // This is the real case: an admission spanning several chunks. Each chunk
+    // contributes different sentences, so requiring claim overlap kept every
+    // continuation as its own encounter.
+    const out = consolidateEncounters([
+      base({ page: 4, pageEnd: 4, claims: [claim("objectiveFindings", "Alert and oriented on admission")] }),
+      base({ page: 5, pageEnd: 5, claims: [claim("treatment", "IV fluids started")] }),
+      base({ page: 6, pageEnd: 6, claims: [claim("disposition", "Transferred to the floor")] }),
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0].claims).toHaveLength(3);
+    expect(out[0].page).toBe(4);
+    expect(out[0].pageEnd).toBe(6);
+  });
+
+  it("case and spacing in the free-text type are noise, not a different visit", () => {
+    const out = consolidateEncounters([
+      base({ page: 4, pageEnd: 4, encounterType: "Inpatient", claims: [claim("objectiveFindings", "Alert on admission")] }),
+      base({ page: 5, pageEnd: 5, encounterType: "inpatient", claims: [claim("treatment", "IV fluids started")] }),
+      base({ page: 6, pageEnd: 6, encounterType: "  INPATIENT  ", claims: [claim("disposition", "Transferred")] }),
+    ]);
+    expect(out).toHaveLength(1);
+  });
+
+  it("a MISSING type is a wildcard — its absence is not evidence of another visit", () => {
+    const out = consolidateEncounters([
+      base({ page: 4, encounterType: "Inpatient", claims: [claim("objectiveFindings", "Alert")] }),
+      base({ page: 5, pageEnd: 5, encounterType: null, claims: [claim("treatment", "IV fluids")] }),
+    ]);
+    expect(out).toHaveLength(1);
+  });
+
+  it("but a DIFFERENT stated type stays separate — a consent is not a therapy visit", () => {
+    const out = consolidateEncounters([
+      base({ page: 4, pageEnd: 4, encounterType: "Therapy visit", claims: [claim("treatment", "Manual therapy")] }),
+      base({ page: 5, pageEnd: 5, encounterType: "consent", claims: [claim("treatment", "Consent signed for injection")] }),
+    ]);
+    expect(out).toHaveLength(2);
+  });
+
+  it("different clinicians on the same day remain distinct encounters", () => {
+    const out = consolidateEncounters([
+      base({ page: 4, pageEnd: 4, provider: "Dana Rivers, MD", claims: [claim("objectiveFindings", "Seen by orthopedics")] }),
+      base({ page: 5, pageEnd: 5, provider: "Sam Okafor, MD", claims: [claim("objectiveFindings", "Seen by neurosurgery")] }),
+    ]);
+    expect(out).toHaveLength(2);
+  });
+
+  it("different dates never merge, however adjacent the pages", () => {
+    const out = consolidateEncounters([
+      base({ page: 4, pageEnd: 4, encounterDate: new Date("2024-03-15T00:00:00Z"), claims: [claim("treatment", "Day one")] }),
+      base({ page: 5, pageEnd: 5, encounterDate: new Date("2024-03-16T00:00:00Z"), claims: [claim("treatment", "Day two")] }),
+    ]);
+    expect(out).toHaveLength(2);
+  });
+
+  it("far-apart pages still merge only on genuine duplication", () => {
+    // Same date and clinician but pages 4 and 90: a re-filed copy, merged only
+    // because the claims actually overlap.
+    const dup = [claim("objectiveFindings", "Alert and oriented on admission")];
+    const merged = consolidateEncounters([base({ page: 4, pageEnd: 4, claims: dup }), base({ page: 90, pageEnd: 90, claims: dup })]);
+    expect(merged).toHaveLength(1);
+    const distinct = consolidateEncounters([
+      base({ page: 4, pageEnd: 4, claims: [claim("objectiveFindings", "Alert and oriented on admission")] }),
+      base({ page: 90, pageEnd: 90, claims: [claim("treatment", "Something entirely different happened here")] }),
+    ]);
+    expect(distinct).toHaveLength(2);
   });
 });

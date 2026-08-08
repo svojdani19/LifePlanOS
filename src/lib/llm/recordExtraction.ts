@@ -1061,6 +1061,19 @@ function overlap(a: Set<string>, b: Set<string>): number {
  * claim excerpts. Distinct same-day encounters (different provider, facility,
  * type, or claims) remain distinct.
  */
+/**
+ * Do two free-text encounter types describe the same kind of visit? Case and
+ * spacing are noise; an ABSENT type is a wildcard, because the model omitting
+ * a label is not evidence of a different encounter. A type that is present on
+ * both sides and differs keeps them apart — a consent is not a therapy visit.
+ */
+function typesCompatible(a: string | null, b: string | null): boolean {
+  const na = norm(a ?? "");
+  const nb = norm(b ?? "");
+  if (!na || !nb) return true;
+  return na === nb;
+}
+
 export function consolidateEncounters(list: ValidatedEncounter[]): ValidatedEncounter[] {
   const out: ValidatedEncounter[] = [];
   for (const e of list) {
@@ -1071,9 +1084,19 @@ export function consolidateEncounters(list: ValidatedEncounter[]): ValidatedEnco
       if ((o.encounterDate?.getTime() ?? null) !== (e.encounterDate?.getTime() ?? null)) return false;
       if (norm(o.provider ?? "") !== norm(e.provider ?? "")) return false;
       if (norm(o.facility ?? "") !== norm(e.facility ?? "")) return false;
-      if ((o.encounterType ?? "") !== (e.encounterType ?? "")) return false;
+      // Encounter type is free text the model writes: "Inpatient" and
+      // "inpatient" are the same visit, and a missing type is not evidence of
+      // a different one. Comparing the raw strings kept an admission split
+      // across chunks as dozens of separate entries.
+      if (!typesCompatible(o.encounterType, e.encounterType)) return false;
       const pagesTouch = o.page == null || e.page == null || (e.page <= (o.pageEnd ?? o.page) + 1 && (e.pageEnd ?? e.page) >= o.page - 1);
-      return pagesTouch && overlap(claimFingerprint(o), fp) >= 0.5;
+      // A visit CONTINUING across a chunk boundary carries complementary
+      // claims, not overlapping ones — so demanding claim overlap was exactly
+      // backwards for the case that matters, and every continuation became its
+      // own entry. Contiguous pages with the same date, clinician and facility
+      // ARE one encounter; the overlap test remains for duplicates that are
+      // not page-adjacent.
+      return pagesTouch || overlap(claimFingerprint(o), fp) >= 0.5;
     });
     if (!match) {
       out.push({ ...e, claims: [...e.claims], warnings: [...e.warnings] });
