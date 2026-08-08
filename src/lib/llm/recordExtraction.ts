@@ -43,7 +43,7 @@ import { profileFor, fieldAllowed, PROFILES, type ClassProfile, type AnalysisCla
 import { composeSummary, isNonSubstantive, isBoilerplate } from "@/lib/llm/summaryShape";
 import { classifyRanges, type ClassifiedRange } from "@/lib/documents/segmentClass";
 
-export const PROMPT_VERSION = "rex-2.1"; // per-segment kinds + explicit claim types
+export const PROMPT_VERSION = "rex-3.0"; // completeness: extract every documented fact
 export const SCHEMA_VERSION = "rex-enc-3"; // persisted class, segment + attribution
 
 // ── Chunking ─────────────────────────────────────────────────────────────────
@@ -92,8 +92,15 @@ export interface DocumentChunk extends DocumentChunkMeta {
 // Chunk size is bounded by the OUTPUT the chunk generates, not the input the
 // model can read: a dense 7k-char chunk of a real chart yields more structured
 // JSON than one response can hold, and a truncated response is a failed run.
-const CHUNK_TARGET = 4_500; // chars
-export const MAX_OUTPUT_TOKENS = 16_000;
+//
+// Both numbers moved together when the prompt began asking for completeness.
+// A page of a real chart documents ten to thirty facts, and extracting all of
+// them produces several times the JSON that extracting a sample did — so the
+// output budget doubled, and the chunk shrank to keep a dense page inside it.
+// Smaller chunks cost more model calls; a truncated response costs the whole
+// chunk, which is the worse trade.
+const CHUNK_TARGET = 3_200; // chars
+export const MAX_OUTPUT_TOKENS = 32_000;
 
 // There is deliberately NO cap on the number of chunks per document: a record
 // review must read the whole record, and a 600-page chart is 600 pages of
@@ -473,6 +480,40 @@ export class ExtractionOutputError extends Error {
 
 // ── Prompt (versioned; treats record text as untrusted data) ─────────────────
 
+/**
+ * Ask for COMPLETENESS.
+ *
+ * Everything else in this prompt pushes toward caution: a long list of things
+ * the model must not infer, a demand that every claim be quotable, an
+ * instruction to keep it short. Precision was tuned hard after early
+ * hallucination problems and recall was never asked for — so the model
+ * returned a representative sample rather than the record.
+ *
+ * Measured against five professionally published Life Care Plans, that cost
+ * roughly two thirds of what the planner chronicled: 7.3 claims per encounter
+ * against pages documenting far more, and the terms lost were the substance of
+ * the note — drug names, exam findings, laterality, modality durations, pain
+ * ratings, anatomic levels.
+ *
+ * Completeness does NOT relax grounding, and the wording says so explicitly: a
+ * fact that cannot be quoted is a fact that is not recorded. The two demands
+ * are compatible because the record already contains the facts; the model was
+ * simply not asked for all of them.
+ */
+const COMPLETENESS = `Extract EVERY fact the excerpt documents — not a representative sample, not the highlights. A reviewer reconstructing this patient's care from your output alone should not have to open the source page to learn anything material that is on it.
+
+Concretely, each of these is its own claim wherever the excerpt states it:
+- every medication BY NAME, with dose, route and frequency as written
+- every examination finding, with its laterality, its anatomic level or region, and any measured value (degrees of motion, strength grade, pain rating out of ten)
+- every treatment or modality actually delivered, with its duration, region and parameters
+- every diagnosis or impression stated, each one separately rather than merged into a list
+- every documented restriction, work status, functional limitation and disposition
+- the patient's own reported symptoms, with location, severity and what changes them
+
+A page describing one visit routinely yields ten to thirty claims. Returning five when the page documents twenty is a failure of this task, and it is the failure this instruction exists to prevent.
+
+This does NOT relax any rule above. Every claim still needs its own exact quotation, and a fact you cannot quote verbatim is a fact you do not record. Completeness means extracting everything the record SAYS — never supplementing it with what you expect a record like this to say.`;
+
 const FORBIDDEN_INFERENCES = `You must NOT:
 - create a diagnosis that is not stated in the text
 - infer that treatment occurred because a consent form exists
@@ -511,7 +552,8 @@ export function buildExtractionPrompt(chunk: DocumentChunk, exemplarGuidance: st
     `Return ONLY a JSON object matching this schema, with no prose, no markdown fences, and no fields beyond the schema:`,
     `Every claim carries a claimType saying what KIND of knowledge it is — a clinician's observation, a patient's report, sworn testimony, an attributed expert opinion, an imaging impression, a billing entry, and so on. Choose from: ${CLAIM_TYPES.join(", ")}. The server re-derives this from the document kind and the field, so an implausible choice is corrected rather than trusted; state it honestly.`,
     `Each object in "encounters" is ONE ${profile.unit}. Use ONLY these claim fields, which are the ones this kind of document can express: ${profile.fields.join(", ")}. A field outside that list is discarded, so do not reach for one — if the document does not support a fact in this vocabulary, omit it.`,
-    `{"encounters":[{"dateStatus":"DOCUMENTED|INFERRED|UNKNOWN","date":"YYYY-MM-DD or null","dateEnd":"YYYY-MM-DD or null","dateExcerpt":"exact text containing the date, or null","encounterType":"string or null","provider":{"value":"...","excerpt":"exact supporting text","page":N} or null,"providerCredentials":"string or null","facility":{same shape} or null,"claims":[{"field":"one of ${profile.fields.join("|")}","claimType":"what KIND of statement this is (see below)","value":"faithful short statement of the documented fact","excerpt":"EXACT contiguous text copied from the record that supports the value","page":N or null,"confidence":0..1,"warning":"optional"}]}]}`,
+    COMPLETENESS,
+    `{"encounters":[{"dateStatus":"DOCUMENTED|INFERRED|UNKNOWN","date":"YYYY-MM-DD or null","dateEnd":"YYYY-MM-DD or null","dateExcerpt":"exact text containing the date, or null","encounterType":"string or null","provider":{"value":"...","excerpt":"exact supporting text","page":N} or null,"providerCredentials":"string or null","facility":{same shape} or null,"claims":[{"field":"one of ${profile.fields.join("|")}","claimType":"what KIND of statement this is (see below)","value":"the documented fact, stated faithfully and SPECIFICALLY — keep drug names, doses, measurements, durations, laterality and anatomic levels","excerpt":"EXACT contiguous text copied from the record that supports the value","page":N or null,"confidence":0..1,"warning":"optional"}]}]}`,
     `If the excerpt begins with a line marked "[CONTINUED FROM EARLIER IN THIS DOCUMENT …]", that line is the most recent service-date header from earlier in this same record, supplied because this excerpt continues past it. You may cite it as the encounter's date excerpt when the content here belongs to that encounter. Do not treat it as the date of a NEW encounter that starts inside this excerpt with its own header.`,
     `Every excerpt must be copied EXACTLY, character for character, from the record text — including OCR errors, misspellings, odd spacing, and line-break artifacts. Never correct, normalize, or paraphrase text inside an excerpt; an excerpt that does not appear verbatim in the record is discarded. Keep each excerpt under 200 characters: quote the single sentence that carries the fact, not the surrounding paragraph. Every claim must be supported by its excerpt. The page number is the printed page marker for the passage within ${pageInfo}; use null if you cannot tell (the server verifies and corrects page attribution, so never guess).`,
     FORBIDDEN_INFERENCES,

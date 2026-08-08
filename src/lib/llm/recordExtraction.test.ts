@@ -22,6 +22,7 @@ import {
   type LlmEncounter,
 } from "./recordExtraction";
 import type { LlmProvider } from "@/lib/llm";
+import { pageMarks } from "@/lib/documents/meta";
 
 const META = { firmId: "firm-1", caseId: "case-1", sourceDocumentId: "doc-1", filename: "synthetic-note.pdf", ocrConfidence: 0.95, documentType: "MEDICAL_RECORD" };
 
@@ -833,5 +834,46 @@ describe("one visit split across chunks consolidates into one encounter", () => 
       base({ page: 90, pageEnd: 90, claims: [claim("treatment", "Something entirely different happened here")] }),
     ]);
     expect(distinct).toHaveLength(2);
+  });
+});
+
+describe("the prompt asks for completeness, not a sample", () => {
+  const promptFor = (documentType: string) => {
+    const text = "Date of Service: 03/14/2025\nAssessment: Lumbar radiculopathy.\nPlan: continue therapy.";
+    const { chunks } = chunkDocumentText(text, pageMarks(text), { ...META, documentType });
+    return buildExtractionPrompt(chunks[0]).system;
+  };
+
+  it("demands every documented fact, and names the detail that was being lost", () => {
+    // Measured against five published plans, the terms lost were the substance
+    // of the note: drug names, exam findings, laterality, durations, ratings.
+    const p = promptFor("MEDICAL_RECORD");
+    expect(p).toMatch(/EVERY fact the excerpt documents/);
+    expect(p).toMatch(/not a representative sample/i);
+    expect(p).toMatch(/every medication BY NAME/);
+    expect(p).toMatch(/laterality/);
+    expect(p).toMatch(/pain rating/i);
+    expect(p).toMatch(/ten to thirty claims/);
+  });
+
+  it("completeness never licenses invention — grounding is restated with it", () => {
+    const p = promptFor("MEDICAL_RECORD");
+    expect(p).toMatch(/does NOT relax any rule above/);
+    expect(p).toMatch(/a fact you cannot quote verbatim is a fact you do not record/);
+    // The verbatim-excerpt demand is still present in full.
+    expect(p).toMatch(/copied EXACTLY, character for character/);
+  });
+
+  it("asks for specificity in the value, not a compressed label", () => {
+    const p = promptFor("MEDICAL_RECORD");
+    expect(p).toMatch(/keep drug names, doses, measurements, durations, laterality and anatomic levels/);
+    // The old instruction that cost the detail is gone.
+    expect(p).not.toMatch(/faithful short statement/);
+  });
+
+  it("applies to every document kind, not only clinical notes", () => {
+    for (const t of ["IMAGING_REPORT", "OPERATIVE_NOTE", "DEPOSITION", "BILLING_RECORD"]) {
+      expect(promptFor(t), t).toMatch(/EVERY fact the excerpt documents/);
+    }
   });
 });
