@@ -5,7 +5,7 @@
 //
 // Synthetic text only — no record content from any real case.
 import { describe, it, expect, vi } from "vitest";
-import { classifyRanges, carriesClinicalSubstance } from "./segmentClass";
+import { classifyRanges, carriesClinicalSubstance, readsAsClinicalNote } from "./segmentClass";
 import { profileFor, analysisClassFor, fieldAllowed, requiresDate, PROFILES, REVIEWER_ASSIGNABLE_CLASSES, NON_CLINICAL_CLASSES, MEDICAL_TIMELINE_CLASSES } from "./analysisClass";
 import { chunkDocumentText, validateEncounters, renderFactualSummary, type DocumentChunk, type LlmEncounter } from "@/lib/llm/recordExtraction";
 import { pageMarks } from "@/lib/documents/meta";
@@ -621,20 +621,44 @@ describe("billing is a record type, not a discard pile", () => {
     expect(NON_CLINICAL_CLASSES.has("FINANCIAL")).toBe(true);
   });
 
-  it("a superbill carrying the provider's own analysis is read as CLINICAL", () => {
-    // Providers file the visit note and its charge together. Reading the whole
-    // page as billing would throw the history and examination away.
-    const SUPERBILL = [
-      CHARGES,
+  it("a note whose clinical content DOMINATES is read as a clinical note", () => {
+    // Providers file the visit note and its charge together. When the note is
+    // the bulk of the page, reading it as a ledger throws the history and
+    // examination away.
+    const NOTE_WITH_CHARGE = [
+      "Date of service 03/14/2025. CPT 99214.",
       "Chief complaint: low back pain radiating to the left leg.",
+      "History of present illness: pain since the collision, worse with sitting.",
       "Physical examination: tenderness to palpation at L4-L5; straight leg raise positive on the left.",
+      "Review of systems otherwise negative. Neurologic exam intact distally.",
       "Assessment: lumbar radiculopathy. Plan: continue therapy and follow-up in 4 weeks.",
     ].join("\n");
-    expect(carriesClinicalSubstance(SUPERBILL)).toBe(true);
+    expect(readsAsClinicalNote(NOTE_WITH_CHARGE)).toBe(true);
   });
 
-  it("one clinical marker is not enough — a charge line mentioning a plan stays billing", () => {
+  it("a charge page with a diagnosis label attached stays a BILL", () => {
+    // The overlap this prevents: promoting it would produce a clinical entry
+    // duplicating the note filed separately in the same packet, counting one
+    // visit twice.
+    const CHARGE_PAGE = [
+      CHARGES,
+      "Assessment: M54.16 submitted with the claim. Plan: bill secondary insurer.",
+    ].join("\n");
+    expect(readsAsClinicalNote(CHARGE_PAGE)).toBe(false);
+  });
+
+  it("one clinical marker is never enough on its own", () => {
     expect(carriesClinicalSubstance(`${CHARGES}\nPlan: bill secondary insurer.`)).toBe(false);
+    expect(readsAsClinicalNote(`${CHARGES}\nPlan: bill secondary insurer.`)).toBe(false);
+  });
+
+  it("a tie goes to the bill — a margin is required, not a draw", () => {
+    // Equal evidence both ways is not evidence that this is a clinical note.
+    const TIED = [
+      "Total charges: $412.00. CPT 99214. Amount billed. Balance due.",
+      "Chief complaint: back pain. Assessment: strain.",
+    ].join("\n");
+    expect(readsAsClinicalNote(TIED)).toBe(false);
   });
 
   it("testimony is never promoted, however much clinical language it quotes", () => {

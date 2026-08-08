@@ -67,32 +67,67 @@ const PROMOTABLE_TO_CLINICAL = new Set<AnalysisClass>([
 ]);
 
 /**
- * Clinical substance inside a document that otherwise looks like billing.
+ * Telling a bill from a clinical note when a segment contains both.
  *
- * A charge line is not clinical. But providers routinely file the visit note
- * and the charge for it in one place, and a superbill or an operative billing
- * packet can carry the real history, examination, assessment or operative
- * detail. Classifying the whole segment FINANCIAL on the strength of its
- * charge columns would discard that clinical content, so a segment that
- * carries a provider's own analysis is treated as the clinical document it
- * partly is. Losing a clinical fact is far worse than over-including a page.
+ * Providers file the visit note and its charge together, so a segment can
+ * carry charge columns AND a provider's own analysis. Two wrong answers are
+ * available here. Calling it billing discards the history and examination
+ * printed beside the charges. Calling it clinical on the strength of a couple
+ * of clinical words turns a fee schedule into an encounter — and worse,
+ * produces a clinical entry that DUPLICATES the note filed separately in the
+ * same packet, so the same visit is counted twice.
+ *
+ * So a segment is decided as ONE thing, by which kind of content actually
+ * dominates it. A bill is treated as a bill; a clinical note is treated as a
+ * clinical note; and a page that is mostly charges with a diagnosis label
+ * attached stays a bill, because that is what it is.
  */
 const CLINICAL_SUBSTANCE_RE =
   /\b(?:chief complaint|history of present illness|\bhpi\b|physical (?:exam|examination)|on examination|review of systems|\bros\b|assessment and plan|\ba\/p\b|impression(?:\s*(?:and|&)\s*plan)?:|assessment:|plan:|operative (?:report|findings)|preoperative diagnosis|postoperative diagnosis|procedure performed|indications for (?:the )?procedure|range of motion|straight leg raise|neurologic(?:al)? exam|palpation reveal|tenderness (?:to|on) palpation|prescrib\w+|discharge instructions|follow[- ]up in)\b/i;
 
-/** At least this many distinct clinical markers before promoting a segment. */
+/** Charge columns, codes, amounts and remittance language: billing substance. */
+const BILLING_SUBSTANCE_RE =
+  /\b(?:cpt|hcpcs|icd-?10 code|revenue code|modifier|units billed|date of service|total charges?|amount (?:billed|paid|allowed)|balance due|patient responsibility|explanation of benefits|\beob\b|adjustment|write-?off|copay|coinsurance|deductible|claim (?:number|status|submitted)|statement of account|remittance|fee schedule|billed to|payer|insurer)\b/i;
+
+/** Distinct markers of one kind of substance in a text. */
+function markerCount(text: string, re: RegExp): number {
+  const scan = new RegExp(re.source, "gi");
+  const hits = new Set<string>();
+  let m: RegExpExecArray | null;
+  while ((m = scan.exec(text))) hits.add(m[0].toLowerCase());
+  return hits.size;
+}
+
+/** At least this many distinct clinical markers before a segment can be clinical. */
 const CLINICAL_PROMOTION_MARKERS = 2;
+
+/**
+ * How decisively clinical content must outweigh billing content before a
+ * billing-looking segment is read as a clinical note. A margin, not a tie —
+ * a page with three charge markers and three clinical words is a bill with a
+ * diagnosis on it.
+ */
+const CLINICAL_DOMINANCE_MARGIN = 2;
 
 /**
  * Does this text carry a provider's own clinical analysis — history, exam,
  * assessment, plan, procedure — rather than only charges for it?
  */
 export function carriesClinicalSubstance(text: string): boolean {
-  const re = new RegExp(CLINICAL_SUBSTANCE_RE.source, "gi");
-  const hits = new Set<string>();
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(text))) hits.add(m[0].toLowerCase());
-  return hits.size >= CLINICAL_PROMOTION_MARKERS;
+  return markerCount(text, CLINICAL_SUBSTANCE_RE) >= CLINICAL_PROMOTION_MARKERS;
+}
+
+/**
+ * Is this segment a clinical note rather than a bill? True only when clinical
+ * substance clearly dominates: enough of it to stand on its own, AND
+ * decisively more of it than billing substance. Anything else stays what the
+ * classifier called it.
+ */
+export function readsAsClinicalNote(text: string): boolean {
+  const clinical = markerCount(text, CLINICAL_SUBSTANCE_RE);
+  if (clinical < CLINICAL_PROMOTION_MARKERS) return false;
+  const billing = markerCount(text, BILLING_SUBSTANCE_RE);
+  return clinical >= billing + CLINICAL_DOMINANCE_MARGIN;
 }
 
 /** Minimum content-classifier score to accept a segment's own class. */
@@ -160,10 +195,10 @@ export function classifyRanges(text: string, documentType: string | null | undef
       const adminContent = classifyByContent(body);
       const admin = classFromContent(adminContent.type, adminContent.score, MIN_SEGMENT_SCORE);
       let klass: AnalysisClass = adminKindAllowed(admin.klass) && admin.method === "SEGMENT_CONTENT" ? admin.klass : "CORRESPONDENCE_OR_GENERIC_EVIDENCE";
-      // Even a segment the segmenter called administrative is clinical when it
-      // carries a provider's own analysis — a superbill with the visit note
-      // attached is still the visit note.
-      if (PROMOTABLE_TO_CLINICAL.has(klass) && carriesClinicalSubstance(body)) klass = "CLINICAL_ENCOUNTER";
+      // A segment the segmenter called administrative is a clinical note only
+      // when clinical content dominates it — a superbill whose visit note is
+      // the bulk of the page, not a charge sheet mentioning a diagnosis.
+      if (PROMOTABLE_TO_CLINICAL.has(klass) && readsAsClinicalNote(body)) klass = "CLINICAL_ENCOUNTER";
       ranges.push({
         offsetStart: start,
         offsetEnd: end,
@@ -180,11 +215,10 @@ export function classifyRanges(text: string, documentType: string | null | undef
     // one. Either way an unconvincing score falls back rather than guessing.
     const floor = body.length < MIN_SEGMENT_CHARS ? MIN_SHORT_SEGMENT_SCORE : MIN_SEGMENT_SCORE;
     let derived = classFromContent(content.type, content.score, floor);
-    // A billing segment that also carries the provider's own analysis is a
-    // clinical document with charges attached, not a ledger. Read it as
-    // clinical so the history, exam, assessment or procedure is not thrown
-    // away with the charge columns.
-    if (PROMOTABLE_TO_CLINICAL.has(derived.klass) && carriesClinicalSubstance(body)) {
+    // Decide what this segment IS. Clinical content must dominate, not merely
+    // appear: otherwise a charge page with a diagnosis label becomes an
+    // encounter, duplicating the note filed separately in the same packet.
+    if (PROMOTABLE_TO_CLINICAL.has(derived.klass) && readsAsClinicalNote(body)) {
       derived = { klass: "CLINICAL_ENCOUNTER", method: derived.method, confidence: derived.confidence };
     }
     // A confident content class wins for its own segment. Otherwise the
