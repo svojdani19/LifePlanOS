@@ -250,6 +250,8 @@ describe("multi-page synthetic chart — end-to-end accuracy", () => {
     const s2 = renderFactualSummary(surgery);
     expect(s1).toBe(s2);
     // One sentence naming the event — the operative procedure itself.
-    expect(s1).toBe("Surgery — Right knee arthroscopic partial medial meniscectomy.");
+    // The headline clause carries no label — "procedure: " would say
+    // "procedure" twice for an entry already titled Surgery.
+    expect(s1).toMatch(/^Surgery — Right knee arthroscopic partial medial meniscectomy/);
   });
 });

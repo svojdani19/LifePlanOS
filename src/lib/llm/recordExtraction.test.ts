@@ -272,13 +272,16 @@ describe("consolidation and rendering", () => {
     expect(a).toBe(b);
   });
 
-  it("the factual summary is ONE sentence naming what the encounter was — not every captured field", () => {
+  it("the factual summary reconstructs the visit — assessment, then finding, then plan", () => {
+    // A reviewer reading a chronology needs what was found and what was
+    // decided, not one fact in isolation. It stays a SUMMARY: bounded at three
+    // clauses, never a dump of every captured field.
     const outcome = validateEncounters(chunkOf(NOTE), [encounter()]);
     const s = renderFactualSummary(outcome.accepted[0]);
-    expect(s).toBe("Clinic visit — Lumbar radiculopathy.");
-    // Structured detail belongs to the claims, not the one-line summary.
-    expect(s).not.toMatch(/Treatment:|Subjective:|physical therapy/);
-    expect(s.length).toBeLessThan(120);
+    expect(s).toMatch(/^Clinic visit — Lumbar radiculopathy/);
+    expect(s).toMatch(/plan: Continue physical therapy twice weekly/);
+    expect(s.split(";").length).toBeLessThanOrEqual(3);
+    expect(s.length).toBeLessThan(260);
   });
 
   it("the lead fact follows clinical priority and falls back honestly", () => {

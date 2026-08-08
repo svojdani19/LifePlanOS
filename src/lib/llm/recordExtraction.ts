@@ -40,6 +40,7 @@ import {
   claimTypeCompatible,
 } from "@/lib/llm/claimTypes";
 import { profileFor, fieldAllowed, PROFILES, type ClassProfile, type AnalysisClass, type ClassificationMethod } from "@/lib/documents/analysisClass";
+import { composeSummary, isNonSubstantive, isBoilerplate } from "@/lib/llm/summaryShape";
 import { classifyRanges, type ClassifiedRange } from "@/lib/documents/segmentClass";
 
 export const PROMPT_VERSION = "rex-2.1"; // per-segment kinds + explicit claim types
@@ -937,6 +938,13 @@ export function validateEncounters(chunk: DocumentChunk, encounters: LlmEncounte
         rejected.push(`claim rejected [${claim.field}]: ${chk.reason}`);
         continue;
       }
+      // A restated field label ("Encounter Date: Jul 18", "MRN: 12345") is
+      // record furniture, not a finding. It displaces the fact that mattered
+      // and tells the reader nothing the date column does not already show.
+      if (isNonSubstantive(claim.value)) {
+        rejected.push(`claim rejected [${claim.field}]: restates a field label rather than a documented fact`);
+        continue;
+      }
       const banned = EXCERPT_REQUIRED_LANGUAGE.find((re) => re.test(claim.value) && !re.test(claim.excerpt));
       if (banned) {
         rejected.push(`claim rejected [${claim.field}]: asserts "${claim.value.match(banned)?.[0]}" but the cited excerpt does not say it`);
@@ -1250,13 +1258,23 @@ export function renderFactualSummary(e: ValidatedEncounter): string {
   // imaging report summarize as if it were a clinic visit.
   const profile = PROFILES[e.analysisClass ?? "CLINICAL_ENCOUNTER"] ?? PROFILES.CLINICAL_ENCOUNTER;
   const lead = (e.encounterType ?? defaultLead(profile)).replace(/\s+/g, " ").trim();
-  // The class's own priorities first, then anything else it may express, so a
-  // document is never summarized by a field its kind does not lead with.
+
+  // A reviewer reading a chronology is reconstructing a course of care, so the
+  // summary carries the CLAUSES this kind of record is for — an encounter's
+  // assessment, exam and plan; a study's impression; an operation's procedure
+  // and findings; a billing line's charge. Picking one fact by field priority
+  // produced summaries led by discharge boilerplate ("keep the injured part
+  // elevated") and by restated field labels ("Encounter Date: Jul 18").
+  const composed = composeSummary(e.analysisClass ?? profile.klass, lead, e.claims, clip);
+  if (composed) return composed;
+
+  // Nothing the shape asked for. Fall back to any substantive claim rather
+  // than a bare label — but still never to boilerplate or to metadata.
   const order = [...profile.leadFields, ...profile.fields.filter((f) => !profile.leadFields.includes(f))];
   for (const field of order) {
-    // The FIRST claim of the highest-priority field present — not a
-    // semicolon-joined list of every value the model returned.
-    const first = e.claims.find((c) => c.field === field && c.value.trim().length > 2);
+    const first = e.claims.find(
+      (c) => c.field === field && c.value.trim().length > 2 && !isNonSubstantive(c.value) && !isBoilerplate(c.value),
+    );
     if (!first) continue;
     const fact = clip(first.value.replace(/^[A-Z][a-z]+:\s*/, ""), 180);
     const body = /[.!?…]$/.test(fact) ? fact : `${fact}.`;
