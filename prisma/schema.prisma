@@ -2017,3 +2017,143 @@ model CorrectionExemplar {
   @@index([firmId, documentType])
   @@index([caseId])
 }
+
+// ── Controlled learning loop ─────────────────────────────────────────────────
+// The program already learns in two narrow ways — correction exemplars feed
+// fact-free guidance into extraction prompts, and learned priors nudge
+// future-care drafts from a firm's own physician corrections. Neither records
+// WHAT WENT WRONG, so nothing can measure a repeat failure, tell a recoverable
+// miss from an unrecoverable one, or decide which mechanism should learn from a
+// given defect. These two models carry the lifecycle those mechanisms lack.
+//
+// PHI stays out. A finding references the protected rows it concerns by ID and
+// records structural deltas (which fields changed, which claim ids were added
+// or removed) — never record text, patient identifiers, or model responses.
+
+/// One thing the program got wrong, from allegation through to adopted lesson.
+model LearningFinding {
+  id     String  @id @default(uuid())
+  firmId String // learning is firm-scoped; findings never cross tenants
+  caseId String?
+
+  // Affected objects, by ID only.
+  documentId        String?
+  encounterId       String?
+  chronologyEventId String?
+  futureCareItemId  String?
+
+  /// EXTRACTION | IDENTITY | SUMMARY | CHRONOLOGY | CARE_PLAN | PRICING
+  stage       String
+  /// Closed vocabulary — see lib/learning/failureTaxonomy.ts
+  failureCode String
+  /// SAFETY_CRITICAL | MATERIAL | QUALITY
+  severity    String
+  /// CRITIC | FACTUAL_AUDIT | SECTION_LEDGER | DETERMINISTIC_CHECK | HUMAN_REVIEW
+  detectionSource String
+
+  // A critic's allegation is not training truth: it becomes learnable only
+  // after deterministic confirmation or an authorized human correction.
+  /// DETERMINISTIC | HUMAN_REVIEWER | HUMAN_CLINICAL
+  validatorKind   String?
+  /// CONFIRMED | REJECTED
+  validatorResult String?
+  /// DETECTED | VALIDATED | REJECTED_FALSE_POSITIVE | REPAIRED | UNRESOLVED |
+  /// LEARNING_CANDIDATE | EVALUATED | ADOPTED | REJECTED_NO_IMPROVEMENT | RETIRED
+  state           String  @default("DETECTED")
+
+  // Everything needed to reproduce the run that produced the defect.
+  modelVersion      String?
+  promptVersion     String?
+  schemaVersion     String?
+  criticVersion     String?
+  writerVersion     String?
+  engineVersion     String?
+  sourceFingerprint String?
+
+  // Structural provenance. Claim IDENTIFIERS only — never claim text.
+  originalClaimIds Json?
+  addedClaimIds    Json?
+  removedClaimIds  Json?
+  selectedClaimIds Json?
+  rejectedClaimIds Json?
+  /// [{field, changeType}] — what changed, never the values that changed
+  correctionDelta  Json?
+  /// True when a summary correction altered meaning rather than phrasing.
+  changedMeaning   Boolean?
+
+  reviewerId       String?
+  reviewerRole     String?
+  correctionReason String?
+
+  /// CASE_ONLY | DOCUMENT_CLASS | FIRM_CLINICAL
+  reusableScope String?
+  documentClass String?
+  sectionType   String?
+
+  // Bounded repair: a targeted retry, not an unbounded loop.
+  repairAttempts Int      @default(0)
+  repairedAt     DateTime?
+
+  candidateId String?
+  candidate   LearningCandidate? @relation(fields: [candidateId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([firmId, state])
+  @@index([firmId, failureCode, createdAt])
+  @@index([caseId])
+  @@index([candidateId])
+}
+
+/// A proposed change to how the program behaves, and the record of whether it
+/// earned its place. Nothing is adopted because it improved the case that
+/// produced it: adoption requires held-out evaluation, and a prior version
+/// always remains available for rollback.
+model LearningCandidate {
+  id     String @id @default(uuid())
+  firmId String
+
+  /// DETERMINISTIC_RULE | TASK_GUIDANCE | SALIENCE_PREFERENCE | CLINICAL_PRIOR
+  mechanism   String
+  failureCode String
+  /// Fact-free, deidentified. Never record text or patient facts.
+  guidance    String
+  /// Structural payload: which field, which document class, which claim type.
+  payload     Json?
+
+  documentClass String?
+  sectionType   String?
+  /// CASE_ONLY | DOCUMENT_CLASS | FIRM_CLINICAL
+  scope         String
+
+  /// How many independent validated findings support it. One correction is
+  /// never enough to change firm-scoped clinical behaviour.
+  supportCount Int @default(1)
+
+  version Int @default(1)
+  /// DRAFT | EVALUATED | ADOPTED | REJECTED_NO_IMPROVEMENT | RETIRED
+  status  String @default("DRAFT")
+
+  /// Held-out scorecard: metric deltas, cases evaluated, safety-critical checks.
+  evaluation Json?
+  /// True only when no safety-critical metric regressed.
+  safetyClean Boolean?
+
+  adoptedAt  DateTime?
+  retiredAt  DateTime?
+  /// The candidate this one supersedes, so rollback has a lineage to follow.
+  supersedesId String?
+
+  /// How many generated outputs recorded applying this candidate.
+  applicationCount Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  findings LearningFinding[]
+
+  @@index([firmId, status])
+  @@index([firmId, mechanism, documentClass])
+  @@index([supersedesId])
+}

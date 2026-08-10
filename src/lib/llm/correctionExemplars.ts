@@ -15,6 +15,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { prisma } from "@/lib/db";
+import { retrieveGuidance, sanitizeGuidance } from "@/lib/learning/candidateService";
 
 export type CorrectionCategory =
   | "WRONG_FIELD"
@@ -115,8 +116,42 @@ export async function recordCorrectionExemplar(input: {
  * sentences for this firm (never another firm), preferring the same document
  * type and promoted exemplars. Case-specific snapshots are never returned.
  */
+/**
+ * Guidance for an extraction prompt: this firm's correction exemplars, plus any
+ * lessons the controlled learning loop has actually ADOPTED.
+ *
+ * The two sources are deliberately joined here rather than given a channel of
+ * their own. An exemplar is one reviewer's correction, recorded immediately;
+ * an adopted lesson has survived held-out evaluation and a safety check. They
+ * answer the same question — what should this prompt be told about this kind of
+ * document — and a second, unrestricted prompt-memory path would be exactly the
+ * thing that makes learned behaviour untraceable.
+ *
+ * Adopted lessons lead, because they have been measured. Everything is
+ * firm-scoped, bounded in count, and sanitized before it is returned.
+ */
 export async function fetchExemplarGuidance(firmId: string, documentType: string | null, limit = 3): Promise<string[]> {
-  if (!exemplarsEnabled()) return [];
+  const learned = await fetchAdoptedGuidance(firmId, documentType, limit).catch(() => []);
+  const remaining = Math.max(0, limit - learned.length);
+  if (!exemplarsEnabled() || remaining === 0) return learned.map((l) => l.text);
+  const exemplars = await fetchRawExemplarGuidance(firmId, documentType, remaining);
+  return [...learned.map((l) => l.text), ...exemplars];
+}
+
+/**
+ * Adopted lessons for this firm and document class, with their candidate ids so
+ * a caller can record which lessons shaped a given output.
+ */
+export async function fetchAdoptedGuidance(firmId: string, documentType: string | null, limit = 3) {
+  return retrieveGuidance({
+    firmId,
+    mechanism: "TASK_GUIDANCE",
+    documentClass: documentType ?? undefined,
+    limit,
+  });
+}
+
+async function fetchRawExemplarGuidance(firmId: string, documentType: string | null, limit: number): Promise<string[]> {
   const rows = await prisma.correctionExemplar.findMany({
     where: { firmId, ...(documentType ? { OR: [{ documentType }, { documentType: null }] } : {}) },
     orderBy: [{ promoted: "desc" }, { verifiedAt: "desc" }],
@@ -124,5 +159,7 @@ export async function fetchExemplarGuidance(firmId: string, documentType: string
     select: { guidance: true, documentType: true, promoted: true },
   });
   const ranked = rows.sort((a, b) => Number(b.documentType === documentType) - Number(a.documentType === documentType) || Number(b.promoted) - Number(a.promoted));
-  return [...new Set(ranked.map((r) => r.guidance))].slice(0, limit);
+  // Sanitized on the way out: the cheapest place to catch a lesson carrying
+  // patient detail is immediately before it enters a prompt.
+  return [...new Set(ranked.map((r) => sanitizeGuidance(r.guidance)).filter((g): g is string => !!g))].slice(0, limit);
 }
