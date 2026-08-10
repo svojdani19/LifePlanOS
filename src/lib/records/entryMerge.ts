@@ -84,8 +84,14 @@ export function mergeKey(row: MergeableRow): string {
  * complaint in the other direction. So groups merge as normal and only an
  * oversized one is split, in document order, into parts that are each a
  * plausible record.
+ *
+ * The bound is what the writer can actually compose, not a guess. At 80 claims
+ * a fifth of entries came back as malformed output — the model could not
+ * finish an entry that large — and each took some twenty-five seconds. A real
+ * visit is documented in a few dozen facts; a group holding more than that is
+ * a packet, not a record.
  */
-export const MAX_CLAIMS_PER_ENTRY = 80;
+export const MAX_CLAIMS_PER_ENTRY = 35;
 
 /**
  * Which class wins when merged rows disagree.

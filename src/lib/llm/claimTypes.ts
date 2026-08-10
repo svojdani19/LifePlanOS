@@ -234,7 +234,12 @@ export function looksCopiedForward(excerpt: string, priorExcerpts: string[]): bo
 export const CERTAINTY_RE = /\b(?:definitely|certainly|clearly|unequivocally|confirms?|proves?|establishes?|without question)\b/i;
 
 /** Hedging in the source that a claim must not discard. */
-export const HEDGE_RE = /\b(?:possible|possibly|probable|probably|suspect(?:ed)?|likely|may|might|could|appears?|suggestive of|cannot be excluded|questionable|equivocal)\b/i;
+// Past tense counts. A chronology entry is written in the past tense by
+// definition, so a radiologist's "soft tissues appear grossly unremarkable"
+// becomes "appeared" in the entry — and a pattern matching only the present
+// tense read that as the hedge having been dropped, rejecting correctly
+// hedged prose on a fifth of imaging records.
+export const HEDGE_RE = /\b(?:possible|possibly|probable|probably|suspect(?:s|ed|ing)?|likely|may|might|could|appear(?:s|ed|ing)?|seem(?:s|ed)?|suggest(?:s|ed)?|suggestive of|cannot be excluded|could not be excluded|questionable|equivocal|presumed)\b/i;
 
 /**
  * A claim must not convert the record's uncertainty into certainty. If the

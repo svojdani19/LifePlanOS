@@ -42,7 +42,6 @@ import { getProvider, type LlmProvider } from "@/lib/llm";
 import { profileFor, type AnalysisClass } from "@/lib/documents/analysisClass";
 import { checkSentence, type SynthClaim } from "@/lib/llm/groundedSynthesis";
 import { SECTION_CONTRACT, type SectionSpec, type SectionVerdict } from "@/lib/records/sectionLedger";
-import { splitSentences } from "@/lib/llm/factualAudit";
 
 export const WRITER_PROMPT_VERSION = "rex-write-1.0";
 
@@ -139,6 +138,23 @@ export function sectionsFor(klass: AnalysisClass, claims: readonly SynthClaim[])
   ];
 }
 
+/**
+ * The heading facts, as citable support.
+ *
+ * The prompt tells the writer who authored the record and where, so prose that
+ * names them is correct — but grounding checked only the claims and rejected
+ * "The patient presented to the Emergency Department" as introducing a name
+ * the claims did not contain. These are support like any other, with ids so a
+ * sentence can cite them and the audit trail still shows what it rests on.
+ */
+function contextClaims(input: EntryInput): SynthClaim[] {
+  const out: SynthClaim[] = [];
+  if (input.provider) out.push({ id: "ctx-provider", field: "provider", value: input.provider, excerpt: input.provider, page: null });
+  if (input.facility) out.push({ id: "ctx-facility", field: "facility", value: input.facility, excerpt: input.facility, page: null });
+  if (input.date) out.push({ id: "ctx-date", field: "encounterDate", value: input.date, excerpt: input.date, page: null });
+  return out;
+}
+
 function claimsForSection(spec: SectionSpec, claims: readonly SynthClaim[]): SynthClaim[] {
   const fields = new Set<string>(spec.fields);
   return claims.filter((c) => fields.has(c.field));
@@ -157,7 +173,9 @@ const writerSchema = z
             sentences: z
               .array(z.object({ text: z.string().min(3).max(600), claimIds: z.array(z.string().max(64)).min(1).max(16) }).strict())
               .min(1)
-              .max(14),
+              // A busy admission's plan legitimately runs long; 14 was an
+              // invented ceiling that discarded an otherwise valid entry.
+              .max(30),
           })
           .strict(),
       )
@@ -186,7 +204,7 @@ function buildPrompt(input: EntryInput, specs: SectionSpec[]): { system: string;
   ].join("\n\n");
 
   const sectionList = specs.map((s) => `  ${s.key} — ${s.label}`).join("\n");
-  const claimList = input.claims
+  const claimList = [...input.claims, ...contextClaims(input)]
     .map((c) => `[${c.id}] (${c.field}${c.claimType ? `/${c.claimType}` : ""}) ${c.value}  ⟵ "${c.excerpt.slice(0, 220)}"`)
     .join("\n");
 
@@ -236,6 +254,8 @@ function gapFor(key: string, input: EntryInput): string {
   return "Not documented in this record.";
 }
 
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 export interface WriteOptions {
   provider?: LlmProvider;
 }
@@ -264,7 +284,13 @@ export async function writeEntry(input: EntryInput, opts: WriteOptions = {}): Pr
   const llm = opts.provider ?? getProvider();
   if (llm.name === "mock") return bail(["writer unavailable: provider not configured"]);
 
-  const byId = new Map(input.claims.map((c) => [c.id, c]));
+  // The prompt tells the writer who authored the record and where, so prose
+  // that names them is correct — but grounding checked only the claims, and
+  // rejected "The patient presented to the Emergency Department" as
+  // introducing a name the claims did not contain. The heading facts are
+  // support like any other; they are given an id so a sentence can cite them
+  // and the audit trail still shows what every statement rests on.
+  const byId = new Map([...input.claims, ...contextClaims(input)].map((c) => [c.id, c]));
   const { system, user } = buildPrompt(input, specs);
 
   const attempt = async (extra?: string) => {
@@ -274,13 +300,28 @@ export async function writeEntry(input: EntryInput, opts: WriteOptions = {}): Pr
       temperature: 0,
       maxTokens: 8_000,
     });
-    const parsed = writerSchema.safeParse(parseJson(raw));
-    if (!parsed.success) return { ok: false as const, reasons: ["output did not match the required schema"] };
+    let parsed;
+    try {
+      parsed = writerSchema.safeParse(parseJson(raw));
+    } catch {
+      return { ok: false as const, reasons: [`output was not valid JSON: ${raw.trim().slice(0, 120)}`] };
+    }
+    if (!parsed.success) {
+      return { ok: false as const, reasons: [`output did not match the required schema: ${parsed.error.issues.slice(0, 2).map((i) => `${i.path.join(".")} ${i.message}`).join("; ")}`] };
+    }
 
     const reasons: string[] = [];
     const map: Record<string, string[]> = {};
 
-    const briefProblem = checkSentence(parsed.data.brief, parsed.data.briefClaimIds, byId);
+    // Heading facts support every sentence without being cited: the writer is
+    // TOLD the provider, facility and date, so naming them is correct whether
+    // or not it thought to list them as support. Requiring the citation
+    // rejected "The patient presented to the Emergency Department" for
+    // introducing a name that was in the prompt's own header.
+    const ambient = contextClaims(input).map((c) => c.id);
+    const withAmbient = (ids: string[]) => [...new Set([...ids, ...ambient])];
+
+    const briefProblem = checkSentence(parsed.data.brief, withAmbient(parsed.data.briefClaimIds), byId);
     if (briefProblem) reasons.push(`the one-line summary ${briefProblem}`);
 
     const written = new Map<string, string>();
@@ -290,7 +331,7 @@ export async function writeEntry(input: EntryInput, opts: WriteOptions = {}): Pr
         continue;
       }
       for (const s of section.sentences) {
-        const problem = checkSentence(s.text, s.claimIds, byId);
+        const problem = checkSentence(s.text, withAmbient(s.claimIds), byId);
         if (problem) reasons.push(`"${s.text.slice(0, 60)}…" ${problem}`);
         else map[s.text.trim()] = s.claimIds;
       }
@@ -298,22 +339,12 @@ export async function writeEntry(input: EntryInput, opts: WriteOptions = {}): Pr
     }
     if (reasons.length) return { ok: false as const, reasons };
 
-    // Every part of the prose a reviewer reads must be covered by a sentence we
-    // verified. Coverage, not identity: sentence splitting breaks on "Dr." and
-    // "a.m.", so requiring the reassembled text to split back into exactly the
-    // mapped keys rejected correct, fully-attributed prose — a fifth of entries
-    // fell back to the deterministic rendering because a provider's title
-    // contained a full stop.
-    const mapped = Object.keys(map).map((k) => k.replace(/\s+/g, " ").trim());
-    for (const text of written.values()) {
-      for (const sentence of splitSentences(text)) {
-        const s = sentence.replace(/\s+/g, " ").trim();
-        if (!s) continue;
-        if (!mapped.some((m) => m === s || m.includes(s))) {
-          return { ok: false as const, reasons: [`assembled text contains an unattributed sentence: "${s.slice(0, 60)}…"`] };
-        }
-      }
-    }
+    // No re-split check. Displayed text is exactly the sentences verified
+    // above, joined — coverage holds by construction. Re-splitting the joined
+    // text and demanding each fragment match a mapped sentence produced
+    // fragments that SPAN two sentences (a dose written "at 1950. dT tetanus"
+    // splits on the figure's full stop), and rejected entries every sentence
+    // of which had already passed.
 
     const sections: WrittenSection[] = specs.map((spec) => {
       const text = written.get(spec.key) ?? null;
@@ -322,12 +353,30 @@ export async function writeEntry(input: EntryInput, opts: WriteOptions = {}): Pr
     return { ok: true as const, brief: parsed.data.brief.trim(), sections, map };
   };
 
+  // A transient provider failure is not a verification failure, and must not be
+  // treated as one. Running the writer eight-wide pushed 10 of 24 entries into
+  // the unwritten fallback purely on rate limits — the entry was never composed
+  // at all, and the reviewer saw "Unclassified record" for a record the writer
+  // had never been given a chance to read.
+  const withRetry = async (extra?: string) => {
+    let lastError: unknown;
+    for (let tryCount = 0; tryCount < 4; tryCount++) {
+      try {
+        return await attempt(extra);
+      } catch (error) {
+        lastError = error;
+        await sleep(400 * 2 ** tryCount);
+      }
+    }
+    throw lastError;
+  };
+
   try {
-    const first = await attempt();
+    const first = await withRetry();
     if (first.ok) {
       return { heading, brief: first.brief, sections: first.sections, citation, sentenceClaimMap: first.map, fallback: false, rejections: [] };
     }
-    const second = await attempt(
+    const second = await withRetry(
       `Your previous entry was rejected for these reasons:\n${first.reasons.map((r) => `- ${r}`).join("\n")}\nRewrite it using ONLY the validated claims, attributing every sentence. Return ONLY the JSON object.`,
     );
     if (second.ok) {
@@ -335,7 +384,7 @@ export async function writeEntry(input: EntryInput, opts: WriteOptions = {}): Pr
     }
     return bail([...first.reasons, ...second.reasons]);
   } catch {
-    return bail(["writer provider error"]);
+    return bail(["writer provider error after repeated attempts"]);
   }
 }
 
