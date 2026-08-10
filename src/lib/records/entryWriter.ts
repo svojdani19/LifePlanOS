@@ -256,6 +256,30 @@ function gapFor(key: string, input: EntryInput): string {
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/**
+ * How long one writing attempt may take before it is abandoned.
+ *
+ * A request that never returns is worse than one that fails: a whole case
+ * rebuild sat at 100 of 766 entries for three quarters of an hour because a
+ * single call hung and the batch waiting on it could not proceed. A timeout
+ * turns that into an ordinary retryable error.
+ */
+const ATTEMPT_TIMEOUT_MS = 120_000;
+
+async function withTimeout<T>(work: Promise<T>, ms = ATTEMPT_TIMEOUT_MS): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("writer attempt timed out")), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export interface WriteOptions {
   provider?: LlmProvider;
 }
@@ -412,7 +436,7 @@ async function writeOnePass(input: EntryInput, opts: WriteOptions = {}): Promise
     let lastError: unknown;
     for (let tryCount = 0; tryCount < 4; tryCount++) {
       try {
-        return await attempt(extra);
+        return await withTimeout(attempt(extra));
       } catch (error) {
         lastError = error;
         await sleep(400 * 2 ** tryCount);
