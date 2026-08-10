@@ -4,6 +4,7 @@ import {
   dedupeAcrossDocuments,
   cleanProvider,
   dominantClass,
+  entrySubstance,
   isDuplicateClaim,
   mergeKey,
   mergeRows,
@@ -236,5 +237,39 @@ describe("an inherited date is not evidence two rows are one record", () => {
   it("treats a missing dateStatus as documented, for rows written before it existed", () => {
     const merged = mergeRows([row({ id: "a" }), row({ id: "b" })]);
     expect(merged).toHaveLength(1);
+  });
+});
+
+describe("what belongs in the clinical records list", () => {
+  const entry = (klass: MergeableRow["analysisClass"], ...values: string[]) =>
+    mergeRows([row({ analysisClass: klass, claims: values.map((value, i) => ({ field: "documentContent", value, excerpt: `e${i}` })) })])[0];
+
+  it("keeps a visit clinical", () => {
+    expect(entrySubstance(entry("THERAPY_COURSE", "Traction performed at 62 lbs for fifteen minutes"))).toBe("CLINICAL");
+  });
+
+  it("routes record furniture out of the clinical list", () => {
+    // These reached the clinical list as entries in their own right, sitting
+    // alongside a four-level laminectomy.
+    expect(entrySubstance(entry("CORRESPONDENCE_OR_GENERIC_EVIDENCE", "Administrative page footer indicating this is page 3 of 3, revised December 1, 2022"))).toBe("ADMINISTRATIVE");
+    expect(entrySubstance(entry("CORRESPONDENCE_OR_GENERIC_EVIDENCE", "Administrative consent form authorizing specimen retention and medical record disclosure"))).toBe("ADMINISTRATIVE");
+  });
+
+  it("keeps a bill reachable as ancillary rather than discarding it", () => {
+    // A charge for a visit bears on the course of care; the reviewer asked for
+    // it to be treated as a bill, not deleted.
+    expect(entrySubstance(entry("FINANCIAL", "Procedure 63047 billed on 03/15/2024, outstanding charge $11,733.30"))).toBe("ANCILLARY");
+  });
+
+  it("treats unclassified paper as administrative", () => {
+    expect(entrySubstance(entry("UNKNOWN", "Some text of no determinable kind"))).toBe("ADMINISTRATIVE");
+  });
+
+  it("does not call a real record furniture because it mentions a consent", () => {
+    const e = entry("CLINICAL_ENCOUNTER",
+      "Consent for treatment was obtained before the procedure",
+      "Lumbar epidural injection was performed at L4-L5 under fluoroscopy",
+      "The patient tolerated the procedure without complication");
+    expect(entrySubstance(e)).toBe("CLINICAL");
   });
 });

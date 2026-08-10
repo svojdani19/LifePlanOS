@@ -21,7 +21,7 @@
 // the disagreement is visible to a reviewer rather than silently resolved.
 // ─────────────────────────────────────────────────────────────────────────────
 
-import type { AnalysisClass } from "@/lib/documents/analysisClass";
+import { NON_CLINICAL_CLASSES, type AnalysisClass } from "@/lib/documents/analysisClass";
 import type { SynthClaim } from "@/lib/llm/groundedSynthesis";
 import { spanOf, type PreparedDocument, type RowSpan } from "@/lib/records/rowSpans";
 
@@ -404,4 +404,42 @@ export function mergeRows(rows: readonly MergeableRow[], doc?: PreparedDocument)
   }
 
   return out.sort((a, b) => (a.encounterDate?.getTime() ?? 0) - (b.encounterDate?.getTime() ?? 0));
+}
+
+// ── What kind of thing an entry is, for display ──────────────────────────────
+
+/**
+ * Record furniture: text that documents the paperwork rather than the care.
+ *
+ * These reached the clinical records list as entries in their own right —
+ * "Administrative page footer indicating this is page 3 of 3, revised December
+ * 1, 2022" appeared twice — sitting alongside a four-level laminectomy with
+ * equal billing. A reviewer opening Details wants the course of care, not the
+ * signature blocks that came stapled to it.
+ */
+const FURNITURE_RE =
+  /\b(?:page footer|page header|footer indicating|header indicating|this is page \d+|revision (?:date|history)|form (?:number|revised)|blank page|intentionally left blank|cover (?:sheet|page)|fax (?:cover|transmittal)|records? (?:request|custodian|disclosure|release)|authorization (?:to|for) (?:disclose|release)|notice of privacy|patient rights|assignment of benefits|financial (?:policy|responsibility) (?:form|agreement)|consent (?:form|for treatment|to treat)|signature (?:page|block|on file))\b/i;
+
+export type EntrySubstance = "CLINICAL" | "ANCILLARY" | "ADMINISTRATIVE";
+
+/**
+ * Whether this entry documents care, supports it, or is paperwork.
+ *
+ * Decided from what the rows actually resolved to rather than asserted by the
+ * caller: a rebuild that stamped every entry "clinical" put page footers in
+ * the clinical list. ANCILLARY covers material that bears on the course of
+ * care without documenting it — the bill for a visit, an imaging order —
+ * which a reviewer wants reachable but not interleaved with the encounters.
+ */
+export function entrySubstance(entry: MergedEntry): EntrySubstance {
+  const text = entry.claims.map((c) => c.value).join(" ");
+  if (entry.claims.length && entry.claims.every((c) => FURNITURE_RE.test(c.value))) return "ADMINISTRATIVE";
+  if (FURNITURE_RE.test(text) && entry.claims.length <= 2) return "ADMINISTRATIVE";
+  if (NON_CLINICAL_CLASSES.has(entry.klass)) {
+    // A billing or correspondence record that nonetheless documents care —
+    // a charge for a visit, a letter reporting a finding — is ancillary
+    // rather than paperwork, and stays reachable.
+    return entry.klass === "UNKNOWN" || entry.klass === "SUPPORTING_FILE" ? "ADMINISTRATIVE" : "ANCILLARY";
+  }
+  return "CLINICAL";
 }
