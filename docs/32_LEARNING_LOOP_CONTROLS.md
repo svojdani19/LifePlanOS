@@ -122,6 +122,34 @@ survives. `applicationCount` on each candidate, incremented through
 `recordApplications`, is what lets a regression be traced back to the lesson
 that caused it.
 
+## Detectors, repair and metrics
+
+| Detector | Arrives as | Why |
+|---|---|---|
+| **Section ledger** | `VALIDATED` | Self-confirming: it compares claims against the uploaded document, so "this page prints an Assessment heading and we captured nothing from it" needs no adjudication |
+| **Extraction critic / factual audit** | `DETECTED` | A model asked to find fault obliges. Recorded anyway, because the rate at which it cries wolf is only measurable if rejections are kept |
+| **Encounter identity** | `DETECTED` | A `POSSIBLE_DUPLICATE` verdict is exactly the state that must not be resolved silently in either direction |
+| **Reviewer correction** | `VALIDATED` | A human with standing has changed the output. Wired into the encounter review route, which now also accepts an explicit `failureCode` — the reviewer's answer beats any mapping inferred from the correction category |
+
+A warning the vocabulary cannot classify is **dropped**, not filed as `OTHER`: a
+finding with the wrong code pollutes the repeat-failure rate for a code that did
+not actually recur.
+
+**Repair** (`repairService.ts`) is narrow, bounded at two attempts, and refuses
+before it starts in three cases: a defect no retry can fix, a defect that has
+used its attempts, and content whose review status is `HUMAN_EDITED`,
+`REVIEWED` or `VERIFIED`. A regeneration that overwrites a physician's
+correction is worse than the defect it was fixing, because the defect was
+visible and the overwrite is not. `auditIsQualified` reports a case as
+unqualified while any confirmed defect remains open.
+
+**Metrics** (`learningMetrics.ts`) count rows, codes and dates — never a claim
+value, an excerpt or a patient identifier. The two that matter most are
+uncomfortable: `falsePositiveCriticRate`, and `repeatFailureRate`, which
+distinguishes a **new** failure from the same code recurring in the same
+document class. A repeat rate that does not fall is the honest signal that a
+lesson did nothing.
+
 ## What this is not
 
 The model's weights do not change. Nothing here retrains anything. The accurate

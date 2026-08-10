@@ -2,6 +2,8 @@ import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requireCanonicalPermission, requireCase, audit } from "@/lib/tenant";
 import { recordCorrectionExemplar, type CorrectionCategory } from "@/lib/llm/correctionExemplars";
+import { detectFromReviewerCorrection } from "@/lib/learning/detectors";
+import { FAILURE_CODES } from "@/lib/learning/failureTaxonomy";
 import { encounterContentHash } from "@/lib/records/verifiedContent";
 import { REVIEWER_ASSIGNABLE_CLASSES, requiresDate } from "@/lib/documents/analysisClass";
 import { classifyEncounterSubstance } from "@/lib/records/encounterSubstance";
@@ -54,6 +56,10 @@ const actionSchema = z.object({
   // reviewer never saw.
   expectedContentHash: z.string().length(64).optional(),
   category: z.enum(["WRONG_FIELD", "BOILERPLATE_REMOVED", "DATE_CORRECTED", "PROVIDER_CORRECTED", "EXCERPT_MISMATCH", "SUMMARY_REWORDED", "OTHER"]).optional(),
+  // What the program got WRONG, as opposed to what the reviewer touched. The
+  // category above answers the second question; only a reviewer can answer the
+  // first, and their answer beats any mapping inferred from the category.
+  failureCode: z.enum(FAILURE_CODES).optional(),
 });
 
 type Params = { params: Promise<{ caseId: string; encounterId: string }> };
@@ -289,6 +295,30 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
         schemaVersion: existing.schemaVersion,
         model: existing.model,
       }).catch(() => {});
+
+      // The same correction, recorded as a confirmed FAILURE. The exemplar says
+      // what a reviewer touched; the finding says what the program got wrong,
+      // which is what a repeat-failure rate and a targeted repair need. Only
+      // structural deltas travel — field names and change kinds, never values.
+      await detectFromReviewerCorrection(
+        {
+          firmId: ctx.firm.id,
+          caseId: params.caseId,
+          encounterId: existing.id,
+          documentId: existing.sourceDocumentId,
+          documentClass: existing.analysisClass ?? doc?.type ?? null,
+          promptVersion: existing.promptVersion,
+          schemaVersion: existing.schemaVersion,
+          modelVersion: existing.model,
+        },
+        {
+          category: input.category ?? "OTHER",
+          failureCode: input.failureCode,
+          reviewerId: ctx.user.id,
+          reviewerRole: ctx.user.role,
+          correctionDelta: edited.map((field) => ({ field, changeType: "HUMAN_EDITED" })),
+        },
+      ).catch(() => {});
     }
 
     await audit(ctx, verify ? "records.encounter_verify" : "records.encounter_review", {
