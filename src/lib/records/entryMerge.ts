@@ -24,7 +24,7 @@
 import { NON_CLINICAL_CLASSES, type AnalysisClass } from "@/lib/documents/analysisClass";
 import type { SynthClaim } from "@/lib/llm/groundedSynthesis";
 import { spanOf, type PreparedDocument, type RowSpan } from "@/lib/records/rowSpans";
-import { groupByIdentity, timeFromText, type IdentityFacts } from "@/lib/records/encounterIdentity";
+import { compareClass, decideIdentity, distinctiveOverlap, groupByIdentity, timeFromText, type IdentityFacts } from "@/lib/records/encounterIdentity";
 
 export interface MergeableRow {
   id: string;
@@ -248,43 +248,137 @@ function preferLonger(a: SynthClaim, b: SynthClaim): SynthClaim {
  * document it was found in, so a reviewer can still reach any of them.
  */
 export function dedupeAcrossDocuments(entries: readonly MergedEntry[]): MergedEntry[] {
+  // Deterministic and order-independent: candidates are considered in a fixed
+  // order, so the same set of entries always consolidates the same way.
+  const ordered = [...entries].sort(
+    (a, b) =>
+      (a.encounterDate?.getTime() ?? 0) - (b.encounterDate?.getTime() ?? 0) ||
+      (a.sourceDocumentId < b.sourceDocumentId ? -1 : a.sourceDocumentId > b.sourceDocumentId ? 1 : 0) ||
+      (a.rowIds[0] ?? "").localeCompare(b.rowIds[0] ?? ""),
+  );
+
   const kept: MergedEntry[] = [];
-  for (const entry of entries) {
-    const date = entry.encounterDate?.getTime();
-    const twin = date
-      ? kept.find(
-          (k) =>
-            k.encounterDate?.getTime() === date &&
-            k.sourceDocumentId !== entry.sourceDocumentId &&
-            contentOverlap(k, entry) >= 0.6,
-        )
-      : undefined;
+  for (const entry of ordered) {
+    const twin = kept.find((k) => k.sourceDocumentId !== entry.sourceDocumentId && isSameRecordAcrossDocuments(k, entry));
     if (!twin) {
-      kept.push({ ...entry });
+      kept.push({ ...entry, claims: [...entry.claims], rowIds: [...entry.rowIds] });
       continue;
     }
-    // Keep whichever copy states more, and absorb the other's provenance.
-    const richer = entry.claims.length > twin.claims.length ? entry : twin;
-    const poorer = richer === twin ? entry : twin;
-    Object.assign(twin, {
-      ...richer,
-      rowIds: [...twin.rowIds, ...entry.rowIds],
-      provider: richer.provider ?? poorer.provider,
-      facility: richer.facility ?? poorer.facility,
-      alsoInDocumentIds: [...new Set([...(twin.alsoInDocumentIds ?? []), poorer.sourceDocumentId])],
-    });
+    absorbCopy(twin, entry);
   }
   return kept;
 }
 
-/** Share of the smaller entry's claims that the larger one also states. */
-function contentOverlap(a: MergedEntry, b: MergedEntry): number {
-  const [small, large] = a.claims.length <= b.claims.length ? [a, b] : [b, a];
-  if (!small.claims.length) return 0;
-  let hits = 0;
-  for (const c of small.claims) if (isDuplicateClaim(c, large.claims)) hits++;
-  return hits / small.claims.length;
+/**
+ * Is this the same record, filed in two documents?
+ *
+ * A higher bar than consolidating fragments inside one document, and
+ * deliberately so: fragments of one note share a page, while two documents
+ * merely sharing a date share nothing. The identity decision must say MERGE —
+ * which means compatible classes, no conflicting provider, facility, time,
+ * procedure or identifier, and either a matching record identifier or genuine
+ * distinctive overlap.
+ *
+ * An earlier version merged on 60% of the smaller entry's claims overlapping,
+ * counted over every claim including boilerplate. Two unrelated notes from one
+ * chart share their medication list, their allergies and their standing
+ * diagnoses; that is a template, not an identity.
+ */
+export function isSameRecordAcrossDocuments(a: MergedEntry, b: MergedEntry): boolean {
+  // Two copies of one record carry the same date. Undated entries are never
+  // folded across documents — there is nothing to anchor them to.
+  if (!a.encounterDate || !b.encounterDate) return false;
+  if (a.encounterDate.getTime() !== b.encounterDate.getTime()) return false;
+
+  const fa = identityFactsOfEntry(a);
+  const fb = identityFactsOfEntry(b);
+
+  // Any conflict at all settles it — different provider, facility, time,
+  // procedure or identifier means two records however alike they read.
+  const decision = decideIdentity(fa, fb);
+  if (decision.verdict === "KEEP_SEPARATE") return false;
+
+  // The classes must positively agree. Inside one document a bill may merge
+  // with the note it bills for; across documents the same latitude would fold
+  // a charge into an unrelated encounter.
+  if (compareClass(a.klass, b.klass) !== "SAME") return false;
+
+  // A shared record identifier is proof on its own — an accession number names
+  // one study wherever the report is filed.
+  if (decision.verdict === "MERGE") return true;
+
+  // Otherwise the copies must agree on nearly all of their DISTINCTIVE content.
+  // The bar is higher than inside a document, where overlapping source spans
+  // already establish that fragments came from one passage; two documents
+  // sharing a date share nothing, so the content has to carry the whole claim.
+  const overlap = distinctiveOverlap(fa, fb);
+  return overlap.ratio >= CROSS_DOCUMENT_OVERLAP && overlap.shared >= 2;
 }
+
+/**
+ * How much of a copy's distinctive content must match to call it the same
+ * record filed twice.
+ *
+ * Deliberately near-total. An earlier version merged on 60% of the smaller
+ * entry's claims overlapping, counted over EVERY claim including boilerplate —
+ * and two unrelated notes from one chart share their medication list, their
+ * allergies and their standing diagnoses before they share anything real.
+ */
+export const CROSS_DOCUMENT_OVERLAP = 0.8;
+
+/** Identity facts for a merged entry, for cross-document comparison. */
+function identityFactsOfEntry(entry: MergedEntry): IdentityFacts {
+  const text = entry.claims.map((c) => `${c.value} ${c.excerpt}`).join("\n");
+  return {
+    id: entry.rowIds[0] ?? entry.sourceDocumentId,
+    sourceDocumentId: entry.sourceDocumentId,
+    klass: entry.klass,
+    dateIso: entry.encounterDate ? entry.encounterDate.toISOString().slice(0, 10) : null,
+    dateDocumented: true,
+    provider: entry.provider,
+    facility: entry.facility,
+    time: timeFromText(text),
+    // Spans and segments are document-local, so they say nothing about a copy
+    // in another document; withholding them is honest rather than unhelpful.
+    segmentKey: null,
+    span: null,
+    claims: entry.claims.map((c) => ({ field: c.field, value: c.value })),
+  };
+}
+
+/**
+ * Fold one copy into another without losing anything.
+ *
+ * Claims are UNIONED, not replaced. An earlier version assigned the richer
+ * copy's fields wholesale over the twin, which silently discarded every claim
+ * the other copy stated alone — including any that disagreed. A disagreement
+ * between two copies of a record is information a reviewer needs, not noise to
+ * resolve by picking the longer list.
+ */
+function absorbCopy(twin: MergedEntry, other: MergedEntry): void {
+  for (const claim of other.claims) {
+    const at = twin.claims.findIndex((e) => e.field === claim.field && isDuplicateClaim(claim, [e]));
+    if (at >= 0) {
+      // Keep whichever states the fact more fully, with its own excerpt and
+      // page — a claim never inherits another claim's citation.
+      if (claim.value.length > twin.claims[at].value.length) {
+        twin.claims[at] = { ...claim, id: twin.claims[at].id };
+      }
+      continue;
+    }
+    twin.claims.push({ ...claim, id: `x${twin.claims.length + 1}` });
+  }
+  twin.rowIds = [...new Set([...twin.rowIds, ...other.rowIds])];
+  twin.provider = twin.provider ?? other.provider;
+  twin.facility = twin.facility ?? other.facility;
+  twin.pageStart = twin.pageStart ?? other.pageStart;
+  twin.pageEnd = twin.pageEnd ?? other.pageEnd;
+  twin.mergedClasses = [...new Set([...twin.mergedClasses, ...other.mergedClasses])];
+  twin.alsoInDocumentIds = [
+    ...new Set([...(twin.alsoInDocumentIds ?? []), ...(other.alsoInDocumentIds ?? []), other.sourceDocumentId]),
+  ].sort();
+}
+
 
 /** The page range a whole group covers, resolved from the document's markers. */
 function spanOfGroup(doc: PreparedDocument, group: readonly MergeableRow[]): RowSpan | null {

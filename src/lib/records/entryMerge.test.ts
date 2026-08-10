@@ -183,45 +183,98 @@ describe("citing a page only when the page is real", () => {
 });
 
 describe("the same record filed in several documents", () => {
-  const claimsA = [
-    { field: "procedure", value: "Pre-procedural assessment for sedation procedure", excerpt: "x" },
-    { field: "assessment", value: "Sedation planned under monitored anesthesia care", excerpt: "y" },
+  const opClaims = [
+    { field: "procedure", value: "L2-S1 bilateral laminectomy, facetectomy and foraminotomy performed", excerpt: "x" },
+    { field: "preOperativeDiagnosis", value: "Herniated disc L2-S1 with central canal stenosis", excerpt: "y" },
   ];
-  const entryIn = (docId: string, extra: typeof claimsA = []) =>
-    row({ id: `r-${docId}`, sourceDocumentId: docId, encounterDate: new Date("2004-10-10T00:00:00Z"), claims: [...claimsA, ...extra] });
+  const copyIn = (docId: string, extra: typeof opClaims = []) =>
+    row({
+      id: `r-${docId}`, sourceDocumentId: docId, analysisClass: "OPERATIVE",
+      encounterDate: new Date("2024-03-15T00:00:00Z"), claims: [...opClaims, ...extra],
+    });
 
-  it("folds copies of one record bound into four PDFs", () => {
-    // A real chronology showed 10/10/2004 four times, one per document the
-    // same pre-procedure form happened to be filed in.
-    const merged = mergeRows([entryIn("d1"), entryIn("d2"), entryIn("d3"), entryIn("d4")]);
-    expect(merged).toHaveLength(4);
-    const deduped = dedupeAcrossDocuments(merged);
+  it("consolidates copies of one operative report bound into several PDFs", () => {
+    const deduped = dedupeAcrossDocuments(mergeRows([copyIn("d1"), copyIn("d2"), copyIn("d3")]));
     expect(deduped).toHaveLength(1);
-    expect(deduped[0].alsoInDocumentIds).toHaveLength(3);
+    expect(deduped[0].alsoInDocumentIds).toHaveLength(2);
   });
 
-  it("keeps the copy that states more", () => {
+  it("preserves every source row and document in the provenance", () => {
+    const deduped = dedupeAcrossDocuments(mergeRows([copyIn("d1"), copyIn("d2")]));
+    expect(deduped[0].rowIds.sort()).toEqual(["r-d1", "r-d2"]);
+    expect([deduped[0].sourceDocumentId, ...(deduped[0].alsoInDocumentIds ?? [])].sort()).toEqual(["d1", "d2"]);
+  });
+
+  it("loses no claim when one copy states something the other does not", () => {
+    // An earlier version assigned the richer copy over the twin wholesale,
+    // which silently discarded every claim the other copy stated alone.
     const deduped = dedupeAcrossDocuments(
-      mergeRows([entryIn("d1"), entryIn("d2", [{ field: "medications", value: "Midazolam 2 mg administered intravenously", excerpt: "z" }])]),
+      mergeRows([
+        copyIn("d1", [{ field: "estimatedBloodLoss", value: "Estimated blood loss was 150 millilitres", excerpt: "a" }]),
+        copyIn("d2", [{ field: "medications", value: "Dexamethasone 10 mg and vancomycin 1 gram given", excerpt: "b" }]),
+      ]),
     );
     expect(deduped).toHaveLength(1);
-    expect(deduped[0].claims.some((c) => c.field === "medications")).toBe(true);
+    const fields = deduped[0].claims.map((c) => c.field);
+    expect(fields).toContain("estimatedBloodLoss");
+    expect(fields).toContain("medications");
   });
 
-  it("does not fold two genuinely different records on one date", () => {
-    // A surgery and the anaesthesia record share a date and are not the same
-    // document; folding them would delete one of them from the timeline.
-    const surgery = row({ id: "s", sourceDocumentId: "d1", encounterDate: new Date("2024-03-15T00:00:00Z"),
-      claims: [{ field: "procedure", value: "L2-S1 bilateral laminectomy, facetectomy and foraminotomy", excerpt: "a" }] });
-    const anesthesia = row({ id: "a", sourceDocumentId: "d2", encounterDate: new Date("2024-03-15T00:00:00Z"),
-      claims: [{ field: "medications", value: "Total charge billed: $11,000.00 for anesthesia services", excerpt: "b" }] });
-    expect(dedupeAcrossDocuments(mergeRows([surgery, anesthesia]))).toHaveLength(2);
+  it("keeps each claim's own excerpt — a claim never inherits another's citation", () => {
+    const deduped = dedupeAcrossDocuments(
+      mergeRows([
+        copyIn("d1", [{ field: "estimatedBloodLoss", value: "Estimated blood loss was 150 millilitres", excerpt: "ebl-excerpt" }]),
+        copyIn("d2", [{ field: "medications", value: "Dexamethasone 10 mg and vancomycin 1 gram given", excerpt: "meds-excerpt" }]),
+      ]),
+    );
+    const ebl = deduped[0].claims.find((c) => c.field === "estimatedBloodLoss");
+    const meds = deduped[0].claims.find((c) => c.field === "medications");
+    expect(ebl?.excerpt).toBe("ebl-excerpt");
+    expect(meds?.excerpt).toBe("meds-excerpt");
   });
 
-  it("never folds undated entries", () => {
-    const a = row({ id: "a", sourceDocumentId: "d1", encounterDate: null, claims: claimsA });
-    const b = row({ id: "b", sourceDocumentId: "d2", encounterDate: null, claims: claimsA });
+  it("does not fold two records that merely share a date across documents", () => {
+    // A surgery and an unrelated therapy note on the same day are two records,
+    // however much template text their charts share.
+    const surgery = copyIn("d1");
+    const therapy = row({
+      id: "t", sourceDocumentId: "d2", analysisClass: "THERAPY_COURSE",
+      encounterDate: new Date("2024-03-15T00:00:00Z"),
+      claims: [{ field: "treatment", value: "Therapeutic exercise and gait training were performed", excerpt: "z" }],
+    });
+    expect(dedupeAcrossDocuments(mergeRows([surgery, therapy]))).toHaveLength(2);
+  });
+
+  it("does not fold on shared boilerplate alone", () => {
+    // Two unrelated notes from one chart share their medication list, their
+    // allergies and their standing diagnoses. That is a template, not identity.
+    const boiler = [
+      { field: "subjective", value: "No known drug allergies documented", excerpt: "b1" },
+      { field: "pastMedicalHistory", value: "Diabetes mellitus and hypertension", excerpt: "b2" },
+      { field: "recommendations", value: "Return to the emergency department if symptoms worsen", excerpt: "b3" },
+    ];
+    const a = row({ id: "a", sourceDocumentId: "d1", analysisClass: "CLINICAL_ENCOUNTER", claims: boiler });
+    const b = row({ id: "b", sourceDocumentId: "d2", analysisClass: "CLINICAL_ENCOUNTER", claims: boiler });
     expect(dedupeAcrossDocuments(mergeRows([a, b]))).toHaveLength(2);
+  });
+
+  it("never folds undated entries across documents", () => {
+    const a = row({ id: "a", sourceDocumentId: "d1", encounterDate: null, claims: opClaims });
+    const b = row({ id: "b", sourceDocumentId: "d2", encounterDate: null, claims: opClaims });
+    expect(dedupeAcrossDocuments(mergeRows([a, b]))).toHaveLength(2);
+  });
+
+  it("gives the same result whatever order the entries arrive in", () => {
+    const forward = dedupeAcrossDocuments(mergeRows([copyIn("d1"), copyIn("d2"), copyIn("d3")]));
+    const backward = dedupeAcrossDocuments(mergeRows([copyIn("d3"), copyIn("d2"), copyIn("d1")]));
+    expect(backward.map((e) => e.rowIds.sort())).toEqual(forward.map((e) => e.rowIds.sort()));
+  });
+
+  it("is idempotent", () => {
+    const once = dedupeAcrossDocuments(mergeRows([copyIn("d1"), copyIn("d2")]));
+    const twice = dedupeAcrossDocuments(once);
+    expect(twice).toHaveLength(once.length);
+    expect(twice[0].claims.length).toBe(once[0].claims.length);
   });
 });
 
