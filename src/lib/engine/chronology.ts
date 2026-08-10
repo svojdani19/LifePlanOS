@@ -559,6 +559,30 @@ const ENCOUNTER_TEXT_CAP = 8000; // enough for detail extraction, bounded for sa
 // compiled chronology reports, where dates are never labeled "Date of Service".
 const NARRATIVE_HEADER = /^[ \t]*(\d{1,2}\/\d{1,2}\/\d{4})(?:\s*[-–—]\s*\d{1,2}\/\d{1,2}\/\d{4})?\s*[-–—,]\s*(?=[A-Z])/gm;
 
+/**
+ * Is this segment a repeated date header rather than a new note?
+ *
+ * Charts restate "Date of Service: 03/15/2024" in table rows, page headers and
+ * continuation banners. Those repeats used to be harmless because every
+ * same-date segment merged anyway; now that each anchor starts an encounter,
+ * a repeat would become a duplicate event.
+ *
+ * The test is deliberately narrow — a repeat carries almost no text of its own,
+ * and anything with a note's worth of content is treated as a new note even
+ * when it shares a date with the one before it. Splitting one note in two is a
+ * visible, correctable error; silently merging two encounters is a deletion.
+ */
+export function isHeaderRepeat(segment: string, openText: string): boolean {
+  const body = segment.replace(ANCHOR_LABEL, " ").replace(/\s+/g, " ").trim();
+  if (body.length > 200) return false;
+  // A short segment that introduces a different clinician or a different kind
+  // of record is a new note however brief it is.
+  const seen = extractProviderName(openText);
+  const here = extractProviderName(segment);
+  if (seen && here && !sameProvider(seen, here)) return false;
+  return true;
+}
+
 export function segmentEncounters(text: string, marks: { offset: number; page: number }[]): Encounter[] {
   const anchors: { offset: number; iso: string }[] = [];
   const re = new RegExp(ANCHOR_LABEL.source, "gi");
@@ -581,27 +605,36 @@ export function segmentEncounters(text: string, marks: { offset: number; page: n
     }
     anchors.sort((a, b) => a.offset - b.offset);
   }
-  const distinct = new Set(anchors.map((a) => a.iso));
-  if (distinct.size < 2) return []; // single-encounter document — no segmentation
+  // Segmentation needs more than one anchor, not more than one DATE. Requiring
+  // two distinct dates meant a document whose encounters all fall on one day —
+  // a hospital admission, a surgical day, a combined same-day production — was
+  // declared a single encounter and never segmented at all, which is the same
+  // date-is-identity assumption from the other direction.
+  if (anchors.length < 2) return []; // single-encounter document — no segmentation
 
-  const byDate = new Map<string, Encounter>();
+  // Each anchor starts an encounter. Anchors are NOT collapsed by date: a
+  // combined production carries a therapy session, an imaging study, an
+  // emergency visit and a follow-up on one day, and keying encounters by date
+  // reported all four as a single event. Two anchors join only when the second
+  // is a repeated header rather than a new note — see `isHeaderRepeat`.
+  const out: Encounter[] = [];
   for (let i = 0; i < anchors.length; i++) {
     const a = anchors[i];
     const end = i + 1 < anchors.length ? anchors[i + 1].offset : text.length;
     const seg = text.slice(a.offset, end);
-    const e = byDate.get(a.iso);
-    if (e) {
-      if (e.text.length < ENCOUNTER_TEXT_CAP) e.text += "\n" + seg.slice(0, ENCOUNTER_TEXT_CAP - e.text.length);
-    } else {
-      byDate.set(a.iso, {
-        dateIso: a.iso,
-        date: new Date(`${a.iso}T00:00:00Z`),
-        page: pageForOffset(a.offset, marks),
-        text: seg.slice(0, ENCOUNTER_TEXT_CAP),
-      });
+    const open = out.at(-1);
+    if (open && open.dateIso === a.iso && isHeaderRepeat(seg, open.text)) {
+      if (open.text.length < ENCOUNTER_TEXT_CAP) open.text += "\n" + seg.slice(0, ENCOUNTER_TEXT_CAP - open.text.length);
+      continue;
     }
+    out.push({
+      dateIso: a.iso,
+      date: new Date(`${a.iso}T00:00:00Z`),
+      page: pageForOffset(a.offset, marks),
+      text: seg.slice(0, ENCOUNTER_TEXT_CAP),
+    });
   }
-  return [...byDate.values()].sort((x, y) => x.date.getTime() - y.date.getTime());
+  return out.sort((x, y) => x.date.getTime() - y.date.getTime());
 }
 
 // Event type + a readable record type from the ENCOUNTER'S OWN content (a

@@ -13,6 +13,11 @@ import {
   type MergeableRow,
 } from "@/lib/records/entryMerge";
 
+// Rows drawn from one note overlap in the source text; that overlap is the
+// evidence a merge now requires, and every real row carries it. A date alone
+// no longer merges anything, which is the point of the change.
+const SAME_NOTE = { start: 1_000, end: 2_000 };
+
 const row = (over: Partial<MergeableRow> = {}): MergeableRow => ({
   id: "r1",
   sourceDocumentId: "doc1",
@@ -28,15 +33,27 @@ const row = (over: Partial<MergeableRow> = {}): MergeableRow => ({
 });
 
 describe("one visit becomes one entry", () => {
-  it("merges rows sharing a document and a date", () => {
+  it("consolidates fourteen extraction rows from one note", () => {
     // A real chiropractic visit produced fourteen rows against one published
-    // entry, because overlapping chunks each wrote out the same note.
+    // entry, because overlapping chunks each wrote out the same note. They
+    // merge on that overlap — not on the date they happen to share.
     const rows = Array.from({ length: 14 }, (_, i) =>
-      row({ id: `r${i}`, claims: [{ field: "treatment", value: "Traction performed at 62 lbs", excerpt: "traction 62 lbs" }] }),
+      row({ id: `r${i}`, segmentKey: "note-1", claims: [{ field: "treatment", value: "Traction performed at 62 lbs", excerpt: "traction 62 lbs" }] }),
     );
     const merged = mergeRows(rows);
     expect(merged).toHaveLength(1);
     expect(merged[0].rowIds).toHaveLength(14);
+  });
+
+  it("does NOT merge two rows that share only a document and a date", () => {
+    // The defect this change exists to fix: a combined production carries
+    // several encounters on one day, and a date-keyed merge reported them as
+    // one event.
+    const merged = mergeRows([
+      row({ id: "a", claims: [{ field: "subjective", value: "Patient reports right shoulder pain after lifting", excerpt: "x" }] }),
+      row({ id: "b", claims: [{ field: "subjective", value: "Patient reports left knee swelling following a fall", excerpt: "y" }] }),
+    ]);
+    expect(merged).toHaveLength(2);
   });
 
   it("keeps records from different documents apart", () => {
@@ -60,17 +77,18 @@ describe("one visit becomes one entry", () => {
 describe("merging loses no fact", () => {
   it("keeps distinct claims from every row", () => {
     const merged = mergeRows([
-      row({ id: "a", claims: [{ field: "subjective", value: "Numbness in the left hand digits", excerpt: "x" }] }),
-      row({ id: "b", claims: [{ field: "treatment", value: "Traction performed at 62 lbs", excerpt: "y" }] }),
+      row({ id: "a", segmentKey: "note-1", claims: [{ field: "subjective", value: "Numbness in the left hand digits", excerpt: "x" }] }),
+      row({ id: "b", segmentKey: "note-1", claims: [{ field: "treatment", value: "Traction performed at 62 lbs", excerpt: "y" }] }),
     ]);
+    expect(merged).toHaveLength(1);
     expect(merged[0].claims.map((c) => c.field).sort()).toEqual(["subjective", "treatment"]);
   });
 
   it("collapses the same fact reworded", () => {
     // "the previous night" and "last night" were two rows of one sentence.
     const merged = mergeRows([
-      row({ id: "a", claims: [{ field: "subjective", value: "Patient reports weakness and pain on the left knee last night", excerpt: "x" }] }),
-      row({ id: "b", claims: [{ field: "subjective", value: "Patient reports weakness and pain on the left knee", excerpt: "y" }] }),
+      row({ id: "a", segmentKey: "note-1", claims: [{ field: "subjective", value: "Patient reports weakness and pain on the left knee last night", excerpt: "x" }] }),
+      row({ id: "b", segmentKey: "note-1", claims: [{ field: "subjective", value: "Patient reports weakness and pain on the left knee", excerpt: "y" }] }),
     ]);
     expect(merged[0].claims).toHaveLength(1);
     // The fuller statement survives.
@@ -79,8 +97,8 @@ describe("merging loses no fact", () => {
 
   it("does not collapse two different facts in the same field", () => {
     const merged = mergeRows([
-      row({ id: "a", claims: [{ field: "subjective", value: "Numbness in the left hand digits upon waking", excerpt: "x" }] }),
-      row({ id: "b", claims: [{ field: "subjective", value: "Increased numbness and tingling in the left foot", excerpt: "y" }] }),
+      row({ id: "a", segmentKey: "note-1", claims: [{ field: "subjective", value: "Numbness in the left hand digits upon waking", excerpt: "x" }] }),
+      row({ id: "b", segmentKey: "note-1", claims: [{ field: "subjective", value: "Increased numbness and tingling in the left foot", excerpt: "y" }] }),
     ]);
     expect(merged[0].claims).toHaveLength(2);
   });
@@ -102,7 +120,11 @@ describe("the clinical reading wins over the billing one", () => {
   });
 
   it("records what it merged, so a disagreement stays visible", () => {
-    const merged = mergeRows([row({ id: "a", analysisClass: "THERAPY_COURSE" }), row({ id: "b", analysisClass: "FINANCIAL" })]);
+    const merged = mergeRows([
+      row({ id: "a", segmentKey: "note-1", analysisClass: "THERAPY_COURSE", claims: [{ field: "treatment", value: "Traction at 62 lbs for fifteen minutes", excerpt: "x" }] }),
+      row({ id: "b", segmentKey: "note-1", analysisClass: "FINANCIAL", claims: [{ field: "charge", value: "Traction at 62 lbs for fifteen minutes billed", excerpt: "y" }] }),
+    ]);
+    expect(merged).toHaveLength(1);
     expect(merged[0].mergedClasses.sort()).toEqual(["FINANCIAL", "THERAPY_COURSE"]);
   });
 });
@@ -205,7 +227,7 @@ describe("the same record filed in several documents", () => {
 
 describe("an inherited date is not evidence two rows are one record", () => {
   const bulk = (i: number, status: string) =>
-    row({ id: `b${i}`, dateStatus: status, encounterDate: new Date("2004-10-10T00:00:00Z"),
+    row({ id: `b${i}`, dateStatus: status, segmentKey: "form-1", encounterDate: new Date("2004-10-10T00:00:00Z"),
       claims: [{ field: "documentContent", value: `Form line ${i} recorded on the pre-procedure sheet`, excerpt: `e${i}` }] });
 
   it("keeps a large day as one record, for the writer to paginate", () => {
@@ -221,7 +243,7 @@ describe("an inherited date is not evidence two rows are one record", () => {
     // Date inheritance once pooled 1,218 claims onto a single day. The bound
     // exists only to stop that becoming one unreadable entry.
     const many = Array.from({ length: 30 }, (_, i) =>
-      row({ id: `m${i}`, dateStatus: "INFERRED", encounterDate: new Date("2004-10-10T00:00:00Z"),
+      row({ id: `m${i}`, dateStatus: "INFERRED", segmentKey: "form-1", encounterDate: new Date("2004-10-10T00:00:00Z"),
         claims: Array.from({ length: 40 }, (_, j) => ({ field: "documentContent", value: `Distinct recorded line ${i}-${j} of the form`, excerpt: `e${i}-${j}` })) }),
     );
     const merged = mergeRows(many);
@@ -234,9 +256,10 @@ describe("an inherited date is not evidence two rows are one record", () => {
     expect(merged).toHaveLength(1);
   });
 
-  it("treats a missing dateStatus as documented, for rows written before it existed", () => {
+  it("does not merge two rows on identity evidence they do not have", () => {
+    // No spans, no segment, no claims — nothing but a shared date. Kept apart.
     const merged = mergeRows([row({ id: "a" }), row({ id: "b" })]);
-    expect(merged).toHaveLength(1);
+    expect(merged).toHaveLength(2);
   });
 });
 

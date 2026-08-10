@@ -24,6 +24,7 @@
 import { NON_CLINICAL_CLASSES, type AnalysisClass } from "@/lib/documents/analysisClass";
 import type { SynthClaim } from "@/lib/llm/groundedSynthesis";
 import { spanOf, type PreparedDocument, type RowSpan } from "@/lib/records/rowSpans";
+import { groupByIdentity, timeFromText, type IdentityFacts } from "@/lib/records/encounterIdentity";
 
 export interface MergeableRow {
   id: string;
@@ -37,6 +38,8 @@ export interface MergeableRow {
   substanceClass: string | null;
   /** DOCUMENTED | INFERRED | UNKNOWN | DISPUTED. Governs whether the date may merge rows. */
   dateStatus?: string | null;
+  /** Identity of the note this row came from, when segmentation knows it. */
+  segmentKey?: string | null;
   claims: readonly { field: string; value: string; excerpt: string; page?: number | null; claimType?: string | null }[];
 }
 
@@ -55,6 +58,11 @@ export interface MergedEntry {
   mergedClasses: AnalysisClass[];
   /** Other documents the same record was found in, after cross-document dedupe. */
   alsoInDocumentIds?: string[];
+  /**
+   * Rows that could not be proven the same as this entry, nor proven different.
+   * Surfaced for review rather than silently merged or silently dropped.
+   */
+  possibleDuplicateOf?: string[];
 }
 
 /**
@@ -291,7 +299,32 @@ function spanOfGroup(doc: PreparedDocument, group: readonly MergeableRow[]): Row
   };
 }
 
-/** Group by document and date. */
+/**
+ * What identity is decided from, for one extracted row.
+ *
+ * Time is read out of the row's own claims, because the extraction schema has
+ * no time field: a note stating "seen at 2:15 pm" carries that in the text of a
+ * claim, and it is exactly the signal that separates two visits to the same
+ * clinician on one day.
+ */
+export function identityFactsOf(row: MergeableRow, span: RowSpan | null): IdentityFacts {
+  const text = row.claims.map((c) => `${c.value} ${c.excerpt}`).join("\n");
+  return {
+    id: row.id,
+    sourceDocumentId: row.sourceDocumentId,
+    klass: row.analysisClass,
+    dateIso: row.encounterDate ? row.encounterDate.toISOString().slice(0, 10) : null,
+    dateDocumented: row.dateStatus === "DOCUMENTED",
+    provider: cleanProvider(row.provider),
+    facility: cleanFacilityName(row.facility),
+    time: timeFromText(text),
+    segmentKey: row.segmentKey ?? null,
+    span: span ? { start: span.start, end: span.end } : null,
+    claims: row.claims.map((c) => ({ field: c.field, value: c.value })),
+  };
+}
+
+/** Group by document and date — retained for callers with no document text. */
 function dateGroups(rows: readonly MergeableRow[]): MergeableRow[][] {
   const groups = new Map<string, MergeableRow[]>();
   for (const row of rows) {
@@ -337,13 +370,22 @@ function splitOversized(group: readonly MergeableRow[]): MergeableRow[][] {
  * every row of a 56-page packet on "page 1".
  */
 export function mergeRows(rows: readonly MergeableRow[], doc?: PreparedDocument): MergedEntry[] {
-  const groups: { rows: MergeableRow[]; span: RowSpan | null }[] = dateGroups(rows).map((g) => ({
-    rows: g,
-    span: doc ? spanOfGroup(doc, g) : null,
+  // Identity, not the calendar. Grouping on document plus date merged every
+  // encounter a combined records production happened to record on one day —
+  // the therapy session, the imaging study, the follow-up and the billing for
+  // all of them — into a single entry.
+  const spanByRow = new Map<string, RowSpan | null>();
+  for (const row of rows) spanByRow.set(row.id, doc ? spanOf(doc, row) : null);
+
+  const identified = groupByIdentity(rows, (row) => identityFactsOf(row, spanByRow.get(row.id) ?? null));
+  const groups: { rows: MergeableRow[]; span: RowSpan | null; possibleDuplicateOf: string[] }[] = identified.map((g) => ({
+    rows: g.members,
+    span: doc ? spanOfGroup(doc, g.members) : null,
+    possibleDuplicateOf: g.possibleDuplicateOf,
   }));
 
   const out: MergedEntry[] = [];
-  for (const { rows: wholeGroup, span } of groups) {
+  for (const { rows: wholeGroup, span, possibleDuplicateOf } of groups) {
    for (const group of splitOversized(wholeGroup)) {
     const claims: SynthClaim[] = [];
     let n = 0;
@@ -399,6 +441,7 @@ export function mergeRows(rows: readonly MergeableRow[], doc?: PreparedDocument)
       pageEnd: pages.length ? Math.max(...pages) : null,
       claims,
       mergedClasses: [...new Set(classes.filter(Boolean) as AnalysisClass[])],
+      possibleDuplicateOf,
     });
    }
   }
