@@ -314,10 +314,16 @@ export async function writeEntry(input: EntryInput, opts: WriteOptions = {}): Pr
  * holds the record's opening — what a reviewer scanning a list needs.
  */
 async function writeInPasses(input: EntryInput, opts: WriteOptions): Promise<WrittenEntry> {
-  const passes: WrittenEntry[] = [];
+  // The passes are independent — each sees a different slice of the claims —
+  // so they run together. Sequentially, a record carrying 366 claims took six
+  // minutes of wall-clock, and twenty such records dominated the runtime of an
+  // entire case: 164 entries in two hours, against five seconds for an
+  // ordinary one. Concurrency here changes nothing about the output.
+  const slices: SynthClaim[][] = [];
   for (let at = 0; at < input.claims.length; at += CLAIMS_PER_PASS) {
-    passes.push(await writeOnePass({ ...input, claims: input.claims.slice(at, at + CLAIMS_PER_PASS) }, opts));
+    slices.push(input.claims.slice(at, at + CLAIMS_PER_PASS) as SynthClaim[]);
   }
+  const passes = await Promise.all(slices.map((claims) => writeOnePass({ ...input, claims }, opts)));
   const order = sectionsFor(input.klass, input.claims).map((s) => s.key);
   const merged: WrittenSection[] = [];
   for (const key of order) {
