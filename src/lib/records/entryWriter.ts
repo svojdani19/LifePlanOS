@@ -110,10 +110,33 @@ export function citationFor(pageStart: number | null, pageEnd: number | null): s
 
 // ── What sections this entry can fill ────────────────────────────────────────
 
-/** Sections whose fields this entry has claims for, in the order a plan reads them. */
+/**
+ * Sections whose fields this entry has claims for, in the order a plan reads
+ * them.
+ *
+ * Falls back to a single catch-all section when the contract matches nothing.
+ * Two kinds of record hit that: UNKNOWN, which deliberately has no contract at
+ * all, and a classified record whose claims happen to sit in fields its class
+ * does not list. Bailing out left both of them with no entry to write — a
+ * measured 8 of 44 sampled records produced the unwritten "Unclassified
+ * record — see the cited source page", which is exactly the useless line this
+ * writer exists to stop printing. A record we can state facts about deserves
+ * an entry even when we cannot name its parts.
+ */
 export function sectionsFor(klass: AnalysisClass, claims: readonly SynthClaim[]): SectionSpec[] {
   const have = new Set(claims.map((c) => c.field));
-  return (SECTION_CONTRACT[klass] ?? []).filter((s) => s.fields.some((f) => have.has(f)));
+  const matched = (SECTION_CONTRACT[klass] ?? []).filter((s) => s.fields.some((f) => have.has(f)));
+  if (matched.length) return matched;
+  if (!have.size) return [];
+  return [
+    {
+      key: "record",
+      concept: "other",
+      label: "Record",
+      fields: [...have] as SectionSpec["fields"],
+      header: /(?!)/,
+    },
+  ];
 }
 
 function claimsForSection(spec: SectionSpec, claims: readonly SynthClaim[]): SynthClaim[] {
@@ -249,7 +272,7 @@ export async function writeEntry(input: EntryInput, opts: WriteOptions = {}): Pr
       system,
       messages: [{ role: "user", content: extra ? `${user}\n\n${extra}` : user }],
       temperature: 0,
-      maxTokens: 4_000,
+      maxTokens: 8_000,
     });
     const parsed = writerSchema.safeParse(parseJson(raw));
     if (!parsed.success) return { ok: false as const, reasons: ["output did not match the required schema"] };

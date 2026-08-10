@@ -23,6 +23,7 @@
 
 import type { AnalysisClass } from "@/lib/documents/analysisClass";
 import type { SynthClaim } from "@/lib/llm/groundedSynthesis";
+import { spanOf, type PreparedDocument, type RowSpan } from "@/lib/records/rowSpans";
 
 export interface MergeableRow {
   id: string;
@@ -34,6 +35,8 @@ export interface MergeableRow {
   page: number | null;
   pageEnd: number | null;
   substanceClass: string | null;
+  /** DOCUMENTED | INFERRED | UNKNOWN | DISPUTED. Governs whether the date may merge rows. */
+  dateStatus?: string | null;
   claims: readonly { field: string; value: string; excerpt: string; page?: number | null; claimType?: string | null }[];
 }
 
@@ -50,6 +53,8 @@ export interface MergedEntry {
   claims: SynthClaim[];
   /** Classes seen among the merged rows, when they disagreed. */
   mergedClasses: AnalysisClass[];
+  /** Other documents the same record was found in, after cross-document dedupe. */
+  alsoInDocumentIds?: string[];
 }
 
 /**
@@ -62,9 +67,25 @@ export interface MergedEntry {
  * Spine and Rehabilitation Centers", one per note per day.
  */
 export function mergeKey(row: MergeableRow): string {
-  const date = row.encounterDate ? row.encounterDate.toISOString().slice(0, 10) : `undated:${row.id}`;
-  return `${row.sourceDocumentId}::${date}`;
+  if (!row.encounterDate) return `${row.sourceDocumentId}::undated:${row.id}`;
+  return `${row.sourceDocumentId}::${row.encounterDate.toISOString().slice(0, 10)}`;
 }
+
+/**
+ * How much one entry may hold before it stops being one record.
+ *
+ * Date inheritance assigns a document's dated section to the undated rows
+ * around it, and on one real document that pooled ninety rows carrying 1,218
+ * claims onto a single day — a whole packet collapsed into one "visit", from
+ * which no entry could be composed.
+ *
+ * Refusing to merge inherited dates at all was the wrong correction: it turned
+ * 720 entries into 1,376, which is the same "more records than documents"
+ * complaint in the other direction. So groups merge as normal and only an
+ * oversized one is split, in document order, into parts that are each a
+ * plausible record.
+ */
+export const MAX_CLAIMS_PER_ENTRY = 80;
 
 /**
  * Which class wins when merged rows disagree.
@@ -195,15 +216,127 @@ function preferLonger(a: SynthClaim, b: SynthClaim): SynthClaim {
   return b.value.length > a.value.length ? b : a;
 }
 
-export function mergeRows(rows: readonly MergeableRow[]): MergedEntry[] {
+/**
+ * Fold entries that are the same record filed in more than one document.
+ *
+ * A case file is not a set of distinct records: the same operative report is
+ * bound into the hospital packet, faxed to the surgeon's office, and attached
+ * to a billing affidavit. A real chronology showed 10/10/2004 four times with
+ * near-identical text, one per PDF the record happened to appear in, which is
+ * the same "more records than documents" complaint one level up from chunking.
+ *
+ * Same date and substantially the same content is the test. Provider is NOT
+ * required to match — the same record often carries a different byline in each
+ * copy, sometimes an OCR variant of one name ("Girish Gidwani" and "Girlsh
+ * Gidwani"). The surviving entry keeps the richest copy and records every
+ * document it was found in, so a reviewer can still reach any of them.
+ */
+export function dedupeAcrossDocuments(entries: readonly MergedEntry[]): MergedEntry[] {
+  const kept: MergedEntry[] = [];
+  for (const entry of entries) {
+    const date = entry.encounterDate?.getTime();
+    const twin = date
+      ? kept.find(
+          (k) =>
+            k.encounterDate?.getTime() === date &&
+            k.sourceDocumentId !== entry.sourceDocumentId &&
+            contentOverlap(k, entry) >= 0.6,
+        )
+      : undefined;
+    if (!twin) {
+      kept.push({ ...entry });
+      continue;
+    }
+    // Keep whichever copy states more, and absorb the other's provenance.
+    const richer = entry.claims.length > twin.claims.length ? entry : twin;
+    const poorer = richer === twin ? entry : twin;
+    Object.assign(twin, {
+      ...richer,
+      rowIds: [...twin.rowIds, ...entry.rowIds],
+      provider: richer.provider ?? poorer.provider,
+      facility: richer.facility ?? poorer.facility,
+      alsoInDocumentIds: [...new Set([...(twin.alsoInDocumentIds ?? []), poorer.sourceDocumentId])],
+    });
+  }
+  return kept;
+}
+
+/** Share of the smaller entry's claims that the larger one also states. */
+function contentOverlap(a: MergedEntry, b: MergedEntry): number {
+  const [small, large] = a.claims.length <= b.claims.length ? [a, b] : [b, a];
+  if (!small.claims.length) return 0;
+  let hits = 0;
+  for (const c of small.claims) if (isDuplicateClaim(c, large.claims)) hits++;
+  return hits / small.claims.length;
+}
+
+/** The page range a whole group covers, resolved from the document's markers. */
+function spanOfGroup(doc: PreparedDocument, group: readonly MergeableRow[]): RowSpan | null {
+  const spans = group.map((r) => spanOf(doc, r)).filter((s): s is RowSpan => !!s);
+  if (!spans.length) return null;
+  const pages = spans.flatMap((s) => [s.pageStart, s.pageEnd]).filter((n): n is number => typeof n === "number");
+  return {
+    start: Math.min(...spans.map((s) => s.start)),
+    end: Math.max(...spans.map((s) => s.end)),
+    pageStart: pages.length ? Math.min(...pages) : null,
+    pageEnd: pages.length ? Math.max(...pages) : null,
+  };
+}
+
+/** Group by document and date. */
+function dateGroups(rows: readonly MergeableRow[]): MergeableRow[][] {
   const groups = new Map<string, MergeableRow[]>();
   for (const row of rows) {
     const key = mergeKey(row);
     groups.set(key, [...(groups.get(key) ?? []), row]);
   }
+  return [...groups.values()];
+}
+
+/** Break a group that carries more than one record's worth of claims. */
+function splitOversized(group: readonly MergeableRow[]): MergeableRow[][] {
+  const total = group.reduce((n, r) => n + r.claims.length, 0);
+  if (total <= MAX_CLAIMS_PER_ENTRY || group.length < 2) return [[...group]];
+  const parts: MergeableRow[][] = [];
+  let current: MergeableRow[] = [];
+  let count = 0;
+  for (const row of group) {
+    if (current.length && count + row.claims.length > MAX_CLAIMS_PER_ENTRY) {
+      parts.push(current);
+      current = [];
+      count = 0;
+    }
+    current.push(row);
+    count += row.claims.length;
+  }
+  if (current.length) parts.push(current);
+  return parts;
+}
+
+/**
+ * Merge a document's rows into records.
+ *
+ * Grouped by document and date. Grouping by where the rows SIT in the document
+ * was tried and measured worse on both counts that matter: 1,181 entries at
+ * 44% unwritable against 720 at 14%. About a fifth of rows cannot be located
+ * in their own source at all — their excerpts do not match the OCR'd text —
+ * and every one of those became a single-row record too thin to compose an
+ * entry from. Position is the better idea and the wrong one to act on until
+ * excerpt matching survives degraded scans.
+ *
+ * The document is still used, for the one thing offsets do reliably: telling
+ * us which page a record is actually on, where the recorded page numbers put
+ * every row of a 56-page packet on "page 1".
+ */
+export function mergeRows(rows: readonly MergeableRow[], doc?: PreparedDocument): MergedEntry[] {
+  const groups: { rows: MergeableRow[]; span: RowSpan | null }[] = dateGroups(rows).map((g) => ({
+    rows: g,
+    span: doc ? spanOfGroup(doc, g) : null,
+  }));
 
   const out: MergedEntry[] = [];
-  for (const group of groups.values()) {
+  for (const { rows: wholeGroup, span } of groups) {
+   for (const group of splitOversized(wholeGroup)) {
     const claims: SynthClaim[] = [];
     let n = 0;
     for (const row of group) {
@@ -234,14 +367,22 @@ export function mergeRows(rows: readonly MergeableRow[]): MergedEntry[] {
       }
     }
 
-    const pages = group.flatMap((r) => [r.page, r.pageEnd]).filter((p): p is number => typeof p === "number" && p > 0);
+    // Pages resolved from the text's own offsets beat the recorded ones, which
+    // a 56-page packet reported as "page 1" on every row.
+    const pages = span?.pageStart
+      ? [span.pageStart, span.pageEnd ?? span.pageStart]
+      : group.flatMap((r) => [r.page, r.pageEnd]).filter((p): p is number => typeof p === "number" && p > 0);
     const classes = group.map((r) => r.analysisClass);
 
     out.push({
       rowIds: group.map((r) => r.id),
       sourceDocumentId: group[0].sourceDocumentId,
       klass: dominantClass(classes),
-      encounterDate: group.find((r) => r.encounterDate)?.encounterDate ?? null,
+      // A date the record states outranks one it inherited from a neighbour.
+      encounterDate:
+        group.find((r) => r.encounterDate && r.dateStatus === "DOCUMENTED")?.encounterDate ??
+        group.find((r) => r.encounterDate)?.encounterDate ??
+        null,
       // A provider named by ANY row governs the merged entry: the name usually
       // appears in one chunk and is absent from the rest of the same note.
       provider: group.map((r) => cleanProvider(r.provider)).find(Boolean) ?? null,
@@ -251,6 +392,7 @@ export function mergeRows(rows: readonly MergeableRow[]): MergedEntry[] {
       claims,
       mergedClasses: [...new Set(classes.filter(Boolean) as AnalysisClass[])],
     });
+   }
   }
 
   return out.sort((a, b) => (a.encounterDate?.getTime() ?? 0) - (b.encounterDate?.getTime() ?? 0));

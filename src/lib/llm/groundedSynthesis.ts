@@ -54,6 +54,26 @@ export interface SynthesisResult {
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
 
+/**
+ * A figure as it would be written without its formatting.
+ *
+ * "$11,733.30", "11733.30" and "11,733.3" are the same amount; "62 lbs" and
+ * "62lbs" are the same weight. Thousands separators and trailing zeros are
+ * presentation, not content, and treating them as content made the verifier
+ * reject prose that had quoted its own claim correctly.
+ */
+function canonicalNumber(raw: string): string {
+  const cleaned = raw.replace(/,/g, "");
+  if (!cleaned.includes(".")) return cleaned.replace(/^0+(?=\d)/, "");
+  return cleaned.replace(/0+$/, "").replace(/\.$/, "").replace(/^0+(?=\d)/, "");
+}
+
+/** Every figure the cited claims contain, canonicalised, as a searchable set. */
+function digitsOf(text: string): string {
+  const found = text.match(/\b\d+(?:[.,]\d+)*\b/g) ?? [];
+  return ` ${found.map(canonicalNumber).join(" ")} `;
+}
+
 const LATERALITY_RE = /\b(left|right|bilateral)\b/gi;
 const DATE_RE = /\b\d{1,2}[/.-]\d{1,2}[/.-]\d{2,4}\b|\b\d{4}-\d{2}-\d{2}\b/g;
 
@@ -78,8 +98,16 @@ export function checkSentence(sentence: string, claimIds: string[], byId: Map<st
     if (!support.includes(norm(d))) return "introduces a date the cited claims do not contain";
   }
   // No new numbers (dosages, measurements, counts).
-  for (const n of sentence.match(/\b\d+(?:\.\d+)?\b/g) ?? []) {
-    if (!support.includes(` ${n} `) && !support.startsWith(`${n} `) && !support.endsWith(` ${n}`) && !support.includes(n)) {
+  //
+  // Compared on a digit-preserving normalization rather than the general one:
+  // `norm` strips punctuation, so "$11,733.30" in a claim became "11 733 30"
+  // and the decimal figure could never be found again. Every billing entry in
+  // a real case was rejected for "introducing" a figure quoted straight out of
+  // its own claim, and the entry fell back to an unwritten rendering.
+  const numericSupport = digitsOf(cited.map((c) => `${c.value} ${c.excerpt}`).join(" "));
+  for (const n of sentence.match(/\b\d+(?:[.,]\d+)*\b/g) ?? []) {
+    // Padded on both sides so "3" does not match inside "733".
+    if (!numericSupport.includes(` ${canonicalNumber(n)} `)) {
       return `introduces the figure "${n}" that the cited claims do not contain`;
     }
   }

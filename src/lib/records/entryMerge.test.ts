@@ -1,11 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   cleanFacilityName,
+  dedupeAcrossDocuments,
   cleanProvider,
   dominantClass,
   isDuplicateClaim,
   mergeKey,
   mergeRows,
+  MAX_CLAIMS_PER_ENTRY,
   pageAttributionUsable,
   type MergeableRow,
 } from "@/lib/records/entryMerge";
@@ -154,5 +156,76 @@ describe("citing a page only when the page is real", () => {
 
   it("refuses when no row carries a page at all", () => {
     expect(pageAttributionUsable([row({ page: null, pageEnd: null })], 56)).toBe(false);
+  });
+});
+
+describe("the same record filed in several documents", () => {
+  const claimsA = [
+    { field: "procedure", value: "Pre-procedural assessment for sedation procedure", excerpt: "x" },
+    { field: "assessment", value: "Sedation planned under monitored anesthesia care", excerpt: "y" },
+  ];
+  const entryIn = (docId: string, extra: typeof claimsA = []) =>
+    row({ id: `r-${docId}`, sourceDocumentId: docId, encounterDate: new Date("2004-10-10T00:00:00Z"), claims: [...claimsA, ...extra] });
+
+  it("folds copies of one record bound into four PDFs", () => {
+    // A real chronology showed 10/10/2004 four times, one per document the
+    // same pre-procedure form happened to be filed in.
+    const merged = mergeRows([entryIn("d1"), entryIn("d2"), entryIn("d3"), entryIn("d4")]);
+    expect(merged).toHaveLength(4);
+    const deduped = dedupeAcrossDocuments(merged);
+    expect(deduped).toHaveLength(1);
+    expect(deduped[0].alsoInDocumentIds).toHaveLength(3);
+  });
+
+  it("keeps the copy that states more", () => {
+    const deduped = dedupeAcrossDocuments(
+      mergeRows([entryIn("d1"), entryIn("d2", [{ field: "medications", value: "Midazolam 2 mg administered intravenously", excerpt: "z" }])]),
+    );
+    expect(deduped).toHaveLength(1);
+    expect(deduped[0].claims.some((c) => c.field === "medications")).toBe(true);
+  });
+
+  it("does not fold two genuinely different records on one date", () => {
+    // A surgery and the anaesthesia record share a date and are not the same
+    // document; folding them would delete one of them from the timeline.
+    const surgery = row({ id: "s", sourceDocumentId: "d1", encounterDate: new Date("2024-03-15T00:00:00Z"),
+      claims: [{ field: "procedure", value: "L2-S1 bilateral laminectomy, facetectomy and foraminotomy", excerpt: "a" }] });
+    const anesthesia = row({ id: "a", sourceDocumentId: "d2", encounterDate: new Date("2024-03-15T00:00:00Z"),
+      claims: [{ field: "medications", value: "Total charge billed: $11,000.00 for anesthesia services", excerpt: "b" }] });
+    expect(dedupeAcrossDocuments(mergeRows([surgery, anesthesia]))).toHaveLength(2);
+  });
+
+  it("never folds undated entries", () => {
+    const a = row({ id: "a", sourceDocumentId: "d1", encounterDate: null, claims: claimsA });
+    const b = row({ id: "b", sourceDocumentId: "d2", encounterDate: null, claims: claimsA });
+    expect(dedupeAcrossDocuments(mergeRows([a, b]))).toHaveLength(2);
+  });
+});
+
+describe("an inherited date is not evidence two rows are one record", () => {
+  const bulk = (i: number, status: string) =>
+    row({ id: `b${i}`, dateStatus: status, encounterDate: new Date("2004-10-10T00:00:00Z"),
+      claims: [{ field: "documentContent", value: `Form line ${i} recorded on the pre-procedure sheet`, excerpt: `e${i}` }] });
+
+  it("splits a group that holds more than one record's worth of claims", () => {
+    // Date inheritance smeared one date across a document: ninety rows and
+    // 1,218 claims merged into a single "record" the writer could not compose.
+    // Refusing to merge inherited dates at all produced 1,376 entries where
+    // 720 was already too many, so oversized groups are split instead.
+    const rows = Array.from({ length: 90 }, (_, i) => bulk(i, "INFERRED"));
+    const merged = mergeRows(rows);
+    expect(merged.length).toBeGreaterThan(1);
+    expect(merged.length).toBeLessThan(90);
+    for (const m of merged) expect(m.claims.length).toBeLessThanOrEqual(MAX_CLAIMS_PER_ENTRY);
+  });
+
+  it("still merges an ordinary visit into one entry", () => {
+    const merged = mergeRows(Array.from({ length: 14 }, (_, i) => bulk(i, "DOCUMENTED")));
+    expect(merged).toHaveLength(1);
+  });
+
+  it("treats a missing dateStatus as documented, for rows written before it existed", () => {
+    const merged = mergeRows([row({ id: "a" }), row({ id: "b" })]);
+    expect(merged).toHaveLength(1);
   });
 });
