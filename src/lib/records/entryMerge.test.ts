@@ -207,15 +207,24 @@ describe("an inherited date is not evidence two rows are one record", () => {
     row({ id: `b${i}`, dateStatus: status, encounterDate: new Date("2004-10-10T00:00:00Z"),
       claims: [{ field: "documentContent", value: `Form line ${i} recorded on the pre-procedure sheet`, excerpt: `e${i}` }] });
 
-  it("splits a group that holds more than one record's worth of claims", () => {
-    // Date inheritance smeared one date across a document: ninety rows and
-    // 1,218 claims merged into a single "record" the writer could not compose.
-    // Refusing to merge inherited dates at all produced 1,376 entries where
-    // 720 was already too many, so oversized groups are split instead.
-    const rows = Array.from({ length: 90 }, (_, i) => bulk(i, "INFERRED"));
-    const merged = mergeRows(rows);
+  it("keeps a large day as one record, for the writer to paginate", () => {
+    // Ninety rows on one inherited date is a lot of text but still one record
+    // to a reviewer. Splitting it to fit the prompt turned 1,111 entries into
+    // 1,684 and broke visits apart; a large record is written in passes.
+    const merged = mergeRows(Array.from({ length: 90 }, (_, i) => bulk(i, "INFERRED")));
+    expect(merged).toHaveLength(1);
+    expect(merged[0].claims.length).toBeGreaterThan(35);
+  });
+
+  it("still splits a pathological group", () => {
+    // Date inheritance once pooled 1,218 claims onto a single day. The bound
+    // exists only to stop that becoming one unreadable entry.
+    const many = Array.from({ length: 30 }, (_, i) =>
+      row({ id: `m${i}`, dateStatus: "INFERRED", encounterDate: new Date("2004-10-10T00:00:00Z"),
+        claims: Array.from({ length: 40 }, (_, j) => ({ field: "documentContent", value: `Distinct recorded line ${i}-${j} of the form`, excerpt: `e${i}-${j}` })) }),
+    );
+    const merged = mergeRows(many);
     expect(merged.length).toBeGreaterThan(1);
-    expect(merged.length).toBeLessThan(90);
     for (const m of merged) expect(m.claims.length).toBeLessThanOrEqual(MAX_CLAIMS_PER_ENTRY);
   });
 

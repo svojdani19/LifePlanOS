@@ -264,7 +264,57 @@ export interface WriteOptions {
  * Compose one chronology entry. One corrective retry against the specific
  * verification failures, then the deterministic fallback.
  */
+/**
+ * How many claims the writer is given at once.
+ *
+ * Not a limit on the record — a limit on the prompt. At eighty claims a fifth
+ * of entries came back malformed and each took twenty-five seconds; at
+ * thirty-five they succeed and take five. Splitting the RECORD to satisfy that
+ * was the wrong fix: it turned 1,111 entries into 1,684 and fragmented visits
+ * a reviewer reads as one. A large record is written in passes and reassembled
+ * into the single entry it always was.
+ */
+export const CLAIMS_PER_PASS = 35;
+
 export async function writeEntry(input: EntryInput, opts: WriteOptions = {}): Promise<WrittenEntry> {
+  if (input.claims.length > CLAIMS_PER_PASS) return writeInPasses(input, opts);
+  return writeOnePass(input, opts);
+}
+
+/**
+ * Write a large record in passes and reassemble it.
+ *
+ * Each pass sees a slice of the claims in document order and writes the
+ * sections that slice supports; the parts are then joined section by section,
+ * in the order a plan reads them. The brief comes from the first pass, which
+ * holds the record's opening — what a reviewer scanning a list needs.
+ */
+async function writeInPasses(input: EntryInput, opts: WriteOptions): Promise<WrittenEntry> {
+  const passes: WrittenEntry[] = [];
+  for (let at = 0; at < input.claims.length; at += CLAIMS_PER_PASS) {
+    passes.push(await writeOnePass({ ...input, claims: input.claims.slice(at, at + CLAIMS_PER_PASS) }, opts));
+  }
+  const order = sectionsFor(input.klass, input.claims).map((s) => s.key);
+  const merged: WrittenSection[] = [];
+  for (const key of order) {
+    const parts = passes.flatMap((p) => p.sections.filter((s) => s.key === key && s.text));
+    if (!parts.length) continue;
+    merged.push({ key, label: parts[0].label, text: parts.map((p) => p.text).join(" "), gap: null });
+  }
+  const written = passes.filter((p) => !p.fallback);
+  return {
+    heading: passes[0].heading,
+    brief: (written[0] ?? passes[0]).brief,
+    sections: merged.length ? merged : passes[0].sections,
+    citation: passes[0].citation,
+    sentenceClaimMap: Object.assign({}, ...passes.map((p) => p.sentenceClaimMap)),
+    // The record is unwritten only when no pass could be written.
+    fallback: !written.length,
+    rejections: passes.flatMap((p) => p.rejections),
+  };
+}
+
+async function writeOnePass(input: EntryInput, opts: WriteOptions = {}): Promise<WrittenEntry> {
   const specs = sectionsFor(input.klass, input.claims);
   const heading = headingFor(input);
   const citation = citationFor(input.pageStart, input.pageEnd);

@@ -85,13 +85,15 @@ export function mergeKey(row: MergeableRow): string {
  * oversized one is split, in document order, into parts that are each a
  * plausible record.
  *
- * The bound is what the writer can actually compose, not a guess. At 80 claims
- * a fifth of entries came back as malformed output — the model could not
- * finish an entry that large — and each took some twenty-five seconds. A real
- * visit is documented in a few dozen facts; a group holding more than that is
- * a packet, not a record.
+ * The bound is deliberately loose. It exists only to stop a pathological group
+ * — date inheritance once pooled ninety rows and 1,218 claims onto one day —
+ * from becoming a single unreadable entry. What the WRITER can compose in one
+ * pass is a separate and much smaller number, handled by writing a large
+ * record in passes rather than by splitting the record itself; splitting to
+ * suit the prompt turned 1,111 entries into 1,684 and broke visits a reviewer
+ * reads as one.
  */
-export const MAX_CLAIMS_PER_ENTRY = 35;
+export const MAX_CLAIMS_PER_ENTRY = 400;
 
 /**
  * Which class wins when merged rows disagree.
