@@ -78,7 +78,7 @@ async function main() {
   const db = new PrismaClient();
   const theCase = await db.case.findFirst({
     where: { OR: [{ id: target }, { caseNumber: target }] },
-    select: { id: true, caseNumber: true },
+    select: { id: true, caseNumber: true, clientName: true },
   });
   if (!theCase) {
     console.error(`no case matching ${target}`);
@@ -105,7 +105,12 @@ async function main() {
     if (!rows.length) continue;
     rowCount += rows.length;
 
-    const entries = consolidateIntoNotes(mergeRows(rows, prepareDocument(doc.extractedText ?? "")));
+    const entries = consolidateIntoNotes(mergeRows(rows, prepareDocument(doc.extractedText ?? "")), {
+      // A patient is never the author of their own note, and the extractor
+      // sometimes reads their name off the chart header instead of the
+      // clinician's.
+      patientName: theCase.clientName,
+    });
     // Offsets resolve real pages, so a citation no longer depends on the
     // recorded page number, which one packet reported as "page 1" throughout.
     citable.set(doc.id, entries.some((e) => e.pageStart) || pageAttributionUsable(rows, doc.pageCount));

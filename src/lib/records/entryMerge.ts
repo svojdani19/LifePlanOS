@@ -637,6 +637,59 @@ export function providerKey(raw: string | null | undefined): string | null {
   return `${surname}|${initial}`;
 }
 
+/**
+ * The same author, once OCR has had its way with the name.
+ *
+ * A scanned chart yielded "Techy. Femando" — the comma of a surname-first
+ * listing read as a full stop, the given name misread — and "DR. FTECHY", with
+ * the title run into the surname. Each became an author of its own, so one
+ * operation appeared three times on the timeline under three surgeons who were
+ * all the same man.
+ *
+ * Both rules are confined to a single document and date, which is what makes
+ * them safe: within one admission the candidates are a handful of named people,
+ * not the whole case.
+ */
+function sameAuthorAllowingOcr(a: string, b: string): boolean {
+  if (sameAuthor(a, b)) return true;
+  if (a.startsWith("ORG|") || b.startsWith("ORG|")) return false;
+
+  // "Techy. Femando" keys as FEMANDO|T; read the other way round it is TECHY|F.
+  const [surnameA, initialA] = a.split("|");
+  const [surnameB, initialB] = b.split("|");
+  if (initialA && surnameB.startsWith(initialA) && surnameA.startsWith(initialB || surnameA[0])) {
+    if (sameAuthor(`${surnameB}|${surnameA[0]}`, b)) return true;
+  }
+
+  // "FTECHY" against "TECHY". Long surnames only: at four characters an edit
+  // apart is as likely to be two people as one.
+  if (surnameA.length >= 5 && surnameB.length >= 5 && withinOneEdit(surnameA, surnameB)) {
+    return !initialA || !initialB || initialA === initialB;
+  }
+  return false;
+}
+
+/** Are these one insertion, deletion or substitution apart? */
+function withinOneEdit(a: string, b: string): boolean {
+  if (a === b) return true;
+  if (Math.abs(a.length - b.length) > 1) return false;
+  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
+  let i = 0;
+  let j = 0;
+  let edits = 0;
+  while (i < shorter.length && j < longer.length) {
+    if (shorter[i] === longer[j]) {
+      i++;
+      j++;
+      continue;
+    }
+    if (++edits > 1) return false;
+    if (shorter.length === longer.length) i++;
+    j++;
+  }
+  return true;
+}
+
 /** Do two author keys name the same person, treating an absent initial as unknown? */
 function sameAuthor(a: string, b: string): boolean {
   // An organisation matches only itself; it never absorbs a person.
@@ -665,7 +718,24 @@ export const NOTE_REACH = 12_000;
  * provider belongs to the nearest note that has one. Grouping is confined to a
  * single document and a single date: a date alone still merges nothing.
  */
-export function consolidateIntoNotes(entries: readonly MergedEntry[]): MergedEntry[] {
+export interface ConsolidateOptions {
+  /**
+   * The person the records are about.
+   *
+   * A chart header prints the patient's name beside the author's, and the
+   * extractor sometimes reads the wrong one — "MCMENRY, DERRICK" arrived as the
+   * provider on an admission evaluation. A patient is never the author of their
+   * own note, and letting them key as one collects unrelated records from every
+   * clinician who saw them into a single fictitious author.
+   */
+  patientName?: string | null;
+}
+
+export function consolidateIntoNotes(
+  entries: readonly MergedEntry[],
+  options: ConsolidateOptions = {},
+): MergedEntry[] {
+  const patient = providerKey(options.patientName);
   const buckets = new Map<string, MergedEntry[]>();
   for (const e of entries) {
     const key = `${e.sourceDocumentId}|${e.encounterDate?.toISOString().slice(0, 10) ?? "undated"}`;
@@ -681,11 +751,13 @@ export function consolidateIntoNotes(entries: readonly MergedEntry[]): MergedEnt
 
     for (const e of bucket) {
       const key = providerKey(e.provider);
-      if (!key) {
+      // An unattributed fragment is honest; one attributed to the patient is
+      // not, so it is treated as carrying no author at all.
+      if (!key || (patient && sameAuthor(key, patient))) {
         orphans.push(e);
         continue;
       }
-      const existing = notes.find((n) => sameAuthor(n.key, key));
+      const existing = notes.find((n) => sameAuthorAllowingOcr(n.key, key));
       if (existing) {
         existing.members.push(e);
         existing.span = widen(existing.span, e.span ?? null);
@@ -906,9 +978,25 @@ export interface MaterialityVerdict {
  * Immaterial records are NOT discarded — they stay in the records list, where a
  * reviewer can open them. They are kept off the timeline.
  */
+/**
+ * A lone measurement, standing as an entire record.
+ *
+ * "Height documented at 5'4"." reached the timeline as an event in its own
+ * right, dated to the morning of a four-level laminectomy. A biometric is
+ * something a record contains, not something that happened to the patient, and
+ * on its own it says nothing about the course of care.
+ */
+const MEASUREMENT_ONLY =
+  /^(?:\W*(?:patient|pt)\b\W*)?(?:height|weight|body mass index|bmi|body surface area|bsa)\b[^.]*\.?$/i;
+
 export function chronologyMateriality(entry: MergedEntry): MaterialityVerdict {
   const text = entry.claims.map((c) => c.value).join(" ");
   if (!entry.claims.length) return { material: false, reason: "NO_CONTENT" };
+
+  // One claim, and that claim a biometric: there is no event here to place.
+  if (entry.claims.length === 1 && MEASUREMENT_ONLY.test(entry.claims[0].value.trim())) {
+    return { material: false, reason: "MEASUREMENT_ONLY" };
+  }
 
   const clinical = entry.claims.filter((c) => CLINICAL_ASSERTION_FIELDS.has(c.field));
   if (!clinical.length) return { material: false, reason: "NO_CLINICAL_ASSERTION" };

@@ -410,6 +410,24 @@ describe("what belongs on the medical chronology", () => {
     expect(v.reason).toBe("NO_CLINICAL_ASSERTION");
   });
 
+  it("keeps a lone biometric off the timeline", () => {
+    // This reached the timeline as an event dated to the morning of a
+    // four-level laminectomy.
+    const v = chronologyMateriality(timeline("CLINICAL_ENCOUNTER", [["objectiveFindings", "Height documented at 5'4\"."]]));
+    expect(v.material).toBe(false);
+    expect(v.reason).toBe("MEASUREMENT_ONLY");
+  });
+
+  it("keeps a measurement that comes with an assessment", () => {
+    const v = chronologyMateriality(
+      timeline("CLINICAL_ENCOUNTER", [
+        ["objectiveFindings", "Weight 210 lbs"],
+        ["assessment", "Morbid obesity contributing to delayed wound healing"],
+      ]),
+    );
+    expect(v.material).toBe(true);
+  });
+
   it("keeps a discharge on the timeline", () => {
     expect(
       chronologyMateriality(timeline("CLINICAL_ENCOUNTER", [["disposition", "Discharged home with home health"]])).material,
@@ -453,6 +471,47 @@ describe("who signed the note", () => {
     expect(providerKey(null)).toBeNull();
     expect(providerKey("")).toBeNull();
     expect(providerKey("Osly")).toBeNull();
+  });
+});
+
+describe("names the chart got wrong", () => {
+  const at = (start: number, provider: string | null, value: string) =>
+    mergeRows([row({ id: `r${start}`, provider, claims: [{ field: "assessment", value, excerpt: `e${start}` }] })]).map(
+      (e) => ({ ...e, span: { start, end: start + 500, pageStart: null, pageEnd: null } }),
+    )[0];
+
+  it("folds an OCR-mangled name into the author it belongs to", () => {
+    // "Techy. Femando" is a surname-first listing whose comma scanned as a full
+    // stop; "DR. FTECHY" ran the title into the surname. Both were separate
+    // surgeons performing the same operation.
+    const notes = consolidateIntoNotes([
+      at(0, "FERNANDO TECHY, MD", "Bilateral lumbar laminectomy L2-S1 performed"),
+      at(600, "Techy. Femando", "Intraoperative fluoroscopy, total time 3 seconds"),
+      at(1_200, "DR. FTECHY", "Estimated blood loss 150 mL"),
+    ]);
+    expect(notes).toHaveLength(1);
+  });
+
+  it("does not fold two genuinely different authors on a short surname", () => {
+    const notes = consolidateIntoNotes([
+      at(0, "Alan Ross, MD", "Assessment recorded"),
+      at(600, "Alan Rose, MD", "Assessment recorded separately"),
+    ]);
+    expect(notes).toHaveLength(2);
+  });
+
+  it("refuses to make the patient the author of their own note", () => {
+    // The extractor read the patient's name off a chart header. Left alone it
+    // collects records from every clinician who saw them under one author.
+    const notes = consolidateIntoNotes(
+      [
+        at(0, "Fernando Techy, MD", "Laminectomy performed"),
+        at(600, "MCHENRY, DERRICK", "Admission evaluation for prolapsed lumbar disc"),
+      ],
+      { patientName: "Derrick McHenry" },
+    );
+    expect(notes).toHaveLength(1);
+    expect(notes[0].provider).toBe("Fernando Techy, MD");
   });
 });
 
