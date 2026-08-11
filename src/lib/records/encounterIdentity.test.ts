@@ -323,3 +323,53 @@ describe("reading identity facts out of text", () => {
     expect(compareFacility("Houston Spine and Rehabilitation Centers", "The Houston Spine & Rehab Center, LLC")).toBe("SAME");
   });
 });
+
+describe("consecutive chunks of one note", () => {
+  const chunk = (id: string, start: number, end: number, ...values: string[]) =>
+    facts({
+      id, span: { start, end },
+      claims: values.map((value, i) => claim(i === 0 ? "treatment" : "subjective", value)),
+    });
+
+  it("merges chunks that abut rather than overlap", () => {
+    // Extraction reads a document in chunks, and consecutive chunks of one note
+    // ABUT. Treating every non-overlap as a conflict split one chiropractic
+    // visit into five chronology entries, each describing the same traction.
+    const d = decideIdentity(
+      chunk("a", 1_000, 2_000, "Lumbar traction performed at sixty two pounds for fifteen minutes"),
+      chunk("b", 2_050, 3_000, "Lumbar traction performed at sixty two pounds for fifteen minutes"),
+    );
+    expect(d.verdict).toBe("MERGE");
+    expect(d.reasons).toContain("SPANS_NEARBY");
+  });
+
+  it("still keeps two notes a page apart separate", () => {
+    const d = decideIdentity(
+      chunk("a", 1_000, 2_000, "Lumbar traction performed at sixty two pounds for fifteen minutes"),
+      chunk("b", 20_000, 21_000, "Lumbar traction performed at sixty two pounds for fifteen minutes"),
+    );
+    expect(d.verdict).toBe("KEEP_SEPARATE");
+    expect(d.reasons).toContain("SPANS_DISJOINT");
+  });
+
+  it("does not merge adjacent chunks that share nothing distinctive", () => {
+    // Proximity alone is not identity — two notes can sit back to back.
+    const d = decideIdentity(
+      chunk("a", 1_000, 2_000, "Lumbar traction performed at sixty two pounds"),
+      chunk("b", 2_050, 3_000, "Left shoulder injection administered under ultrasound guidance"),
+    );
+    expect(d.verdict).not.toBe("MERGE");
+  });
+
+  it("a conflict still outranks adjacency", () => {
+    const a = { ...chunk("a", 1_000, 2_000, "Lumbar traction performed at sixty two pounds"), provider: "Michael Crone, DC" };
+    const b = { ...chunk("b", 2_050, 3_000, "Lumbar traction performed at sixty two pounds"), provider: "Fernando Techy, M.D." };
+    expect(decideIdentity(a, b).verdict).toBe("KEEP_SEPARATE");
+  });
+
+  it("classifies the span relation three ways", () => {
+    expect(compareSpans({ start: 0, end: 100 }, { start: 50, end: 200 })).toBe("OVERLAP");
+    expect(compareSpans({ start: 0, end: 100 }, { start: 150, end: 300 })).toBe("NEARBY");
+    expect(compareSpans({ start: 0, end: 100 }, { start: 30_000, end: 30_100 })).toBe("DISJOINT");
+  });
+});

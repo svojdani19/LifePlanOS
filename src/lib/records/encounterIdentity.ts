@@ -269,7 +269,23 @@ function sharedSpecificProcedure(a: Set<string>, b: Set<string>): string | null 
 
 // ── Spans ────────────────────────────────────────────────────────────────────
 
-export type SpanRelation = "OVERLAP" | "DISJOINT" | "UNKNOWN";
+export type SpanRelation = "OVERLAP" | "NEARBY" | "DISJOINT" | "UNKNOWN";
+
+/**
+ * How far apart two passages may sit and still be the same note.
+ *
+ * Extraction reads a document in chunks, and consecutive chunks of one note
+ * ABUT rather than overlap. Treating every non-overlap as a conflict therefore
+ * forced apart exactly the fragments the merge exists to join: one chiropractic
+ * visit came back as five chronology entries, each describing the same traction
+ * at 62 lbs, because its chunks did not happen to share a character.
+ *
+ * A gap inside this window is not evidence of anything — it makes the spans
+ * NEARBY, which neither proves nor disproves identity and leaves the decision
+ * to provider, time, class and distinctive content. Only a gap wider than a
+ * note is a conflict.
+ */
+export const SAME_NOTE_GAP = 2_500;
 
 /**
  * How two fragments' source text relates.
@@ -282,7 +298,9 @@ export type SpanRelation = "OVERLAP" | "DISJOINT" | "UNKNOWN";
  */
 export function compareSpans(a: IdentitySpan | null, b: IdentitySpan | null): SpanRelation {
   if (!a || !b) return "UNKNOWN";
-  return a.start <= b.end && b.start <= a.end ? "OVERLAP" : "DISJOINT";
+  if (a.start <= b.end && b.start <= a.end) return "OVERLAP";
+  const gap = Math.max(a.start, b.start) - Math.min(a.end, b.end);
+  return gap <= SAME_NOTE_GAP ? "NEARBY" : "DISJOINT";
 }
 
 // ── The decision ─────────────────────────────────────────────────────────────
@@ -337,8 +355,11 @@ export function decideIdentity(a: IdentityFacts, b: IdentityFacts): IdentityDeci
   if (klass === "SAME") supporting.push({ code: "CLASS_SAME" });
 
   const spans = compareSpans(a.span, b.span);
+  // Only a gap wider than a note conflicts. Adjacent chunks of one note are
+  // NEARBY, which settles nothing either way.
   if (spans === "DISJOINT") conflicting.push({ code: "SPANS_DISJOINT" });
   if (spans === "OVERLAP") supporting.push({ code: "SPANS_OVERLAP" });
+  if (spans === "NEARBY") supporting.push({ code: "SPANS_NEARBY" });
 
   const segmentsKnown = !!a.segmentKey && !!b.segmentKey;
   if (segmentsKnown && a.segmentKey !== b.segmentKey) conflicting.push({ code: "SEGMENT_DIFFERENT" });
@@ -392,6 +413,14 @@ export function decideIdentity(a: IdentityFacts, b: IdentityFacts): IdentityDeci
   const sharedDate = !!a.dateIso && a.dateIso === b.dateIso;
   if (sameDocument && sharedDate && overlap.ratio >= 0.5 && overlap.shared >= 2) {
     return { verdict: "MERGE", reasons: ["DISTINCTIVE_OVERLAP", "DATE_SAME"], supporting, conflicting };
+  }
+
+  // Consecutive chunks of one note: adjacent in the source, same day, same
+  // document, nothing conflicting, and they agree on something distinctive.
+  // A single shared distinctive fact is enough here because the passages sit
+  // side by side — which is how a visit's chunks actually present.
+  if (sameDocument && sharedDate && spans === "NEARBY" && overlap.shared >= 1) {
+    return { verdict: "MERGE", reasons: ["SPANS_NEARBY", "DISTINCTIVE_OVERLAP"], supporting, conflicting };
   }
 
   // Nothing conflicts and nothing proves it. Say so, keep them apart, and let
