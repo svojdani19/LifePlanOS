@@ -47,15 +47,39 @@ export interface RecoveredDate {
  * extractor's own validator exists to reject, and recovering a date from one
  * would reintroduce exactly the defect that validator prevents.
  */
-const SERVICE_CONTEXT = String.raw`(?:performed|rendered|provided|furnished|administered|billed|charged|delivered|dispensed|supplied|occurred|seen|treated|admitted|discharged|conducted)\s+(?:on|date)?|date\s+of\s+(?:service|visit|procedure|operation|admission|surgery|treatment)|service\s+date|visit\s+date|encounter\s+date|dos|d\.?o\.?s\.?`;
+const SERVICE_CONTEXT = String.raw`(?:performed|rendered|provided|furnished|administered|billed|charged|delivered|dispensed|supplied|occurred|seen|treated|admitted|discharged|conducted|collected|drawn|obtained|resulted|recorded|documented|ordered(?:\s+start)?|taken|measured|assessed)\s+(?:on|start|date)?|date[ds]?\s+of\s+(?:service|visit|procedure|operation|admission|surgery|treatment|collection|result)|service\s+date|visit\s+date|encounter\s+date|collection\s+date|result(?:ed)?\s+date|dos|d\.?o\.?s\.?|dated`;
 
 /** Contexts that must never yield a record's date, mirroring the extractor. */
 const ARTIFACT_CONTEXT =
   /\b(?:dob|date of birth|birth\s?date|print(?:ed)?|signed|signature|fax(?:ed)?|received|scanned|uploaded|created|expir\w*|policy|statement|due|report generated|as of)\b/i;
 
+/**
+ * Care that has not happened yet.
+ *
+ * "Follow up scheduled with Dr. Techy on 4/2/24 at 11:20" is the plan a visit
+ * closed with, not the day the visit occurred, and dating the record by it
+ * moves a real encounter forward in time to a day nothing was documented.
+ * Measured on a real case, prospective phrasing was the single largest source
+ * of disagreement between a record's header date and its claims — so this is a
+ * correctness guard, not a tuning knob.
+ */
+const PROSPECTIVE_CONTEXT =
+  /\b(?:follow[ -]?up|f\/u|scheduled|schedule[ds]?\s+for|return|rtc|recheck|re-?evaluat\w*|next\s+(?:visit|appointment)|appointment|upcoming|planned|will\s+be\s+seen|to\s+be\s+(?:seen|performed|scheduled))\b/i;
+
 const DATE = String.raw`(\d{1,2})[/.-](\d{1,2})[/.-](\d{2,4})|(\d{4})-(\d{2})-(\d{2})`;
 
 const SERVICE_DATE = new RegExp(String.raw`(?:${SERVICE_CONTEXT})\s*[:#-]?\s*(?:${DATE})`, "gi");
+
+/**
+ * A date immediately followed by a clock time.
+ *
+ * "Temperature 96.2 F, temporal artery on 03/17/2024 at 04:06" carries no
+ * service verb, but a date stamped with a time is an observation timestamp —
+ * the moment the reading was taken. Inside an inpatient chart this is the most
+ * common way a record says when it happened, and ignoring it left a twelve-day
+ * admission piled onto the single date the whole chart inherited.
+ */
+const TIMESTAMPED_DATE = new RegExp(String.raw`(?:${DATE})\s*(?:@|at)\s*\d{1,2}:\d{2}`, "gi");
 
 /**
  * The record's date, read from its claims.
@@ -68,11 +92,12 @@ export function dateFromClaims(claims: readonly DatedClaim[], today = new Date()
   for (const claim of claims) {
     for (const text of [claim.value, claim.excerpt]) {
       if (!text) continue;
-      for (const m of text.matchAll(SERVICE_DATE)) {
+      for (const m of [...text.matchAll(SERVICE_DATE), ...text.matchAll(TIMESTAMPED_DATE)]) {
         const at = m.index ?? 0;
         // "Metformin 500 mg tablet (as of 03/23/2024)" states when a
         // medication list was current, not when the record happened.
-        if (ARTIFACT_CONTEXT.test(text.slice(Math.max(0, at - 30), at + m[0].length))) continue;
+        const window = text.slice(Math.max(0, at - 60), at + m[0].length);
+        if (ARTIFACT_CONTEXT.test(window) || PROSPECTIVE_CONTEXT.test(window)) continue;
         const iso = toIso(m, today);
         if (iso && !found.has(iso)) found.set(iso, text.replace(/\s+/g, " ").trim().slice(0, 200));
       }

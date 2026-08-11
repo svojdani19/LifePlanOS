@@ -298,9 +298,20 @@ export function isSameRecordAcrossDocuments(a: MergedEntry, b: MergedEntry): boo
   const decision = decideIdentity(fa, fb);
   if (decision.verdict === "KEEP_SEPARATE") return false;
 
-  // The classes must positively agree. Inside one document a bill may merge
-  // with the note it bills for; across documents the same latitude would fold
-  // a charge into an unrelated encounter.
+  const overlap = distinctiveOverlap(fa, fb);
+
+  // Near-identical clinical content is DIRECT evidence that two entries are one
+  // record; agreeing classes are only a proxy for it. Requiring the proxy left
+  // one operative report on the timeline six times over — bound into several
+  // PDFs and classified differently in each, so "Bilateral lumbar laminectomy
+  // L2-S1, patient extubated to PACU" appeared as a lab, a complication and a
+  // clinic visit. When the content itself carries the identity, it outranks the
+  // label the classifier happened to assign.
+  if (overlap.ratio >= CONTENT_IS_IDENTITY && overlap.shared >= 3) return true;
+
+  // Short of that, the classes must positively agree. Inside one document a
+  // bill may merge with the note it bills for; across documents the same
+  // latitude would fold a charge into an unrelated encounter.
   if (compareClass(a.klass, b.klass) !== "SAME") return false;
 
   // A shared record identifier is proof on its own — an accession number names
@@ -308,12 +319,15 @@ export function isSameRecordAcrossDocuments(a: MergedEntry, b: MergedEntry): boo
   if (decision.verdict === "MERGE") return true;
 
   // Otherwise the copies must agree on nearly all of their DISTINCTIVE content.
-  // The bar is higher than inside a document, where overlapping source spans
-  // already establish that fragments came from one passage; two documents
-  // sharing a date share nothing, so the content has to carry the whole claim.
-  const overlap = distinctiveOverlap(fa, fb);
   return overlap.ratio >= CROSS_DOCUMENT_OVERLAP && overlap.shared >= 2;
 }
+
+/**
+ * Overlap at which content alone establishes identity, whatever the classifier
+ * called each copy. Higher than the ordinary cross-document bar, and requiring
+ * more shared facts, because it is overruling a signal rather than joining it.
+ */
+export const CONTENT_IS_IDENTITY = 0.85;
 
 /**
  * How much of a copy's distinctive content must match to call it the same
@@ -579,4 +593,100 @@ export function entrySubstance(entry: MergedEntry): EntrySubstance {
     return entry.klass === "UNKNOWN" || entry.klass === "SUPPORTING_FILE" ? "ADMINISTRATIVE" : "ANCILLARY";
   }
   return "CLINICAL";
+}
+
+// ── Materiality ──────────────────────────────────────────────────────────────
+
+/**
+ * Records that document the paperwork of care rather than the care.
+ *
+ * A billing statement, an affidavit of reasonableness, a registration page and
+ * a consent form are all real records that belong in the file — and none of
+ * them is an event in the course of care. On one surgical admission these put
+ * "Anesthesia services billing statement showing $20,900.00 owed" and
+ * "Documentation confirming medical necessity and reasonableness of charges"
+ * on the medical timeline beside the laminectomy.
+ */
+const NON_EVENT_CONTENT =
+  /\b(?:billing statement|statement of account|amount (?:owed|billed|paid)|outstanding (?:charge|balance)|balance due|affidavit|reasonableness of charges|medical necessity and reasonabl|custodian of (?:medical )?(?:billing )?records|business records|charges? (?:for|were) (?:services|necessary)|total (?:billed|charges)|itemized (?:statement|bill)|registration (?:form|page)|face ?sheet|assignment of benefits|notice of privacy|authorization (?:to|for) (?:disclose|release))\b/i;
+
+/**
+ * A record that asserts nothing clinical: no finding, no procedure, no
+ * assessment, no treatment, no symptom. A visit that yielded only demographics
+ * — "Advanced Diagnostics visit for 47-year-old male patient" — documents that
+ * paper exists, not that anything happened.
+ */
+const CLINICAL_ASSERTION_FIELDS = new Set([
+  "subjective", "objectiveFindings", "assessment", "treatment", "procedure", "medications",
+  "diagnosticStudies", "impression", "operativeFindings", "preOperativeDiagnosis",
+  "postOperativeDiagnosis", "responseToTreatment", "functionalStatus", "restrictions",
+  "disposition", "complications", "anesthesia", "pathologicDiagnosis", "mechanism",
+]);
+
+/**
+ * Routine documentation generated *inside* an episode of care.
+ *
+ * An inpatient stay produces a nursing note every shift, a vitals row every few
+ * hours, a medication administration record for every dose and a monitoring
+ * entry for every hour in recovery. Each is a genuine record. None is an event
+ * in the course of care: a planner writes the admission, the operation and the
+ * discharge, not the 3 a.m. blood pressure.
+ *
+ * On one surgical admission this was the difference between 132 timeline events
+ * and the handful a reviewer needs. The records stay in the file and stay
+ * openable; they are simply not events.
+ */
+const INTRA_EPISODE_ROUTINE =
+  /\b(?:vital signs?|vitals\b|blood pressure|temperature|pulse ox|oxygen saturation|intake and output|i ?& ?o\b|flow ?sheet|medication administration|administration record|\bmar\b|dose administered|scheduled medications?|prn medications?|nursing (?:note|observation|assessment|documentation|round)|shift (?:note|assessment|change)|hourly rounding|braden|morse fall|fall risk (?:score|assessment)|pain (?:score|scale) (?:of|documented)|post ?-?anesthesia care|pacu (?:monitoring|observation)|recovery room monitoring|telemetry|continuous monitoring|daily progress note|routine (?:observation|monitoring))\b/i;
+
+/**
+ * Content that marks a record as pivotal whatever else it contains — the events
+ * a chronology exists to carry. A discharge summary mentioning vital signs is
+ * still a discharge.
+ */
+const PIVOTAL_CONTENT =
+  /\b(?:operative report|procedure performed|laminectomy|discectomy|foraminotomy|arthroplasty|fusion performed|injection performed|surgery performed|admitted|admission (?:diagnosis|for)|discharge(?:d)? (?:home|to|summary|instructions)|consultation|consult(?:ed)? (?:by|with)|impression|final diagnosis|mri|ct scan|radiograph|x-?ray|emergency department|initial evaluation|new (?:diagnosis|finding)|complication|readmission)\b/i;
+
+export interface MaterialityVerdict {
+  material: boolean;
+  reason: string;
+}
+
+/**
+ * Does this entry belong on the medical chronology?
+ *
+ * The chronology is what a reviewer reads to reconstruct the course of care,
+ * and the application already promises "pivotal events — those bearing on the
+ * diagnoses and future care". Nothing was enforcing that: a surgical admission
+ * produced 141 timeline events, most of them the paperwork the admission
+ * generated rather than the care it delivered.
+ *
+ * Immaterial records are NOT discarded — they stay in the records list, where a
+ * reviewer can open them. They are kept off the timeline.
+ */
+export function chronologyMateriality(entry: MergedEntry): MaterialityVerdict {
+  const text = entry.claims.map((c) => c.value).join(" ");
+  if (!entry.claims.length) return { material: false, reason: "NO_CONTENT" };
+
+  const clinical = entry.claims.filter((c) => CLINICAL_ASSERTION_FIELDS.has(c.field));
+  if (!clinical.length) return { material: false, reason: "NO_CLINICAL_ASSERTION" };
+
+  // A pivotal record is pivotal whatever routine detail it also carries.
+  if (PIVOTAL_CONTENT.test(text)) return { material: true, reason: "PIVOTAL_EVENT" };
+
+  // Routine documentation generated inside an episode of care is record-keeping
+  // rather than an event: the planner writes the admission, the operation and
+  // the discharge, not the 3 a.m. blood pressure.
+  const routine = entry.claims.filter((c) => INTRA_EPISODE_ROUTINE.test(c.value)).length;
+  if (routine / entry.claims.length >= 0.5) return { material: false, reason: "INTRA_EPISODE_ROUTINE" };
+
+  // Paperwork wins only when the record is MOSTLY paperwork: an operative note
+  // that happens to carry its charge is still an operative note.
+  const paperwork = entry.claims.filter((c) => NON_EVENT_CONTENT.test(c.value)).length;
+  if (paperwork / entry.claims.length >= 0.5) return { material: false, reason: "DOCUMENTS_THE_PAPERWORK" };
+  if (NON_EVENT_CONTENT.test(text) && clinical.length <= 1) {
+    return { material: false, reason: "PAPERWORK_WITH_INCIDENTAL_CLINICAL_TEXT" };
+  }
+
+  return { material: true, reason: "DOCUMENTS_CARE" };
 }

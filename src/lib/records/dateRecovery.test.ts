@@ -37,6 +37,52 @@ describe("a date the record states about its own service", () => {
   });
 });
 
+describe("an observation timestamp", () => {
+  // Inside an inpatient chart a reading says when it was taken by stamping a
+  // clock time, not by naming a service. Ignoring these left a twelve-day
+  // admission piled onto the one date the whole chart inherited.
+  it("reads a date carrying a clock time", () => {
+    expect(
+      dateFromClaims([claim("vital", "Temperature 96.2 F, temporal artery on 03/17/2024 at 04:06")], TODAY)?.iso,
+    ).toBe("2024-03-17");
+  });
+
+  it("reads a collection date off a laboratory result", () => {
+    expect(dateFromClaims([claim("lab", "Lactic Acid 1.9 mmol/L, collected 03/19/2024")], TODAY)?.iso).toBe("2024-03-19");
+  });
+});
+
+describe("care that has not happened yet", () => {
+  // Prospective phrasing was the single largest source of disagreement between
+  // a record's header date and its claims on a real case. Dating a record by
+  // the appointment it schedules moves a real encounter forward in time to a
+  // day on which nothing was documented.
+  it("ignores a scheduled follow-up", () => {
+    expect(
+      dateFromClaims([claim("plan", "Follow up scheduled with Dr. Techy on 4/2/24 at 11:20")], TODAY),
+    ).toBeNull();
+  });
+
+  it("ignores a return appointment stated with a clock time", () => {
+    expect(
+      dateFromClaims([claim("plan", "Follow-up MD Consult FU15 Telemed at clinic on 05/31/2024 at 10:35 AM")], TODAY),
+    ).toBeNull();
+  });
+
+  it("ignores a planned procedure date", () => {
+    expect(dateFromClaims([claim("plan", "Repeat MRI to be performed on 06/04/2024")], TODAY)).toBeNull();
+  });
+
+  it("still dates the record when it also schedules a follow-up", () => {
+    // The prospective date is discarded; the service date it sits beside is not.
+    const at = dateFromClaims(
+      [claim("procedure", "Lumbar epidural steroid injection performed on 03/13/24"), claim("plan", "Return 4/2/24")],
+      TODAY,
+    );
+    expect(at?.iso).toBe("2024-03-13");
+  });
+});
+
 describe("dates that are not the record's date", () => {
   it("ignores a medication currency date", () => {
     // "Metformin 500 mg tablet (as of 03/23/2024)" says when a list was

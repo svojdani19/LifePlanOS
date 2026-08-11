@@ -4,6 +4,7 @@ import {
   dedupeAcrossDocuments,
   cleanProvider,
   dominantClass,
+  chronologyMateriality,
   entrySubstance,
   isDuplicateClaim,
   mergeKey,
@@ -347,5 +348,69 @@ describe("what belongs in the clinical records list", () => {
       "Lumbar epidural injection was performed at L4-L5 under fluoroscopy",
       "The patient tolerated the procedure without complication");
     expect(entrySubstance(e)).toBe("CLINICAL");
+  });
+});
+
+describe("what belongs on the medical chronology", () => {
+  // The records list and the timeline answer different questions. Every record
+  // stays reachable in the list; the timeline carries only what changed the
+  // course of care. A single surgical admission produced 141 timeline events
+  // before anything enforced that distinction.
+  const timeline = (klass: MergeableRow["analysisClass"], claims: Array<[string, string]>) =>
+    mergeRows([
+      row({ analysisClass: klass, claims: claims.map(([field, value], i) => ({ field, value, excerpt: `e${i}` })) }),
+    ])[0];
+
+  it("puts an operation on the timeline", () => {
+    const v = chronologyMateriality(
+      timeline("OPERATIVE", [["procedure", "Bilateral lumbar laminectomy L2-S1 performed for prolapsed disc"]]),
+    );
+    expect(v.material).toBe(true);
+  });
+
+  it("keeps a shift's vital signs off the timeline", () => {
+    const v = chronologyMateriality(
+      timeline("CLINICAL_ENCOUNTER", [
+        ["objectiveFindings", "Vital signs: temperature 96.2 F, temporal artery"],
+        ["objectiveFindings", "Vitals recorded, blood pressure 118/72"],
+      ]),
+    );
+    expect(v.material).toBe(false);
+    expect(v.reason).toBe("INTRA_EPISODE_ROUTINE");
+  });
+
+  it("keeps a medication administration record off the timeline", () => {
+    const v = chronologyMateriality(
+      timeline("CLINICAL_ENCOUNTER", [["medications", "Medication administration record: dose administered 0600"]]),
+    );
+    expect(v.material).toBe(false);
+  });
+
+  it("keeps an operative note on the timeline despite the routine detail around it", () => {
+    // A pivotal record is pivotal whatever record-keeping it also carries;
+    // screening on the proportion of routine claims alone would drop this.
+    const v = chronologyMateriality(
+      timeline("OPERATIVE", [
+        ["objectiveFindings", "Vital signs stable throughout"],
+        ["objectiveFindings", "PACU monitoring, oxygen saturation 96% on room air"],
+        ["procedure", "Operative report: bilateral lumbar laminectomy L2-S1"],
+      ]),
+    );
+    expect(v.material).toBe(true);
+    expect(v.reason).toBe("PIVOTAL_EVENT");
+  });
+
+  it("keeps a record with no clinical assertion off the timeline", () => {
+    const v = chronologyMateriality(
+      timeline("CORRESPONDENCE_OR_GENERIC_EVIDENCE", [["documentContent", "Page 3 of 3, revised December 2022"]]),
+    );
+    expect(v.material).toBe(false);
+    expect(v.reason).toBe("NO_CLINICAL_ASSERTION");
+  });
+
+  it("keeps a discharge on the timeline", () => {
+    expect(
+      chronologyMateriality(timeline("CLINICAL_ENCOUNTER", [["disposition", "Discharged home with home health"]])).material,
+    ).toBe(true);
   });
 });
