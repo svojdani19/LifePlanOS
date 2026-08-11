@@ -500,6 +500,20 @@ describe("names the chart got wrong", () => {
     expect(notes).toHaveLength(2);
   });
 
+  it("refuses the patient as author even when the scan mangled their name", () => {
+    // "MCMENRY" is the patient's own surname with a letter scanned wrong. An
+    // exact comparison misses it, which is how it reached the timeline.
+    const notes = consolidateIntoNotes(
+      [
+        at(0, "Fernando Techy, MD", "Laminectomy performed"),
+        at(600, "MCMENRY, DERRICK", "Elective admission for prolapsed lumbar disc"),
+      ],
+      { patientName: "Derrick McHenry" },
+    );
+    expect(notes).toHaveLength(1);
+    expect(notes[0].provider).toBe("Fernando Techy, MD");
+  });
+
   it("refuses to make the patient the author of their own note", () => {
     // The extractor read the patient's name off a chart header. Left alone it
     // collects records from every clinician who saw them under one author.

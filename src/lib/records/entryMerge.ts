@@ -746,26 +746,30 @@ export function consolidateIntoNotes(
 
   const out: MergedEntry[] = [];
   for (const bucket of buckets.values()) {
-    const notes: { key: string; members: MergedEntry[]; span: RowSpan | null }[] = [];
+    // Each appearance keeps its own span. Merging them into one envelope let a
+    // surgeon named on page 5 and again on page 200 claim a span covering
+    // everything in between, and every loose fragment in that range attached to
+    // him — one note reached 1,654 claims, which is a chart, not a note.
+    const notes: { key: string; members: MergedEntry[]; spans: RowSpan[] }[] = [];
     const orphans: MergedEntry[] = [];
 
     for (const e of bucket) {
       const key = providerKey(e.provider);
       // An unattributed fragment is honest; one attributed to the patient is
       // not, so it is treated as carrying no author at all.
-      if (!key || (patient && sameAuthor(key, patient))) {
+      if (!key || (patient && sameAuthorAllowingOcr(key, patient))) {
         orphans.push(e);
         continue;
       }
       const existing = notes.find((n) => sameAuthorAllowingOcr(n.key, key));
       if (existing) {
         existing.members.push(e);
-        existing.span = widen(existing.span, e.span ?? null);
+        if (e.span) existing.spans.push(e.span);
         // A fuller name supersedes an initial-only one: "TECHY|" becomes
         // "TECHY|F" so a later "Techy, Fernando" still lands here.
         if (existing.key.endsWith("|") && !key.endsWith("|")) existing.key = key;
       } else {
-        notes.push({ key, members: [e], span: e.span ?? null });
+        notes.push({ key, members: [e], spans: e.span ? [e.span] : [] });
       }
     }
 
@@ -776,9 +780,15 @@ export function consolidateIntoNotes(
       continue;
     }
 
+    // Capping how much a note may absorb was measured and rejected: it left the
+    // overflow standing as separate entries, which put the surgery date back to
+    // 107 events without making any of them more accurate. Reach was measured
+    // too — 2,500 characters and 12,000 give the same grouping, because the
+    // fragments sit immediately beside the surgeon's signature rather than
+    // merely near it. Neither is the binding constraint, so neither is tuned.
     for (const orphan of orphans) {
       const home = nearestNote(notes, orphan.span ?? null);
-      if (home) home.members.push(orphan);
+      if (home) home.note.members.push(orphan);
       else out.push(orphan);
     }
 
@@ -817,20 +827,23 @@ function maxDefined(a: number | null | undefined, b: number | null | undefined):
  * radiology report to whichever surgeon happened to be in the bucket.
  */
 function nearestNote(
-  notes: { key: string; members: MergedEntry[]; span: RowSpan | null }[],
+  notes: { key: string; members: MergedEntry[]; spans: RowSpan[] }[],
   span: RowSpan | null,
-): { members: MergedEntry[] } | null {
+): { note: { members: MergedEntry[] }; distance: number } | null {
   if (!span) return null;
   let best: { note: (typeof notes)[number]; distance: number } | null = null;
   for (const note of notes) {
-    if (!note.span) continue;
-    const distance =
-      span.start <= note.span.end && note.span.start <= span.end
-        ? 0
-        : Math.max(span.start, note.span.start) - Math.min(span.end, note.span.end);
-    if (distance <= NOTE_REACH && (!best || distance < best.distance)) best = { note, distance };
+    for (const at of note.spans) {
+      // Distance to where the author actually signed, not to the range their
+      // appearances happen to bracket.
+      const distance =
+        span.start <= at.end && at.start <= span.end
+          ? 0
+          : Math.max(span.start, at.start) - Math.min(span.end, at.end);
+      if (distance <= NOTE_REACH && (!best || distance < best.distance)) best = { note, distance };
+    }
   }
-  return best?.note ?? null;
+  return best;
 }
 
 /** One note out of the fragments it was chunked into. */
