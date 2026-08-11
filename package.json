@@ -2,7 +2,7 @@
   "name": "lifeplanos",
   "version": "0.1.0",
   "private": true,
-  "description": "LifePlanOS — the operating system for life care planning. Standalone multi-tenant SaaS.",
+  "description": "LifePlanOS \u2014 the operating system for life care planning. Standalone multi-tenant SaaS.",
   "scripts": {
     "dev": "next dev -p 3100",
     "dev:auto": "next dev",
@@ -19,6 +19,7 @@
     "db:deploy": "prisma migrate deploy",
     "db:seed": "tsx prisma/seed.ts",
     "citations:refresh": "tsx scripts/refresh-citations.ts",
+    "records:rebuild": "tsx scripts/rebuild-records.ts",
     "reasoning:backfill": "tsx scripts/backfill-reasoning.ts",
     "ocr:redo": "tsx scripts/ocr-redo.ts",
     "retention:enforce": "tsx scripts/enforce-retention.ts",

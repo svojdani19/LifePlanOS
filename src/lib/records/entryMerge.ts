@@ -58,6 +58,8 @@ export interface MergedEntry {
   mergedClasses: AnalysisClass[];
   /** Other documents the same record was found in, after cross-document dedupe. */
   alsoInDocumentIds?: string[];
+  /** Where the entry sits in the document text, for note-level consolidation. */
+  span?: RowSpan | null;
   /**
    * Rows that could not be proven the same as this entry, nor proven different.
    * Surfaced for review rather than silently merged or silently dropped.
@@ -158,7 +160,9 @@ export function cleanProvider(raw: string | null | undefined): string | null {
   if (s.length < 3 || s.length > 90) return null;
   if (CREDENTIAL.test(s)) return s;
   // Two or more capitalised words: "Michael Crone", "Mary Catharine Maxian".
-  const words = s.split(" ").filter((w) => /^[A-Z][A-Za-z'’-]{1,}$/.test(w));
+  // Punctuation between them is the chart's, not part of the name — a surname
+  // printed first, "Techy, Fernando", is still two words and still a person.
+  const words = s.split(" ").filter((w) => /^[A-Z][A-Za-z'’-]{1,}[,.]?$/.test(w));
   return words.length >= 2 ? s : null;
 }
 
@@ -550,11 +554,249 @@ export function mergeRows(rows: readonly MergeableRow[], doc?: PreparedDocument)
       claims,
       mergedClasses: [...new Set(classes.filter(Boolean) as AnalysisClass[])],
       possibleDuplicateOf,
+      span,
     });
    }
   }
 
   return out.sort((a, b) => (a.encounterDate?.getTime() ?? 0) - (b.encounterDate?.getTime() ?? 0));
+}
+
+// ── The signed note as the unit of a record ──────────────────────────────────
+
+/** Credentials and roles that are not part of a person's name. */
+const CREDENTIAL_WORD =
+  /^(?:m\.?d\.?|d\.?o\.?|r\.?n\.?|l\.?v\.?n\.?|l\.?p\.?n\.?|p\.?t\.?|o\.?t\.?|d\.?c\.?|n\.?p\.?|p\.?a\.?(?:-c)?|c\.?r\.?n\.?a\.?|d\.?p\.?m\.?|ph\.?d\.?|psy\.?d\.?|f\.?a\.?c\.?s\.?|jr|sr|ii|iii|iv)$/i;
+
+const TITLE_WORD = /^(?:dr|doctor|mr|mrs|ms|miss|prof|professor)$/i;
+
+/**
+ * An organisation, not a person.
+ *
+ * "Chopra Imaging Centers, Inc" and "Dynamic Anesthesia Providers PLLC" arrive
+ * in the provider field alongside real authors. Keyed as people they became
+ * "INC" and "PLLC", which would file two unrelated companies under one author.
+ * They still key — a facility's records do belong together — but in a namespace
+ * of their own, so an organisation can never merge with a physician.
+ */
+const ORGANISATION =
+  /\b(?:inc|llc|pllc|l\.?l\.?c|corp|corporation|company|co|ltd|group|associates|assoc|partners|providers|centers?|centres?|clinics?|hospitals?|health(?:care)?|imaging|radiology|laborator(?:y|ies)|labs?|pharmacy|services|systems?|institute|practice|pa|p\.?a\.?)\b/i;
+
+/**
+ * One person, however their name was printed.
+ *
+ * A hospital chart names the same surgeon as "FERNANDO TECHY, MD", "Fernando
+ * Techy, MD", "DR F. TECHY" and "FERNANDO TECHY" on four consecutive pages. Each
+ * spelling started its own record, so one operation appeared four times on the
+ * timeline. The key is surname plus first initial: enough to tell two authors
+ * apart on one admission, coarse enough to survive the way charts print names.
+ *
+ * Returns null when the string does not name a person — an empty key would make
+ * every unattributed row match every other one.
+ */
+export function providerKey(raw: string | null | undefined): string | null {
+  let s = cleanProvider(raw);
+  if (!s) return null;
+
+  // A role annotation carries its own punctuation — "(admitting/surgeon)" — so
+  // it has to go before the string is split on the separators between people,
+  // or the slash inside it cuts the name in half.
+  s = s.replace(/\([^)]*\)/g, " ").replace(/\([^)]*$/, " ");
+
+  // "Fernando Techy, MD; Esteban Berberian, MD" lists the team. The author is
+  // named first, and taking the first consistently makes the key reproducible.
+  s = s.split(/[;/]|\s+and\s+/i)[0].trim();
+
+  if (ORGANISATION.test(s)) {
+    const name = s.replace(/[^A-Za-z0-9 ]+/g, " ").replace(/\s+/g, " ").trim().toUpperCase();
+    return name.length >= 3 ? `ORG|${name}` : null;
+  }
+
+  let parts = s
+    .split(/[\s,]+/)
+    .map((w) => w.replace(/[.,]+$/, "").trim())
+    .filter(Boolean)
+    .filter((w) => !CREDENTIAL_WORD.test(w) && !TITLE_WORD.test(w));
+
+  // "Techy, Fernando" — a surname-first listing, once credentials are gone.
+  const surnameFirst = /^[^,]+,\s*[A-Za-z][A-Za-z'’-]*\.?\s*$/.test(
+    s.replace(/\b(?:m\.?d\.?|d\.?o\.?|r\.?n\.?|p\.?t\.?|n\.?p\.?|p\.?a\.?-?c?)\b\.?/gi, "").trim(),
+  );
+  if (surnameFirst && parts.length >= 2) parts = [parts[1], parts[0]];
+
+  const named = parts.filter((w) => /[A-Za-z]{2,}/.test(w));
+  if (!named.length) return null;
+
+  const surname = named[named.length - 1].toUpperCase();
+  if (surname.length < 2) return null;
+  // "DR F. TECHY" gives its initial as a bare letter, which the name filter
+  // drops. Reading it back is what lets that spelling meet "Fernando Techy"
+  // instead of keying as an author whose given name is unknown.
+  const first = named.length > 1 ? named[0] : parts.find((w) => /^[A-Za-z]$/.test(w));
+  const initial = first && first !== surname ? first[0].toUpperCase() : "";
+  return `${surname}|${initial}`;
+}
+
+/** Do two author keys name the same person, treating an absent initial as unknown? */
+function sameAuthor(a: string, b: string): boolean {
+  // An organisation matches only itself; it never absorbs a person.
+  if (a.startsWith("ORG|") || b.startsWith("ORG|")) return a === b;
+  const [surnameA, initialA] = a.split("|");
+  const [surnameB, initialB] = b.split("|");
+  if (surnameA !== surnameB) return false;
+  return !initialA || !initialB || initialA === initialB;
+}
+
+/** How far an unattributed fragment may sit from the note that names its author. */
+export const NOTE_REACH = 12_000;
+
+/**
+ * Fold a document's entries into the notes that were actually signed.
+ *
+ * The published plan lists seven entries for a surgical admission — the H&P, the
+ * anesthesia record, the operative report, two nursing notes, the therapy
+ * evaluation and the discharge summary — each identified by its author and a
+ * short page range. The program produced 156 for the same day, because
+ * extraction chunks a 284-page chart into fragments and nothing put the
+ * fragments back into the note they came from.
+ *
+ * Authorship is what does it. A chart names the author once, in the note
+ * header, and the following pages do not repeat it, so a fragment with no
+ * provider belongs to the nearest note that has one. Grouping is confined to a
+ * single document and a single date: a date alone still merges nothing.
+ */
+export function consolidateIntoNotes(entries: readonly MergedEntry[]): MergedEntry[] {
+  const buckets = new Map<string, MergedEntry[]>();
+  for (const e of entries) {
+    const key = `${e.sourceDocumentId}|${e.encounterDate?.toISOString().slice(0, 10) ?? "undated"}`;
+    const bucket = buckets.get(key);
+    if (bucket) bucket.push(e);
+    else buckets.set(key, [e]);
+  }
+
+  const out: MergedEntry[] = [];
+  for (const bucket of buckets.values()) {
+    const notes: { key: string; members: MergedEntry[]; span: RowSpan | null }[] = [];
+    const orphans: MergedEntry[] = [];
+
+    for (const e of bucket) {
+      const key = providerKey(e.provider);
+      if (!key) {
+        orphans.push(e);
+        continue;
+      }
+      const existing = notes.find((n) => sameAuthor(n.key, key));
+      if (existing) {
+        existing.members.push(e);
+        existing.span = widen(existing.span, e.span ?? null);
+        // A fuller name supersedes an initial-only one: "TECHY|" becomes
+        // "TECHY|F" so a later "Techy, Fernando" still lands here.
+        if (existing.key.endsWith("|") && !key.endsWith("|")) existing.key = key;
+      } else {
+        notes.push({ key, members: [e], span: e.span ?? null });
+      }
+    }
+
+    // Nothing in this bucket names an author, so there is no note to attach to
+    // and nothing is known that was not known before.
+    if (!notes.length) {
+      out.push(...bucket);
+      continue;
+    }
+
+    for (const orphan of orphans) {
+      const home = nearestNote(notes, orphan.span ?? null);
+      if (home) home.members.push(orphan);
+      else out.push(orphan);
+    }
+
+    for (const note of notes) out.push(note.members.length === 1 ? note.members[0] : foldNote(note.members));
+  }
+
+  return out.sort((a, b) => (a.encounterDate?.getTime() ?? 0) - (b.encounterDate?.getTime() ?? 0));
+}
+
+function widen(a: RowSpan | null, b: RowSpan | null): RowSpan | null {
+  if (!a) return b;
+  if (!b) return a;
+  return {
+    ...a,
+    start: Math.min(a.start, b.start),
+    end: Math.max(a.end, b.end),
+    pageStart: minDefined(a.pageStart, b.pageStart),
+    pageEnd: maxDefined(a.pageEnd, b.pageEnd),
+  };
+}
+
+function minDefined(a: number | null | undefined, b: number | null | undefined): number | null {
+  const vals = [a, b].filter((v): v is number => typeof v === "number" && v > 0);
+  return vals.length ? Math.min(...vals) : null;
+}
+
+function maxDefined(a: number | null | undefined, b: number | null | undefined): number | null {
+  const vals = [a, b].filter((v): v is number => typeof v === "number" && v > 0);
+  return vals.length ? Math.max(...vals) : null;
+}
+
+/**
+ * The note a fragment sits inside.
+ *
+ * A fragment with no span cannot be placed, and guessing would attach a
+ * radiology report to whichever surgeon happened to be in the bucket.
+ */
+function nearestNote(
+  notes: { key: string; members: MergedEntry[]; span: RowSpan | null }[],
+  span: RowSpan | null,
+): { members: MergedEntry[] } | null {
+  if (!span) return null;
+  let best: { note: (typeof notes)[number]; distance: number } | null = null;
+  for (const note of notes) {
+    if (!note.span) continue;
+    const distance =
+      span.start <= note.span.end && note.span.start <= span.end
+        ? 0
+        : Math.max(span.start, note.span.start) - Math.min(span.end, note.span.end);
+    if (distance <= NOTE_REACH && (!best || distance < best.distance)) best = { note, distance };
+  }
+  return best?.note ?? null;
+}
+
+/** One note out of the fragments it was chunked into. */
+function foldNote(members: MergedEntry[]): MergedEntry {
+  const claims: SynthClaim[] = [];
+  let n = 0;
+  for (const m of members) {
+    for (const c of m.claims) {
+      if (!c.value?.trim()) continue;
+      const at = claims.findIndex((e) => e.field === c.field && isDuplicateClaim(c, [e]));
+      if (at >= 0) {
+        claims[at] = preferLonger(claims[at], { ...c, id: claims[at].id });
+        continue;
+      }
+      claims.push({ ...c, id: `c${++n}` });
+    }
+  }
+
+  const pages = members.flatMap((m) => [m.pageStart, m.pageEnd]).filter((p): p is number => typeof p === "number" && p > 0);
+  const classes = members.flatMap((m) => (m.mergedClasses.length ? m.mergedClasses : [m.klass]));
+
+  return {
+    rowIds: members.flatMap((m) => m.rowIds),
+    sourceDocumentId: members[0].sourceDocumentId,
+    klass: dominantClass(classes),
+    encounterDate: members.find((m) => m.encounterDate)?.encounterDate ?? null,
+    provider: members.map((m) => m.provider).find(Boolean) ?? null,
+    facility: members.map((m) => m.facility).find(Boolean) ?? null,
+    pageStart: pages.length ? Math.min(...pages) : null,
+    pageEnd: pages.length ? Math.max(...pages) : null,
+    claims,
+    mergedClasses: [...new Set(classes.filter(Boolean))],
+    alsoInDocumentIds: [...new Set(members.flatMap((m) => m.alsoInDocumentIds ?? []))].length
+      ? [...new Set(members.flatMap((m) => m.alsoInDocumentIds ?? []))]
+      : undefined,
+    possibleDuplicateOf: [...new Set(members.flatMap((m) => m.possibleDuplicateOf ?? []))],
+    span: members.reduce<RowSpan | null>((acc, m) => widen(acc, m.span ?? null), null),
+  };
 }
 
 // ── What kind of thing an entry is, for display ──────────────────────────────

@@ -5,6 +5,8 @@ import {
   cleanProvider,
   dominantClass,
   chronologyMateriality,
+  consolidateIntoNotes,
+  providerKey,
   entrySubstance,
   isDuplicateClaim,
   mergeKey,
@@ -412,5 +414,137 @@ describe("what belongs on the medical chronology", () => {
     expect(
       chronologyMateriality(timeline("CLINICAL_ENCOUNTER", [["disposition", "Discharged home with home health"]])).material,
     ).toBe(true);
+  });
+});
+
+describe("who signed the note", () => {
+  // A hospital chart prints the same surgeon four ways on four consecutive
+  // pages. Each spelling started its own record, so one operation appeared four
+  // times on the timeline.
+  it("keys one author however the chart spells the name", () => {
+    const key = providerKey("Fernando Techy, MD");
+    expect(key).toBe("TECHY|F");
+    expect(providerKey("FERNANDO TECHY")).toBe(key);
+    expect(providerKey("DR F. TECHY")).toBe(key);
+    expect(providerKey("Techy, Fernando")).toBe(key);
+  });
+
+  it("reads the author out of a listed care team", () => {
+    // The role annotation carries its own slash, so it has to go before the
+    // string is split on the separators between people.
+    expect(providerKey("Fernando Techy, MD (admitting/surgeon); Esteban Berberian, MD (attending)")).toBe("TECHY|F");
+  });
+
+  it("drops credentials rather than reading them as a surname", () => {
+    expect(providerKey("Abraham Jiju, PT")).toBe("JIJU|A");
+    expect(providerKey("Esteban N Berberian, MD")).toBe("BERBERIAN|E");
+    expect(providerKey("Mary Catharine Maxian, MD")).toBe("MAXIAN|M");
+  });
+
+  it("keys an organisation apart from any person", () => {
+    // Keyed as people these became "INC" and "PLLC", which files two unrelated
+    // companies under one author.
+    expect(providerKey("Chopra Imaging Centers, Inc")).toBe("ORG|CHOPRA IMAGING CENTERS INC");
+    expect(providerKey("Dynamic Anesthesia Providers PLLC")).toBe("ORG|DYNAMIC ANESTHESIA PROVIDERS PLLC");
+    expect(providerKey("Chopra Imaging Centers, Inc")).not.toBe(providerKey("Chopra Radiology Group"));
+  });
+
+  it("says nothing when the field does not name anyone", () => {
+    expect(providerKey(null)).toBeNull();
+    expect(providerKey("")).toBeNull();
+    expect(providerKey("Osly")).toBeNull();
+  });
+});
+
+describe("folding a chart back into the notes it was signed as", () => {
+  const at = (start: number, provider: string | null, ...values: string[]) =>
+    mergeRows(
+      [
+        row({
+          id: `r${start}`,
+          provider,
+          claims: values.map((value, i) => ({ field: "assessment", value, excerpt: `e${start}${i}` })),
+        }),
+      ],
+      undefined,
+    ).map((e) => ({ ...e, span: { start, end: start + 500, pageStart: null, pageEnd: null } }))[0];
+
+  it("folds one author's fragments into one note", () => {
+    const notes = consolidateIntoNotes([
+      at(0, "FERNANDO TECHY, MD", "Bilateral lumbar laminectomy L2-S1 performed"),
+      at(600, "Fernando Techy, MD", "Estimated blood loss 150 mL"),
+      at(1_200, "DR F. TECHY", "Patient extubated awake and transferred to PACU"),
+    ]);
+    expect(notes).toHaveLength(1);
+    expect(notes[0].claims).toHaveLength(3);
+  });
+
+  it("keeps two authors on the same day apart", () => {
+    // The published plan lists the surgeon, the attending, the anaesthetist and
+    // the therapist as separate entries for one admission.
+    const notes = consolidateIntoNotes([
+      at(0, "Fernando Techy, MD", "Laminectomy performed"),
+      at(600, "Esteban Berberian, MD", "Diabetes mellitus managed on sliding scale insulin"),
+    ]);
+    expect(notes).toHaveLength(2);
+  });
+
+  it("attaches an unattributed fragment to the note it sits inside", () => {
+    // A chart names its author once, in the note header; the pages that follow
+    // do not repeat it.
+    const notes = consolidateIntoNotes([
+      at(0, "Fernando Techy, MD", "Laminectomy performed"),
+      at(700, null, "Final count correct, MD notified"),
+    ]);
+    expect(notes).toHaveLength(1);
+    expect(notes[0].provider).toBe("Fernando Techy, MD");
+  });
+
+  it("leaves a distant fragment alone rather than guessing an author for it", () => {
+    const notes = consolidateIntoNotes([
+      at(0, "Fernando Techy, MD", "Laminectomy performed"),
+      at(400_000, null, "Physical therapy evaluation, gait antalgic"),
+    ]);
+    expect(notes).toHaveLength(2);
+    expect(notes.find((n) => !n.provider)).toBeDefined();
+  });
+
+  it("cannot place a fragment with no span, and says so by leaving it", () => {
+    const orphan = { ...at(0, null, "Charge posted"), span: null };
+    const notes = consolidateIntoNotes([at(1_000, "Fernando Techy, MD", "Laminectomy performed"), orphan]);
+    expect(notes).toHaveLength(2);
+  });
+
+  it("does not fold an organisation into a physician's note", () => {
+    const notes = consolidateIntoNotes([
+      at(0, "Fernando Techy, MD", "Laminectomy performed"),
+      at(600, "Dynamic Anesthesia Providers PLLC", "Anesthesia services rendered"),
+    ]);
+    expect(notes).toHaveLength(2);
+  });
+
+  it("never folds across documents on a shared date", () => {
+    // A date alone still authorises nothing.
+    const a = at(0, "Fernando Techy, MD", "Laminectomy performed");
+    const b = { ...at(0, "Fernando Techy, MD", "Laminectomy performed"), sourceDocumentId: "doc2" };
+    expect(consolidateIntoNotes([a, b])).toHaveLength(2);
+  });
+
+  it("never folds one author's notes from two different days", () => {
+    const a = at(0, "Fernando Techy, MD", "Laminectomy performed");
+    const b = { ...at(600, "Fernando Techy, MD", "Wound clean, dry, intact"), encounterDate: new Date("2023-07-19T00:00:00Z") };
+    expect(consolidateIntoNotes([a, b])).toHaveLength(2);
+  });
+
+  it("leaves a bucket that names nobody exactly as it found it", () => {
+    const entries = [at(0, null, "Vital signs recorded"), at(600, null, "Intake and output charted")];
+    expect(consolidateIntoNotes(entries)).toHaveLength(2);
+  });
+
+  it("orders notes by date", () => {
+    const later = { ...at(600, "Esteban Berberian, MD", "Follow-up"), encounterDate: new Date("2024-01-02T00:00:00Z") };
+    const earlier = { ...at(0, "Fernando Techy, MD", "Surgery"), encounterDate: new Date("2023-01-02T00:00:00Z") };
+    const notes = consolidateIntoNotes([later, earlier]);
+    expect(notes[0].encounterDate?.getUTCFullYear()).toBe(2023);
   });
 });
