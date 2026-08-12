@@ -890,7 +890,13 @@ function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, cal
                           // rows not yet segmented.
                           const segs: AnyRec[] | null = Array.isArray(d.segments) ? (d.segments as AnyRec[]) : null;
                           const fallbackEnc = segs ? null : recordEncounters(d);
-                          const clinical: AnyRec[] = segs ? segs.filter((s) => s.kind === "clinical") : (fallbackEnc ?? []);
+                          const allClinical: AnyRec[] = segs ? segs.filter((s) => s.kind === "clinical") : (fallbackEnc ?? []);
+                          // Dated care reads as a sequence; unresolved items
+                          // interleaved among it read as part of that sequence
+                          // and quietly undermine it. They are separated, kept,
+                          // and each says why it is still undated.
+                          const clinical = allClinical.filter((e) => e.date);
+                          const unresolved = allClinical.filter((e) => !e.date);
                           const adminBearing: AnyRec[] = segs ? segs.filter((s) => s.kind === "administrative" && s.bearsOnCare) : [];
                           const adminOther: AnyRec[] = segs ? segs.filter((s) => s.kind === "administrative" && !s.bearsOnCare) : [];
                           const consolidated = segs ? clinical.length + adminBearing.length + adminOther.length > 0 : !!fallbackEnc && fallbackEnc.length >= 2;
@@ -919,11 +925,34 @@ function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, cal
                                         <li key={i} className="border-l-2 border-ink-200 pl-2.5 text-xs">
                                           <p className="font-semibold text-ink-900">
                                             {e.label}
+                                            {e.noteTitle ? <span className="font-normal text-ink-500"> · {e.noteTitle}</span> : null}
                                             {e.provider ? <span className="font-normal text-ink-700"> — {e.provider}</span> : null}
                                             {e.facility ? <span className="font-normal text-ink-400"> · {e.facility}</span> : null}
                                             {segPages(e) ? <span className="font-normal text-ink-300"> · {segPages(e)}</span> : null}
                                           </p>
                                           <p className="leading-relaxed text-ink-600">{e.summary}</p>
+                                          <DateProvenance seg={e} />
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
+                                {unresolved.length > 0 && (
+                                  <div className="space-y-1.5 rounded-md border border-amber-200 bg-amber-50/60 p-2">
+                                    <p className="text-[11px] font-medium text-amber-800">
+                                      Undated — requires review ({unresolved.length})
+                                    </p>
+                                    <ul className="space-y-2">
+                                      {unresolved.map((e, i) => (
+                                        <li key={i} className="border-l-2 border-amber-300 pl-2.5 text-xs">
+                                          <p className="font-semibold text-ink-900">
+                                            {e.noteTitle ? <span className="font-normal text-ink-600">{e.noteTitle}</span> : "Undated record"}
+                                            {e.provider ? <span className="font-normal text-ink-700"> — {e.provider}</span> : null}
+                                            {e.facility ? <span className="font-normal text-ink-400"> · {e.facility}</span> : null}
+                                            {segPages(e) ? <span className="font-normal text-ink-300"> · {segPages(e)}</span> : null}
+                                          </p>
+                                          <p className="leading-relaxed text-ink-600">{e.summary}</p>
+                                          <p className="mt-0.5 text-[11px] text-amber-700">{undatedReason(e.unresolvedReason)}</p>
                                         </li>
                                       ))}
                                     </ul>
@@ -4062,6 +4091,58 @@ const RECORD_KIND_OPTIONS: [string, string][] = [
   ["SUPPORTING_FILE", "Supporting file — no date needed"],
   ["UNKNOWN", "Unclassified — needs review"],
 ];
+
+/**
+ * Why a record carries the date it carries.
+ *
+ * A reviewer signing a life care plan has to be able to tell a date read off
+ * the page from one the program worked out, and to see the text it came from.
+ * Shown quietly — this is provenance, not content.
+ */
+function DateProvenance({ seg }: { seg: AnyRec }) {
+  const basis = typeof seg.dateBasis === "string" ? seg.dateBasis : null;
+  if (!basis || basis === "NONE") return null;
+  const documented = seg.dateDocumented === true;
+  const evidence = typeof seg.dateEvidence === "string" ? seg.dateEvidence : null;
+  return (
+    <p className="mt-0.5 text-[11px] text-ink-400">
+      <span className={documented ? "text-ink-500" : "text-amber-700"}>
+        {documented ? "Documented" : "Inferred"}
+      </span>
+      {" · "}
+      {DATE_BASIS_LABEL[basis] ?? basis}
+      {evidence ? <span className="text-ink-300"> · “{evidence.slice(0, 90)}”</span> : null}
+    </p>
+  );
+}
+
+const DATE_BASIS_LABEL: Record<string, string> = {
+  DOCUMENTED: "date in the record header",
+  NOTE_SERVICE_LABEL: "service-date field of this note",
+  NOTE_HEADER: "this note's own header",
+  RETIMED_FROM_PAGE: "year corrected from the page",
+  STATED_IN_CLAIMS: "service date stated in the record",
+  NEIGHBOURS_AGREE: "records either side carry this date",
+  BRACKETED_BY_NEIGHBOURS: "bracketed by the records either side",
+};
+
+/** Why a record is still undated, for the reviewer who has to resolve it. */
+function undatedReason(reason: unknown): string {
+  switch (reason) {
+    case "NO_SERVICE_DATE":
+      return "No service date present in the source.";
+    case "CONFLICTING_DATES":
+      return "Surrounding records give conflicting dates; the packet is out of order here.";
+    case "ONLY_ARTIFACT_DATES":
+      return "Only print, signature or birth dates were found — none is a service date.";
+    case "NOTE_BOUNDARY_UNCERTAIN":
+      return "The note this belongs to could not be identified in the document.";
+    case "SOURCE_TEXT_INSUFFICIENT":
+      return "Too little text was extracted to establish a date.";
+    default:
+      return "No supported date was found. Assign one to place this on the chronology.";
+  }
+}
 
 // ── Undated / date requires review ──────────────────────────────────────────
 // Encounters whose date the record did not support. They are extracted and

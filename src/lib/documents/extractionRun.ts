@@ -18,6 +18,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { prisma } from "@/lib/db";
+import { refreshCaseRecords } from "@/lib/records/buildRecords";
 import { withDbRetry, createWithDbRetry } from "@/lib/dbRetry";
 import { pageMarks } from "@/lib/documents/meta";
 import { segmentEncounters } from "@/lib/engine/chronology";
@@ -625,6 +626,22 @@ export async function processDocumentExtraction(
     return { extractionId: runId, status: "PAUSED", accepted: encounters.length, rejected: rejects.length, resumeFrom: endIndex };
   }
   await finishRun(runId, "COMPLETE", runData, startedAt);
+
+  // The Records page and the chronology are rebuilt from everything now
+  // extracted for the case, through the same service the manual rebuild uses.
+  // A case that was uploaded and the same case rebuilt by hand must be
+  // described identically; they were not, and every fix to one missed the
+  // other. Failure here is reported and does not fail the run: the extraction
+  // output is already safely persisted, and the previous records survive.
+  try {
+    const refreshed = await refreshCaseRecords(prisma as never, doc.caseId);
+    if (!refreshed.persisted.published) {
+      console.error(`[extraction] records not republished for case ${doc.caseId}: ${refreshed.persisted.reason}`);
+    }
+  } catch (error) {
+    console.error(`[extraction] records refresh failed for case ${doc.caseId}: ${String(error).slice(0, 200)}`);
+  }
+
   return { extractionId: runId, status: "COMPLETE", accepted: encounters.length, rejected: rejects.length };
 }
 

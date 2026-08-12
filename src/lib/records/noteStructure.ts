@@ -26,6 +26,13 @@
 // and excluded explicitly rather than filtered by luck.
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Why a note's date is trustworthy. */
+export type NoteDateBasis =
+  /** A field the note labels as the date of the service it documents. */
+  | "SERVICE_LABEL"
+  /** An unambiguous date printed in the note's own header. */
+  | "NOTE_HEADER";
+
 /** A note as the document presents it. */
 export interface DocumentNote {
   start: number;
@@ -34,9 +41,48 @@ export interface DocumentNote {
   title: string | null;
   /** Who signed it, in the document's own words. */
   author: string | null;
-  /** The marker text this was read from, for review. */
+  /** The marker text the author was read from, for review. */
   evidence: string;
+  /** The day this note documents, normalised, where it says so. */
+  date: string | null;
+  /** How that date was identified. */
+  dateBasis: NoteDateBasis | null;
+  /** The exact text the date was read from. */
+  dateEvidence: string | null;
+  /** Pages the note covers, where the document prints them. */
+  pageStart: number | null;
+  pageEnd: number | null;
 }
+
+/**
+ * Fields that state the date of the service a note documents.
+ *
+ * Each of these labels the clinical event itself. A date carrying one of these
+ * labels is DOCUMENTED — read off the page, not worked out — which is the
+ * distinction the whole review process depends on.
+ */
+const SERVICE_LABEL =
+  /\b(?:date\s+of\s+service|service\s+date|d\.?o\.?s\.?|encounter\s+date|date\s+of\s+encounter|visit\s+date|date\s+of\s+visit|admission\s+date|date\s+of\s+admission|admit(?:ted)?\s+date|procedure\s+date|date\s+of\s+procedure|surgery\s+date|date\s+of\s+surgery|operation\s+date|exam(?:ination)?\s+date|date\s+of\s+exam(?:ination)?|evaluation\s+date|date\s+of\s+evaluation|collect(?:ion|ed)\s+date|date\s+collected|specimen\s+collected|stud(?:y|ies)\s+date|date\s+performed|performed\s+(?:on|date)|exam\s+performed)\b/i;
+
+/**
+ * Labels that must never supply a service date.
+ *
+ * Every one of these is a real date about a real thing — when the chart was
+ * printed, when the clinician signed it, when the patient was born — and none
+ * of them is when the care happened. Dating a record by one puts an encounter
+ * on a day nothing clinical occurred.
+ */
+const UNSAFE_LABEL =
+  /\b(?:d\.?o\.?b\.?|date\s+of\s+birth|birth\s?date|age|print(?:ed)?(?:\s+date)?|date\s+printed|scan(?:ned)?|upload(?:ed)?|fax(?:ed)?|received|signed|signature|authenticat\w*|report\s+(?:generated|run)|date\s+report\s+(?:generated|run|printed)|generated\s+(?:on|date)|statement\s+date|billing\s+date|invoice|policy(?:\s+date)?|effective\s+date|expir\w*|due|follow[\s-]?up|f\/u|next\s+(?:visit|appointment)|appointment|scheduled|return|recheck|proposed|planned|as\s+of|transcri(?:bed|ption))\b/i;
+
+const ANY_DATE =
+  /\b(\d{1,2})[/.-](\d{1,2})[/.-]((?:19|20)?\d{2})\b|\b((?:19|20)\d{2})-(\d{2})-(\d{2})\b/g;
+
+/** How far after a label its date may sit and still belong to it. */
+const LABEL_REACH = 40;
+
+/** "Page 12 of 284", so a note can carry the pages it covers. */
+const PAGE_MARK = /\bpage\s+(\d{1,4})\s+of\s+\d{1,4}\b/gi;
 
 /**
  * Headers that open a note.
@@ -143,15 +189,97 @@ export function findNotes(text: string): DocumentNote[] {
     if (end - start < MIN_NOTE) continue;
 
     const inside = markers.filter((m) => m.kind === "AUTHOR" && m.at >= start && m.at < end);
+    const body = text.slice(start, end);
+    const dated = noteDate(body);
     notes.push({
       start,
       end,
       title: headers[i].title,
       author: inside[0]?.author ?? null,
       evidence: inside[0]?.evidence ?? headers[i].evidence,
+      date: dated?.iso ?? null,
+      dateBasis: dated?.basis ?? null,
+      dateEvidence: dated?.evidence ?? null,
+      ...pagesIn(body),
     });
   }
   return notes;
+}
+
+/**
+ * The day a note says it documents.
+ *
+ * Read only from a field the note labels as the date of its own service, or
+ * from an unambiguous date in its header. A date sitting loose in the body is
+ * ignored: a progress note quotes the surgery it follows and schedules the
+ * visit it precedes, and neither is the day it was written.
+ *
+ * Conflicting service labels return nothing. Two labelled dates disagreeing is
+ * a question for a reviewer, not something to resolve by picking the first.
+ */
+export function noteDate(body: string): { iso: string; basis: NoteDateBasis; evidence: string } | null {
+  const labelled = new Map<string, string>();
+  for (const m of body.matchAll(ANY_DATE)) {
+    const at = m.index ?? 0;
+    const before = body.slice(Math.max(0, at - LABEL_REACH), at);
+    // The nearest label wins, and an unsafe one disqualifies the date outright
+    // even when a service label also appears in the window.
+    if (UNSAFE_LABEL.test(before)) continue;
+    if (!SERVICE_LABEL.test(before)) continue;
+    const iso = toIso(m);
+    if (iso && !labelled.has(iso)) labelled.set(iso, snippet(body, at, m[0].length));
+  }
+  if (labelled.size === 1) {
+    const [iso, evidence] = [...labelled.entries()][0];
+    return { iso, basis: "SERVICE_LABEL", evidence };
+  }
+  if (labelled.size > 1) return null;
+
+  // Nothing labelled. A single unambiguous date in the note's own header — the
+  // first line or so, before any clinical narrative — is the note dating
+  // itself. Anything further in is body text and is not read.
+  const header = body.slice(0, 300);
+  const inHeader = new Map<string, string>();
+  for (const m of header.matchAll(ANY_DATE)) {
+    const at = m.index ?? 0;
+    if (UNSAFE_LABEL.test(header.slice(Math.max(0, at - LABEL_REACH), at))) continue;
+    const iso = toIso(m);
+    if (iso && !inHeader.has(iso)) inHeader.set(iso, snippet(header, at, m[0].length));
+  }
+  if (inHeader.size !== 1) return null;
+  const [iso, evidence] = [...inHeader.entries()][0];
+  return { iso, basis: "NOTE_HEADER", evidence };
+}
+
+function toIso(m: RegExpMatchArray): string | null {
+  let year: number;
+  let month: number;
+  let day: number;
+  if (m[4]) {
+    year = Number(m[4]);
+    month = Number(m[5]);
+    day = Number(m[6]);
+  } else {
+    month = Number(m[1]);
+    day = Number(m[2]);
+    year = Number(m[3]);
+    if (year < 100) year += 2000;
+  }
+  if (month < 1 || month > 12 || day < 1 || day > 31 || year < 1900 || year > 2100) return null;
+  const at = new Date(Date.UTC(year, month - 1, day));
+  if (at.getUTCMonth() !== month - 1 || at.getUTCDate() !== day) return null;
+  return at.toISOString().slice(0, 10);
+}
+
+function pagesIn(body: string): { pageStart: number | null; pageEnd: number | null } {
+  const pages: number[] = [];
+  for (const m of body.matchAll(PAGE_MARK)) {
+    const n = Number(m[1]);
+    if (n > 0) pages.push(n);
+  }
+  return pages.length
+    ? { pageStart: Math.min(...pages), pageEnd: Math.max(...pages) }
+    : { pageStart: null, pageEnd: null };
 }
 
 /** The note containing an offset, if the document has one there. */

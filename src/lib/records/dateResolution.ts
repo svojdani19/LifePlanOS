@@ -28,10 +28,15 @@
 
 import { dateFromClaims, type DatedClaim } from "@/lib/records/dateRecovery";
 import { dateVerdict, type YearProfile } from "@/lib/records/dateSanity";
+import type { NoteDateBasis } from "@/lib/records/noteStructure";
 
 export type DateBasis =
   /** Read off the record, and the document attests the year. */
   | "DOCUMENTED"
+  /** A field the containing note labels as the date of its own service. */
+  | "NOTE_SERVICE_LABEL"
+  /** An unambiguous date in the containing note's header. */
+  | "NOTE_HEADER"
   /** The record's day, re-yeared from a date the page itself prints. */
   | "RETIMED_FROM_PAGE"
   /** A service date the record states in its own text. */
@@ -43,6 +48,17 @@ export type DateBasis =
   /** No source could date it. It routes to review. */
   | "NONE";
 
+/** Why a record could not be dated, for the reviewer who has to fix it. */
+export type UnresolvedReason =
+  | "NO_SERVICE_DATE"
+  | "CONFLICTING_DATES"
+  | "ONLY_ARTIFACT_DATES"
+  | "NOTE_BOUNDARY_UNCERTAIN"
+  | "SOURCE_TEXT_INSUFFICIENT";
+
+/** Which bases are read off the page rather than worked out. */
+const DOCUMENTED_BASES = new Set<DateBasis>(["DOCUMENTED", "NOTE_SERVICE_LABEL", "NOTE_HEADER"]);
+
 export interface ResolvedDate {
   iso: string | null;
   basis: DateBasis;
@@ -50,6 +66,8 @@ export interface ResolvedDate {
   evidence?: string;
   /** True when the program worked the date out rather than reading it. */
   inferred: boolean;
+  /** Present only when nothing could date the record. */
+  unresolvedReason?: UnresolvedReason;
 }
 
 /**
@@ -73,6 +91,15 @@ export interface DateSources {
   before?: string | null;
   /** Nearest already-resolved date after this record, by position. */
   after?: string | null;
+  /**
+   * The signed note this record's text sits inside, when one contains it.
+   *
+   * Containment is the whole point: a note's date belongs to the fragments of
+   * THAT note, and to nothing else. A date is never taken because it happens to
+   * be printed nearby, which would give an operative report the date of the
+   * admission note filed before it.
+   */
+  containingNote?: { date: string | null; dateBasis: NoteDateBasis | null; dateEvidence: string | null } | null;
   today?: Date;
 }
 
@@ -96,6 +123,18 @@ export function resolveDate(sources: DateSources): ResolvedDate {
     // and the record may still say what day it documents.
   }
 
+  // The note this record sits inside, dating itself in its own header or
+  // service field. Read off the page, so it is documented rather than inferred.
+  const note = sources.containingNote;
+  if (note?.date && note.dateBasis) {
+    return {
+      iso: note.date,
+      basis: note.dateBasis === "SERVICE_LABEL" ? "NOTE_SERVICE_LABEL" : "NOTE_HEADER",
+      evidence: note.dateEvidence ?? undefined,
+      inferred: false,
+    };
+  }
+
   const stated = dateFromClaims(claims, today);
   if (stated) {
     return { iso: stated.iso, basis: "STATED_IN_CLAIMS", evidence: stated.sourceText, inferred: true };
@@ -104,7 +143,31 @@ export function resolveDate(sources: DateSources): ResolvedDate {
   const positioned = fromNeighbours(sources.before ?? null, sources.after ?? null);
   if (positioned) return positioned;
 
-  return { iso: null, basis: "NONE", inferred: false };
+  return { iso: null, basis: "NONE", inferred: false, unresolvedReason: whyUnresolved(sources) };
+}
+
+/** Whether a resolved date was read off the page rather than worked out. */
+export function isDocumented(basis: DateBasis): boolean {
+  return DOCUMENTED_BASES.has(basis);
+}
+
+function whyUnresolved(sources: DateSources): UnresolvedReason {
+  const { header, claims, nearbyText, profile } = sources;
+
+  // A header the year check refused: the page printed only dates that cannot
+  // be the service date.
+  if (header && dateVerdict(header, nearbyText, profile).verdict === "UNTRUSTED") {
+    return "ONLY_ARTIFACT_DATES";
+  }
+  if (sources.before && sources.after) {
+    const from = Date.parse(`${sources.before}T00:00:00Z`);
+    const to = Date.parse(`${sources.after}T00:00:00Z`);
+    // Backwards neighbours mean the packet is out of order here.
+    if (Number.isFinite(from) && Number.isFinite(to) && to < from) return "CONFLICTING_DATES";
+  }
+  if (!sources.containingNote) return "NOTE_BOUNDARY_UNCERTAIN";
+  if (!claims.length) return "SOURCE_TEXT_INSUFFICIENT";
+  return "NO_SERVICE_DATE";
 }
 
 function fromNeighbours(before: string | null, after: string | null): ResolvedDate | null {
