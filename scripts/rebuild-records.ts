@@ -15,8 +15,8 @@
 import { Prisma, PrismaClient } from "@/generated/prisma";
 import { MEDICAL_TIMELINE_CLASSES } from "@/lib/documents/analysisClass";
 import { classifySegment } from "@/lib/engine/chronology";
-import { dateFromClaims } from "@/lib/records/dateRecovery";
-import { dateVerdict, yearProfile, type YearProfile } from "@/lib/records/dateSanity";
+import { resolveDate, type DateBasis, type ResolvedDate } from "@/lib/records/dateResolution";
+import { yearProfile, type YearProfile } from "@/lib/records/dateSanity";
 import {
   chronologyMateriality,
   consolidateIntoNotes,
@@ -129,45 +129,90 @@ async function main() {
   const notes = dedupeAcrossDocuments(perDocument);
   console.log(`${rowCount} rows -> ${perDocument.length} notes -> ${notes.length} after cross-document dedupe`);
 
+  // ── What day each note documents, and on what evidence ────────────────────
+  //
+  // Two passes, because the records either side of a note can only date it once
+  // they are dated themselves. The first pass uses evidence a note carries on
+  // its own; the second offers the neighbours that pass established, so an
+  // inference is never built on another inference.
+  const dated = new Map<MergedEntry, ResolvedDate>();
+  const nearbyOf = (note: MergedEntry) => {
+    const text = textOf.get(note.sourceDocumentId) ?? "";
+    return note.span ? text.slice(Math.max(0, note.span.start - 2_000), note.span.end + 2_000) : "";
+  };
+
+  for (const note of notes) {
+    dated.set(
+      note,
+      resolveDate({
+        header: note.encounterDate,
+        claims: note.claims,
+        nearbyText: nearbyOf(note),
+        profile: yearsOf.get(note.sourceDocumentId) ?? yearProfile(""),
+      }),
+    );
+  }
+
+  const byPosition = [...notes].sort((a, b) => {
+    if (a.sourceDocumentId !== b.sourceDocumentId) return a.sourceDocumentId.localeCompare(b.sourceDocumentId);
+    return (a.span?.start ?? Number.MAX_SAFE_INTEGER) - (b.span?.start ?? Number.MAX_SAFE_INTEGER);
+  });
+
+  for (let i = 0; i < byPosition.length; i++) {
+    const note = byPosition[i];
+    if (dated.get(note)?.iso) continue;
+    // A note with no span has no position, so nothing is either side of it.
+    if (!note.span) continue;
+
+    let before: string | null = null;
+    let after: string | null = null;
+    for (let j = i - 1; j >= 0; j--) {
+      if (byPosition[j].sourceDocumentId !== note.sourceDocumentId) break;
+      const iso = dated.get(byPosition[j])?.iso;
+      if (iso) {
+        before = iso;
+        break;
+      }
+    }
+    for (let j = i + 1; j < byPosition.length; j++) {
+      if (byPosition[j].sourceDocumentId !== note.sourceDocumentId) break;
+      const iso = dated.get(byPosition[j])?.iso;
+      if (iso) {
+        after = iso;
+        break;
+      }
+    }
+
+    dated.set(
+      note,
+      resolveDate({
+        header: note.encounterDate,
+        claims: note.claims,
+        nearbyText: nearbyOf(note),
+        profile: yearsOf.get(note.sourceDocumentId) ?? yearProfile(""),
+        before,
+        after,
+      }),
+    );
+  }
+
+  const bases = new Map<DateBasis, number>();
+  for (const r of dated.values()) bases.set(r.basis, (bases.get(r.basis) ?? 0) + 1);
+  console.log("dates:");
+  for (const [basis, n] of [...bases.entries()].sort((a, b) => b[1] - a[1])) {
+    console.log(`  ${String(n).padStart(5)} ${basis}`);
+  }
+
   // ── Notes into prose ──────────────────────────────────────────────────────
   const segmentsFor = new Map<string, unknown[]>();
   const chronology: Record<string, unknown>[] = [];
   const heldOff = new Map<string, number>();
-  const untrusted = new Map<string, number>();
   let written = 0;
   let fallbacks = 0;
-  let retimedCount = 0;
 
   async function compose(note: MergedEntry) {
-    // A record with no date gets one read from its own claims — service dates
-    // the extractor declined to propose on a billing-shaped line.
-    const recovered = note.encounterDate ? null : dateFromClaims(note.claims);
-    let iso = note.encounterDate?.toISOString().slice(0, 10) ?? recovered?.iso ?? null;
-    let retimed = false;
-
-    // A year the document does not attest is a misread until the page itself
-    // says otherwise. Nine records of a March 2024 admission were dated 2004
-    // and filed under prior medical history, where they read as pre-existing.
-    if (note.encounterDate) {
-      const profile = yearsOf.get(note.sourceDocumentId);
-      const documentText = textOf.get(note.sourceDocumentId);
-      if (profile && documentText) {
-        const nearby = note.span
-          ? documentText.slice(Math.max(0, note.span.start - 2_000), note.span.end + 2_000)
-          : note.claims.map((c) => `${c.value} ${c.excerpt}`).join(" ");
-        const verdict = dateVerdict(note.encounterDate, nearby, profile);
-        if (verdict.verdict === "RETIME") {
-          iso = verdict.iso;
-          retimed = true;
-          retimedCount++;
-        } else if (verdict.verdict === "UNTRUSTED") {
-          // Refused, not replaced: undated routes to review, misdated asserts
-          // something false with a citation attached.
-          iso = null;
-          untrusted.set(verdict.reason, (untrusted.get(verdict.reason) ?? 0) + 1);
-        }
-      }
-    }
+    const resolved = dated.get(note) ?? { iso: null, basis: "NONE" as DateBasis, inferred: false };
+    const iso = resolved.iso;
     const label = iso ? `${iso.slice(5, 7)}/${iso.slice(8, 10)}/${iso.slice(0, 4)}` : "Undated";
     const substance = entrySubstance(note);
     const cite = citable.get(note.sourceDocumentId) ?? false;
@@ -225,7 +270,7 @@ async function main() {
         sourceDocumentId: note.sourceDocumentId,
         sourcePage: cite ? note.pageStart : null,
         reviewStatus: "AI_DRAFT",
-        dateInferred: !!recovered || retimed,
+        dateInferred: resolved.inferred,
         relevanceScore: 50,
       };
       for (const section of entry.sections) {
@@ -253,10 +298,6 @@ async function main() {
 
   console.log(`\n\n${notes.length} notes | fallbacks ${fallbacks} (${pct(fallbacks, notes.length)})`);
   console.log(`chronology: ${chronology.length} events`);
-  if (retimedCount) console.log(`  years corrected from the page: ${retimedCount}`);
-  for (const [reason, n] of [...untrusted.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5)) {
-    console.log(`  date refused: ${String(n).padStart(4)} ${reason}`);
-  }
   for (const [reason, n] of [...heldOff.entries()].sort((a, b) => b[1] - a[1])) {
     console.log(`  held off the timeline: ${String(n).padStart(4)} ${reason}`);
   }
