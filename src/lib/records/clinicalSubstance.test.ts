@@ -31,6 +31,58 @@ describe("records that do not document care", () => {
     expect(clinicalSubstanceOf([claim("subjective", "Page 3 of 284")]).meaningful).toBe(false);
   });
 
+  it("refuses a demographic claim however the extractor worded it", () => {
+    // The first attempt matched the SHAPE of the sentence in the bug report and
+    // missed "Male patient, age 47" — which is what the extractor actually
+    // produces, and begins with neither a number nor "patient is".
+    for (const value of [
+      "Male patient, age 47",
+      "47-year-old male patient record.",
+      "Patient is male, age 47",
+      "47-year-old male patient contact.",
+    ]) {
+      expect(claimIsSubstantive(claim("subjective", value))).toBe(false);
+    }
+  });
+
+  it("refuses a billing code read back as a clinical statement", () => {
+    // These come off claim lines: the words are the code's official descriptor,
+    // not anything a clinician wrote about this patient.
+    for (const value of [
+      "Encounter for aftercare (Z4889) noted on claim",
+      "Diagnoses coded: M5450, M5126",
+      "Urinalysis (82962)",
+      "Therapeutic, prophylactic, or diagnostic injection (96374)",
+    ]) {
+      expect(claimIsSubstantive(claim("procedure", value))).toBe(false);
+    }
+    expect(clinicalSubstanceOf([claim("procedure", "Venipuncture (36415)")])).toMatchObject({
+      meaningful: false,
+      reason: "CODED_CLAIM_DATA",
+    });
+  });
+
+  it("keeps a real note that happens to cite its code", () => {
+    // The narrative is what distinguishes a note from a ledger line.
+    expect(
+      claimIsSubstantive(
+        claim("procedure", "Bilateral L2-S1 laminectomy, facetectomy and foraminotomy performed for spinal stenosis (CPT 63047)"),
+      ),
+    ).toBe(true);
+  });
+
+  it("refuses a patient-education handout printed into the chart", () => {
+    // About the condition in general, and about what may happen rather than
+    // what did.
+    for (const value of [
+      "Noncardiac chest pain - pain or discomfort in chest not caused by a heart problem",
+      "Medicines may be given to treat the cause of chest pain",
+      "Educational material on possible causes of chest pain",
+    ]) {
+      expect(claimIsSubstantive(claim("assessment", value))).toBe(false);
+    }
+  });
+
   it("refuses content carrying no clinical field at all", () => {
     const v = clinicalSubstanceOf([claim("documentContent", "Sworn to and subscribed before me")]);
     expect(v).toMatchObject({ meaningful: false, reason: "NO_CLINICAL_FIELD" });
