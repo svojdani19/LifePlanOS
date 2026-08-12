@@ -435,6 +435,71 @@ describe("what belongs on the medical chronology", () => {
   });
 });
 
+describe("one visit filed in two record productions", () => {
+  const entry = (over: Partial<MergeableRow>, ...values: string[]) =>
+    mergeRows([row({ ...over, claims: values.map((value, i) => ({ field: "assessment", value, excerpt: `e${i}` })) })])[0];
+
+  it("folds one clinician's visit when the two productions agree on its substance", () => {
+    // The hospital filed it as "ENGLISH, PAUL W" and the therapy practice as
+    // "Paul English, MD"; those key to one man now. Where the two accounts
+    // agree on what happened, the author carries the identity that the exact
+    // wording does not.
+    const a = entry(
+      { sourceDocumentId: "hospital", provider: "ENGLISH, PAUL W" },
+      "Emergency department visit for fall with left knee and hip pain",
+      "X-rays showed no fractures",
+      "Discharged home after Toradol",
+    );
+    const b = entry(
+      { sourceDocumentId: "therapy", provider: "Paul English, MD" },
+      "Emergency department visit for fall with left knee and hip pain",
+      "X-rays showed no fractures",
+      "Discharged home after Toradol administration",
+    );
+    expect(dedupeAcrossDocuments([a, b])).toHaveLength(1);
+  });
+
+  it("leaves two accounts that share only their opening line as two records", () => {
+    // Deliberate. Folding these would need a bar low enough to also fold the
+    // operative report with the discharge summary the same surgeon wrote that
+    // day, and losing a real record is worse than showing a duplicate.
+    const a = entry(
+      { sourceDocumentId: "hospital", provider: "ENGLISH, PAUL W" },
+      "Emergency department visit for fall with left knee and hip pain",
+      "Toradol administered, patient discharged home",
+    );
+    const b = entry(
+      { sourceDocumentId: "therapy", provider: "Paul English, MD" },
+      "Emergency department visit for fall with left knee and hip pain",
+      "X-rays showed no fractures, discharged with ibuprofen",
+    );
+    expect(dedupeAcrossDocuments([a, b])).toHaveLength(2);
+  });
+
+  it("keeps one surgeon's operative report and discharge summary apart", () => {
+    // He writes both on the day he operates, and the published plan lists them
+    // separately. Authorship alone must not fold them.
+    const op = entry(
+      { sourceDocumentId: "hospital", provider: "Fernando Techy, MD", analysisClass: "OPERATIVE" },
+      "Bilateral L2-S1 laminectomy, facetectomy and foraminotomy performed",
+      "Estimated blood loss 150 mL, patient extubated to PACU",
+    );
+    const discharge = entry(
+      { sourceDocumentId: "hospital2", provider: "Fernando Techy, MD", analysisClass: "CLINICAL_ENCOUNTER" },
+      "Discharged home on postoperative day eight with home health",
+      "Diabetes management addressed, follow-up in two weeks",
+    );
+    expect(dedupeAcrossDocuments([op, discharge])).toHaveLength(2);
+  });
+
+  it("does not fold two records because a facility name matches", () => {
+    // An organisation is a filing cabinet, not an author.
+    const a = entry({ sourceDocumentId: "d1", provider: "Chopra Imaging Centers, Inc" }, "MRI lumbar spine performed");
+    const b = entry({ sourceDocumentId: "d2", provider: "Chopra Imaging Centers, Inc" }, "CT cervical spine performed");
+    expect(dedupeAcrossDocuments([a, b])).toHaveLength(2);
+  });
+});
+
 describe("who signed the note", () => {
   // A hospital chart prints the same surgeon four ways on four consecutive
   // pages. Each spelling started its own record, so one operation appeared four

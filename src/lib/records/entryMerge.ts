@@ -323,6 +323,19 @@ export function isSameRecordAcrossDocuments(a: MergedEntry, b: MergedEntry): boo
   // one study wherever the report is filed.
   if (decision.verdict === "MERGE") return true;
 
+  // One named clinician, one day, one kind of record, and nothing in either
+  // contradicting the other. Two productions of the same emergency visit
+  // reached the timeline twice — "ENGLISH, PAUL W" in the hospital's records
+  // and "Paul English, MD" in the therapy practice's — because each described
+  // the visit in its own words and word-overlap alone never reached the bar.
+  // Authorship carries the identity that the wording does not.
+  //
+  // It is not sufficient on its own: one surgeon writes both the operative
+  // report and the discharge summary on the day he operates, and the published
+  // plan lists those separately. So the content must still agree substantially,
+  // just not near-identically.
+  if (sameNamedAuthor(a, b) && overlap.ratio >= SAME_AUTHOR_OVERLAP && overlap.shared >= 2) return true;
+
   // Otherwise the copies must agree on nearly all of their DISTINCTIVE content.
   return overlap.ratio >= CROSS_DOCUMENT_OVERLAP && overlap.shared >= 2;
 }
@@ -344,6 +357,15 @@ export const CONTENT_IS_IDENTITY = 0.85;
  * allergies and their standing diagnoses before they share anything real.
  */
 export const CROSS_DOCUMENT_OVERLAP = 0.8;
+
+/**
+ * How much two entries by the SAME named clinician must still share.
+ *
+ * Lower than the anonymous bar because the author is already strong evidence,
+ * high enough that one clinician's operative report and discharge summary on
+ * the day he operates stay the two records the published plan lists.
+ */
+export const SAME_AUTHOR_OVERLAP = 0.5;
 
 /** Identity facts for a merged entry, for cross-document comparison. */
 function identityFactsOfEntry(entry: MergedEntry): IdentityFacts {
@@ -870,6 +892,16 @@ function isSameContent(a: MergedEntry, b: MergedEntry): boolean {
   let shared = 0;
   for (const value of va) if (vb.has(value)) shared++;
   return shared / Math.max(va.size, vb.size) >= CONTENT_IS_IDENTITY;
+}
+
+/** Do both entries name the same clinician — not merely fail to disagree? */
+function sameNamedAuthor(a: MergedEntry, b: MergedEntry): boolean {
+  const ka = providerKey(a.provider);
+  const kb = providerKey(b.provider);
+  // An organisation is a filing cabinet, not an author; two of its records are
+  // not one record because the cabinet matches.
+  if (!ka || !kb || ka.startsWith("ORG|") || kb.startsWith("ORG|")) return false;
+  return sameAuthorAllowingOcr(ka, kb);
 }
 
 function widen(a: RowSpan | null, b: RowSpan | null): RowSpan | null {
