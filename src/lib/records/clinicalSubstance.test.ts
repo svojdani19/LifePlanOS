@@ -62,6 +62,21 @@ describe("records that do not document care", () => {
     });
   });
 
+  it("recognises a seven-character ICD-10 code", () => {
+    // "S8002XA" is a full ICD-10 code. Matching only the five-character shape
+    // let a ledger of knee-contusion codes read as clinical encounters, twice
+    // over, on the emergency-visit date.
+    expect(claimIsSubstantive(claim("assessment", "Contusion of left knee, initial encounter (S8002XA)"))).toBe(false);
+    expect(claimIsSubstantive(claim("assessment", "S8002XA - Contusion of left knee, initial encounter"))).toBe(false);
+  });
+
+  it("does not mistake an anatomical level for a code", () => {
+    // "T12" is a vertebra and "L5-S1" a disc space. Both open claims that are
+    // entirely clinical.
+    expect(claimIsSubstantive(claim("assessment", "T12 compression fracture with 30% vertebral height loss"))).toBe(true);
+    expect(claimIsSubstantive(claim("impression", "MRI shows L5-S1 disc protrusion with right foot weakness"))).toBe(true);
+  });
+
   it("keeps a real note that happens to cite its code", () => {
     // The narrative is what distinguishes a note from a ledger line.
     expect(

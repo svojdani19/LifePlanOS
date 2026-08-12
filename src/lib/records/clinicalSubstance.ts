@@ -115,7 +115,16 @@ const CARRIES_A_RESULT =
  * The bill still matters and is still kept; it is simply not an encounter.
  */
 const CODE_REFERENCE =
-  /\b(?:cpt|hcpcs|icd(?:-?\s?10)?(?:-?cm)?)\b|\(\s*[A-TV-Z]?\d{4,5}(?:\.\d+)?\s*\)|\b[A-TV-Z]\d{2}\.?\d{0,4}\b/i;
+  // A labelled code, a parenthesised one, one opening the claim before a dash,
+  // or a bare one mid-sentence.
+  //
+  // Two lengths matter. ICD-10 runs to seven characters — "S8002XA" — and
+  // matching only the five-character shape let a ledger of knee-contusion codes
+  // read as clinical encounters. And a bare code carries at least four
+  // characters: a letter, two digits and something more. That is what separates
+  // "M5450" from "T12", which is a vertebra; dropping the bare form altogether
+  // to avoid that collision was measured and cost 32 real catches.
+  /\b(?:cpt|hcpcs|icd(?:-?\s?10)?(?:-?cm)?)\b|\(\s*[A-TV-Z]?\d{2,5}(?:\.\d+)?[0-9A-Z]{0,3}\s*\)|^\s*[A-TV-Z]\d{2}\.?[0-9A-Z]{0,4}\s*[-–—:]|\bcod(?:ed|es)\s*:?\s*[A-TV-Z]?\d{2}|\b[A-TV-Z]\d{2}\.?[0-9A-Z]{1,4}\b/i;
 
 const BILLING_CONTEXT = /\b(?:coded|codes?\s*:|on\s+claim|billed|charge[ds]?|units?|modifier|allowed\s+amount)\b/i;
 
@@ -126,7 +135,7 @@ function isCodeReference(value: string): boolean {
   const residue = value
     .replace(/\([^)]*\)/g, " ")
     .replace(/\b(?:cpt|hcpcs|icd(?:-?\s?10)?(?:-?cm)?)\b/gi, " ")
-    .replace(/\b[A-TV-Z]\d{2}\.?\d{0,4}\b/g, " ")
+    .replace(/\b[A-TV-Z]\d{2}\.?[0-9A-Z]{0,4}\b/g, " ")
     .replace(/\b\d{4,5}\b/g, " ")
     .replace(BILLING_CONTEXT, " ")
     .replace(/[^A-Za-z]+/g, " ")
