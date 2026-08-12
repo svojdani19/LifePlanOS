@@ -23,6 +23,7 @@
 
 import { NON_CLINICAL_CLASSES, type AnalysisClass } from "@/lib/documents/analysisClass";
 import type { SynthClaim } from "@/lib/llm/groundedSynthesis";
+import { noteAt, type DocumentNote } from "@/lib/records/noteStructure";
 import { spanOf, type PreparedDocument, type RowSpan } from "@/lib/records/rowSpans";
 import { compareClass, decideIdentity, distinctiveOverlap, groupByIdentity, timeFromText, type IdentityFacts } from "@/lib/records/encounterIdentity";
 
@@ -612,17 +613,26 @@ export function providerKey(raw: string | null | undefined): string | null {
     return name.length >= 3 ? `ORG|${name}` : null;
   }
 
-  let parts = s
-    .split(/[\s,]+/)
-    .map((w) => w.replace(/[.,]+$/, "").trim())
-    .filter(Boolean)
-    .filter((w) => !CREDENTIAL_WORD.test(w) && !TITLE_WORD.test(w));
+  // Whether a comma separates the surname is decided BEFORE credentials are
+  // dropped, on the words as printed. Testing the stripped string meant a
+  // credential the stripper did not know became the given name: "Michael Crone,
+  // DC" read as surname Michael, and every "First Last, CRED" whose credential
+  // was not in that one list came out reversed.
+  const printed = s
+    .split(/\s+/)
+    .map((w) => ({ word: w.replace(/[.,;]+$/, "").trim(), comma: /[,;]$/.test(w.trim()) }))
+    .filter((w) => w.word.length > 0);
 
-  // "Techy, Fernando" — a surname-first listing, once credentials are gone.
-  const surnameFirst = /^[^,]+,\s*[A-Za-z][A-Za-z'’-]*\.?\s*$/.test(
-    s.replace(/\b(?:m\.?d\.?|d\.?o\.?|r\.?n\.?|p\.?t\.?|n\.?p\.?|p\.?a\.?-?c?)\b\.?/gi, "").trim(),
-  );
-  if (surnameFirst && parts.length >= 2) parts = [parts[1], parts[0]];
+  const kept = printed.filter((w) => !CREDENTIAL_WORD.test(w.word) && !TITLE_WORD.test(w.word));
+  let parts = kept.map((w) => w.word);
+
+  // "Techy, Fernando" and "ENGLISH, PAUL W" — the surname printed first, with
+  // or without the middle initial an emergency department adds.
+  const surnameFirst = kept.length >= 2 && kept[0].comma;
+  // "English Paul W" — a trailing lone initial marks the same listing as surely
+  // as a comma does.
+  const trailingInitial = parts.length >= 3 && parts[parts.length - 1].length === 1;
+  if ((surnameFirst || trailingInitial) && parts.length >= 2) parts = [...parts.slice(1), parts[0]];
 
   const named = parts.filter((w) => /[A-Za-z]{2,}/.test(w));
   if (!named.length) return null;
@@ -720,6 +730,18 @@ export const NOTE_REACH = 12_000;
  */
 export interface ConsolidateOptions {
   /**
+   * The notes the document is made of, read from its own structure.
+   *
+   * Used to name the author of a fragment that carries none — a chart signs a
+   * note once and the pages under it do not repeat the name. It deliberately
+   * does NOT group: bucketing by detected note was measured and made things
+   * worse, putting 69 entries on a surgery date that folding by author puts at
+   * 14, because headers in a 1.3MB chart are far too sparse to bound a note
+   * reliably and one author's work then lands in several of them, unable to
+   * rejoin. Attribution is what the document's structure is good for.
+   */
+  documentNotes?: readonly DocumentNote[];
+  /**
    * The person the records are about.
    *
    * A chart header prints the patient's name beside the author's, and the
@@ -736,8 +758,16 @@ export function consolidateIntoNotes(
   options: ConsolidateOptions = {},
 ): MergedEntry[] {
   const patient = providerKey(options.patientName);
+  const structure = options.documentNotes ?? [];
   const buckets = new Map<string, MergedEntry[]>();
-  for (const e of entries) {
+
+  for (const raw of entries) {
+    // The note this fragment sits inside names its author, where the fragment
+    // itself does not.
+    const printed = raw.span && structure.length ? noteAt(structure, raw.span.start) : null;
+    const e =
+      printed?.author && !providerKey(raw.provider) ? { ...raw, provider: printed.author } : raw;
+
     const key = `${e.sourceDocumentId}|${e.encounterDate?.toISOString().slice(0, 10) ?? "undated"}`;
     const bucket = buckets.get(key);
     if (bucket) bucket.push(e);

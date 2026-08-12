@@ -459,6 +459,25 @@ describe("who signed the note", () => {
     expect(providerKey("Mary Catharine Maxian, MD")).toBe("MAXIAN|M");
   });
 
+  it("reads a surname printed first, with or without a middle initial", () => {
+    // "ENGLISH, PAUL W" is how an emergency department prints the man the
+    // discharge summary calls Paul English, MD. Read the other way he keyed on
+    // PAUL, and the two records never met.
+    expect(providerKey("ENGLISH, PAUL W")).toBe("ENGLISH|P");
+    expect(providerKey("Paul English, MD")).toBe("ENGLISH|P");
+    expect(providerKey("English Paul W")).toBe("ENGLISH|P");
+    expect(providerKey("GIDWANI, GIRISH M")).toBe("GIDWANI|G");
+  });
+
+  it("does not reverse a name because of a credential it has not seen before", () => {
+    // The comma test ran on a string with credentials stripped by a list that
+    // did not include DC, so "Michael Crone, DC" read as surname Michael — and
+    // every "First Last, CRED" outside that list came out reversed.
+    expect(providerKey("Michael Crone, DC")).toBe("CRONE|M");
+    expect(providerKey("Mary Catharine Maxian, CRNA")).toBe("MAXIAN|M");
+    expect(providerKey("Abraham Jiju, PT")).toBe("JIJU|A");
+  });
+
   it("keys an organisation apart from any person", () => {
     // Keyed as people these became "INC" and "PLLC", which files two unrelated
     // companies under one author.

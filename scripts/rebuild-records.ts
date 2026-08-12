@@ -28,6 +28,8 @@ import {
   type MergedEntry,
 } from "@/lib/records/entryMerge";
 import { renderEntry, writeEntry } from "@/lib/records/entryWriter";
+import { findNotes } from "@/lib/records/noteStructure";
+import { prepareDocumentText } from "@/lib/records/sectionLedger";
 import { prepareDocument } from "@/lib/records/rowSpans";
 
 /** Which chronology column a written section belongs in. */
@@ -119,6 +121,10 @@ async function main() {
       // sometimes reads their name off the chart header instead of the
       // clinician's.
       patientName: theCase.clientName,
+      // The document's own note structure names the author of a fragment that
+      // carries none: a chart signs a note once and the pages under it do not
+      // repeat the name.
+      documentNotes: findNotes(prepareDocumentText(text)),
     });
     // Offsets resolve real pages, so a citation no longer depends on the
     // recorded page number, which one packet reported as "page 1" throughout.
