@@ -6,6 +6,7 @@ import {
   identityFactsOfMergedEntry,
   isSameRecordAcrossDocuments,
   mergeRows,
+  providerKey,
   sameNamedAuthor,
   type MergeableRow,
   type MergedEntry,
@@ -34,6 +35,7 @@ const entry = (over: Partial<MergeableRow>, ...values: string[]): MergedEntry =>
 
 const deps = {
   sameNamedAuthor,
+  namesSomeone: (entry: MergedEntry) => providerKey(entry.provider) !== null,
   settledByRules: isSameRecordAcrossDocuments,
   factsOf: identityFactsOfMergedEntry,
   compatibleClass: classesCompatible,
@@ -91,6 +93,30 @@ describe("choosing which pairs to ask about", () => {
   it("never offers records that do not name the same clinician", () => {
     const a = entry(HOSPITAL, "Emergency department visit for fall with left knee and hip pain");
     const b = entry({ sourceDocumentId: "therapy", provider: "Michael Crone, DC" }, "Emergency department visit for fall with knee pain");
+    expect(candidatePairs([a, b], deps)).toHaveLength(0);
+  });
+
+  it("offers two unattributed records that read alike", () => {
+    // Four duplicate pairs survived with no clinician named on either side, so
+    // a shared name could not be the reason to ask. Resemblance is.
+    const a = entry({ sourceDocumentId: "hospital" }, "MRI lumbar spine without contrast showed multilevel disc herniations with moderate stenosis at L4-5");
+    const b = entry({ sourceDocumentId: "imaging" }, "MRI of the lumbar spine demonstrated multilevel disc herniations with moderate stenosis at L4-5");
+    const pairs = candidatePairs([a, b], deps);
+    expect(pairs).toHaveLength(1);
+    expect(pairs[0].reason).toMatch(/unattributed/);
+  });
+
+  it("does not offer two unattributed records that merely share a date", () => {
+    // Without this every pair of records on a busy admission date would be a
+    // question, and almost none of them a duplicate.
+    const a = entry({ sourceDocumentId: "d1" }, "Physical therapy session with electrical stimulation to the lumbar region");
+    const b = entry({ sourceDocumentId: "d2" }, "Anesthesia consent signed for planned epidural steroid injection");
+    expect(candidatePairs([a, b], deps)).toHaveLength(0);
+  });
+
+  it("does not treat a record naming a different clinician as unattributed", () => {
+    const a = entry(HOSPITAL, "MRI lumbar spine showed multilevel disc herniations with moderate stenosis");
+    const b = entry({ sourceDocumentId: "imaging", provider: "Michael Crone, DC" }, "MRI lumbar spine showed multilevel disc herniations with moderate stenosis");
     expect(candidatePairs([a, b], deps)).toHaveLength(0);
   });
 

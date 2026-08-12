@@ -61,7 +61,42 @@ export type PairVerdict =
 export const ASK_FLOOR = 0;
 
 /** How many pairs one case may ask about, so a bad corpus cannot run away. */
-export const MAX_PAIRS = 40;
+export const MAX_PAIRS = 60;
+
+/**
+ * How alike two UNATTRIBUTED records must read before they are worth asking about.
+ *
+ * A named clinician on a shared date is itself a reason to ask. Without one
+ * there is no such reason, and every pair of records sharing a date would
+ * qualify — hundreds on a busy admission, none of them likely. So text
+ * similarity selects the candidates here.
+ *
+ * This is a filter, not a finding. It decides which questions are worth the
+ * asking; the answer still comes from reading both records.
+ */
+export const UNATTRIBUTED_SIMILARITY = 0.5;
+
+const STOP = new Set(["the", "a", "an", "of", "for", "with", "and", "to", "in", "on", "at", "was", "were", "is", "patient"]);
+
+/** Rough token similarity, for selecting questions rather than answering them. */
+export function textSimilarity(a: string, b: string): number {
+  const tokens = (s: string) =>
+    new Set(
+      s
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, " ")
+        .split(/\s+/)
+        .filter((w) => w.length > 2 && !STOP.has(w)),
+    );
+  const ta = tokens(a);
+  const tb = tokens(b);
+  if (!ta.size || !tb.size) return 0;
+  let shared = 0;
+  for (const t of ta) if (tb.has(t)) shared++;
+  return shared / Math.min(ta.size, tb.size);
+}
+
+const textOf = (entry: { claims: readonly { value: string }[] }) => entry.claims.map((c) => c.value).join(" ");
 
 const verdictSchema = z.object({
   same_encounter: z.boolean(),
@@ -79,6 +114,8 @@ export function candidatePairs(
   entries: readonly MergedEntry[],
   deps: {
     sameNamedAuthor: (a: MergedEntry, b: MergedEntry) => boolean;
+    /** Does this record name a clinician at all? */
+    namesSomeone: (entry: MergedEntry) => boolean;
     settledByRules: (a: MergedEntry, b: MergedEntry) => boolean;
     factsOf: (entry: MergedEntry) => IdentityFacts;
     compatibleClass: (a: MergedEntry, b: MergedEntry) => boolean;
@@ -97,10 +134,19 @@ export function candidatePairs(
       // Within a document the rules already have the note structure to work
       // with; this is for copies filed in separate productions.
       if (a.sourceDocumentId === b.sourceDocumentId) continue;
-      if (!deps.sameNamedAuthor(a, b)) continue;
       if (!deps.compatibleClass(a, b)) continue;
       // Anything the rules can settle stays with the rules.
       if (deps.settledByRules(a, b)) continue;
+
+      // Either a shared clinician, or — where neither record names one — enough
+      // resemblance to make the question worth asking.
+      const named = deps.sameNamedAuthor(a, b);
+      const similarity = named ? 1 : textSimilarity(textOf(a), textOf(b));
+      if (!named) {
+        // A record naming a DIFFERENT clinician is not an unattributed pair.
+        if (deps.namesSomeone(a) && deps.namesSomeone(b)) continue;
+        if (similarity < UNATTRIBUTED_SIMILARITY) continue;
+      }
 
       const overlap = distinctiveOverlap(deps.factsOf(a), deps.factsOf(b));
       if (overlap.ratio < ASK_FLOOR) continue;
@@ -110,7 +156,9 @@ export function candidatePairs(
         b,
         // Recorded for the audit trail, not used as a gate: it is the measure
         // that could not settle this pair in the first place.
-        reason: `same clinician and date in two productions, ${Math.round(overlap.ratio * 100)}% distinctive agreement`,
+        reason: named
+          ? `same clinician and date in two productions, ${Math.round(overlap.ratio * 100)}% distinctive agreement`
+          : `unattributed records on one date in two productions, ${Math.round(similarity * 100)}% textual resemblance`,
       });
       if (pairs.length >= MAX_PAIRS) return pairs;
     }

@@ -35,11 +35,11 @@ const ROW_SELECT = {
 async function main() {
   const args = process.argv.slice(2);
   const dryRun = args.includes("--dry-run");
-  // Opt-in: the deterministic result is what runs by default.
-  const adjudicate = args.includes("--adjudicate-duplicates");
+  // On by default; --no-adjudicate falls back to the deterministic result.
+  const adjudicate = !args.includes("--no-adjudicate");
   const target = args.find((a) => !a.startsWith("--"));
   if (!target) {
-    console.error("usage: npm run records:rebuild -- <caseId|caseNumber> [--dry-run] [--adjudicate-duplicates]");
+    console.error("usage: npm run records:rebuild -- <caseId|caseNumber> [--dry-run] [--no-adjudicate]");
     process.exit(1);
   }
 

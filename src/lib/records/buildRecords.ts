@@ -40,6 +40,7 @@ import {
   isSameRecordAcrossDocuments,
   mergeRows,
   pageAttributionUsable,
+  providerKey,
   sameNamedAuthor,
   type MergeableRow,
   type MergedEntry,
@@ -165,8 +166,10 @@ export interface BuildOptions {
   /**
    * Ask an adjudicator about the pairs the rules leave undecided.
    *
-   * Off by default so every existing caller, test and dry run behaves exactly
-   * as before. It can only merge what the rules left apart.
+   * On by default. It can only merge what the rules left apart, and every
+   * failure mode keeps records separate, so the risk of leaving it on is a
+   * duplicate on screen rather than a lost record. Pass false to skip it —
+   * tests and structure-only builds do.
    */
   adjudicateDuplicates?: boolean;
   onProgress?: (done: number, total: number) => void;
@@ -180,6 +183,10 @@ export interface BuildOptions {
  */
 export async function buildRecords(options: BuildOptions): Promise<BuiltRecords> {
   const { caseId, documents, patientName = null, write = true } = options;
+  // Adjudication follows composition: a build that is not writing prose is a
+  // structural dry run, and asking a model about it spends tokens on an answer
+  // nobody reads.
+  const shouldAdjudicate = options.adjudicateDuplicates ?? write;
 
   const perDocument: MergedEntry[] = [];
   const citable = new Map<string, boolean>();
@@ -215,9 +222,10 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
   // adjudicator, which may only join what the rules left apart.
   let notes = deduped;
   let adjudication: BuildStats["adjudication"];
-  if (options.adjudicateDuplicates) {
+  if (shouldAdjudicate) {
     const pairs = candidatePairs(deduped, {
       sameNamedAuthor,
+      namesSomeone: (entry) => providerKey(entry.provider) !== null,
       settledByRules: isSameRecordAcrossDocuments,
       factsOf: identityFactsOfMergedEntry,
       compatibleClass: classesCompatible,
