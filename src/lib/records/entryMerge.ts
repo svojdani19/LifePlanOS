@@ -919,10 +919,14 @@ export function consolidateIntoNotes(
       else stranded.push(orphan);
     }
 
-    for (const note of notes) out.push(note.members.length === 1 ? note.members[0] : foldNote(note.members));
-    // Orphans that found no note are still one document and one date, and may
-    // still be copies of each other.
-    out.push(...foldIdenticalCopies(stranded));
+    // Folded across the bucket's WHOLE output, not just the strays. Four
+    // duplicate pairs survived because each copy attached to a DIFFERENT named
+    // note, so the two never met: notes were emitted straight out and only the
+    // orphans were compared with one another. Two entries carrying the same
+    // words on the same date in the same document are one record whichever
+    // notes they happened to attach to.
+    const composed = notes.map((note) => (note.members.length === 1 ? note.members[0] : foldNote(note.members)));
+    out.push(...foldIdenticalCopies([...composed, ...stranded]));
   }
 
   return out.sort((a, b) => (a.encounterDate?.getTime() ?? 0) - (b.encounterDate?.getTime() ?? 0));
