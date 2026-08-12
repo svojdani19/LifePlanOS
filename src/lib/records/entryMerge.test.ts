@@ -492,6 +492,22 @@ describe("one visit filed in two record productions", () => {
     expect(dedupeAcrossDocuments([op, discharge])).toHaveLength(2);
   });
 
+  it("folds a word-for-word copy filed in two productions", () => {
+    // Ten records survived as pairs this way — one MRI report, one therapy
+    // visit — because cross-document folding measured only DISTINCTIVE-fact
+    // overlap, which scores zero when the extractor yields no distinctive facts
+    // however identical the text. Within a document this was already the test.
+    const a = entry({ sourceDocumentId: "hospital" }, "MRI lumbar spine without contrast showed multilevel disc herniations with moderate stenosis");
+    const b = entry({ sourceDocumentId: "imaging" }, "MRI lumbar spine without contrast showed multilevel disc herniations with moderate stenosis");
+    expect(dedupeAcrossDocuments([a, b])).toHaveLength(1);
+  });
+
+  it("does not fold two records that agree only on their boilerplate", () => {
+    const a = entry({ sourceDocumentId: "d1" }, "No known drug allergies (NKDA)");
+    const b = entry({ sourceDocumentId: "d2" }, "No known drug allergies (NKDA)");
+    expect(dedupeAcrossDocuments([a, b])).toHaveLength(2);
+  });
+
   it("does not fold two records because a facility name matches", () => {
     // An organisation is a filing cabinet, not an author.
     const a = entry({ sourceDocumentId: "d1", provider: "Chopra Imaging Centers, Inc" }, "MRI lumbar spine performed");

@@ -25,7 +25,7 @@ import { NON_CLINICAL_CLASSES, type AnalysisClass } from "@/lib/documents/analys
 import type { SynthClaim } from "@/lib/llm/groundedSynthesis";
 import { noteAt, type DocumentNote } from "@/lib/records/noteStructure";
 import { spanOf, type PreparedDocument, type RowSpan } from "@/lib/records/rowSpans";
-import { compareClass, decideIdentity, distinctiveOverlap, groupByIdentity, timeFromText, type IdentityFacts } from "@/lib/records/encounterIdentity";
+import { compareClass, decideIdentity, distinctiveOverlap, groupByIdentity, isDistinctive, timeFromText, type IdentityFacts } from "@/lib/records/encounterIdentity";
 
 export interface MergeableRow {
   id: string;
@@ -367,6 +367,15 @@ export function isSameRecordAcrossDocuments(a: MergedEntry, b: MergedEntry): boo
   // procedure or identifier means two records however alike they read.
   const decision = decideIdentity(fa, fb);
   if (decision.verdict === "KEEP_SEPARATE") return false;
+
+  // The same words, claim for claim. Distinctive-fact overlap is a good measure
+  // of two accounts that describe one event differently, and a blind one for
+  // two copies of the SAME account: where the extractor yields no distinctive
+  // facts, identical text scores zero agreement. Ten records survived as pairs
+  // that way — one MRI report, one therapy visit, filed in two productions and
+  // word-for-word the same in both. Within a document this was already the
+  // test; there was no reason for it to stop at the document boundary.
+  if (isSameContent(a, b, { requireDistinctive: true })) return true;
 
   const overlap = distinctiveOverlap(fa, fb);
 
@@ -936,22 +945,41 @@ export function consolidateIntoNotes(
 function foldIdenticalCopies(entries: MergedEntry[]): MergedEntry[] {
   const groups: MergedEntry[][] = [];
   for (const entry of entries) {
-    const twin = groups.find((group) => isSameContent(group[0], entry));
+    const twin = groups.find((group) => isSameContent(group[0], entry, { requireDistinctive: false }));
     if (twin) twin.push(entry);
     else groups.push([entry]);
   }
   return groups.map((group) => (group.length === 1 ? group[0] : foldNote(group)));
 }
 
-/** Do these two say the same thing, claim for claim? */
-function isSameContent(a: MergedEntry, b: MergedEntry): boolean {
+/**
+ * Do these two say the same thing, claim for claim?
+ *
+ * Across documents, boilerplate is excluded first: two unrelated records that
+ * both note "no known drug allergies" and "vital signs stable" agree completely
+ * on their furniture and on nothing else, and folding those loses a record.
+ *
+ * Within one document and one date the bar is the raw text, because the risk is
+ * not the same. Those entries are already known to be fragments of one day of
+ * one production, and requiring distinctiveness there cost seven legitimate
+ * folds — records whose only claim was too short to qualify.
+ */
+function isSameContent(a: MergedEntry, b: MergedEntry, opts: { requireDistinctive: boolean }): boolean {
   if (!a.claims.length || !b.claims.length) return false;
   // Different days are different records even when the words match.
   if ((a.encounterDate?.getTime() ?? null) !== (b.encounterDate?.getTime() ?? null)) return false;
 
-  const values = (entry: MergedEntry) => new Set(entry.claims.map((c) => norm(c.value)).filter(Boolean));
+  const values = (entry: MergedEntry) =>
+    new Set(
+      entry.claims
+        .filter((c) => !opts.requireDistinctive || isDistinctive(c))
+        .map((c) => norm(c.value))
+        .filter(Boolean),
+    );
   const va = values(a);
   const vb = values(b);
+  // Nothing distinctive on either side means the two agree only on their
+  // furniture, which is no evidence at all.
   if (!va.size || !vb.size) return false;
 
   let shared = 0;
