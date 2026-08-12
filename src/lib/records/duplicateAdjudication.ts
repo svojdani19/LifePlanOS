@@ -74,12 +74,29 @@ export const MAX_PAIRS = 60;
  * This is a filter, not a finding. It decides which questions are worth the
  * asking; the answer still comes from reading both records.
  */
-export const UNATTRIBUTED_SIMILARITY = 0.5;
+export const UNATTRIBUTED_SIMILARITY = 0.65;
+
+/** Shared meaningful words below which a resemblance is not worth acting on. */
+export const MIN_SHARED_TOKENS = 5;
 
 const STOP = new Set(["the", "a", "an", "of", "for", "with", "and", "to", "in", "on", "at", "was", "were", "is", "patient"]);
 
-/** Rough token similarity, for selecting questions rather than answering them. */
-export function textSimilarity(a: string, b: string): number {
+/**
+ * Rough token similarity, for selecting questions rather than answering them.
+ *
+ * Divides by the UNION. The first version divided by the smaller set, which
+ * scores a short record fully contained in a long one at 1.0 — so a one-line
+ * note matched every long record that happened to mention the same words, and
+ * the candidate set went from 5 pairs to more than 60, capped, at 60 model
+ * calls a rebuild, without folding the duplicates it was built for.
+ *
+ * Measured on the case, the denominator was the whole problem: at the SAME
+ * threshold, union scoring takes 60+ candidates down to 20. Between 0.65 and
+ * 0.8 the count barely moves — 16 pairs against 14 — so the bar sits on a
+ * plateau rather than a cliff, which is where a threshold should sit if it has
+ * to sit anywhere.
+ */
+export function textSimilarity(a: string, b: string): { ratio: number; shared: number } {
   const tokens = (s: string) =>
     new Set(
       s
@@ -90,10 +107,10 @@ export function textSimilarity(a: string, b: string): number {
     );
   const ta = tokens(a);
   const tb = tokens(b);
-  if (!ta.size || !tb.size) return 0;
+  if (!ta.size || !tb.size) return { ratio: 0, shared: 0 };
   let shared = 0;
   for (const t of ta) if (tb.has(t)) shared++;
-  return shared / Math.min(ta.size, tb.size);
+  return { ratio: shared / (ta.size + tb.size - shared), shared };
 }
 
 const textOf = (entry: { claims: readonly { value: string }[] }) => entry.claims.map((c) => c.value).join(" ");
@@ -110,6 +127,8 @@ const verdictSchema = z.object({
  * `sameNamed` and `settledByRules` are supplied by the caller so this module
  * cannot drift from the rules it defers to.
  */
+export type CandidateList = DuplicatePair[] & { truncated?: boolean };
+
 export function candidatePairs(
   entries: readonly MergedEntry[],
   deps: {
@@ -120,8 +139,8 @@ export function candidatePairs(
     factsOf: (entry: MergedEntry) => IdentityFacts;
     compatibleClass: (a: MergedEntry, b: MergedEntry) => boolean;
   },
-): DuplicatePair[] {
-  const pairs: DuplicatePair[] = [];
+): CandidateList {
+  const pairs: CandidateList = [];
 
   for (let i = 0; i < entries.length; i++) {
     for (let j = i + 1; j < entries.length; j++) {
@@ -141,11 +160,16 @@ export function candidatePairs(
       // Either a shared clinician, or — where neither record names one — enough
       // resemblance to make the question worth asking.
       const named = deps.sameNamedAuthor(a, b);
-      const similarity = named ? 1 : textSimilarity(textOf(a), textOf(b));
+      let similarity = 1;
       if (!named) {
         // A record naming a DIFFERENT clinician is not an unattributed pair.
         if (deps.namesSomeone(a) && deps.namesSomeone(b)) continue;
-        if (similarity < UNATTRIBUTED_SIMILARITY) continue;
+        const resemblance = textSimilarity(textOf(a), textOf(b));
+        // Both bars matter: the ratio rejects a long record that merely
+        // contains a short one, and the token floor rejects two thin records
+        // agreeing on three words.
+        if (resemblance.ratio < UNATTRIBUTED_SIMILARITY || resemblance.shared < MIN_SHARED_TOKENS) continue;
+        similarity = resemblance.ratio;
       }
 
       const overlap = distinctiveOverlap(deps.factsOf(a), deps.factsOf(b));
@@ -160,7 +184,13 @@ export function candidatePairs(
           ? `same clinician and date in two productions, ${Math.round(overlap.ratio * 100)}% distinctive agreement`
           : `unattributed records on one date in two productions, ${Math.round(similarity * 100)}% textual resemblance`,
       });
-      if (pairs.length >= MAX_PAIRS) return pairs;
+      if (pairs.length >= MAX_PAIRS) {
+        // Hitting the cap means coverage is incomplete AND depends on iteration
+        // order. Said out loud rather than truncated quietly: a silent cap
+        // reads as "everything was checked".
+        pairs.truncated = true;
+        return pairs;
+      }
     }
   }
   return pairs;
