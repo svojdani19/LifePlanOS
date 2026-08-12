@@ -31,14 +31,20 @@ import { resolveDate, isDocumented, type DateBasis, type ResolvedDate, type Unre
 import { yearProfile, type YearProfile } from "@/lib/records/dateSanity";
 import {
   chronologyMateriality,
+  classesCompatible,
   consolidateIntoNotes,
   dedupeAcrossDocuments,
   entrySubstance,
+  foldAdjudicatedPairs,
+  identityFactsOfMergedEntry,
+  isSameRecordAcrossDocuments,
   mergeRows,
   pageAttributionUsable,
+  sameNamedAuthor,
   type MergeableRow,
   type MergedEntry,
 } from "@/lib/records/entryMerge";
+import { adjudicateDuplicates, candidatePairs } from "@/lib/records/duplicateAdjudication";
 import { renderEntry, writeEntry } from "@/lib/records/entryWriter";
 import { findNotes, noteAt, type DocumentNote } from "@/lib/records/noteStructure";
 import { prepareDocument } from "@/lib/records/rowSpans";
@@ -130,6 +136,8 @@ export interface BuildStats {
   heldOffTimeline: Record<string, number>;
   fallbacks: number;
   failures: number;
+  /** Present only when adjudication ran. */
+  adjudication?: { candidates: number; asked: number; merged: number; failed: number };
 }
 
 export interface BuiltRecords {
@@ -154,6 +162,13 @@ export interface BuildOptions {
   documents: readonly RecordSource[];
   /** Compose prose. False builds structure only — used by tests and dry runs. */
   write?: boolean;
+  /**
+   * Ask an adjudicator about the pairs the rules leave undecided.
+   *
+   * Off by default so every existing caller, test and dry run behaves exactly
+   * as before. It can only merge what the rules left apart.
+   */
+  adjudicateDuplicates?: boolean;
   onProgress?: (done: number, total: number) => void;
 }
 
@@ -193,7 +208,30 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
     perDocument.push(...entries);
   }
 
-  const notes = dedupeAcrossDocuments(perDocument);
+  const deduped = dedupeAcrossDocuments(perDocument);
+
+  // The rules have now made every call they can. What remains undecided — one
+  // clinician, one day, two productions, partial agreement — is put to an
+  // adjudicator, which may only join what the rules left apart.
+  let notes = deduped;
+  let adjudication: BuildStats["adjudication"];
+  if (options.adjudicateDuplicates) {
+    const pairs = candidatePairs(deduped, {
+      sameNamedAuthor,
+      settledByRules: isSameRecordAcrossDocuments,
+      factsOf: identityFactsOfMergedEntry,
+      compatibleClass: classesCompatible,
+    });
+    const result = await adjudicateDuplicates(pairs);
+    notes = foldAdjudicatedPairs(deduped, result.merged);
+    adjudication = {
+      candidates: pairs.length,
+      asked: result.asked,
+      merged: result.merged.length,
+      failed: result.failed,
+    };
+  }
+
   const dated = resolveDatesFor(notes, { yearsOf, textOf, notesOf });
 
   // ── Compose ───────────────────────────────────────────────────────────────
@@ -348,6 +386,7 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
       heldOffTimeline: Object.fromEntries(heldOff),
       fallbacks,
       failures: failures.length,
+      adjudication,
     },
   };
 }

@@ -35,9 +35,11 @@ const ROW_SELECT = {
 async function main() {
   const args = process.argv.slice(2);
   const dryRun = args.includes("--dry-run");
+  // Opt-in: the deterministic result is what runs by default.
+  const adjudicate = args.includes("--adjudicate-duplicates");
   const target = args.find((a) => !a.startsWith("--"));
   if (!target) {
-    console.error("usage: npm run records:rebuild -- <caseId|caseNumber> [--dry-run]");
+    console.error("usage: npm run records:rebuild -- <caseId|caseNumber> [--dry-run] [--adjudicate-duplicates]");
     process.exit(1);
   }
 
@@ -71,6 +73,7 @@ async function main() {
     patientName: theCase.clientName,
     documents: sources,
     write: !dryRun,
+    adjudicateDuplicates: adjudicate,
     onProgress: (done, total) => {
       if (done % 25 === 0) process.stdout.write(`\r  ${done}/${total} composed   `);
     },
@@ -107,6 +110,11 @@ function report(built: Awaited<ReturnType<typeof buildRecords>>) {
   undated clinical      ${stats.undatedClinical}
   writer fallbacks      ${stats.fallbacks}
   failures              ${stats.failures}`);
+
+  if (stats.adjudication) {
+    const a = stats.adjudication;
+    console.log(`\n  duplicate adjudication: ${a.candidates} undecided pairs, ${a.asked} asked, ${a.merged} merged, ${a.failed} failed`);
+  }
 
   console.log("\n  dates by basis:");
   for (const [basis, n] of Object.entries(stats.dateBasis).sort((a, b) => b[1] - a[1])) {

@@ -1,0 +1,237 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// The pairs the rules cannot settle.
+//
+// One emergency visit reached the chronology twice: the hospital filed it under
+// "ENGLISH, PAUL W" and the therapy practice under "Paul English, MD". Both
+// name one man on one day, but each production described the visit in its own
+// words — "Toradol, discharged home" against "x-rays showed no fractures,
+// ibuprofen" — and word overlap never reached the bar.
+//
+// Lowering that bar was tried and rejected: a threshold loose enough to fold
+// those two also folds the operative report with the discharge summary the same
+// surgeon wrote that day, which the published plan lists separately. Losing a
+// real record is worse than showing a duplicate.
+//
+// So the deterministic rules keep every decision they can make, and this reads
+// only what they leave genuinely undecided — same day, same named clinician,
+// compatible record types, partial agreement. That residue is small, bounded,
+// and exactly the question a human would answer by reading both.
+//
+// Everything about this defers to the rules:
+//
+//   - it never separates what the rules merged, only merges what they left apart
+//   - a pair must already be a candidate; it cannot volunteer new ones
+//   - any failure, timeout, malformed answer or hesitation keeps them separate
+//   - it runs on claim text that is already in the case, and returns a verdict
+//     and a reason, never new clinical content
+// ─────────────────────────────────────────────────────────────────────────────
+
+import { z } from "zod";
+import { getProvider, type LlmProvider } from "@/lib/llm";
+import { distinctiveOverlap, type IdentityFacts } from "@/lib/records/encounterIdentity";
+import type { MergedEntry } from "@/lib/records/entryMerge";
+
+/** A pair the rules could not settle either way. */
+export interface DuplicatePair {
+  a: MergedEntry;
+  b: MergedEntry;
+  /** Why this pair is worth asking about, for the audit trail. */
+  reason: string;
+}
+
+export type PairVerdict =
+  | { same: true; confidence: "HIGH"; reason: string }
+  | { same: false; reason: string };
+
+/**
+ * No agreement floor, deliberately.
+ *
+ * The first version required some measured overlap before asking, and that
+ * gated out the exact case this exists for: the two accounts of one emergency
+ * visit share ZERO distinctive facts as the extractor computes them, because
+ * one says "Toradol, discharged home" and the other "x-rays showed no
+ * fractures, ibuprofen". A residue with no measurable overlap is not a residue
+ * worth skipping — it is the residue, and measuring it again with the same
+ * instrument that already failed would answer the same way.
+ *
+ * What bounds this instead is the candidacy test itself: same day, same named
+ * clinician, compatible record types, in different productions, and unsettled
+ * by the rules. That is a small set on any real case, and MAX_PAIRS caps it.
+ */
+export const ASK_FLOOR = 0;
+
+/** How many pairs one case may ask about, so a bad corpus cannot run away. */
+export const MAX_PAIRS = 40;
+
+const verdictSchema = z.object({
+  same_encounter: z.boolean(),
+  confidence: z.enum(["high", "medium", "low"]),
+  reason: z.string().min(3).max(400),
+});
+
+/**
+ * Pairs worth adjudicating, chosen deterministically.
+ *
+ * `sameNamed` and `settledByRules` are supplied by the caller so this module
+ * cannot drift from the rules it defers to.
+ */
+export function candidatePairs(
+  entries: readonly MergedEntry[],
+  deps: {
+    sameNamedAuthor: (a: MergedEntry, b: MergedEntry) => boolean;
+    settledByRules: (a: MergedEntry, b: MergedEntry) => boolean;
+    factsOf: (entry: MergedEntry) => IdentityFacts;
+    compatibleClass: (a: MergedEntry, b: MergedEntry) => boolean;
+  },
+): DuplicatePair[] {
+  const pairs: DuplicatePair[] = [];
+
+  for (let i = 0; i < entries.length; i++) {
+    for (let j = i + 1; j < entries.length; j++) {
+      const a = entries[i];
+      const b = entries[j];
+
+      // One day. An undated record has nothing to anchor a comparison to.
+      if (!a.encounterDate || !b.encounterDate) continue;
+      if (a.encounterDate.getTime() !== b.encounterDate.getTime()) continue;
+      // Within a document the rules already have the note structure to work
+      // with; this is for copies filed in separate productions.
+      if (a.sourceDocumentId === b.sourceDocumentId) continue;
+      if (!deps.sameNamedAuthor(a, b)) continue;
+      if (!deps.compatibleClass(a, b)) continue;
+      // Anything the rules can settle stays with the rules.
+      if (deps.settledByRules(a, b)) continue;
+
+      const overlap = distinctiveOverlap(deps.factsOf(a), deps.factsOf(b));
+      if (overlap.ratio < ASK_FLOOR) continue;
+
+      pairs.push({
+        a,
+        b,
+        // Recorded for the audit trail, not used as a gate: it is the measure
+        // that could not settle this pair in the first place.
+        reason: `same clinician and date in two productions, ${Math.round(overlap.ratio * 100)}% distinctive agreement`,
+      });
+      if (pairs.length >= MAX_PAIRS) return pairs;
+    }
+  }
+  return pairs;
+}
+
+export interface AdjudicationResult {
+  /** Pairs judged to be one encounter, in the order they were asked. */
+  merged: DuplicatePair[];
+  /** Every verdict, including refusals, for the audit trail. */
+  verdicts: { reason: string; verdict: PairVerdict }[];
+  asked: number;
+  failed: number;
+}
+
+/**
+ * Ask which of the undecided pairs are one encounter.
+ *
+ * Concurrency is modest and the pair count is capped, because this runs once
+ * per rebuild over a residue that should stay small. A growing residue is a
+ * signal that the rules need work, not that this should scale.
+ */
+export async function adjudicateDuplicates(
+  pairs: readonly DuplicatePair[],
+  options: { provider?: LlmProvider; concurrency?: number } = {},
+): Promise<AdjudicationResult> {
+  const result: AdjudicationResult = { merged: [], verdicts: [], asked: 0, failed: 0 };
+  if (!pairs.length) return result;
+
+  let llm: LlmProvider;
+  try {
+    llm = options.provider ?? getProvider();
+  } catch {
+    // No provider configured: the rules' answer stands, which is separate.
+    return result;
+  }
+
+  const concurrency = options.concurrency ?? 4;
+  for (let i = 0; i < pairs.length; i += concurrency) {
+    const batch = pairs.slice(i, i + concurrency);
+    const verdicts = await Promise.all(batch.map((pair) => askOnePair(llm, pair, result)));
+    batch.forEach((pair, index) => {
+      const verdict = verdicts[index];
+      result.verdicts.push({ reason: pair.reason, verdict });
+      if (verdict.same) result.merged.push(pair);
+    });
+  }
+  return result;
+}
+
+async function askOnePair(llm: LlmProvider, pair: DuplicatePair, result: AdjudicationResult): Promise<PairVerdict> {
+  result.asked++;
+  try {
+    const raw = await llm.complete({
+      system: SYSTEM,
+      messages: [{ role: "user", content: promptFor(pair) }],
+      temperature: 0,
+      maxTokens: 500,
+    });
+    const parsed = verdictSchema.safeParse(JSON.parse(extractJson(raw)));
+    if (!parsed.success) {
+      result.failed++;
+      return { same: false, reason: "the adjudicator's answer did not match the required shape" };
+    }
+    // Only a confident yes merges. "Medium" on a question this consequential is
+    // a no, and the pair stays visible for a reviewer.
+    if (parsed.data.same_encounter && parsed.data.confidence === "high") {
+      return { same: true, confidence: "HIGH", reason: parsed.data.reason };
+    }
+    return { same: false, reason: parsed.data.reason };
+  } catch (error) {
+    result.failed++;
+    return { same: false, reason: `adjudication failed: ${String(error).slice(0, 120)}` };
+  }
+}
+
+const SYSTEM = `You compare two medical record entries that a records-consolidation system could not tell apart or distinguish.
+
+Both entries are dated the same day and name the same clinician. They come from two different record productions — for example a hospital's own chart and a copy subpoenaed by another practice.
+
+Decide whether they document THE SAME clinical encounter, or two different encounters that happen to share a clinician and a date.
+
+They are the same encounter when the two texts describe one event in different words: the same presentation, the same findings, the same disposition, differing only in wording, detail or emphasis.
+
+They are DIFFERENT encounters when the texts describe things that both happened but are distinct — an operation and the discharge that followed it, a morning clinic visit and an evening admission, a procedure and the imaging that preceded it. One clinician commonly writes several records in one day.
+
+Answer "high" confidence only when a reviewer reading both would say without hesitation that they are one event. If the texts are consistent but you cannot tell whether they are one event or two, that is not high confidence.
+
+Reply with JSON only:
+{"same_encounter": true|false, "confidence": "high"|"medium"|"low", "reason": "<one sentence>"}`;
+
+function promptFor(pair: DuplicatePair): string {
+  return [
+    `Both records are dated ${pair.a.encounterDate?.toISOString().slice(0, 10)}.`,
+    "",
+    "RECORD A:",
+    describe(pair.a),
+    "",
+    "RECORD B:",
+    describe(pair.b),
+    "",
+    "Are these the same clinical encounter?",
+  ].join("\n");
+}
+
+function describe(entry: MergedEntry): string {
+  const head = [entry.provider, entry.facility].filter(Boolean).join(" · ");
+  // Claim text only — already extracted, already in the case. Bounded so a
+  // large record cannot crowd out the comparison.
+  const claims = entry.claims
+    .slice(0, 25)
+    .map((c) => `- ${c.field}: ${c.value}`)
+    .join("\n");
+  return [head ? `(${head})` : "(no attribution)", claims].filter(Boolean).join("\n");
+}
+
+function extractJson(raw: string): string {
+  const trimmed = raw.trim();
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start < 0 || end <= start) return trimmed;
+  return trimmed.slice(start, end + 1);
+}

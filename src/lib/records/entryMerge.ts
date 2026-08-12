@@ -289,6 +289,71 @@ export function dedupeAcrossDocuments(entries: readonly MergedEntry[]): MergedEn
  * chart share their medication list, their allergies and their standing
  * diagnoses; that is a template, not an identity.
  */
+/** The identity facts an entry presents, for callers comparing two of them. */
+export function identityFactsOfMergedEntry(entry: MergedEntry): IdentityFacts {
+  return identityFactsOfEntry(entry);
+}
+
+/** Are two entries' record classes compatible enough to be one record? */
+export function classesCompatible(a: MergedEntry, b: MergedEntry): boolean {
+  return compareClass(a.klass, b.klass) !== "DIFFERENT";
+}
+
+/**
+ * Fold pairs an adjudicator judged to be one record.
+ *
+ * Separate from dedupeAcrossDocuments so the deterministic result is complete
+ * before anything else touches it: this only merges what the rules left apart,
+ * and cannot separate what they joined.
+ */
+export function foldAdjudicatedPairs(
+  entries: readonly MergedEntry[],
+  pairs: readonly { a: MergedEntry; b: MergedEntry }[],
+): MergedEntry[] {
+  if (!pairs.length) return [...entries];
+
+  // Union-find over the entries named in the pairs, so a record recognised in
+  // three productions becomes one entry rather than a chain of two merges.
+  const parent = new Map<MergedEntry, MergedEntry>();
+  const find = (e: MergedEntry): MergedEntry => {
+    const up = parent.get(e);
+    if (!up || up === e) return e;
+    const root = find(up);
+    parent.set(e, root);
+    return root;
+  };
+  for (const entry of entries) parent.set(entry, entry);
+  for (const { a, b } of pairs) {
+    if (!parent.has(a) || !parent.has(b)) continue;
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent.set(rb, ra);
+  }
+
+  const groups = new Map<MergedEntry, MergedEntry[]>();
+  for (const entry of entries) {
+    const root = find(entry);
+    const group = groups.get(root);
+    if (group) group.push(entry);
+    else groups.set(root, [entry]);
+  }
+
+  const out: MergedEntry[] = [];
+  for (const group of groups.values()) {
+    if (group.length === 1) {
+      out.push(group[0]);
+      continue;
+    }
+    const folded = foldNote(group);
+    // Provenance survives: the entry records every document it was found in.
+    folded.alsoInDocumentIds = [
+      ...new Set(group.flatMap((g) => [g.sourceDocumentId, ...(g.alsoInDocumentIds ?? [])])),
+    ].filter((id) => id !== folded.sourceDocumentId);
+    out.push(folded);
+  }
+  return out.sort((a, b) => (a.encounterDate?.getTime() ?? 0) - (b.encounterDate?.getTime() ?? 0));
+}
+
 export function isSameRecordAcrossDocuments(a: MergedEntry, b: MergedEntry): boolean {
   // Two copies of one record carry the same date. Undated entries are never
   // folded across documents — there is nothing to anchor them to.
@@ -895,7 +960,7 @@ function isSameContent(a: MergedEntry, b: MergedEntry): boolean {
 }
 
 /** Do both entries name the same clinician — not merely fail to disagree? */
-function sameNamedAuthor(a: MergedEntry, b: MergedEntry): boolean {
+export function sameNamedAuthor(a: MergedEntry, b: MergedEntry): boolean {
   const ka = providerKey(a.provider);
   const kb = providerKey(b.provider);
   // An organisation is a filing cabinet, not an author; two of its records are
