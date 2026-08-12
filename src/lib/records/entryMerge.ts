@@ -806,7 +806,7 @@ export function consolidateIntoNotes(
     // Nothing in this bucket names an author, so there is no note to attach to
     // and nothing is known that was not known before.
     if (!notes.length) {
-      out.push(...bucket);
+      out.push(...foldIdenticalCopies(bucket));
       continue;
     }
 
@@ -816,16 +816,60 @@ export function consolidateIntoNotes(
     // too — 2,500 characters and 12,000 give the same grouping, because the
     // fragments sit immediately beside the surgeon's signature rather than
     // merely near it. Neither is the binding constraint, so neither is tuned.
+    const stranded: MergedEntry[] = [];
     for (const orphan of orphans) {
       const home = nearestNote(notes, orphan.span ?? null);
       if (home) home.note.members.push(orphan);
-      else out.push(orphan);
+      else stranded.push(orphan);
     }
 
     for (const note of notes) out.push(note.members.length === 1 ? note.members[0] : foldNote(note.members));
+    // Orphans that found no note are still one document and one date, and may
+    // still be copies of each other.
+    out.push(...foldIdenticalCopies(stranded));
   }
 
   return out.sort((a, b) => (a.encounterDate?.getTime() ?? 0) - (b.encounterDate?.getTime() ?? 0));
+}
+
+/**
+ * Fold entries that are the same record said twice.
+ *
+ * One emergency visit produced four chronology events with byte-identical
+ * summaries, no author, the same facility and the same document. Nothing folded
+ * them: grouping is by author, and an entry naming nobody can only attach to a
+ * note that names someone — so a bucket naming nobody passed straight through,
+ * however many copies of one record it held.
+ *
+ * Identical content in one document on one date is not two records. The bar is
+ * deliberately high — near-total claim overlap, not similarity — because two
+ * therapy sessions in a week genuinely read alike, and merging those would lose
+ * a visit rather than a duplicate.
+ */
+function foldIdenticalCopies(entries: MergedEntry[]): MergedEntry[] {
+  const groups: MergedEntry[][] = [];
+  for (const entry of entries) {
+    const twin = groups.find((group) => isSameContent(group[0], entry));
+    if (twin) twin.push(entry);
+    else groups.push([entry]);
+  }
+  return groups.map((group) => (group.length === 1 ? group[0] : foldNote(group)));
+}
+
+/** Do these two say the same thing, claim for claim? */
+function isSameContent(a: MergedEntry, b: MergedEntry): boolean {
+  if (!a.claims.length || !b.claims.length) return false;
+  // Different days are different records even when the words match.
+  if ((a.encounterDate?.getTime() ?? null) !== (b.encounterDate?.getTime() ?? null)) return false;
+
+  const values = (entry: MergedEntry) => new Set(entry.claims.map((c) => norm(c.value)).filter(Boolean));
+  const va = values(a);
+  const vb = values(b);
+  if (!va.size || !vb.size) return false;
+
+  let shared = 0;
+  for (const value of va) if (vb.has(value)) shared++;
+  return shared / Math.max(va.size, vb.size) >= CONTENT_IS_IDENTITY;
 }
 
 function widen(a: RowSpan | null, b: RowSpan | null): RowSpan | null {

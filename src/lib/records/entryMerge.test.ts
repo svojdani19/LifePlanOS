@@ -633,6 +633,33 @@ describe("folding a chart back into the notes it was signed as", () => {
     expect(consolidateIntoNotes(entries)).toHaveLength(2);
   });
 
+  it("folds identical unattributed copies of one record", () => {
+    // One emergency visit reached the chronology four times, byte-identical,
+    // with no author and the same document and date. Grouping is by author, and
+    // an entry naming nobody can only attach to a note that names someone — so
+    // a bucket naming nobody passed straight through, however many copies it
+    // held.
+    const copy = (start: number) => at(start, null, "Emergency department visit for initial evaluation of left knee contusion");
+    const folded = consolidateIntoNotes([copy(0), copy(600), copy(1_200), copy(1_800)]);
+    expect(folded).toHaveLength(1);
+  });
+
+  it("does not fold two visits that merely read alike", () => {
+    // Two therapy sessions in a week genuinely resemble each other, and merging
+    // those loses a visit rather than a duplicate.
+    const folded = consolidateIntoNotes([
+      at(0, null, "Therapy: electrical stimulation to the lumbar region, patient tolerated well"),
+      at(600, null, "Therapy: ultrasound to the cervical region, moderate tenderness on palpation"),
+    ]);
+    expect(folded).toHaveLength(2);
+  });
+
+  it("does not fold identical text recorded on different days", () => {
+    const a = at(0, null, "Emergency department visit for initial evaluation of left knee contusion");
+    const b = { ...at(600, null, "Emergency department visit for initial evaluation of left knee contusion"), encounterDate: new Date("2023-08-02T00:00:00Z") };
+    expect(consolidateIntoNotes([a, b])).toHaveLength(2);
+  });
+
   it("orders notes by date", () => {
     const later = { ...at(600, "Esteban Berberian, MD", "Follow-up"), encounterDate: new Date("2024-01-02T00:00:00Z") };
     const earlier = { ...at(0, "Fernando Techy, MD", "Surgery"), encounterDate: new Date("2023-01-02T00:00:00Z") };
