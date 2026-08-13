@@ -31,10 +31,27 @@ import { getProvider, type LlmProvider } from "@/lib/llm";
 import { distinctiveOverlap, type IdentityFacts } from "@/lib/records/encounterIdentity";
 import type { MergedEntry } from "@/lib/records/entryMerge";
 
+/**
+ * How the two records are attributed.
+ *
+ * The prompt asserted "both entries name the same clinician" for every pair,
+ * which was false for the unattributed ones — the model was being told
+ * something about the evidence that was not true, and answering on that basis.
+ */
+export type Attribution =
+  /** Both name a clinician, and it is the same one. */
+  | "SAME_CLINICIAN"
+  /** Neither names anyone. */
+  | "BOTH_UNATTRIBUTED"
+  /** One names a clinician; the other names nobody. */
+  | "ONE_ATTRIBUTED";
+
 /** A pair the rules could not settle either way. */
 export interface DuplicatePair {
   a: MergedEntry;
   b: MergedEntry;
+  /** What is actually known about who wrote each. */
+  attribution: Attribution;
   /** Why this pair is worth asking about, for the audit trail. */
   reason: string;
 }
@@ -78,6 +95,16 @@ export const UNATTRIBUTED_SIMILARITY = 0.65;
 
 /** Shared meaningful words below which a resemblance is not worth acting on. */
 export const MIN_SHARED_TOKENS = 5;
+
+/**
+ * The bar for a pair where only one record names its clinician.
+ *
+ * Higher than for two unattributed records. "Neither names anyone" leaves the
+ * question open; "one names Dr A and the other names nobody" carries a live
+ * possibility that the unnamed one belongs to somebody else, so it needs more
+ * agreement in the content before it is worth asking about.
+ */
+export const ONE_ATTRIBUTED_SIMILARITY = 0.8;
 
 const STOP = new Set(["the", "a", "an", "of", "for", "with", "and", "to", "in", "on", "at", "was", "were", "is", "patient"]);
 
@@ -160,15 +187,31 @@ export function candidatePairs(
       // Either a shared clinician, or — where neither record names one — enough
       // resemblance to make the question worth asking.
       const named = deps.sameNamedAuthor(a, b);
+      const aNamed = deps.namesSomeone(a);
+      const bNamed = deps.namesSomeone(b);
+
+      // Two records naming DIFFERENT clinicians are two records. They never
+      // enter any path here — least of all one that would describe them as
+      // unattributed.
+      if (!named && aNamed && bNamed) continue;
+
+      const attribution: Attribution = named
+        ? "SAME_CLINICIAN"
+        : aNamed || bNamed
+          ? "ONE_ATTRIBUTED"
+          : "BOTH_UNATTRIBUTED";
+
       let similarity = 1;
       if (!named) {
-        // A record naming a DIFFERENT clinician is not an unattributed pair.
-        if (deps.namesSomeone(a) && deps.namesSomeone(b)) continue;
         const resemblance = textSimilarity(textOf(a), textOf(b));
         // Both bars matter: the ratio rejects a long record that merely
         // contains a short one, and the token floor rejects two thin records
-        // agreeing on three words.
-        if (resemblance.ratio < UNATTRIBUTED_SIMILARITY || resemblance.shared < MIN_SHARED_TOKENS) continue;
+        // agreeing on three words. A half-attributed pair must clear a higher
+        // bar, because "one record names nobody" is weaker evidence of one
+        // event than "neither does" — an unnamed fragment could belong to any
+        // clinician, including one other than the named record's.
+        const floor = attribution === "ONE_ATTRIBUTED" ? ONE_ATTRIBUTED_SIMILARITY : UNATTRIBUTED_SIMILARITY;
+        if (resemblance.ratio < floor || resemblance.shared < MIN_SHARED_TOKENS) continue;
         similarity = resemblance.ratio;
       }
 
@@ -178,11 +221,15 @@ export function candidatePairs(
       pairs.push({
         a,
         b,
+        attribution,
         // Recorded for the audit trail, not used as a gate: it is the measure
         // that could not settle this pair in the first place.
-        reason: named
-          ? `same clinician and date in two productions, ${Math.round(overlap.ratio * 100)}% distinctive agreement`
-          : `unattributed records on one date in two productions, ${Math.round(similarity * 100)}% textual resemblance`,
+        reason:
+          attribution === "SAME_CLINICIAN"
+            ? `same clinician and date in two productions, ${Math.round(overlap.ratio * 100)}% distinctive agreement`
+            : attribution === "BOTH_UNATTRIBUTED"
+              ? `neither record names a clinician; one date in two productions, ${Math.round(similarity * 100)}% textual resemblance`
+              : `one record names a clinician and the other does not; one date in two productions, ${Math.round(similarity * 100)}% textual resemblance`,
       });
       if (pairs.length >= MAX_PAIRS) {
         // Hitting the cap means coverage is incomplete AND depends on iteration
@@ -268,7 +315,7 @@ async function askOnePair(llm: LlmProvider, pair: DuplicatePair, result: Adjudic
 
 const SYSTEM = `You compare two medical record entries that a records-consolidation system could not tell apart or distinguish.
 
-Both entries are dated the same day and name the same clinician. They come from two different record productions — for example a hospital's own chart and a copy subpoenaed by another practice.
+Both entries are dated the same day and come from two different record productions — for example a hospital's own chart and a copy subpoenaed by another practice. What is known about their authorship is stated in the message; rely on that and not on an assumption.
 
 Decide whether they document THE SAME clinical encounter, or two different encounters that happen to share a clinician and a date.
 
@@ -281,9 +328,17 @@ Answer "high" confidence only when a reviewer reading both would say without hes
 Reply with JSON only:
 {"same_encounter": true|false, "confidence": "high"|"medium"|"low", "reason": "<one sentence>"}`;
 
+const ATTRIBUTION_SENTENCE: Record<Attribution, string> = {
+  SAME_CLINICIAN: "Both records name the same clinician.",
+  BOTH_UNATTRIBUTED: "Neither record names a clinician, so authorship is unknown for both. Do not assume they share an author.",
+  ONE_ATTRIBUTED:
+    "One record names a clinician and the other names nobody. The unattributed record may or may not be by that clinician; do not assume it is.",
+};
+
 function promptFor(pair: DuplicatePair): string {
   return [
     `Both records are dated ${pair.a.encounterDate?.toISOString().slice(0, 10)}.`,
+    ATTRIBUTION_SENTENCE[pair.attribution],
     "",
     "RECORD A:",
     describe(pair.a),

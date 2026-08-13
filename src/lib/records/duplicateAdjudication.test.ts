@@ -96,6 +96,58 @@ describe("choosing which pairs to ask about", () => {
     expect(candidatePairs([a, b], deps)).toHaveLength(0);
   });
 
+  it("never routes two differently-named clinicians through any path, however alike they read", () => {
+    // Word-for-word identical, and still two records: two clinicians did not
+    // write one note.
+    const same = "MRI lumbar spine without contrast showed multilevel disc herniations with moderate stenosis at L4-5";
+    const a = entry({ sourceDocumentId: "d1", provider: "Paul English, MD" }, same);
+    const b = entry({ sourceDocumentId: "d2", provider: "Michael Crone, DC" }, same);
+    expect(candidatePairs([a, b], deps)).toHaveLength(0);
+  });
+
+  it("labels each pair with what is actually known about its authorship", () => {
+    // The prompt asserted "both entries name the same clinician" for every
+    // pair, which was false for the unattributed ones — the model answered on
+    // evidence it had been told incorrectly.
+    const [a, b] = edPair();
+    expect(candidatePairs([a, b], deps)[0].attribution).toBe("SAME_CLINICIAN");
+
+    const un1 = entry({ sourceDocumentId: "hospital" }, "MRI lumbar spine without contrast showed multilevel disc herniations with moderate stenosis at L4-5");
+    const un2 = entry({ sourceDocumentId: "imaging" }, "MRI of the lumbar spine demonstrated multilevel disc herniations with moderate stenosis at L4-5");
+    expect(candidatePairs([un1, un2], deps)[0].attribution).toBe("BOTH_UNATTRIBUTED");
+  });
+
+  it("treats a half-attributed pair as its own case, at a higher bar", () => {
+    // "One names Dr A, the other names nobody" carries a live possibility that
+    // the unnamed record belongs to somebody else.
+    // Worded differently enough that the deterministic rules cannot settle it,
+    // but far past the higher bar a half-attributed pair must clear.
+    const named = entry(
+      { sourceDocumentId: "hospital", provider: "Paul English, MD" },
+      "MRI lumbar spine without contrast showed multilevel disc herniations with moderate stenosis at L4-5",
+    );
+    const unnamed = entry(
+      { sourceDocumentId: "imaging" },
+      "MRI lumbar spine without contrast showed multilevel disc herniations with moderate stenosis at L4-5 noted",
+    );
+    const pairs = candidatePairs([named, unnamed], deps);
+    expect(pairs[0]?.attribution).toBe("ONE_ATTRIBUTED");
+    expect(pairs[0]?.reason).toMatch(/names a clinician and the other does not/);
+  });
+
+  it("holds a half-attributed pair to a higher bar than an unattributed one", () => {
+    const named = entry({ sourceDocumentId: "d1", provider: "Paul English, MD" }, "Emergency visit for a fall with left knee pain and swelling noted");
+    const unnamed = entry({ sourceDocumentId: "d2" }, "Emergency visit for a fall with left knee pain and bruising documented");
+    // Same texts with neither attributed would qualify; half-attributed does not.
+    const bothUnnamed = [
+      entry({ sourceDocumentId: "d1" }, "Emergency visit for a fall with left knee pain and swelling noted"),
+      entry({ sourceDocumentId: "d2" }, "Emergency visit for a fall with left knee pain and bruising documented"),
+    ];
+    expect(candidatePairs(bothUnnamed, deps).length).toBeGreaterThanOrEqual(
+      candidatePairs([named, unnamed], deps).length,
+    );
+  });
+
   it("offers two unattributed records that read alike", () => {
     // Four duplicate pairs survived with no clinician named on either side, so
     // a shared name could not be the reason to ask. Resemblance is.
@@ -103,7 +155,7 @@ describe("choosing which pairs to ask about", () => {
     const b = entry({ sourceDocumentId: "imaging" }, "MRI of the lumbar spine demonstrated multilevel disc herniations with moderate stenosis at L4-5");
     const pairs = candidatePairs([a, b], deps);
     expect(pairs).toHaveLength(1);
-    expect(pairs[0].reason).toMatch(/unattributed/);
+    expect(pairs[0].reason).toMatch(/neither record names a clinician/);
   });
 
   it("does not offer two unattributed records that merely share a date", () => {
