@@ -26,6 +26,7 @@
 //     and a reason, never new clinical content
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { getProvider, type LlmProvider } from "@/lib/llm";
 import { distinctiveOverlap, type IdentityFacts } from "@/lib/records/encounterIdentity";
@@ -243,11 +244,60 @@ export function candidatePairs(
   return pairs;
 }
 
+/**
+ * What was decided about one pair, and on what basis.
+ *
+ * Aggregate counts cannot answer the question a reviewer will actually ask:
+ * why did these two records become one? A merge changes what the plan says
+ * happened to the patient, so the reasoning has to survive the rebuild that
+ * produced it.
+ *
+ * Content hashes stand in for the text wherever they can. The claims are
+ * already stored on the rows this references; copying them here would multiply
+ * the PHI without adding anything a reviewer could not reach.
+ */
+export interface AdjudicationRecord {
+  /** The rows behind each side, so a reviewer can open both. */
+  aRowIds: string[];
+  bRowIds: string[];
+  aDocumentId: string;
+  bDocumentId: string;
+  /** Content identity, rather than another copy of the content. */
+  aContentHash: string;
+  bContentHash: string;
+  /** The date and provider evidence the decision was taken on. */
+  encounterDate: string | null;
+  aProvider: string | null;
+  bProvider: string | null;
+  attribution: Attribution;
+  /** Why the deterministic rules offered this pair. */
+  candidacyReason: string;
+  decision: "MERGED" | "KEPT_SEPARATE";
+  confidence: "high" | "medium" | "low" | "none";
+  explanation: string;
+  provider: string | null;
+  model: string | null;
+  promptVersion: string;
+  schemaVersion: string;
+  decidedAt: string;
+}
+
+/** Bumped when the prompt or the verdict shape changes, so old rows stay readable. */
+export const ADJUDICATION_PROMPT_VERSION = "2026-08-12.attribution-aware";
+export const ADJUDICATION_SCHEMA_VERSION = "1";
+
+function contentHash(entry: MergedEntry): string {
+  const text = entry.claims.map((c) => `${c.field}:${c.value}`).sort().join("\n");
+  return createHash("sha256").update(text).digest("hex").slice(0, 32);
+}
+
 export interface AdjudicationResult {
   /** Pairs judged to be one encounter, in the order they were asked. */
   merged: DuplicatePair[];
   /** Every verdict, including refusals, for the audit trail. */
   verdicts: { reason: string; verdict: PairVerdict }[];
+  /** One durable record per pair, for the reviewer who asks why. */
+  audit: AdjudicationRecord[];
   asked: number;
   failed: number;
 }
@@ -261,9 +311,9 @@ export interface AdjudicationResult {
  */
 export async function adjudicateDuplicates(
   pairs: readonly DuplicatePair[],
-  options: { provider?: LlmProvider; concurrency?: number } = {},
+  options: { provider?: LlmProvider; concurrency?: number; decidedAt?: string } = {},
 ): Promise<AdjudicationResult> {
-  const result: AdjudicationResult = { merged: [], verdicts: [], asked: 0, failed: 0 };
+  const result: AdjudicationResult = { merged: [], verdicts: [], audit: [], asked: 0, failed: 0 };
   if (!pairs.length) return result;
 
   let llm: LlmProvider;
@@ -275,16 +325,50 @@ export async function adjudicateDuplicates(
   }
 
   const concurrency = options.concurrency ?? 4;
+  // One timestamp for the run: rows from one adjudication should sort together
+  // rather than by whichever model call returned first.
+  const decidedAt = options.decidedAt ?? new Date().toISOString();
   for (let i = 0; i < pairs.length; i += concurrency) {
     const batch = pairs.slice(i, i + concurrency);
     const verdicts = await Promise.all(batch.map((pair) => askOnePair(llm, pair, result)));
     batch.forEach((pair, index) => {
       const verdict = verdicts[index];
       result.verdicts.push({ reason: pair.reason, verdict });
+      result.audit.push(auditRecordFor(pair, verdict, llm, decidedAt));
       if (verdict.same) result.merged.push(pair);
     });
   }
   return result;
+}
+
+function auditRecordFor(
+  pair: DuplicatePair,
+  verdict: PairVerdict,
+  llm: LlmProvider,
+  decidedAt: string,
+): AdjudicationRecord {
+  const named = llm as unknown as { name?: string; model?: string };
+  return {
+    aRowIds: pair.a.rowIds,
+    bRowIds: pair.b.rowIds,
+    aDocumentId: pair.a.sourceDocumentId,
+    bDocumentId: pair.b.sourceDocumentId,
+    aContentHash: contentHash(pair.a),
+    bContentHash: contentHash(pair.b),
+    encounterDate: pair.a.encounterDate?.toISOString().slice(0, 10) ?? null,
+    aProvider: pair.a.provider,
+    bProvider: pair.b.provider,
+    attribution: pair.attribution,
+    candidacyReason: pair.reason,
+    decision: verdict.same ? "MERGED" : "KEPT_SEPARATE",
+    confidence: verdict.same ? "high" : "none",
+    explanation: verdict.reason,
+    provider: named.name ?? null,
+    model: named.model ?? null,
+    promptVersion: ADJUDICATION_PROMPT_VERSION,
+    schemaVersion: ADJUDICATION_SCHEMA_VERSION,
+    decidedAt,
+  };
 }
 
 async function askOnePair(llm: LlmProvider, pair: DuplicatePair, result: AdjudicationResult): Promise<PairVerdict> {

@@ -48,7 +48,7 @@ import {
   type MergeableRow,
   type MergedEntry,
 } from "@/lib/records/entryMerge";
-import { adjudicateDuplicates, candidatePairs } from "@/lib/records/duplicateAdjudication";
+import { adjudicateDuplicates, candidatePairs, type AdjudicationRecord } from "@/lib/records/duplicateAdjudication";
 import { renderEntry, writeEntry } from "@/lib/records/entryWriter";
 import { findNotes, noteAt, type DocumentNote } from "@/lib/records/noteStructure";
 import { prepareDocument } from "@/lib/records/rowSpans";
@@ -152,7 +152,7 @@ export interface BuildStats {
   /** Entries where the source states something the human summary omits. */
   claimDiscrepancies: number;
   /** Present only when adjudication ran. */
-  adjudication?: { candidates: number; asked: number; merged: number; failed: number };
+  adjudication?: { candidates: number; asked: number; merged: number; failed: number; truncated: boolean };
 }
 
 export interface BuiltRecords {
@@ -163,6 +163,8 @@ export interface BuiltRecords {
   stats: BuildStats;
   /** Notes that could not be written at all, with the error each raised. */
   failures: { rowIds: string[]; error: string }[];
+  /** Why every adjudicated pair was merged or kept apart. */
+  adjudicationAudit: AdjudicationRecord[];
 }
 
 /** The rows this build reads. Narrow on purpose, so callers may pass anything. */
@@ -246,6 +248,7 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
   // adjudicator, which may only join what the rules left apart.
   let notes = deduped;
   let adjudication: BuildStats["adjudication"];
+  let adjudicationAudit: AdjudicationRecord[] = [];
   if (shouldAdjudicate) {
     const pairs = candidatePairs(deduped, {
       sameNamedAuthor,
@@ -256,11 +259,16 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
     });
     const result = await adjudicateDuplicates(pairs);
     notes = foldAdjudicatedPairs(deduped, result.merged);
+    adjudicationAudit = result.audit;
     adjudication = {
       candidates: pairs.length,
       asked: result.asked,
       merged: result.merged.length,
       failed: result.failed,
+      // Coverage that stopped at the cap is incomplete AND order-dependent.
+      // Saying so is the difference between "no duplicates remain" and "we
+      // stopped looking".
+      truncated: Boolean(pairs.truncated),
     };
   }
 
@@ -426,6 +434,7 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
     segmentsByDocument,
     chronology,
     failures,
+    adjudicationAudit,
     stats: {
       documents: documents.length,
       pages: pageCount,

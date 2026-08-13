@@ -225,6 +225,58 @@ describe("the verdict", () => {
   });
 });
 
+describe("why two records became one", () => {
+  // Counts cannot answer the question a reviewer actually asks. A merge changes
+  // what the plan says happened to the patient.
+  it("records the basis of every decision, merged or not", async () => {
+    const pairs = candidatePairs(edPair(), deps);
+    const merged = await adjudicateDuplicates(pairs, { provider: yes, decidedAt: "2026-08-12T00:00:00Z" });
+    expect(merged.audit).toHaveLength(1);
+    expect(merged.audit[0]).toMatchObject({
+      decision: "MERGED",
+      attribution: "SAME_CLINICIAN",
+      aDocumentId: "hospital",
+      bDocumentId: "therapy",
+      encounterDate: "2023-05-29",
+      decidedAt: "2026-08-12T00:00:00Z",
+    });
+    expect(merged.audit[0].candidacyReason).toMatch(/same clinician/);
+    expect(merged.audit[0].explanation).toMatch(/\w/);
+  });
+
+  it("records a refusal as fully as a merge", async () => {
+    const pairs = candidatePairs(edPair(), deps);
+    const kept = await adjudicateDuplicates(pairs, { provider: no });
+    expect(kept.audit[0]).toMatchObject({ decision: "KEPT_SEPARATE", confidence: "none" });
+    expect(kept.audit[0].explanation).toMatch(/discharge/);
+  });
+
+  it("identifies content by hash rather than copying it", async () => {
+    // The claims are already on the rows this references; copying them here
+    // would multiply the PHI without adding anything a reviewer cannot reach.
+    const pairs = candidatePairs(edPair(), deps);
+    const result = await adjudicateDuplicates(pairs, { provider: yes });
+    const record = result.audit[0];
+    expect(record.aContentHash).toMatch(/^[0-9a-f]{32}$/);
+    expect(record.aContentHash).not.toBe(record.bContentHash);
+    expect(JSON.stringify(record)).not.toContain("Toradol");
+  });
+
+  it("stamps the prompt and schema version so old rows stay readable", async () => {
+    const pairs = candidatePairs(edPair(), deps);
+    const result = await adjudicateDuplicates(pairs, { provider: yes });
+    expect(result.audit[0].promptVersion).toMatch(/\w/);
+    expect(result.audit[0].schemaVersion).toMatch(/\d/);
+  });
+
+  it("carries the rows behind each side so a reviewer can open both", async () => {
+    const pairs = candidatePairs(edPair(), deps);
+    const result = await adjudicateDuplicates(pairs, { provider: yes });
+    expect(result.audit[0].aRowIds.length).toBeGreaterThan(0);
+    expect(result.audit[0].bRowIds.length).toBeGreaterThan(0);
+  });
+});
+
 describe("folding what the adjudicator joined", () => {
   it("keeps every claim and records both documents", async () => {
     const [a, b] = edPair();

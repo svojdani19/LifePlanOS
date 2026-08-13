@@ -123,6 +123,12 @@ function report(built: Awaited<ReturnType<typeof buildRecords>>) {
   if (stats.adjudication) {
     const a = stats.adjudication;
     console.log(`\n  duplicate adjudication: ${a.candidates} undecided pairs, ${a.asked} asked, ${a.merged} merged, ${a.failed} failed`);
+    if (a.truncated) {
+      console.log("    NOTE: the pair cap was reached — coverage is incomplete and depends on iteration order");
+    }
+    for (const record of built.adjudicationAudit.filter((r) => r.decision === "MERGED")) {
+      console.log(`    merged  ${record.encounterDate ?? "undated"}  ${record.attribution}  ${record.explanation.slice(0, 90)}`);
+    }
   }
 
   console.log("\n  dates by basis:");
