@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { claimIsSubstantive, clinicalSubstanceOf, explainInsubstantial } from "@/lib/records/clinicalSubstance";
+import { billingDocumentedCare, claimIsSubstantive, clinicalSubstanceOf, explainInsubstantial } from "@/lib/records/clinicalSubstance";
 
 const claim = (field: string, value: string) => ({ field, value });
 
@@ -162,5 +162,50 @@ describe("explaining a refusal to the reviewer", () => {
     ] as const) {
       expect(explainInsubstantial(reason)).toMatch(/\w/);
     }
+  });
+});
+
+describe("care documented only by its bill", () => {
+  // Four dates the published plan lists were missing while the program held
+  // the evidence: an E/M code, a charge, and the complaint. A billing-only
+  // production is often a visit's only witness.
+  it("recognises a billed office visit", () => {
+    const care = billingDocumentedCare([
+      claim("serviceCode", "99215"),
+      claim("charge", "$2,400.00 charged on 07/21/2025"),
+      claim("subjective", "Chief complaint: cervical, thoracic, and lumbar spine pain"),
+    ]);
+    expect(care).toMatchObject({ kind: "OFFICE_VISIT" });
+    expect(care?.evidence).toContain("99215");
+  });
+
+  it("recognises a billed imaging study by code or by name", () => {
+    expect(billingDocumentedCare([claim("serviceCode", "72141"), claim("billedAmount", "$4,500.00")])).toMatchObject({
+      kind: "IMAGING",
+    });
+    expect(billingDocumentedCare([claim("charge", "MRI spine cervical without contrast")])).toMatchObject({
+      kind: "IMAGING",
+    });
+  });
+
+  it("types a visit that also billed its imaging as the visit", () => {
+    const care = billingDocumentedCare([claim("serviceCode", "99205"), claim("serviceCode", "72050")]);
+    expect(care).toMatchObject({ kind: "OFFICE_VISIT" });
+  });
+
+  it("recognises billed ED, procedure and therapy services", () => {
+    expect(billingDocumentedCare([claim("serviceCode", "99284")])).toMatchObject({ kind: "ER_VISIT" });
+    expect(billingDocumentedCare([claim("serviceCode", "62323 epidural steroid injection")])).toMatchObject({ kind: "PROCEDURE" });
+    expect(billingDocumentedCare([claim("serviceCode", "98941")])).toMatchObject({ kind: "THERAPY" });
+  });
+
+  it("does not manufacture care from a bare charge or from paperwork", () => {
+    expect(billingDocumentedCare([claim("charge", "$150.00 outstanding balance")])).toBeNull();
+    expect(billingDocumentedCare([claim("documentContent", "Consent for payment and collection communications signed")])).toBeNull();
+  });
+
+  it("does not read a code quoted inside a clinical narrative", () => {
+    // That encounter already reaches the timeline through the note quoting it.
+    expect(billingDocumentedCare([claim("assessment", "Office visit 99214 for lumbar radiculopathy")])).toBeNull();
   });
 });

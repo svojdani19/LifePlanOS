@@ -169,7 +169,7 @@ export const PROFILES: Record<AnalysisClass, ClassProfile> = {
     singleUnit: false,
     leadFields: ["assessment", "procedure", "treatment", "objectiveFindings", "subjective", "disposition"],
     guidance:
-      "This is a clinical encounter record. Extract one entry per DATED VISIT. What matters: why the patient presented, what was found on examination, what was assessed, what was done or prescribed, and what was planned. Attribute each visit to the clinician who saw the patient and the date of service printed on the note.",
+      "Encounters by nurses, physician assistants and nurse practitioners are clinical encounters in their own right — an RN pre-anesthesia assessment, a PA-C hospital evaluation and a triage note each document care and each is a record; do not fold them into a physician's note or discard them as administrative. When several providers saw the patient on ONE date — an ED physician, a radiologist, a consultant — each provider's service is a SEPARATE record with its own attribution. This is a clinical encounter record. Extract one entry per DATED VISIT. What matters: why the patient presented, what was found on examination, what was assessed, what was done or prescribed, and what was planned. Attribute each visit to the clinician who saw the patient and the date of service printed on the note.",
     requiresDate: true,
   },
 
@@ -270,6 +270,10 @@ export const PROFILES: Record<AnalysisClass, ClassProfile> = {
     leadFields: ["charge", "serviceCode", "billedAmount", "payer"],
     guidance:
       "This is a billing, pharmacy, or insurance record. It documents what was CHARGED, not what was clinically found. Extract the charge lines: date of service, the service or drug billed, its CPT/HCPCS/NDC code, the amount billed or paid, and the payer. A diagnosis code appearing on a claim line is a BILLING code justifying the charge — it is not a clinical assessment of the patient and must never be recorded as one. This document has no examining clinician; do not attribute one. " +
+      // Gap analysis against a published plan: billing-only productions are
+      // often a visit's ONLY record, and the plan's chronology lists every
+      // billed service. Missing service lines were the largest recall gap.
+      "IMPORTANT: a billing-only production is often the ONLY record of the care it bills. Capture EVERY distinct service line as its own record — every E/M visit (99201-99215, 99281-99285), every imaging study (7xxxx or a named MRI/CT/X-ray), every injection or procedure, every therapy session — each with ITS OWN date of service. Do not collapse a statement covering many visit dates into one record. Where the bill states a chief complaint, diagnosis description or body region beside a service line, capture it with that line. " +
       NEVER_INVENT_CLINICAL,
     requiresDate: false,
   },

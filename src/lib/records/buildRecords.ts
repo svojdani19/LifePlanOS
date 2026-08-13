@@ -21,6 +21,7 @@
 import { MEDICAL_TIMELINE_CLASSES, type AnalysisClass } from "@/lib/documents/analysisClass";
 import { classifySegment } from "@/lib/engine/chronology";
 import {
+  billingDocumentedCare,
   claimIsSubstantive,
   clinicalSubstanceOf,
   explainInsubstantial,
@@ -151,6 +152,8 @@ export interface BuildStats {
   humanAuthored: number;
   /** Entries where the source states something the human summary omits. */
   claimDiscrepancies: number;
+  /** Events admitted because a bill is the care's only witness. */
+  billingDocumented: number;
   /** Present only when adjudication ran. */
   adjudication?: { candidates: number; asked: number; merged: number; failed: number; truncated: boolean };
 }
@@ -289,6 +292,7 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
   let fallbacks = 0;
   let undatedClinical = 0;
   let humanAuthored = 0;
+  let billingDocumented = 0;
   const discrepancies = new Map<string, number>();
   let done = 0;
 
@@ -402,12 +406,34 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
     const material = chronologyMateriality(note);
     if (!material.material) heldOff.set(material.reason, (heldOff.get(material.reason) ?? 0) + 1);
 
-    if (iso && clinical && MEDICAL_TIMELINE_CLASSES.has(note.klass) && material.material) {
+    // A bill that is a visit's only witness. Four dates the published plan
+    // lists were missing while the program held "serviceCode: 99215,
+    // subjective: cervical, thoracic and lumbar spine pain" — killed because
+    // FINANCIAL is not a timeline class. A billed service on a distinct date is
+    // a distinct event; the bill stays ancillary in the Records list, and the
+    // event it witnesses reaches the chronology, marked as billing-documented.
+    // Materiality's clinical-assertion screen does not apply: the billed
+    // service IS the material fact.
+    const billingCare = !clinical && substance.meaningful && iso ? billingDocumentedCare(note.claims) : null;
+    if (billingCare) billingDocumented++;
+
+    const admit =
+      iso && ((clinical && MEDICAL_TIMELINE_CLASSES.has(note.klass) && material.material) || billingCare !== null);
+    if (admit) {
       const kind = classifySegment(note.claims.map((c) => `${c.value} ${c.excerpt}`).join("\n"));
+      // A billing-documented event is typed by the service its bill names, not
+      // by how billing text happens to classify.
+      const billingType: Record<string, string> = {
+        OFFICE_VISIT: "CLINIC_VISIT",
+        ER_VISIT: "ER_VISIT",
+        IMAGING: "IMAGING",
+        PROCEDURE: "PROCEDURE",
+        THERAPY: "THERAPY",
+      };
       const event: ChronologyDraft = {
         caseId,
         eventDate: new Date(`${iso}T00:00:00Z`),
-        eventType: kind.eventType,
+        eventType: billingCare ? billingType[billingCare.kind] : kind.eventType,
         specialty: kind.specialty,
         recordType: kind.recordType,
         provider: note.provider,
@@ -417,7 +443,7 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
         sourcePage: cite ? note.pageStart : null,
         reviewStatus: "AI_DRAFT",
         dateInferred: resolved.inferred,
-        relevanceScore: 50,
+        relevanceScore: billingCare ? 40 : 50,
       };
       for (const section of sections) {
         const column = FIELD_FOR[section.key];
@@ -469,6 +495,7 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
       failures: failures.length,
       humanAuthored,
       claimDiscrepancies: discrepancies.size,
+      billingDocumented,
       adjudication,
     },
   };

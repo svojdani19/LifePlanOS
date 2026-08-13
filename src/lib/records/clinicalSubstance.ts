@@ -252,3 +252,72 @@ export function explainInsubstantial(reason: InsubstantialReason): string {
       return "No content was extracted from this source.";
   }
 }
+
+// ── Care documented only by its bill ─────────────────────────────────────────
+//
+// Four dates the published plan lists were missing from the chronology, and on
+// every one the program HELD the evidence: "serviceCode: 99215, charge:
+// $2,400.00 charged on 07/21/2025, subjective: cervical, thoracic, and lumbar
+// spine pain". A billing-only production is often the ONLY record of a visit —
+// the ClinTech and STAT Diagnostics productions in the corpus are exactly that
+// — and the plan's chronology lists every one of those visits and studies.
+//
+// The program's gates killed them twice over: FINANCIAL is not a timeline
+// class, and service codes are not "meaningful" fields. Both rules are right
+// for a charge that merely re-bills a documented encounter, and wrong for a
+// bill that is the encounter's only witness.
+//
+// The LLM gap analysis over the plan-vs-program misses named the categories:
+// billed office visits (E/M 99201–99215, ED 99281–99285), billed imaging
+// (CPT 70000–79999 or a named study), billed procedures (injection/surgical
+// ranges), and billed therapy. Each billed service on a distinct date is a
+// distinct chronology event in the published plan.
+
+export type BillingCareKind = "OFFICE_VISIT" | "ER_VISIT" | "IMAGING" | "PROCEDURE" | "THERAPY";
+
+export interface BillingCare {
+  kind: BillingCareKind;
+  /** The claim text that identifies the service, for the audit trail. */
+  evidence: string;
+}
+
+/** Fields billing productions put their service identity in. */
+const BILLING_FIELDS = new Set(["serviceCode", "charge", "billedAmount", "procedure", "treatment", "documentContent"]);
+
+const EM_OFFICE = /\b992(0[1-5]|1[1-5])\b/;
+const EM_ED = /\b9928[1-5]\b/;
+const IMAGING_CODE = /\b7[0-9]{3}[0-9]\b/;
+const IMAGING_NAME = /\b(?:mri|magnetic resonance|ct scan|computed tomography|x-?ray|radiograph|ultrasound|myelogram|emg|nerve conduction)\b/i;
+const PROCEDURE_CODE = /\b(?:6[234][0-9]{3}|2[0-9]{4})\b/;
+const THERAPY_CODE = /\b(?:9894[0-3]|97[01][0-9]{2}|975[0-9]{2})\b/;
+
+/**
+ * The clinical event a bill documents, if it documents one.
+ *
+ * Order matters: a visit line often carries an imaging code for the study it
+ * ordered, and the visit is the event. Only claims in billing-shaped fields are
+ * read — a code quoted inside a clinical narrative already reaches the timeline
+ * through the note that quotes it.
+ */
+export function billingDocumentedCare(claims: readonly SubstanceClaim[]): BillingCare | null {
+  const lines = claims.filter((c) => BILLING_FIELDS.has(c.field)).map((c) => c.value ?? "");
+  if (!lines.length) return null;
+  const joined = lines.join(" \n ");
+
+  const found = (re: RegExp) => {
+    const hit = lines.find((line) => re.test(line));
+    return hit ? hit.slice(0, 160) : null;
+  };
+
+  const office = found(EM_OFFICE);
+  if (office) return { kind: "OFFICE_VISIT", evidence: office };
+  const ed = found(EM_ED);
+  if (ed) return { kind: "ER_VISIT", evidence: ed };
+  const imaging = found(IMAGING_CODE) ?? (IMAGING_NAME.test(joined) ? found(IMAGING_NAME) : null);
+  if (imaging) return { kind: "IMAGING", evidence: imaging };
+  const procedure = found(PROCEDURE_CODE);
+  if (procedure) return { kind: "PROCEDURE", evidence: procedure };
+  const therapy = found(THERAPY_CODE);
+  if (therapy) return { kind: "THERAPY", evidence: therapy };
+  return null;
+}
