@@ -21,6 +21,7 @@
 // the disagreement is visible to a reviewer rather than silently resolved.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { createHash } from "node:crypto";
 import { NON_CLINICAL_CLASSES, type AnalysisClass } from "@/lib/documents/analysisClass";
 import type { SynthClaim } from "@/lib/llm/groundedSynthesis";
 import { noteAt, type DocumentNote } from "@/lib/records/noteStructure";
@@ -44,6 +45,26 @@ export interface MergeableRow {
   claims: readonly { field: string; value: string; excerpt: string; page?: number | null; claimType?: string | null }[];
 }
 
+/**
+ * One document's copy of a record that appears in several.
+ *
+ * Folding cross-document copies kept only the other document's ID. Its pages,
+ * rows and provider evidence were discarded, so every duplicate copy's Details
+ * dropdown showed the PRIMARY document's page numbers — a citation pointing at
+ * pages of a different file, which reads as authoritative and is wrong.
+ */
+export interface RecordAppearance {
+  documentId: string;
+  pageStart: number | null;
+  pageEnd: number | null;
+  /** The rows this copy was extracted into, so a reviewer can open it. */
+  rowIds: string[];
+  /** The provider as THIS copy printed it. */
+  provider: string | null;
+  /** Identity of this copy's content, without another copy of the content. */
+  contentHash: string;
+}
+
 export interface MergedEntry {
   /** Every row that was folded in, so a reviewer can trace back. */
   rowIds: string[];
@@ -59,6 +80,8 @@ export interface MergedEntry {
   mergedClasses: AnalysisClass[];
   /** Other documents the same record was found in, after cross-document dedupe. */
   alsoInDocumentIds?: string[];
+  /** Per-document evidence for every copy, including the primary. */
+  appearances?: RecordAppearance[];
   /** Where the entry sits in the document text, for note-level consolidation. */
   span?: RowSpan | null;
   /**
@@ -345,10 +368,15 @@ export function foldAdjudicatedPairs(
       continue;
     }
     const folded = foldNote(group);
-    // Provenance survives: the entry records every document it was found in.
+    // Provenance survives: the entry records every document it was found in,
+    // and every copy's own pages and rows.
     folded.alsoInDocumentIds = [
       ...new Set(group.flatMap((g) => [g.sourceDocumentId, ...(g.alsoInDocumentIds ?? [])])),
     ].filter((id) => id !== folded.sourceDocumentId);
+    folded.appearances = group.reduce<RecordAppearance[]>(
+      (held, member) => mergeAppearances({ ...folded, appearances: held }, member),
+      [appearanceOf(folded)],
+    );
     out.push(folded);
   }
   return out.sort((a, b) => (a.encounterDate?.getTime() ?? 0) - (b.encounterDate?.getTime() ?? 0));
@@ -492,8 +520,48 @@ function absorbCopy(twin: MergedEntry, other: MergedEntry): void {
   twin.alsoInDocumentIds = [
     ...new Set([...(twin.alsoInDocumentIds ?? []), ...(other.alsoInDocumentIds ?? []), other.sourceDocumentId]),
   ].sort();
+  // Each copy keeps its own pages, rows and provider evidence — the reason a
+  // duplicate's citation can point at its own document rather than the primary.
+  twin.appearances = mergeAppearances(twin, other);
 }
 
+
+/** This entry as an appearance in its own document. */
+export function appearanceOf(entry: MergedEntry): RecordAppearance {
+  const text = entry.claims.map((c) => `${c.field}:${c.value}`).sort().join("\n");
+  return {
+    documentId: entry.sourceDocumentId,
+    pageStart: entry.pageStart,
+    pageEnd: entry.pageEnd,
+    rowIds: entry.rowIds,
+    provider: entry.provider,
+    contentHash: createHash("sha256").update(text).digest("hex").slice(0, 32),
+  };
+}
+
+/** Union of both sides' appearances, one per document, page ranges widened. */
+export function mergeAppearances(a: MergedEntry, b: MergedEntry): RecordAppearance[] {
+  const all = [...(a.appearances ?? [appearanceOf(a)]), ...(b.appearances ?? [appearanceOf(b)])];
+  const byDocument = new Map<string, RecordAppearance>();
+  for (const appearance of all) {
+    const held = byDocument.get(appearance.documentId);
+    if (!held) {
+      byDocument.set(appearance.documentId, appearance);
+      continue;
+    }
+    const pages = [held.pageStart, held.pageEnd, appearance.pageStart, appearance.pageEnd].filter(
+      (n): n is number => typeof n === "number" && n > 0,
+    );
+    byDocument.set(appearance.documentId, {
+      ...held,
+      pageStart: pages.length ? Math.min(...pages) : null,
+      pageEnd: pages.length ? Math.max(...pages) : null,
+      rowIds: [...new Set([...held.rowIds, ...appearance.rowIds])],
+      provider: held.provider ?? appearance.provider,
+    });
+  }
+  return [...byDocument.values()];
+}
 
 /** The page range a whole group covers, resolved from the document's markers. */
 function spanOfGroup(doc: PreparedDocument, group: readonly MergeableRow[]): RowSpan | null {

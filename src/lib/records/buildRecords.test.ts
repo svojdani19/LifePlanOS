@@ -231,6 +231,43 @@ describe("what a reviewer sees", () => {
   });
 });
 
+describe("citations for a record filed in two documents", () => {
+  it("shows each document its own copy's pages", async () => {
+    // 21. The same segment carried the primary's page numbers into every
+    //     duplicate document's Details dropdown.
+    const same = [
+      { field: "assessment", value: "Emergency department visit for fall with left knee and hip pain", excerpt: "e1" },
+      { field: "assessment", value: "X-rays showed no fractures, discharged home", excerpt: "e2" },
+    ];
+    const built = await buildRecords({
+      caseId: CASE,
+      write: false,
+      adjudicateDuplicates: false,
+      documents: [
+        {
+          id: "hospital",
+          pageCount: 20,
+          extractedText: `Progress Note Date of Service: 05/29/2023 ${filler()}`,
+          rows: [row({ id: "h1", sourceDocumentId: "hospital", page: 12, pageEnd: 14, claims: same, encounterDate: new Date("2023-05-29T00:00:00Z"), dateStatus: "DOCUMENTED" })],
+        },
+        {
+          id: "therapy",
+          pageCount: 8,
+          extractedText: `Progress Note Date of Service: 05/29/2023 ${filler()}`,
+          rows: [row({ id: "t1", sourceDocumentId: "therapy", page: 3, pageEnd: 4, claims: same, encounterDate: new Date("2023-05-29T00:00:00Z"), dateStatus: "DOCUMENTED" })],
+        },
+      ],
+    });
+    const hospital = built.segmentsByDocument.get("hospital") ?? [];
+    const therapy = built.segmentsByDocument.get("therapy") ?? [];
+    expect(hospital).toHaveLength(1);
+    expect(therapy).toHaveLength(1);
+    expect(hospital[0].pageStart).toBe(12);
+    expect(therapy[0].pageStart).toBe(3);
+    expect(therapy[0].rowIds).toContain("t1");
+  });
+});
+
 describe("publishing a rebuilt case", () => {
   const store = (over: Partial<RecordStore> = {}, reviewedEvents: never[] = []) => {
     const calls = { updated: 0, created: 0, deleted: 0 };

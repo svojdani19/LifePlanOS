@@ -436,6 +436,35 @@ describe("what belongs on the medical chronology", () => {
   });
 });
 
+describe("what each production's copy keeps of itself", () => {
+  const copy = (over: Partial<MergeableRow>, ...values: string[]) =>
+    mergeRows([row({ ...over, claims: values.map((value, i) => ({ field: "assessment", value, excerpt: `e${i}` })) })])[0];
+
+  it("keeps every copy's own pages and rows through a cross-document fold", () => {
+    // Folding kept only the other document's ID; its pages and rows were
+    // discarded, so a duplicate copy's citation pointed at the primary's pages.
+    const same = ["Emergency department visit for fall with left knee and hip pain", "X-rays showed no fractures"];
+    const a = { ...copy({ id: "a", sourceDocumentId: "hospital" }, ...same), pageStart: 12, pageEnd: 14 };
+    const b = { ...copy({ id: "b", sourceDocumentId: "therapy" }, ...same), pageStart: 3, pageEnd: 4 };
+    const [folded] = dedupeAcrossDocuments([a, b]);
+    expect(folded.appearances).toHaveLength(2);
+    const hospital = folded.appearances?.find((x) => x.documentId === "hospital");
+    const therapy = folded.appearances?.find((x) => x.documentId === "therapy");
+    expect(hospital).toMatchObject({ pageStart: 12, pageEnd: 14 });
+    expect(therapy).toMatchObject({ pageStart: 3, pageEnd: 4 });
+    expect(therapy?.rowIds).toContain("b");
+  });
+
+  it("identifies each copy's content by hash rather than another copy of it", () => {
+    const a = copy({ id: "a", sourceDocumentId: "d1" }, "Emergency department visit for fall with left knee and hip pain", "Discharged home");
+    const b = copy({ id: "b", sourceDocumentId: "d2" }, "Emergency department visit for fall with left knee and hip pain", "Discharged home");
+    const [folded] = dedupeAcrossDocuments([a, b]);
+    for (const appearance of folded.appearances ?? []) {
+      expect(appearance.contentHash).toMatch(/^[0-9a-f]{32}$/);
+    }
+  });
+});
+
 describe("one visit filed in two record productions", () => {
   const entry = (over: Partial<MergeableRow>, ...values: string[]) =>
     mergeRows([row({ ...over, claims: values.map((value, i) => ({ field: "assessment", value, excerpt: `e${i}` })) })])[0];

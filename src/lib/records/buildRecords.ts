@@ -375,7 +375,21 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
     if (clinical && !iso) undatedClinical++;
 
     for (const id of [note.sourceDocumentId, ...(note.alsoInDocumentIds ?? [])]) {
-      segmentsByDocument.set(id, [...(segmentsByDocument.get(id) ?? []), segment]);
+      // A citation inside a document's Details must point at THAT document's
+      // pages. The same segment was written to every copy with the primary's
+      // page numbers, which reads as authoritative and is wrong.
+      const appearance = note.appearances?.find((copy) => copy.documentId === id);
+      const localized =
+        id === note.sourceDocumentId || !appearance
+          ? segment
+          : {
+              ...segment,
+              pageStart: appearance.pageStart,
+              pageEnd: appearance.pageEnd,
+              rowIds: appearance.rowIds,
+              provider: authored?.provider ?? appearance.provider ?? segment.provider,
+            };
+      segmentsByDocument.set(id, [...(segmentsByDocument.get(id) ?? []), localized]);
     }
 
     // The timeline carries the course of care, and only where the date is
