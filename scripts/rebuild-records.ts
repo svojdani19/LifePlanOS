@@ -31,6 +31,13 @@ const ROW_SELECT = {
   pageEnd: true,
   substanceClass: true,
   claims: true,
+  // Review state and any human corrections. Without these a rebuild cannot
+  // tell a physician's summary from one it wrote itself.
+  status: true,
+  factualSummary: true,
+  encounterType: true,
+  providerCredentials: true,
+  verifiedContentHash: true,
 } as const;
 
 async function main() {

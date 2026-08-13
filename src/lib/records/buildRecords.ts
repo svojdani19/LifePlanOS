@@ -29,6 +29,7 @@ import {
 } from "@/lib/records/clinicalSubstance";
 import { resolveDate, isDocumented, type DateBasis, type ResolvedDate, type UnresolvedReason } from "@/lib/records/dateResolution";
 import { ACTIVE_ENCOUNTER_WHERE } from "@/lib/records/encounterLifecycle";
+import { authoritativeFacts, claimDiscrepancies, type ReviewableRow } from "@/lib/records/humanAuthority";
 import { yearProfile, type YearProfile } from "@/lib/records/dateSanity";
 import {
   chronologyMateriality,
@@ -106,6 +107,13 @@ export interface RecordSegment {
   insubstantialReason?: InsubstantialReason;
   /** Source rows, so a reviewer can trace an entry back. */
   rowIds?: string[];
+  /** Credentials as a reviewer corrected them. */
+  providerCredentials?: string | null;
+  /** True when a human wrote or approved this entry's content. */
+  humanAuthored?: boolean;
+  /** The review states behind it, for the audit trail. */
+  reviewStates?: string[];
+  verifiedContentHash?: string | null;
 }
 
 export interface ChronologyDraft {
@@ -138,6 +146,10 @@ export interface BuildStats {
   heldOffTimeline: Record<string, number>;
   fallbacks: number;
   failures: number;
+  /** Entries whose wording came from a human rather than the writer. */
+  humanAuthored: number;
+  /** Entries where the source states something the human summary omits. */
+  claimDiscrepancies: number;
   /** Present only when adjudication ran. */
   adjudication?: { candidates: number; asked: number; merged: number; failed: number };
 }
@@ -155,7 +167,11 @@ export interface RecordSource {
   id: string;
   pageCount: number | null;
   extractedText: string | null;
-  rows: readonly MergeableRow[];
+  /**
+   * Rows carry their review state and any human corrections, because a rebuild
+   * that reads only the claims regenerates over the top of a physician's work.
+   */
+  rows: readonly (MergeableRow & ReviewableRow)[];
 }
 
 export interface BuildOptions {
@@ -190,6 +206,9 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
   const shouldAdjudicate = options.adjudicateDuplicates ?? write;
 
   const perDocument: MergedEntry[] = [];
+  // A note absorbs several rows; the composer needs their review state to know
+  // whether a human already wrote this record's summary.
+  const rowsById = new Map<string, MergeableRow & ReviewableRow>();
   const citable = new Map<string, boolean>();
   const yearsOf = new Map<string, YearProfile>();
   const textOf = new Map<string, string>();
@@ -202,6 +221,7 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
     if (!doc.rows.length) continue;
     rowCount += doc.rows.length;
 
+    for (const row of doc.rows) rowsById.set(row.id, row);
     const text = doc.extractedText ?? "";
     const structure = findNotes(prepareDocumentText(text));
     yearsOf.set(doc.id, yearProfile(text));
@@ -252,6 +272,8 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
   const basisCount = new Map<string, number>();
   let fallbacks = 0;
   let undatedClinical = 0;
+  let humanAuthored = 0;
+  const discrepancies = new Map<string, number>();
   let done = 0;
 
   async function compose(note: MergedEntry) {
@@ -262,6 +284,11 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
     const printed = note.span ? noteAt(notesOf.get(note.sourceDocumentId) ?? [], note.span.start) : null;
 
     basisCount.set(resolved.basis, (basisCount.get(resolved.basis) ?? 0) + 1);
+
+    // What a human decided outranks what the program would decide again.
+    const authored = authoritativeFacts(
+      note.rowIds.map((id) => rowsById.get(id)).filter((r): r is MergeableRow & ReviewableRow => Boolean(r)),
+    );
 
     // Does this record document care, or only the paperwork around it?
     const substance = clinicalSubstanceOf(note.claims);
@@ -275,7 +302,16 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
     let full: string | undefined;
     let sections: { key: string; text: string }[] = [];
 
-    if (write && substance.meaningful) {
+    if (authored?.summary) {
+      // Reused verbatim. Asking the writer for fresh prose here is how a
+      // physician's correction disappeared at the next document completion.
+      summary = authored.summary;
+      humanAuthored++;
+      // The source may say something the correction omits. That is a question
+      // for a reviewer, not grounds for the program to overrule them.
+      const missed = claimDiscrepancies(authored.summary, note.claims);
+      if (missed.length) discrepancies.set(note.rowIds[0] ?? "", missed.length);
+    } else if (write && substance.meaningful) {
       // A claim in a clinical field that says nothing clinical — the chart
       // header, the ICD text read back as a sentence, the list of studies
       // ordered — is withheld from the writer. Given it, the writer dutifully
@@ -309,10 +345,14 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
       type: note.klass,
       category: clinical ? null : substance.meaningful ? structural : "Insufficient clinical detail",
       bearsOnCare: clinical || structural === "ANCILLARY",
-      provider: note.provider,
-      facility: note.facility,
+      provider: authored?.provider ?? note.provider,
+      providerCredentials: authored?.providerCredentials ?? null,
+      facility: authored?.facility ?? note.facility,
       summary,
       full,
+      humanAuthored: Boolean(authored),
+      reviewStates: authored?.states,
+      verifiedContentHash: authored?.verifiedContentHash ?? null,
       noteTitle: printed?.title ?? null,
       dateBasis: resolved.basis,
       dateEvidence: resolved.evidence ?? null,
@@ -395,6 +435,8 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
       heldOffTimeline: Object.fromEntries(heldOff),
       fallbacks,
       failures: failures.length,
+      humanAuthored,
+      claimDiscrepancies: discrepancies.size,
       adjudication,
     },
   };
@@ -609,6 +651,13 @@ const ROW_SELECT = {
   pageEnd: true,
   substanceClass: true,
   claims: true,
+  // Review state and any human corrections. Without these a rebuild cannot
+  // tell a physician's summary from one it wrote itself.
+  status: true,
+  factualSummary: true,
+  encounterType: true,
+  providerCredentials: true,
+  verifiedContentHash: true,
 } as const;
 
 /**
