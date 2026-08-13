@@ -231,6 +231,15 @@ describe("what a reviewer sees", () => {
   });
 });
 
+describe("a document whose rows are all gone", () => {
+  it("clears its stale segments rather than leaving old Details visible", async () => {
+    // 4. Every row superseded or rejected: the document must publish an EMPTY
+    //    segment list, not vanish from the update and keep its old content.
+    const built = await build("some text with no active rows", []);
+    expect(built.segmentsByDocument.get("doc-1")).toEqual([]);
+  });
+});
+
 describe("citations for a record filed in two documents", () => {
   it("shows each document its own copy's pages", async () => {
     // 21. The same segment carried the primary's page numbers into every

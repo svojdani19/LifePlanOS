@@ -276,6 +276,11 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
 
   // ── Compose ───────────────────────────────────────────────────────────────
   const segmentsByDocument = new Map<string, RecordSegment[]>();
+  // Every input document gets an entry, including an empty one. A document
+  // whose rows were all superseded or rejected must have its stale segments
+  // REPLACED with nothing — skipping it entirely would leave the old Details
+  // content standing, describing rows that no longer exist.
+  for (const doc of documents) segmentsByDocument.set(doc.id, []);
   const chronology: ChronologyDraft[] = [];
   const failures: { rowIds: string[]; error: string }[] = [];
   const heldOff = new Map<string, number>();
