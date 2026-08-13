@@ -97,6 +97,44 @@ async function main() {
   }
 
   const result = await persistRecords(asStore(db), theCase.id, built);
+
+  // Why every adjudicated pair was merged or kept apart, made durable.
+  // Append-only and after publication: an audit of a build that did not
+  // publish still happened, but recording it against the case would read as
+  // describing the published state.
+  if (result.published && built.adjudicationAudit.length) {
+    const firm = await db.case.findUnique({ where: { id: theCase.id }, select: { firmId: true } });
+    if (firm) {
+      await db.duplicateAdjudication.createMany({
+        data: built.adjudicationAudit.map((r) => ({
+          firmId: firm.firmId,
+          caseId: theCase.id,
+          aRowIds: r.aRowIds,
+          bRowIds: r.bRowIds,
+          aDocumentId: r.aDocumentId,
+          bDocumentId: r.bDocumentId,
+          aContentHash: r.aContentHash,
+          bContentHash: r.bContentHash,
+          encounterDate: r.encounterDate ? new Date(`${r.encounterDate}T00:00:00Z`) : null,
+          aProvider: r.aProvider,
+          bProvider: r.bProvider,
+          attribution: r.attribution,
+          candidacyReason: r.candidacyReason,
+          decision: r.decision,
+          confidence: r.confidence,
+          explanation: r.explanation,
+          llmProvider: r.provider,
+          llmModel: r.model,
+          promptVersion: r.promptVersion,
+          schemaVersion: r.schemaVersion,
+          merged: r.decision === "MERGED",
+          decidedAt: new Date(r.decidedAt),
+        })),
+      });
+      console.log(`  adjudication audit: ${built.adjudicationAudit.length} decisions recorded`);
+    }
+  }
+
   if (!result.published) {
     console.error(`\nNOT PUBLISHED: ${result.reason}`);
     await db.$disconnect();

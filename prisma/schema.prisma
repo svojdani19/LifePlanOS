@@ -2157,3 +2157,39 @@ model LearningCandidate {
   @@index([firmId, mechanism, documentClass])
   @@index([supersedesId])
 }
+
+// One row per LLM-adjudicated duplicate pair — why two records became one, or
+// did not. Append-only: a decision later reversed gets its humanOutcome set,
+// never a rewrite. Content is identified by hash; the claims live on the rows
+// the ids reference, so no clinical text is duplicated here.
+model DuplicateAdjudication {
+  id              String    @id @default(cuid())
+  firmId          String
+  caseId          String
+  aRowIds         Json // string[]
+  bRowIds         Json // string[]
+  aDocumentId     String
+  bDocumentId     String
+  aContentHash    String
+  bContentHash    String
+  encounterDate   DateTime?
+  aProvider       String?
+  bProvider       String?
+  attribution     String // SAME_CLINICIAN | BOTH_UNATTRIBUTED | ONE_ATTRIBUTED
+  candidacyReason String
+  decision        String // MERGED | KEPT_SEPARATE
+  confidence      String
+  explanation     String
+  llmProvider     String?
+  llmModel        String?
+  promptVersion   String
+  schemaVersion   String
+  merged          Boolean
+  // Set when a reviewer later confirms or reverses the machine's decision.
+  humanOutcome    String? // CONFIRMED | REVERSED
+  decidedAt       DateTime
+  createdAt       DateTime  @default(now())
+
+  @@index([firmId, caseId])
+  @@index([caseId, decidedAt])
+}
