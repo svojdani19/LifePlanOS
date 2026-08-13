@@ -15,6 +15,7 @@
 
 import { Prisma, PrismaClient } from "@/generated/prisma";
 import { buildRecords, persistRecords, type RecordSource, type RecordStore } from "@/lib/records/buildRecords";
+import { ACTIVE_ENCOUNTER_WHERE } from "@/lib/records/encounterLifecycle";
 import type { MergeableRow } from "@/lib/records/entryMerge";
 
 const ROW_SELECT = {
@@ -62,7 +63,7 @@ async function main() {
   const sources: RecordSource[] = [];
   for (const doc of documents) {
     const rows = (await db.extractedEncounter.findMany({
-      where: { caseId: theCase.id, sourceDocumentId: doc.id },
+      where: { caseId: theCase.id, sourceDocumentId: doc.id, ...ACTIVE_ENCOUNTER_WHERE },
       select: ROW_SELECT,
     })) as unknown as MergeableRow[];
     sources.push({ id: doc.id, pageCount: doc.pageCount, extractedText: doc.extractedText, rows });

@@ -12,6 +12,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { prisma } from "@/lib/db";
+import { ACTIVE_ENCOUNTER_WHERE } from "@/lib/records/encounterLifecycle";
 import { requiresDate } from "@/lib/documents/analysisClass";
 import { detectVerificationDrift } from "@/lib/records/verifiedContent";
 
@@ -163,7 +164,7 @@ export async function getStructuredRecord(caseId: string, firmId: string): Promi
     prisma.document.findMany({ where: { caseId, firmId }, orderBy: { createdAt: "asc" } }),
     prisma.recordExtraction.findMany({ where: { caseId, firmId }, orderBy: { createdAt: "desc" } }),
     prisma.extractedEncounter.findMany({
-      where: { caseId, firmId, status: { in: ["AI_DRAFT", "AI_AUDIT_PASSED", "HUMAN_EDITED", "REVIEWED", "VERIFIED", "STALE"] } },
+      where: { caseId, firmId, ...ACTIVE_ENCOUNTER_WHERE },
       orderBy: [{ encounterDate: "asc" }, { page: "asc" }],
     }),
   ]);
@@ -274,7 +275,7 @@ export async function factualReviewState(caseId: string, firmId: string): Promis
     getStructuredRecord(caseId, firmId),
     prisma.chronologyEvent.findMany({ where: { caseId }, select: { reviewStatus: true, edited: true } }),
     prisma.extractedEncounter.findMany({
-      where: { caseId, firmId, status: { in: ["AI_DRAFT", "AI_AUDIT_PASSED", "HUMAN_EDITED", "REVIEWED", "VERIFIED", "STALE"] } },
+      where: { caseId, firmId, ...ACTIVE_ENCOUNTER_WHERE },
       select: {
         status: true, auditResult: true, verifiedContentHash: true, dateStatus: true, encounterDate: true,
         provider: true, facility: true, encounterType: true, factualSummary: true, synthesis: true, claims: true,

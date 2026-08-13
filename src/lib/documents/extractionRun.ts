@@ -19,6 +19,7 @@
 
 import { prisma } from "@/lib/db";
 import { refreshCaseRecords } from "@/lib/records/buildRecords";
+import { ACTIVE_ENCOUNTER_WHERE } from "@/lib/records/encounterLifecycle";
 import { withDbRetry, createWithDbRetry } from "@/lib/dbRetry";
 import { pageMarks } from "@/lib/documents/meta";
 import { segmentEncounters } from "@/lib/engine/chronology";
@@ -478,7 +479,7 @@ export async function processDocumentExtraction(
 
   // ── Persist with review lineage ────────────────────────────────────────────
   const prior = await withDbRetry(() =>
-    prisma.extractedEncounter.findMany({ where: { caseId: doc.caseId, sourceDocumentId: doc.id, status: { notIn: ["SUPERSEDED"] } } }),
+    prisma.extractedEncounter.findMany({ where: { caseId: doc.caseId, sourceDocumentId: doc.id, ...ACTIVE_ENCOUNTER_WHERE } }),
   );
   const priorHuman = prior.filter((p) => ["HUMAN_EDITED", "REVIEWED", "VERIFIED", "STALE"].includes(p.status));
   // Machine-produced drafts — including ones that passed the audit — may be

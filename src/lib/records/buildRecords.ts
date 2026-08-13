@@ -28,6 +28,7 @@ import {
   type InsubstantialReason,
 } from "@/lib/records/clinicalSubstance";
 import { resolveDate, isDocumented, type DateBasis, type ResolvedDate, type UnresolvedReason } from "@/lib/records/dateResolution";
+import { ACTIVE_ENCOUNTER_WHERE } from "@/lib/records/encounterLifecycle";
 import { yearProfile, type YearProfile } from "@/lib/records/dateSanity";
 import {
   chronologyMateriality,
@@ -631,7 +632,9 @@ export async function refreshCaseRecords(
   const sources: RecordSource[] = [];
   for (const doc of documents) {
     const rows = (await db.extractedEncounter.findMany({
-      where: { caseId, sourceDocumentId: doc.id },
+      // Superseded, rejected and failed rows are history. They stay in the
+      // database for audit and out of everything downstream.
+      where: { caseId, sourceDocumentId: doc.id, ...ACTIVE_ENCOUNTER_WHERE },
       select: ROW_SELECT,
     })) as unknown as MergeableRow[];
     sources.push({ id: doc.id, pageCount: doc.pageCount, extractedText: doc.extractedText, rows });
