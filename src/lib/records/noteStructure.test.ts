@@ -69,6 +69,53 @@ describe("finding the notes a document is made of", () => {
   });
 });
 
+describe("which of a note's several true dates is its own", () => {
+  const filler = (n = 400) => ` clinical narrative continues ${" more text".repeat(n / 20)} `;
+
+  it("dates a discharge summary by its discharge, not its admission", () => {
+    // A twelve-day stay's summary dated by the admission sits on day one.
+    const text = `Discharge Summary Admission Date: 03/15/2024 Discharge Date: 03/27/2024 ${filler()}`;
+    expect(findNotes(text)[0].date).toBe("2024-03-27");
+  });
+
+  it("dates an admission note by its admission", () => {
+    const text = `Admission Note Admission Date: 03/15/2024 ${filler()}`;
+    expect(findNotes(text)[0].date).toBe("2024-03-15");
+  });
+
+  it("dates imaging by the study, not by the radiologist's signature", () => {
+    const text = `Radiology Report Date Performed: 09/03/2024 Date of Service: 09/05/2024 ${filler()}`;
+    expect(findNotes(text)[0].date).toBe("2024-09-03");
+  });
+
+  it("dates a specimen by its collection, not its result", () => {
+    const text = `Pathology Report Collection Date: 02/14/2024 Result Date: 02/19/2024 ${filler()}`;
+    expect(findNotes(text)[0].date).toBe("2024-02-14");
+  });
+
+  it("dates a procedure by the procedure", () => {
+    const text = `Operative Report Admission Date: 03/15/2024 Date of Procedure: 03/16/2024 ${filler()}`;
+    expect(findNotes(text)[0].date).toBe("2024-03-16");
+  });
+
+  it("dates therapy by the evaluation", () => {
+    const text = `Physical Therapy Evaluation Evaluation Date: 04/02/2024 Date of Service: 04/09/2024 ${filler()}`;
+    expect(findNotes(text)[0].date).toBe("2024-04-02");
+  });
+
+  it("refuses an admission date printed on a progress note", () => {
+    // Genuine, and not this note's date. Dating by it collapses an admission
+    // onto its first day.
+    const text = `Progress Note Admission Date: 03/15/2024 ${filler()}`;
+    expect(findNotes(text)[0].date).toBeNull();
+  });
+
+  it("still refuses two service dates it cannot choose between", () => {
+    const text = `Consultation Date of Service: 03/18/2024 Visit Date: 04/22/2024 ${filler()}`;
+    expect(findNotes(text)[0].date).toBeNull();
+  });
+});
+
 describe("placing a fragment in the note it came from", () => {
   const text = `History and Physical${body()}Operative Report${body()}`;
   const notes = findNotes(text);

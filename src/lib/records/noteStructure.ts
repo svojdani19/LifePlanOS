@@ -62,7 +62,7 @@ export interface DocumentNote {
  * distinction the whole review process depends on.
  */
 const SERVICE_LABEL =
-  /\b(?:date\s+of\s+service|service\s+date|d\.?o\.?s\.?|encounter\s+date|date\s+of\s+encounter|visit\s+date|date\s+of\s+visit|admission\s+date|date\s+of\s+admission|admit(?:ted)?\s+date|procedure\s+date|date\s+of\s+procedure|surgery\s+date|date\s+of\s+surgery|operation\s+date|exam(?:ination)?\s+date|date\s+of\s+exam(?:ination)?|evaluation\s+date|date\s+of\s+evaluation|collect(?:ion|ed)\s+date|date\s+collected|specimen\s+collected|stud(?:y|ies)\s+date|date\s+performed|performed\s+(?:on|date)|exam\s+performed)\b/i;
+  /\b(?:date\s+of\s+service|service\s+date|d\.?o\.?s\.?|encounter\s+date|date\s+of\s+encounter|visit\s+date|date\s+of\s+visit|admission\s+date|date\s+of\s+admission|admit(?:ted)?\s+date|discharge\s+date|date\s+of\s+discharge|result(?:ed)?\s+date|date\s+result\w*|treatment\s+date|date\s+of\s+treatment|procedure\s+date|date\s+of\s+procedure|surgery\s+date|date\s+of\s+surgery|operation\s+date|exam(?:ination)?\s+date|date\s+of\s+exam(?:ination)?|evaluation\s+date|date\s+of\s+evaluation|collect(?:ion|ed)\s+date|date\s+collected|specimen\s+collected|stud(?:y|ies)\s+date|date\s+performed|performed\s+(?:on|date)|exam\s+performed)\b/i;
 
 /**
  * Labels that must never supply a service date.
@@ -190,7 +190,7 @@ export function findNotes(text: string): DocumentNote[] {
 
     const inside = markers.filter((m) => m.kind === "AUTHOR" && m.at >= start && m.at < end);
     const body = text.slice(start, end);
-    const dated = noteDate(body);
+    const dated = noteDate(body, headers[i].title);
     notes.push({
       start,
       end,
@@ -217,8 +217,74 @@ export function findNotes(text: string): DocumentNote[] {
  * Conflicting service labels return nothing. Two labelled dates disagreeing is
  * a question for a reviewer, not something to resolve by picking the first.
  */
-export function noteDate(body: string): { iso: string; basis: NoteDateBasis; evidence: string } | null {
-  const labelled = new Map<string, string>();
+/**
+ * Which labelled date actually dates a note of this kind.
+ *
+ * A chart prints several true dates on one page and only one of them is the day
+ * the note documents. A discharge summary carries the admission date, the
+ * discharge date and the day it was dictated; dating it by the admission puts
+ * a twelve-day stay's summary on day one. An imaging report carries the day the
+ * study was performed and the day a radiologist signed it, days apart.
+ *
+ * Each note type therefore names the labels that date IT, strongest first.
+ * Anything not listed for a type is still a real date and still recorded — it
+ * is simply not this note's date.
+ */
+const DATE_PREFERENCE: { match: RegExp; prefer: RegExp[] }[] = [
+  {
+    match: /discharge/i,
+    prefer: [/\bdischarge\s+date|date\s+of\s+discharge\b/i, /\bdate\s+of\s+service|service\s+date\b/i],
+  },
+  {
+    match: /operative|procedure|surgery/i,
+    prefer: [
+      /\bprocedure\s+date|date\s+of\s+procedure|surgery\s+date|date\s+of\s+surgery|operation\s+date\b/i,
+      /\bdate\s+of\s+service|service\s+date\b/i,
+    ],
+  },
+  {
+    match: /radiolog|imaging/i,
+    prefer: [
+      /\bdate\s+performed|performed\s+(?:on|date)|stud(?:y|ies)\s+date|exam(?:ination)?\s+date|date\s+of\s+exam(?:ination)?\b/i,
+      /\bdate\s+of\s+service|service\s+date\b/i,
+    ],
+  },
+  {
+    match: /patholog|laborator|specimen/i,
+    prefer: [
+      /\bcollect(?:ion|ed)\s+date|date\s+collected|specimen\s+collected\b/i,
+      /\bresult(?:ed)?\s+date|date\s+result\w*\b/i,
+    ],
+  },
+  {
+    match: /therapy|rehab/i,
+    prefer: [/\bevaluation\s+date|date\s+of\s+evaluation|treatment\s+date\b/i, /\bdate\s+of\s+service|service\s+date\b/i],
+  },
+  {
+    match: /admission|history\s+and\s+physical/i,
+    prefer: [/\badmission\s+date|date\s+of\s+admission|admit(?:ted)?\s+date\b/i, /\bdate\s+of\s+service|service\s+date\b/i],
+  },
+];
+
+/**
+ * Labels that must not date a note of a kind they do not belong to.
+ *
+ * An admission date is genuine and belongs to the admission. On a progress
+ * note, an imaging report or a discharge summary it is context, and dating by
+ * it collapses an admission onto its first day — which is how a twelve-day stay
+ * came to sit entirely on the day of surgery.
+ */
+const FOREIGN_TO_TYPE: { match: RegExp; reject: RegExp }[] = [
+  { match: /discharge|progress|radiolog|imaging|patholog|laborator|therapy|operative|procedure/i,
+    reject: /\badmission\s+date|date\s+of\s+admission|admit(?:ted)?\s+date\b/i },
+];
+
+export function noteDate(body: string, noteType?: string | null): { iso: string; basis: NoteDateBasis; evidence: string } | null {
+  const type = noteType ?? "";
+  const foreign = FOREIGN_TO_TYPE.find((rule) => rule.match.test(type))?.reject;
+  const preference = DATE_PREFERENCE.find((rule) => rule.match.test(type))?.prefer ?? [];
+
+  const labelled = new Map<string, { evidence: string; label: string }>();
   for (const m of body.matchAll(ANY_DATE)) {
     const at = m.index ?? 0;
     const before = body.slice(Math.max(0, at - LABEL_REACH), at);
@@ -226,13 +292,26 @@ export function noteDate(body: string): { iso: string; basis: NoteDateBasis; evi
     // even when a service label also appears in the window.
     if (UNSAFE_LABEL.test(before)) continue;
     if (!SERVICE_LABEL.test(before)) continue;
+    // A label belonging to a different kind of note is context, not this note's
+    // date: an admission date on a discharge summary dates the admission.
+    if (foreign?.test(before)) continue;
     const iso = toIso(m);
-    if (iso && !labelled.has(iso)) labelled.set(iso, snippet(body, at, m[0].length));
+    if (iso && !labelled.has(iso)) labelled.set(iso, { evidence: snippet(body, at, m[0].length), label: before });
+  }
+
+  if (labelled.size > 1 && preference.length) {
+    // Several genuine service dates. The note's own kind says which is its own.
+    for (const wanted of preference) {
+      const hit = [...labelled.entries()].find(([, v]) => wanted.test(v.label));
+      if (hit) return { iso: hit[0], basis: "SERVICE_LABEL", evidence: hit[1].evidence };
+    }
   }
   if (labelled.size === 1) {
-    const [iso, evidence] = [...labelled.entries()][0];
-    return { iso, basis: "SERVICE_LABEL", evidence };
+    const [iso, found] = [...labelled.entries()][0];
+    return { iso, basis: "SERVICE_LABEL", evidence: found.evidence };
   }
+  // Two service dates and nothing to choose between them is a question for a
+  // reviewer, not a coin toss.
   if (labelled.size > 1) return null;
 
   // Nothing labelled. A single unambiguous date in the note's own header — the
@@ -242,7 +321,11 @@ export function noteDate(body: string): { iso: string; basis: NoteDateBasis; evi
   const inHeader = new Map<string, string>();
   for (const m of header.matchAll(ANY_DATE)) {
     const at = m.index ?? 0;
-    if (UNSAFE_LABEL.test(header.slice(Math.max(0, at - LABEL_REACH), at))) continue;
+    const before = header.slice(Math.max(0, at - LABEL_REACH), at);
+    if (UNSAFE_LABEL.test(before)) continue;
+    // The fallback must respect the same rule as the labelled path, or an
+    // admission date rejected above is simply picked up again here.
+    if (foreign?.test(before)) continue;
     const iso = toIso(m);
     if (iso && !inHeader.has(iso)) inHeader.set(iso, snippet(header, at, m[0].length));
   }
