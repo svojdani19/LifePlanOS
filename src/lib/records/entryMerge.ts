@@ -876,8 +876,32 @@ export function consolidateIntoNotes(
     // surgeon named on page 5 and again on page 200 claim a span covering
     // everything in between, and every loose fragment in that range attached to
     // him — one note reached 1,654 claims, which is a chart, not a note.
-    const notes: { key: string; members: MergedEntry[]; spans: RowSpan[] }[] = [];
+    const notes: { key: string; members: MergedEntry[]; spans: RowSpan[]; noteStart: string | null }[] = [];
     const orphans: MergedEntry[] = [];
+
+    // The KIND of detected note a fragment sits strictly inside, where one
+    // does. A surgeon writes an operative report and a discharge summary on the
+    // day he operates, and the published plan lists them separately —
+    // authorship alone must not fold them back into one.
+    //
+    // The scope is the note's title, not its offset. Scoping by offset was
+    // measured first and re-fragmented the admission it was meant to organise:
+    // a hospital chart prints dozens of generic headers, and one author's
+    // fragments scattered across several "Progress Note" instances split back
+    // into the per-page entries this module exists to fold — 14 entries on the
+    // surgery date became 39. The published plan's own shape says the
+    // distinction a planner draws is by KIND: the operative report and the
+    // discharge summary are two entries; the same author's routine fragments
+    // under repeated generic headers are one.
+    //
+    // Containment must be strict: a fragment that runs past the note's end is
+    // not proven to belong to it, and scoping by a boundary it crosses would be
+    // scoping by evidence it contradicts.
+    const containedIn = (e: MergedEntry): string | null => {
+      if (!e.span || !structure.length) return null;
+      const at = noteAt(structure, e.span.start);
+      return at && e.span.end <= at.end ? (at.title ?? null) : null;
+    };
 
     for (const e of bucket) {
       const key = providerKey(e.provider);
@@ -895,8 +919,35 @@ export function consolidateIntoNotes(
         // "TECHY|F" so a later "Techy, Fernando" still lands here.
         if (existing.key.endsWith("|") && !key.endsWith("|")) existing.key = key;
       } else {
-        notes.push({ key, members: [e], spans: e.span ? [e.span] : [] });
+        notes.push({ key, members: [e], spans: e.span ? [e.span] : [], noteStart: null });
       }
+    }
+
+    // One author, two KINDS of detected note: two records — but only when the
+    // boundary evidence covers everything the author wrote in this bucket.
+    // Splitting on partial containment was measured and severed whichever
+    // fragments happened to sit inside a detected header from the rest of the
+    // same work: one surgeon became five entries on the day he operated, split
+    // not into his operative report and his discharge summary but into
+    // arbitrary scraps. An author with unscoped fragments is an author whose
+    // boundaries the detection did not capture, and evidence that incomplete
+    // does not get to divide their record.
+    for (let i = notes.length - 1; i >= 0; i--) {
+      const group = notes[i];
+      const scopes = group.members.map(containedIn);
+      if (scopes.some((scope) => scope === null)) continue;
+      const kinds = new Set(scopes);
+      if (kinds.size < 2) continue;
+      const replacements = [...kinds].map((kind) => {
+        const members = group.members.filter((_, at) => scopes[at] === kind);
+        return {
+          key: group.key,
+          members,
+          spans: members.flatMap((m) => (m.span ? [m.span] : [])),
+          noteStart: kind,
+        };
+      });
+      notes.splice(i, 1, ...replacements);
     }
 
     // Nothing in this bucket names an author, so there is no note to attach to

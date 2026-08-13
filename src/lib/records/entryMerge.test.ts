@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { findNotes } from "@/lib/records/noteStructure";
 import {
   cleanFacilityName,
   dedupeAcrossDocuments,
@@ -571,6 +572,88 @@ describe("who signed the note", () => {
     expect(providerKey(null)).toBeNull();
     expect(providerKey("")).toBeNull();
     expect(providerKey("Osly")).toBeNull();
+  });
+});
+
+describe("the source note is the identity, not the author plus the date", () => {
+  const filler = () => " clinical narrative continues ".repeat(40);
+  const at = (start: number, provider: string | null, value: string) =>
+    mergeRows([row({ id: `r${start}`, provider, claims: [{ field: "assessment", value, excerpt: `e${start}` }] })]).map(
+      (e) => ({ ...e, span: { start, end: start + 400, pageStart: null, pageEnd: null } }),
+    )[0];
+
+  it("keeps one surgeon's operative report and discharge summary separate in one document", () => {
+    // He writes both on the day he operates. Folding them by authorship put a
+    // discharge's disposition inside the operative note, and the published
+    // plan lists them as two entries.
+    const text = `Operative Report Provider: TECHY, FERNANDO ${filler()}Discharge Summary Provider: TECHY, FERNANDO ${filler()}`;
+    const structure = findNotes(text);
+    expect(structure).toHaveLength(2);
+    const opAt = structure[0].start + 60;
+    const dcAt = structure[1].start + 60;
+    const notes = consolidateIntoNotes(
+      [at(opAt, "Fernando Techy, MD", "Bilateral laminectomy performed"), at(dcAt, "Fernando Techy, MD", "Discharged home with therapy")],
+      { documentNotes: structure },
+    );
+    expect(notes).toHaveLength(2);
+  });
+
+  it("keeps notes of different kinds distinct, and folds repeats of the same kind", () => {
+    // Scoping is by the KIND of note. Two same-day "Progress Note" instances by
+    // one author fold — offset-scoping was measured and re-fragmented the
+    // admission (14 entries on the surgery date became 39) — while an operative
+    // report never folds into a consultation.
+    const text = `Progress Note Provider: BERBERIAN, ESTEBAN ${filler()}Progress Note Provider: BERBERIAN, ESTEBAN ${filler()}Consultation Provider: BERBERIAN, ESTEBAN ${filler()}`;
+    const structure = findNotes(text);
+    expect(structure).toHaveLength(3);
+    const notes = consolidateIntoNotes(
+      [
+        at(structure[0].start + 60, "Esteban Berberian, MD", "Ambulating with assistance"),
+        at(structure[1].start + 60, "Esteban Berberian, MD", "Pain controlled on orals"),
+        at(structure[2].start + 60, "Esteban Berberian, MD", "Consulted for glucose management"),
+      ],
+      { documentNotes: structure },
+    );
+    expect(notes).toHaveLength(2);
+  });
+
+  it("still folds one author's fragments inside one detected note", () => {
+    const text = `Operative Report Provider: TECHY, FERNANDO ${filler()}${filler()}`;
+    const structure = findNotes(text);
+    const notes = consolidateIntoNotes(
+      [
+        at(structure[0].start + 60, "Fernando Techy, MD", "Laminectomy performed"),
+        at(structure[0].start + 500, "FERNANDO TECHY, MD", "Estimated blood loss 150 mL"),
+      ],
+      { documentNotes: structure },
+    );
+    expect(notes).toHaveLength(1);
+  });
+
+  it("keeps the anti-fragmentation behaviour where headers are sparse", () => {
+    // No detected boundaries at all: one author's fragments still fold, which
+    // is the measured win against 128 events on one surgery date.
+    const notes = consolidateIntoNotes(
+      [at(0, "Fernando Techy, MD", "Laminectomy performed"), at(600, "DR F. TECHY", "Extubated to PACU")],
+      { documentNotes: [] },
+    );
+    expect(notes).toHaveLength(1);
+  });
+
+  it("does not split an author whose boundaries the detection failed to capture", () => {
+    // One fragment crosses the note's end, so the boundary evidence does not
+    // cover this author's whole work — and evidence that incomplete does not
+    // get to divide their record. Splitting on partial containment was measured
+    // on the real chart: one surgeon became five entries on the day he
+    // operated, cut into arbitrary scraps rather than into his notes.
+    const text = `Progress Note Provider: BERBERIAN, ESTEBAN ${filler()}Consultation Provider: BERBERIAN, ESTEBAN ${filler()}`;
+    const structure = findNotes(text);
+    const spill = {
+      ...at(structure[0].start + 60, "Esteban Berberian, MD", "Crosses the boundary"),
+      span: { start: structure[0].start + 60, end: structure[1].end + 5_000, pageStart: null, pageEnd: null },
+    };
+    const inside = at(structure[1].start + 100, "Esteban Berberian, MD", "Inside the consultation");
+    expect(consolidateIntoNotes([spill, inside], { documentNotes: structure })).toHaveLength(1);
   });
 });
 
