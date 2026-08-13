@@ -16,6 +16,7 @@
 import { Prisma, PrismaClient } from "@/generated/prisma";
 import { buildRecords, persistRecords, type RecordSource, type RecordStore } from "@/lib/records/buildRecords";
 import { ACTIVE_ENCOUNTER_WHERE } from "@/lib/records/encounterLifecycle";
+import { caseFingerprint, caseLockKey } from "@/lib/records/buildRecords";
 import type { MergeableRow } from "@/lib/records/entryMerge";
 
 const ROW_SELECT = {
@@ -145,6 +146,23 @@ function report(built: Awaited<ReturnType<typeof buildRecords>>) {
   }
 }
 
+/** The case as it stands right now, for the pre-publication recheck. */
+async function readFingerprint(db: PrismaClient, caseId: string): Promise<string> {
+  const documents = await db.document.findMany({
+    where: { caseId },
+    select: { id: true, pageCount: true, extractedText: true },
+  });
+  const sources: RecordSource[] = [];
+  for (const doc of documents) {
+    const rows = (await db.extractedEncounter.findMany({
+      where: { caseId, sourceDocumentId: doc.id, ...ACTIVE_ENCOUNTER_WHERE },
+      select: ROW_SELECT,
+    })) as unknown as RecordSource["rows"];
+    sources.push({ id: doc.id, pageCount: doc.pageCount, extractedText: doc.extractedText, rows });
+  }
+  return caseFingerprint(sources);
+}
+
 /** Prisma with the narrow surface persistence asks for. */
 function asStore(db: PrismaClient): RecordStore {
   const wrap = (client: Pick<PrismaClient, "document" | "chronologyEvent">): RecordStore => ({
@@ -161,6 +179,12 @@ function asStore(db: PrismaClient): RecordStore {
       deleteMany: (args) => client.chronologyEvent.deleteMany(args as never),
       createMany: (args) => client.chronologyEvent.createMany({ data: args.data as never }),
     },
+    lockCase: async (caseId) => {
+      // Held until the transaction ends, so a second publisher waits rather
+      // than interleaving with this one.
+      await db.$executeRawUnsafe("SELECT pg_advisory_xact_lock($1)", caseLockKey(caseId));
+    },
+    currentFingerprint: (caseId) => readFingerprint(db, caseId),
     $transaction: (work) => db.$transaction((tx) => work(wrap(tx)), { timeout: 120_000 }),
   });
   return wrap(db);

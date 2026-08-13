@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildRecords,
+  caseFingerprint,
+  caseLockKey,
   persistRecords,
   sortForDisplay,
   type RecordSegment,
@@ -327,6 +329,77 @@ describe("publishing a rebuilt case", () => {
     expect(calls.updated).toBe(0);
     expect(calls.deleted).toBe(0);
     expect(calls.created).toBe(0);
+  });
+});
+
+describe("overlapping rebuilds", () => {
+  // Every completed document starts a full-case rebuild, and a rebuild takes
+  // minutes because it composes prose. Two routinely overlap, and the one that
+  // finishes last wins regardless of which read newer data.
+  const storeWith = (currentFingerprint: string) => {
+    const calls = { updated: 0, created: 0, locked: 0 };
+    const base: RecordStore = {
+      lockCase: async () => {
+        calls.locked++;
+      },
+      currentFingerprint: async () => currentFingerprint,
+      document: {
+        update: async () => {
+          calls.updated++;
+          return null;
+        },
+      },
+      chronologyEvent: {
+        count: async () => 0,
+        findMany: async () => [],
+        deleteMany: async () => ({ count: 0 }),
+        createMany: async ({ data }) => {
+          calls.created += data.length;
+          return null;
+        },
+      },
+      $transaction: async (work) => work(base),
+    };
+    return { store: base, calls };
+  };
+
+  it("refuses to publish a build read from state the case has moved past", async () => {
+    // An older build finishing after a newer source state must not overwrite it.
+    const built = await build(`Progress Note Date of Service: 03/18/2024 ${filler()}`, [row()]);
+    const { store: s, calls } = storeWith("a-different-fingerprint");
+    const result = await persistRecords(s, CASE, built);
+    expect(result.published).toBe(false);
+    expect(result.staleBuild).toBe(true);
+    expect(calls.updated).toBe(0);
+    expect(calls.created).toBe(0);
+  });
+
+  it("publishes when the case is still as the build found it", async () => {
+    const built = await build(`Progress Note Date of Service: 03/18/2024 ${filler()}`, [row()]);
+    const { store: s, calls } = storeWith(built.fingerprint);
+    const result = await persistRecords(s, CASE, built);
+    expect(result.published).toBe(true);
+    expect(calls.locked).toBe(1);
+  });
+
+  it("changes fingerprint when a reviewer corrects a record", async () => {
+    // A rebuild that missed a correction is exactly the one that must not
+    // publish, so a corrected field has to move the fingerprint.
+    const plain = caseFingerprint([{ id: "doc-1", pageCount: 1, extractedText: "x", rows: [row({ id: "r" })] }]);
+    const corrected = caseFingerprint([
+      { id: "doc-1", pageCount: 1, extractedText: "x", rows: [{ ...row({ id: "r" }), factualSummary: "Physician's corrected wording." }] },
+    ]);
+    expect(corrected).not.toBe(plain);
+  });
+
+  it("is stable for the same case read twice", () => {
+    const sources = [{ id: "doc-1", pageCount: 1, extractedText: "x", rows: [row({ id: "r" })] }];
+    expect(caseFingerprint(sources)).toBe(caseFingerprint(sources));
+  });
+
+  it("gives every case its own lock key", () => {
+    expect(caseLockKey("case-a")).not.toBe(caseLockKey("case-b"));
+    expect(caseLockKey("case-a")).toBe(caseLockKey("case-a"));
   });
 });
 

@@ -28,6 +28,7 @@ import {
   type InsubstantialReason,
 } from "@/lib/records/clinicalSubstance";
 import { resolveDate, isDocumented, type DateBasis, type ResolvedDate, type UnresolvedReason } from "@/lib/records/dateResolution";
+import { createHash } from "node:crypto";
 import { ACTIVE_ENCOUNTER_WHERE } from "@/lib/records/encounterLifecycle";
 import { authoritativeFacts, claimDiscrepancies, type ReviewableRow } from "@/lib/records/humanAuthority";
 import { yearProfile, type YearProfile } from "@/lib/records/dateSanity";
@@ -155,6 +156,8 @@ export interface BuildStats {
 }
 
 export interface BuiltRecords {
+  /** What the case looked like when this build read it. */
+  fingerprint: string;
   segmentsByDocument: Map<string, RecordSegment[]>;
   chronology: ChronologyDraft[];
   stats: BuildStats;
@@ -419,6 +422,7 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
   }
 
   return {
+    fingerprint: caseFingerprint(documents),
     segmentsByDocument,
     chronology,
     failures,
@@ -548,6 +552,56 @@ export type { AnalysisClass };
 // ── Publishing a rebuilt case ────────────────────────────────────────────────
 
 /**
+ * What the case looked like when a build started.
+ *
+ * Every completed document kicks off a full-case rebuild, and a rebuild takes
+ * minutes because it composes prose. So two builds routinely overlap, and the
+ * one that finishes last wins regardless of which read newer data — an older
+ * build, started before a document finished extracting, could publish over a
+ * newer one and quietly drop that document's records.
+ *
+ * The fingerprint covers what a build's output depends on: which documents and
+ * rows were active, and every human correction, because a rebuild that misses a
+ * correction is exactly the case that must not publish. It deliberately does
+ * NOT cover claim text — an extraction that rewrites a claim without changing
+ * the row set produces the same records, and refusing to publish then would
+ * livelock a busy case.
+ */
+export function caseFingerprint(documents: readonly RecordSource[]): string {
+  const hash = createHash("sha256");
+  for (const doc of [...documents].sort((a, b) => a.id.localeCompare(b.id))) {
+    hash.update(`d:${doc.id}:${doc.pageCount ?? 0}:${doc.extractedText?.length ?? 0}\n`);
+    for (const row of [...doc.rows].sort((a, b) => a.id.localeCompare(b.id))) {
+      // Row identity, lifecycle, and everything a reviewer can correct.
+      hash.update(
+        [
+          "r",
+          row.id,
+          row.status ?? "",
+          row.encounterDate?.toISOString() ?? "",
+          row.provider ?? "",
+          row.providerCredentials ?? "",
+          row.facility ?? "",
+          row.encounterType ?? "",
+          row.analysisClass ?? "",
+          row.substanceClass ?? "",
+          // The wording itself, so an edited summary changes the fingerprint.
+          row.factualSummary ?? "",
+        ].join(":") + "\n",
+      );
+    }
+  }
+  return hash.digest("hex");
+}
+
+/** A Postgres advisory lock key for a case, stable across processes. */
+export function caseLockKey(caseId: string): bigint {
+  // 63 bits of a digest: advisory locks take a signed 64-bit integer, and the
+  // key must be identical in every process that rebuilds this case.
+  return BigInt(`0x${createHash("sha256").update(caseId).digest("hex").slice(0, 15)}`);
+}
+
+/**
  * A stable name for the clinical event a chronology row documents.
  *
  * Publication kept every reviewed event and then inserted the whole freshly
@@ -586,11 +640,20 @@ export interface PersistResult {
   reviewedKept: number;
   /** Drafts withheld because a reviewed event already covers them. */
   draftsSuppressed?: number;
+  /** True when publication was refused because the case moved on. */
+  staleBuild?: boolean;
   reason?: string;
 }
 
 /** The database surface persistence needs. Narrow, so tests can supply a fake. */
 export interface RecordStore {
+  /**
+   * Serialize this case against other processes, and report what the case looks
+   * like now. Optional so a test store need not implement it; when absent, the
+   * build publishes as before.
+   */
+  lockCase?(caseId: string): Promise<void>;
+  currentFingerprint?(caseId: string): Promise<string>;
   document: {
     update(args: { where: { id: string }; data: { segments: unknown } }): Promise<unknown>;
   };
@@ -635,6 +698,27 @@ export async function persistRecords(
   }
 
   return store.$transaction(async (tx) => {
+    // One publication per case at a time, across processes. An in-memory guard
+    // cannot do this: the live pipeline and the rebuild script are different
+    // processes, and both publish.
+    await tx.lockCase?.(caseId);
+
+    // The case may have moved while this build was composing — another document
+    // finished extracting, or a reviewer corrected a record. Publishing a
+    // result read from older data would silently drop their work.
+    const now = await tx.currentFingerprint?.(caseId);
+    if (now !== undefined && now !== built.fingerprint) {
+      return {
+        published: false,
+        documentsUpdated: 0,
+        chronologyInserted: 0,
+        draftsRemoved: 0,
+        reviewedKept: 0,
+        reason: "the case changed while this build was running; the newer state was kept and a rebuild is needed",
+        staleBuild: true,
+      };
+    }
+
     // Events a human has touched. Their lineage keys are what the new drafts
     // are checked against, so a reviewed event does not gain a draft twin.
     const reviewed = await tx.chronologyEvent.findMany({
