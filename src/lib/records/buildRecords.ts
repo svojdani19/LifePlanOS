@@ -547,12 +547,45 @@ export type { AnalysisClass };
 
 // ── Publishing a rebuilt case ────────────────────────────────────────────────
 
+/**
+ * A stable name for the clinical event a chronology row documents.
+ *
+ * Publication kept every reviewed event and then inserted the whole freshly
+ * generated draft chronology, so a record a physician had already reviewed
+ * gained a second AI-draft copy of itself beside the reviewed one. On the page
+ * those look like two events on one day, and the reviewed one is the one a
+ * reader is less likely to trust, because the draft usually reads more fluently.
+ *
+ * The key is built from what identifies the event rather than from how it is
+ * worded: the document it came from, the day, the kind of event and the
+ * clinician. Wording is deliberately excluded — a reviewer rewriting a summary
+ * must not thereby create a new event.
+ *
+ * Several genuine events can share a day. An operative report and the discharge
+ * that follows it differ by kind; two progress notes by different clinicians
+ * differ by provider. Where they differ by neither, this treats them as one,
+ * which is the safe direction: an unpublished draft is recoverable from the
+ * next rebuild, a destroyed review is not.
+ */
+export function chronologyLineageKey(event: {
+  sourceDocumentId?: string | null;
+  eventDate: Date | string;
+  eventType?: string | null;
+  provider?: string | null;
+}): string {
+  const day = typeof event.eventDate === "string" ? event.eventDate.slice(0, 10) : event.eventDate.toISOString().slice(0, 10);
+  const who = (event.provider ?? "").toLowerCase().replace(/[^a-z]+/g, "");
+  return [event.sourceDocumentId ?? "", day, event.eventType ?? "", who].join("|");
+}
+
 export interface PersistResult {
   published: boolean;
   documentsUpdated: number;
   chronologyInserted: number;
   draftsRemoved: number;
   reviewedKept: number;
+  /** Drafts withheld because a reviewed event already covers them. */
+  draftsSuppressed?: number;
   reason?: string;
 }
 
@@ -563,6 +596,9 @@ export interface RecordStore {
   };
   chronologyEvent: {
     count(args: { where: Record<string, unknown> }): Promise<number>;
+    findMany(args: { where: Record<string, unknown>; select: Record<string, boolean> }): Promise<
+      { eventDate: Date; eventType: string | null; provider: string | null; sourceDocumentId: string | null }[]
+    >;
     deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
     createMany(args: { data: unknown[] }): Promise<unknown>;
   };
@@ -599,25 +635,37 @@ export async function persistRecords(
   }
 
   return store.$transaction(async (tx) => {
-    const reviewedKept = await tx.chronologyEvent.count({
+    // Events a human has touched. Their lineage keys are what the new drafts
+    // are checked against, so a reviewed event does not gain a draft twin.
+    const reviewed = await tx.chronologyEvent.findMany({
       where: { caseId, reviewStatus: { not: "AI_DRAFT" } },
+      select: { eventDate: true, eventType: true, provider: true, sourceDocumentId: true },
     });
+    const reviewedKept = reviewed.length;
+    const alreadyReviewed = new Set(reviewed.map(chronologyLineageKey));
 
     for (const [documentId, segments] of built.segmentsByDocument) {
       await tx.document.update({ where: { id: documentId }, data: { segments: sortForDisplay(segments) } });
     }
 
     const removed = await tx.chronologyEvent.deleteMany({ where: { caseId, reviewStatus: "AI_DRAFT" } });
-    for (let i = 0; i < built.chronology.length; i += 200) {
-      await tx.chronologyEvent.createMany({ data: built.chronology.slice(i, i + 200) });
+
+    // A draft for an event a human already reviewed is not inserted. The
+    // reviewed event stands; the draft would only be a second copy of it.
+    const toInsert = built.chronology.filter((event) => !alreadyReviewed.has(chronologyLineageKey(event)));
+    const suppressed = built.chronology.length - toInsert.length;
+
+    for (let i = 0; i < toInsert.length; i += 200) {
+      await tx.chronologyEvent.createMany({ data: toInsert.slice(i, i + 200) });
     }
 
     return {
       published: true,
       documentsUpdated: built.segmentsByDocument.size,
-      chronologyInserted: built.chronology.length,
+      chronologyInserted: toInsert.length,
       draftsRemoved: removed.count,
       reviewedKept,
+      draftsSuppressed: suppressed,
     };
   });
 }

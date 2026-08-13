@@ -157,6 +157,7 @@ function asStore(db: PrismaClient): RecordStore {
     },
     chronologyEvent: {
       count: (args) => client.chronologyEvent.count(args as never),
+      findMany: (args) => client.chronologyEvent.findMany(args as never) as never,
       deleteMany: (args) => client.chronologyEvent.deleteMany(args as never),
       createMany: (args) => client.chronologyEvent.createMany({ data: args.data as never }),
     },

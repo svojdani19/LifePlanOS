@@ -32,11 +32,12 @@ const row = (over: Partial<MergeableRow> = {}): MergeableRow => ({
 });
 
 /** Build without composing prose: these tests are about structure and dates. */
-const build = (text: string, rows: MergeableRow[], pageCount = 12) =>
+const build = (text: string, rows: MergeableRow[], pageCount = 12, write = false) =>
   buildRecords({
     caseId: CASE,
     documents: [{ id: "doc-1", pageCount, extractedText: text, rows }],
-    write: false,
+    write,
+    adjudicateDuplicates: false,
   });
 
 const seg = (built: Awaited<ReturnType<typeof build>>) => built.segmentsByDocument.get("doc-1") ?? [];
@@ -229,7 +230,7 @@ describe("what a reviewer sees", () => {
 });
 
 describe("publishing a rebuilt case", () => {
-  const store = (over: Partial<RecordStore> = {}) => {
+  const store = (over: Partial<RecordStore> = {}, reviewedEvents: never[] = []) => {
     const calls = { updated: 0, created: 0, deleted: 0 };
     const base: RecordStore = {
       document: {
@@ -240,6 +241,7 @@ describe("publishing a rebuilt case", () => {
       },
       chronologyEvent: {
         count: async () => 3,
+        findMany: async () => reviewedEvents,
         deleteMany: async () => {
           calls.deleted++;
           return { count: 7 };
@@ -257,11 +259,59 @@ describe("publishing a rebuilt case", () => {
 
   it("publishes a complete build and keeps reviewed events", async () => {
     const built = await build(`Progress Note Date of Service: 03/18/2024 ${filler()}`, [row()]);
-    const { store: s, calls } = store();
+    const reviewed = [
+      { eventDate: new Date("2020-01-01T00:00:00Z"), eventType: "CLINIC_VISIT", provider: "Someone Else", sourceDocumentId: "other" },
+    ] as never[];
+    const { store: s, calls } = store({}, reviewed);
     const result = await persistRecords(s, CASE, built);
     expect(result.published).toBe(true);
-    expect(result.reviewedKept).toBe(3);
+    expect(result.reviewedKept).toBe(1);
     expect(calls.updated).toBe(1);
+  });
+
+  it("does not insert a draft twin of an event a human already reviewed", async () => {
+    // Publication kept every reviewed event and then inserted the whole fresh
+    // draft chronology, so a reviewed record gained a second copy of itself —
+    // and the draft usually reads more fluently than the reviewed one.
+    const built = await build(
+      `Progress Note Date of Service: 03/18/2024 ${filler()} lumbar radiculopathy ${filler()}`,
+      [row()],
+      12,
+      true,
+    );
+    expect(built.chronology.length).toBeGreaterThan(0);
+    const twin = built.chronology[0];
+    const reviewed = [
+      {
+        eventDate: twin.eventDate,
+        eventType: twin.eventType,
+        provider: twin.provider,
+        sourceDocumentId: twin.sourceDocumentId,
+      },
+    ] as never[];
+
+    const { store: s, calls } = store({}, reviewed);
+    const result = await persistRecords(s, CASE, built);
+    expect(result.published).toBe(true);
+    expect(result.draftsSuppressed).toBe(1);
+    expect(calls.created).toBe(built.chronology.length - 1);
+  });
+
+  it("still inserts a draft for a different event on the same day", async () => {
+    // An operative report and the discharge that follows it are two events.
+    const built = await build(
+      `Progress Note Date of Service: 03/18/2024 ${filler()} lumbar radiculopathy ${filler()}`,
+      [row()],
+      12,
+      true,
+    );
+    const twin = built.chronology[0];
+    const reviewed = [
+      { eventDate: twin.eventDate, eventType: "SURGERY", provider: twin.provider, sourceDocumentId: twin.sourceDocumentId },
+    ] as never[];
+    const { store: s } = store({}, reviewed);
+    const result = await persistRecords(s, CASE, built);
+    expect(result.draftsSuppressed).toBe(0);
   });
 
   it("leaves the previous Records and Chronology intact when any note failed", async () => {
