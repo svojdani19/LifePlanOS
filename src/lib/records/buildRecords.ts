@@ -416,7 +416,12 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
     // event it witnesses reaches the chronology, marked as billing-documented.
     // Materiality's clinical-assertion screen does not apply: the billed
     // service IS the material fact.
-    const billingCare = !clinical && substance.meaningful && iso ? billingDocumentedCare(note.claims) : null;
+    // Evaluated INDEPENDENTLY of clinical substance. The gate previously
+    // required substance.meaningful — but a bill of pure service codes is
+    // exactly what the substance screen rejects, so the billing-only
+    // productions this detector was built for never reached it. A dated bill
+    // for 99215 with nothing else IS the visit's witness.
+    const billingCare = !clinical && iso ? billingDocumentedCare(note.claims) : null;
     if (billingCare) billingDocumented++;
 
     const admit =
@@ -440,7 +445,12 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
         recordType: kind.recordType,
         provider: note.provider,
         facility: note.facility,
-        summary,
+        // A codes-only bill never reached the writer; its chronology line
+        // still needs an honest sentence, built from the billed evidence.
+        summary:
+          !substance.meaningful && billingCare
+            ? `Billed service (${billingCare.kind.toLowerCase().replace(/_/g, " ")}): ${billingCare.evidence}`
+            : summary,
         sourceDocumentId: note.sourceDocumentId,
         sourcePage: cite ? note.pageStart : null,
         reviewStatus: "AI_DRAFT",
@@ -476,10 +486,29 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
     segmentsByDocument.set(id, segments);
   }
 
+  // A billed service already documented by a clinical record on the same day
+  // is the same event twice — the bill corroborates, the note narrates. The
+  // clinical event stands; the billing twin is withheld. Matching is
+  // deliberately tight (same day, same event kind, and no provider conflict):
+  // a billing line for a DIFFERENT provider's service the same day survives.
+  const nameKey = (v: string | null) => (v ?? "").toLowerCase().replace(/[^a-z]/g, "");
+  const clinicalCovered = new Set(
+    chronology
+      .filter((e) => !String(e.summary ?? "").startsWith("Billed service"))
+      .map((e) => `${e.eventDate.toISOString().slice(0, 10)}|${e.eventType}|${nameKey(e.provider)}`),
+  );
+  const withoutBillingTwins = chronology.filter((event) => {
+    if (!String(event.summary ?? "").startsWith("Billed service")) return true;
+    const day = event.eventDate.toISOString().slice(0, 10);
+    const exact = clinicalCovered.has(`${day}|${event.eventType}|${nameKey(event.provider)}`);
+    const unattributed = !nameKey(event.provider) && [...clinicalCovered].some((k) => k.startsWith(`${day}|${event.eventType}|`));
+    return !(exact || unattributed);
+  });
+
   return {
     fingerprint: caseFingerprint(documents),
     segmentsByDocument,
-    chronology: collapseTreatmentSeries(chronology),
+    chronology: collapseTreatmentSeries(withoutBillingTwins),
     failures,
     adjudicationAudit,
     stats: {
@@ -720,6 +749,8 @@ export interface PersistResult {
   reviewedKept: number;
   /** Drafts withheld because a reviewed event already covers them. */
   draftsSuppressed?: number;
+  /** Reviewed events marked stale because their series membership changed. */
+  reviewedMarkedStale?: number;
   /** True when publication was refused because the case moved on. */
   staleBuild?: boolean;
   reason?: string;
@@ -740,8 +771,9 @@ export interface RecordStore {
   chronologyEvent: {
     count(args: { where: Record<string, unknown> }): Promise<number>;
     findMany(args: { where: Record<string, unknown>; select: Record<string, boolean> }): Promise<
-      { eventDate: Date; eventType: string | null; provider: string | null; sourceDocumentId: string | null }[]
+      { id?: string; eventDate: Date; eventDateEnd?: Date | null; eventType: string | null; provider: string | null; sourceDocumentId: string | null }[]
     >;
+    updateMany?(args: { where: Record<string, unknown>; data: Record<string, unknown> }): Promise<{ count: number }>;
     deleteMany(args: { where: Record<string, unknown> }): Promise<{ count: number }>;
     createMany(args: { data: unknown[] }): Promise<unknown>;
   };
@@ -803,10 +835,22 @@ export async function persistRecords(
     // are checked against, so a reviewed event does not gain a draft twin.
     const reviewed = await tx.chronologyEvent.findMany({
       where: { caseId, reviewStatus: { not: "AI_DRAFT" } },
-      select: { eventDate: true, eventType: true, provider: true, sourceDocumentId: true },
+      select: { id: true, eventDate: true, eventDateEnd: true, eventType: true, provider: true, sourceDocumentId: true },
     });
     const reviewedKept = reviewed.length;
-    const alreadyReviewed = new Set(reviewed.map(chronologyLineageKey));
+    // Suppression must see the series END as well as the base identity. With
+    // the base alone, a reviewer who approved a three-visit series silently
+    // swallowed the fourth visit forever: the four-visit draft matched the
+    // reviewed entry's key and was withheld. Same base with a DIFFERENT end
+    // now means the membership changed — the reviewed entry is marked STALE
+    // for re-review and the new draft is inserted beside it as the comparison
+    // candidate. (A membership change that keeps the same end date remains
+    // undetectable without a stored membership hash; that needs a column.)
+    const endOf = (e: { eventDateEnd?: Date | null }) => e.eventDateEnd?.toISOString().slice(0, 10) ?? "";
+    const fullKey = (e: Parameters<typeof chronologyLineageKey>[0] & { eventDateEnd?: Date | null }) =>
+      `${chronologyLineageKey(e)}|${endOf(e)}`;
+    const alreadyReviewed = new Set(reviewed.map(fullKey));
+    const reviewedByBase = new Map(reviewed.map((e) => [chronologyLineageKey(e), e]));
 
     for (const [documentId, segments] of built.segmentsByDocument) {
       await tx.document.update({ where: { id: documentId }, data: { segments: sortForDisplay(segments) } });
@@ -816,8 +860,22 @@ export async function persistRecords(
 
     // A draft for an event a human already reviewed is not inserted. The
     // reviewed event stands; the draft would only be a second copy of it.
-    const toInsert = built.chronology.filter((event) => !alreadyReviewed.has(chronologyLineageKey(event)));
+    const toInsert = built.chronology.filter((event) => !alreadyReviewed.has(fullKey(event)));
     const suppressed = built.chronology.length - toInsert.length;
+
+    // Reviewed entries whose membership moved on: same identity, new end.
+    const grewStale = toInsert
+      .map((event) => {
+        const held = reviewedByBase.get(chronologyLineageKey(event));
+        return held && endOf(held) !== endOf(event) ? held.id : null;
+      })
+      .filter((id): id is string => Boolean(id));
+    if (grewStale.length && tx.chronologyEvent.updateMany) {
+      await tx.chronologyEvent.updateMany({
+        where: { id: { in: [...new Set(grewStale)] } },
+        data: { reviewStatus: "STALE" },
+      });
+    }
 
     for (let i = 0; i < toInsert.length; i += 200) {
       await tx.chronologyEvent.createMany({ data: toInsert.slice(i, i + 200) });
@@ -830,6 +888,7 @@ export async function persistRecords(
       draftsRemoved: removed.count,
       reviewedKept,
       draftsSuppressed: suppressed,
+      reviewedMarkedStale: [...new Set(grewStale)].length,
     };
   });
 }
@@ -1015,8 +1074,9 @@ const SERIES_ELIGIBLE_TYPES = new Set(["THERAPY", "CLINIC_VISIT"]);
 
 /**
  * Content that breaks a visit out of a series however routine its neighbours
- * are: a procedure, a study, an admission, a new or worsening problem, a
- * restriction — the material developments a chronology exists to show.
+ * are. Checked against the STRUCTURED columns first — a visit carrying a
+ * procedure or an imaging finding is material whatever its summary says — and
+ * against the summary wording second.
  */
 const SERIES_BREAK =
   /\b(?:surger\w*|operat\w*|procedur\w*|inject\w*|mri|ct\s+scan|x-?ray|imaging|radiograph|admit\w*|admission|discharg\w*|referr\w*|new\b|worsen\w*|deteriorat\w*|restrict\w*|complicat\w*|fracture|impression|abnormal|positive\s+for)\b/i;
@@ -1025,25 +1085,42 @@ const SERIES_BREAK =
 export const MIN_SERIES_RUN = 3;
 
 /**
+ * The widest gap two visits may span and still sit in one series.
+ *
+ * A course of therapy has a cadence; forty-five days without a documented
+ * visit is a break in care, not a long weekend. Without this bound, visits two
+ * years apart that happened to share a provider and a kind collapsed into one
+ * "series" spanning the whole case.
+ */
+export const MAX_SERIES_GAP_DAYS = 45;
+
+/**
  * Collapse runs of routine, same-provider, same-facility, same-kind visits
- * into one series entry carrying the documented range and count.
+ * into one series entry carrying the documented range, count, dates and pages.
  *
- * Twelve unchanged chiropractic visits are twelve stored encounters and ONE
- * chronology line — every individual date, fact and citation stays in the
- * Records details underneath. The series summary states only what is
- * deterministically known: how many documented visits, from when to when, of
- * what kind. It never describes findings, because a finding true of one visit
- * generalised across a series is an invention; and it never implies treatment
- * between the documented dates.
+ * The series entry is constructed CLEAN. The first version spread the first
+ * visit, which carried that visit's examination, diagnosis, treatment and
+ * source page across the entire range — the report then displayed one visit's
+ * findings as if they described months of care, cited to one page. A series
+ * asserts nothing clinical: only what is deterministically known — how many
+ * documented visits, from when to when, of what kind, with whom — plus the
+ * member dates and pages so every underlying encounter stays citable.
  *
- * Different providers, facilities or kinds never combine, and any visit whose
- * summary carries a material development breaks the run and stands alone.
+ * Eligibility is strict: a NAMED provider and facility (unknowns must not pool
+ * into one anonymous series), no structured procedure or imaging content, no
+ * material development in the wording, and no gap wider than
+ * MAX_SERIES_GAP_DAYS. Different providers, facilities or kinds never combine.
  */
 export function collapseTreatmentSeries(events: readonly ChronologyDraft[]): ChronologyDraft[] {
-  const keyOf = (e: ChronologyDraft) =>
-    `${e.eventType}|${(e.provider ?? "").toLowerCase().replace(/[^a-z]/g, "")}|${(e.facility ?? "").toLowerCase().replace(/[^a-z]/g, "")}`;
+  const nameOf = (v: string | null | undefined) => (v ?? "").toLowerCase().replace(/[^a-z]/g, "");
+  const keyOf = (e: ChronologyDraft) => `${e.eventType}|${nameOf(e.provider)}|${nameOf(e.facility)}`;
   const eligible = (e: ChronologyDraft) =>
-    SERIES_ELIGIBLE_TYPES.has(e.eventType) && !SERIES_BREAK.test(e.summary ?? "");
+    SERIES_ELIGIBLE_TYPES.has(e.eventType) &&
+    nameOf(e.provider).length > 0 &&
+    nameOf(e.facility).length > 0 &&
+    !e.procedure &&
+    !e.imagingFindings &&
+    !SERIES_BREAK.test(e.summary ?? "");
 
   const byKey = new Map<string, ChronologyDraft[]>();
   for (const event of events) {
@@ -1051,6 +1128,9 @@ export function collapseTreatmentSeries(events: readonly ChronologyDraft[]): Chr
     if (list) list.push(event);
     else byKey.set(keyOf(event), [event]);
   }
+
+  const fmt = (d: Date) =>
+    `${String(d.getUTCMonth() + 1).padStart(2, "0")}/${String(d.getUTCDate()).padStart(2, "0")}/${d.getUTCFullYear()}`;
 
   const out: ChronologyDraft[] = [];
   for (const list of byKey.values()) {
@@ -1060,15 +1140,29 @@ export function collapseTreatmentSeries(events: readonly ChronologyDraft[]): Chr
       if (run.length >= MIN_SERIES_RUN) {
         const first = run[0];
         const last = run[run.length - 1];
-        const fmt = (d: Date) => `${String(d.getUTCMonth() + 1).padStart(2, "0")}/${String(d.getUTCDate()).padStart(2, "0")}/${d.getUTCFullYear()}`;
         const kind = first.eventType === "THERAPY" ? "therapy" : "follow-up";
+        const dates = run.map((e) => fmt(e.eventDate));
+        const pages = [...new Set(run.map((e) => e.sourcePage).filter((p): p is number => typeof p === "number"))];
         out.push({
-          ...first,
+          // Constructed, never spread: a series inherits no visit's findings.
+          caseId: first.caseId,
+          eventDate: first.eventDate,
           eventDateEnd: last.eventDate,
+          eventType: first.eventType,
+          specialty: first.specialty,
+          recordType: "TREATMENT_SERIES",
+          provider: first.provider,
+          facility: first.facility,
           summary:
             `${run.length} documented ${kind} visits from ${fmt(first.eventDate)} to ${fmt(last.eventDate)}` +
-            `${first.provider ? ` with ${first.provider}` : ""}` +
-            `; each visit's date, findings and citations are retained in the record details.`,
+            `${first.provider ? ` with ${first.provider}` : ""}. ` +
+            `Documented dates: ${dates.join(", ")}${pages.length ? ` (pp. ${pages.sort((a, b) => a - b).join(", ")})` : ""}. ` +
+            `Each visit's findings and citations are retained in the record details.`,
+          sourceDocumentId: first.sourceDocumentId,
+          sourcePage: null,
+          reviewStatus: "AI_DRAFT",
+          dateInferred: false,
+          relevanceScore: first.relevanceScore,
         });
       } else {
         out.push(...run);
@@ -1076,13 +1170,20 @@ export function collapseTreatmentSeries(events: readonly ChronologyDraft[]): Chr
       run = [];
     };
     for (const event of ordered) {
-      if (eligible(event)) run.push(event);
-      else {
+      if (!eligible(event)) {
         flush();
         out.push(event);
+        continue;
       }
+      const previous = run[run.length - 1];
+      if (previous && event.eventDate.getTime() - previous.eventDate.getTime() > MAX_SERIES_GAP_DAYS * 86_400_000) {
+        // A break in care ends the series; a new one may begin after it.
+        flush();
+      }
+      run.push(event);
     }
     flush();
   }
   return out.sort((a, b) => a.eventDate.getTime() - b.eventDate.getTime());
 }
+

@@ -260,6 +260,46 @@ describe("review lineage across regeneration", () => {
   });
 });
 
+describe("overflow through the real runner — the path the unit tests missed", () => {
+  // The subdivision counters lived in a temporal dead zone below the closure
+  // that used them: every ordinary chunk passed, and exactly the dense chunks
+  // that subdivide crashed. These tests force overflow through
+  // processDocumentExtraction itself, not through extractChunkComplete alone.
+  const AT_CAP = JSON.stringify({
+    encounters: [
+      {
+        dateStatus: "DOCUMENTED",
+        date: "2025-03-14",
+        dateEnd: null,
+        dateExcerpt: "Date of Service: 03/14/2025",
+        encounterType: "Clinic visit",
+        provider: { value: "Dana Rivers, MD", excerpt: "Provider: Dana Rivers, MD", page: null },
+        providerCredentials: "MD",
+        facility: null,
+        claims: Array.from({ length: 300 }, (_, i) => ({
+          field: "assessment",
+          value: `Finding ${i}`,
+          excerpt: "Assessment: Lumbar radiculopathy",
+          page: null,
+          confidence: 0.9,
+        })),
+      },
+    ],
+  });
+
+  it("a single-page overflow completes the run, records the page, and fails the ledger closed", async () => {
+    // Depth-bounded: one page cannot subdivide, so the overflow is RECORDED —
+    // warning + TRUNCATED page — never passed off as coverage. Before the fix
+    // this path threw a ReferenceError instead.
+    const r = await processDocumentExtraction("doc-1", { provider: provider([AT_CAP]), exemplarGuidance: [] });
+    expect(r.status).toBe("COMPLETE");
+    const run = db.runs.find((e) => e.id === r.extractionId)!;
+    expect(JSON.stringify(run.warnings)).toMatch(/extraction overflow unresolved/);
+    const telemetry = run.telemetry as { overflowPages?: number };
+    expect(telemetry.overflowPages).toBeGreaterThan(0);
+  });
+});
+
 describe("generation loss: a date the new extraction cannot reproduce", () => {
   // GOOD_JSON produces exactly one encounter, dated 2025-03-14. A prior
   // machine row dated any other day is a date the new generation lost.

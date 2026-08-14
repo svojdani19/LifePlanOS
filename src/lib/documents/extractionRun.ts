@@ -214,6 +214,16 @@ export async function processDocumentExtraction(
   const backoffs = [2_000, 8_000, 20_000];
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+  // Overflow accounting: how many server-chosen subdivisions ran, and which
+  // pages still overflowed after the depth bound. Declared BEFORE processChunk,
+  // which closes over them and RUNS before the block where they used to live —
+  // a `let` in its temporal dead zone made exactly the dense chunks that
+  // subdivide crash with a ReferenceError, while every ordinary chunk passed.
+  // The unit tests called extractChunkComplete directly and never this path,
+  // which is why 2,174 green tests proved nothing about it.
+  let telemetrySubdivisions = 0;
+  const unresolvedOverflowPages: number[] = [];
+
   const processChunk = async (chunk: (typeof chunks)[number]): Promise<ChunkResult> => {
     // Complete extraction: an overflowing range is subdivided at page
     // boundaries the server chose, and only a single page that STILL overflows
@@ -303,12 +313,6 @@ export async function processDocumentExtraction(
   if (configError) return fail((configError as Error).message);
 
   const warningsSeed: string[] = [];
-  // Overflow accounting: how many server-chosen subdivisions ran, and which
-  // pages still overflowed after the depth bound. Unresolved pages are marked
-  // TRUNCATED in the ledger, which the completion gate already treats as
-  // content missing from the record — fail closed, never "complete".
-  let telemetrySubdivisions = 0;
-  const unresolvedOverflowPages: number[] = [];
   const validated: ValidatedEncounter[] = [];
   const rejects: string[] = [];
   const criticFindings: string[] = [];

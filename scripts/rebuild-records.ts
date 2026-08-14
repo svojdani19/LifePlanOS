@@ -221,6 +221,7 @@ function asStore(db: PrismaClient): RecordStore {
       count: (args) => client.chronologyEvent.count(args as never),
       findMany: (args) => client.chronologyEvent.findMany(args as never) as never,
       deleteMany: (args) => client.chronologyEvent.deleteMany(args as never),
+      updateMany: (args) => client.chronologyEvent.updateMany(args as never),
       createMany: (args) => client.chronologyEvent.createMany({ data: args.data as never }),
     },
     lockCase: async (caseId) => {

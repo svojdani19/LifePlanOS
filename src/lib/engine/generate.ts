@@ -2,7 +2,7 @@ import { prisma } from "@/lib/db";
 import { packFor, type CareTemplate } from "@/lib/engine/specialty";
 import { CONDITION_CARE, BASELINE_CARE, resolveConditionKeys } from "@/lib/engine/careLibrary";
 import { project, type CaseAssumptions } from "@/lib/engine/cost";
-import { buildChronologyFromRecords, handleEmptyChronology } from "@/lib/engine/chronology";
+import { handleEmptyChronology } from "@/lib/engine/chronology";
 import { baselineLifeExpectancy, composeBasis, type BasisSex } from "@/lib/engine/lifeExpectancy";
 import {
   loadRecordCareSupport,
@@ -354,12 +354,13 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
     });
   }
 
-  // Chronology — records are screened for relevance; only pivotal events and
-  // those bearing on a diagnosis or anticipated future-care item go on the
-  // timeline, each described specifically and tied to the causation map & care
-  // plan. Falls back to the specialty template only when no relevant records.
-  const chronoResult = await buildChronologyFromRecords(caseId, { conditions: conditionNames, careServices: careItems.map((t) => t.service) });
-  const chronologyCount = chronoResult.kept;
+  // Chronology — CONSUMED, not rebuilt. Plan generation used to invoke a
+  // second chronology engine here, so a reviewer edit could launch two writers
+  // concurrently and whichever finished last owned the timeline — with none of
+  // the canonical builder's protections (reviewed-event preservation, series,
+  // stale-build refusal, lineage suppression). The canonical records pipeline
+  // is the ONE writer; the plan reads what it published.
+  const chronologyCount = await prisma.chronologyEvent.count({ where: { caseId } });
   // NO template fallback: when no reliable events extract from the records,
   // the chronology stays EMPTY and a clear review finding is raised instead.
   // Fabricated specialty-template timelines are never created.

@@ -532,6 +532,178 @@ describe("overlapping rebuilds", () => {
   });
 });
 
+describe("a reviewed series does not swallow the visits added after it", () => {
+  const visit = (iso: string): ChronologyDraft => ({
+    caseId: CASE,
+    eventDate: new Date(`${iso}T00:00:00Z`),
+    eventType: "THERAPY",
+    specialty: null,
+    recordType: null,
+    provider: "Michael Crone, DC",
+    facility: "Houston Spine and Rehabilitation",
+    summary: "Therapy visit; tolerated well.",
+    sourceDocumentId: "doc-1",
+    sourcePage: 1,
+    reviewStatus: "AI_DRAFT",
+    dateInferred: false,
+    relevanceScore: 50,
+  });
+
+  const storeWithReviewed = (reviewed: Record<string, unknown>[]) => {
+    const calls = { created: 0, staleMarked: [] as string[] };
+    const base: RecordStore = {
+      document: { update: async () => null },
+      chronologyEvent: {
+        count: async () => reviewed.length,
+        findMany: async () => reviewed as never,
+        deleteMany: async () => ({ count: 0 }),
+        createMany: async ({ data }) => {
+          calls.created += data.length;
+          return null;
+        },
+        updateMany: async ({ where }) => {
+          const ids = (where.id as { in: string[] }).in;
+          calls.staleMarked.push(...ids);
+          return { count: ids.length };
+        },
+      },
+      $transaction: async (work) => work(base),
+    };
+    return { store: base, calls };
+  };
+
+  it("marks the reviewed three-visit series stale and inserts the four-visit draft", async () => {
+    // The base identity alone suppressed the four-visit draft forever: the
+    // fourth extracted visit became invisible behind the reviewed entry.
+    const built = await build(`Progress Note ${filler()}`, []);
+    built.chronology.push(
+      ...collapseTreatmentSeries(["2023-07-07", "2023-07-12", "2023-07-19", "2023-07-26"].map(visit)),
+    );
+    const reviewedSeries = {
+      id: "reviewed-series",
+      eventDate: new Date("2023-07-07T00:00:00Z"),
+      eventDateEnd: new Date("2023-07-19T00:00:00Z"),
+      eventType: "THERAPY",
+      provider: "Michael Crone, DC",
+      sourceDocumentId: "doc-1",
+    };
+    const { store: s, calls } = storeWithReviewed([reviewedSeries]);
+    const result = await persistRecords(s, CASE, built);
+    expect(result.published).toBe(true);
+    expect(result.draftsSuppressed).toBe(0);
+    expect(result.reviewedMarkedStale).toBe(1);
+    expect(calls.staleMarked).toContain("reviewed-series");
+    expect(calls.created).toBe(built.chronology.length);
+  });
+
+  it("still suppresses a draft whose membership is unchanged", async () => {
+    const built = await build(`Progress Note ${filler()}`, []);
+    built.chronology.push(
+      ...collapseTreatmentSeries(["2023-07-07", "2023-07-12", "2023-07-19"].map(visit)),
+    );
+    const reviewedSeries = {
+      id: "reviewed-series",
+      eventDate: new Date("2023-07-07T00:00:00Z"),
+      eventDateEnd: new Date("2023-07-19T00:00:00Z"),
+      eventType: "THERAPY",
+      provider: "Michael Crone, DC",
+      sourceDocumentId: "doc-1",
+    };
+    const { store: s, calls } = storeWithReviewed([reviewedSeries]);
+    const result = await persistRecords(s, CASE, built);
+    expect(result.draftsSuppressed).toBe(1);
+    expect(result.reviewedMarkedStale).toBe(0);
+    expect(calls.staleMarked).toHaveLength(0);
+  });
+
+  it("a series asserts no clinical findings and cites every member", () => {
+    const [series] = collapseTreatmentSeries(["2023-07-07", "2023-07-12", "2023-07-19"].map(visit));
+    // Constructed clean: the first visit's findings and page must not span the
+    // range, and every documented date is listed.
+    expect(series.sourcePage).toBeNull();
+    expect(series.procedure).toBeUndefined();
+    expect(series.summary).toContain("07/07/2023, 07/12/2023, 07/19/2023");
+    expect(series.recordType).toBe("TREATMENT_SERIES");
+  });
+
+  it("a forty-six-day gap breaks the series", () => {
+    const out = collapseTreatmentSeries(["2023-07-07", "2023-07-12", "2023-09-01", "2023-09-08", "2023-09-15"].map(visit));
+    // Two visits, a break in care, then a three-visit series.
+    expect(out.filter((e) => e.recordType === "TREATMENT_SERIES")).toHaveLength(1);
+    expect(out).toHaveLength(3);
+  });
+
+  it("unknown providers never pool into an anonymous series", () => {
+    const anonymous = ["2023-07-07", "2023-07-12", "2023-07-19"].map((d) => ({ ...visit(d), provider: null, facility: null }));
+    expect(collapseTreatmentSeries(anonymous)).toHaveLength(3);
+  });
+
+  it("a structured procedure column breaks a visit out whatever the summary says", () => {
+    const events = ["2023-07-07", "2023-07-12", "2023-07-19", "2023-07-21"].map(visit);
+    events[2] = { ...events[2], procedure: "Epidural steroid injection administered" };
+    const out = collapseTreatmentSeries(events);
+    expect(out.some((e) => e.procedure)).toBe(true);
+    expect(out.filter((e) => e.recordType === "TREATMENT_SERIES")).toHaveLength(0);
+  });
+});
+
+describe("a bill with nothing but codes still witnesses its visit", () => {
+  it("admits a codes-only dated bill to the chronology with an honest summary", async () => {
+    // The detector was gated behind substance.meaningful — and pure service
+    // codes are exactly what the substance screen rejects, so the billing-only
+    // productions the detector was built FOR never reached it.
+    const built = await build(`Statement of charges ${filler()}`, [
+      row({
+        analysisClass: "FINANCIAL",
+        substanceClass: "ANCILLARY",
+        encounterDate: new Date("2025-07-21T00:00:00Z"),
+        dateStatus: "DOCUMENTED",
+        claims: [{ field: "serviceCode", value: "99215", excerpt: "99215" }],
+      }),
+    ]);
+    const event = built.chronology.find((e) => /^Billed service/.test(e.summary));
+    expect(event).toBeDefined();
+    expect(event?.eventType).toBe("CLINIC_VISIT");
+    expect(event?.summary).toContain("99215");
+  });
+
+  it("withholds the billing twin when a clinical record documents the same service", async () => {
+    const clinicalRows = [
+      row({
+        id: "note",
+        encounterDate: new Date("2025-07-21T00:00:00Z"),
+        dateStatus: "DOCUMENTED",
+        provider: "Fernando Techy, MD",
+        claims: [{ field: "assessment", value: "Follow-up for lumbar radiculopathy, pain improving", excerpt: "follow-up lumbar" }],
+      }),
+    ];
+    const billingRows = [
+      row({
+        id: "bill",
+        sourceDocumentId: "doc-2",
+        analysisClass: "FINANCIAL",
+        substanceClass: "ANCILLARY",
+        encounterDate: new Date("2025-07-21T00:00:00Z"),
+        dateStatus: "DOCUMENTED",
+        provider: "Fernando Techy, MD",
+        claims: [{ field: "serviceCode", value: "99215", excerpt: "99215" }],
+      }),
+    ];
+    const built = await buildRecords({
+      caseId: CASE,
+      write: false,
+      adjudicateDuplicates: false,
+      documents: [
+        { id: "doc-1", pageCount: 3, extractedText: `Progress Note ${filler()}`, rows: clinicalRows },
+        { id: "doc-2", pageCount: 2, extractedText: "Statement of charges", rows: billingRows },
+      ],
+    });
+    // The clinical event stands; the bill corroborates rather than duplicates.
+    expect(built.chronology.filter((e) => e.eventDate.toISOString().startsWith("2025-07-21"))).toHaveLength(1);
+    expect(built.chronology.some((e) => /^Billed service/.test(e.summary))).toBe(false);
+  });
+});
+
 describe("the live path and the manual rebuild agree", () => {
   it("produces the same structured result from the same rows", async () => {
     // 19. Both callers run buildRecords; this asserts the contract they share

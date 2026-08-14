@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { refreshCaseRecordsWithRecovery } from "@/lib/records/buildRecords";
+import { REVIEW_VISIBLE_STATES } from "@/lib/records/encounterLifecycle";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requireCanonicalPermission, requireCase, audit } from "@/lib/tenant";
 import { recordCorrectionExemplar, type CorrectionCategory } from "@/lib/llm/correctionExemplars";
@@ -64,6 +65,13 @@ const actionSchema = z.object({
 });
 
 
+
+// Review actions operate on the rows a reviewer can SEE. A superseded,
+// rejected or failed row is history: verifying one by submitting its id would
+// put a human signature on content the case no longer contains.
+const notReviewable = (status: string | null | undefined) =>
+  !(REVIEW_VISIBLE_STATES as readonly string[]).includes(status ?? "AI_DRAFT");
+
 // A material correction changes what the derived Records and chronology should
 // say, so one coalesced rebuild is scheduled from the newest case state. Fired
 // without awaiting: a rebuild composes prose and takes minutes, and the
@@ -124,6 +132,9 @@ export async function PATCH(req: Request, { params: paramsPromise }: Params) {
     const input = patchSchema.parse(await req.json());
     const existing = await load(params.caseId, params.encounterId, ctx.firm.id);
     if (!existing) return ok({ error: "Encounter not found" }, 404);
+    if (notReviewable(existing.status)) {
+      return ok({ error: `This encounter is historical (${existing.status}) and cannot be edited. Work with the current row that replaced it.` }, 409);
+    }
 
     const materialTouched = MATERIAL_FIELDS.filter((f) => input[f] !== undefined);
 
@@ -248,6 +259,9 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
     const input = actionSchema.parse(await req.json());
     const existing = await load(params.caseId, params.encounterId, ctx.firm.id);
     if (!existing) return ok({ error: "Encounter not found" }, 404);
+    if (notReviewable(existing.status)) {
+      return ok({ error: `This encounter is historical (${existing.status}) and cannot be verified, reviewed or rejected. Work with the current row that replaced it.` }, 409);
+    }
 
     if (input.action === "reject") {
       const updated = await prisma.extractedEncounter.update({

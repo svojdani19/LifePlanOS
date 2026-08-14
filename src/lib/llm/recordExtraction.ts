@@ -641,9 +641,16 @@ export async function extractChunkComplete(
 
   const splittable = chunk.pageSlices.length > 1 && depth < MAX_SUBDIVISION_DEPTH;
   if (!splittable) {
+    // A document with no page markers still overflowed — the end-to-end test
+    // caught this mapping to ZERO pages, which made the overflow vanish
+    // entirely. An unlocatable overflow is still an overflow; it is pinned to
+    // the chunk's own page bounds so the ledger has something to mark.
+    const pages = chunk.pageSlices.length
+      ? chunk.pageSlices.map((s) => s.page)
+      : [chunk.pageStart ?? 1];
     return {
       encounters: result.encounters,
-      unresolvedPages: chunk.pageSlices.map((s) => s.page),
+      unresolvedPages: pages,
       subdivisions: 0,
     };
   }
