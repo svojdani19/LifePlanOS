@@ -1,3 +1,4 @@
+import { CHRONOLOGY_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
 import {
   Document,
   Packer,
@@ -253,7 +254,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
       createdBy: { select: { name: true } },
       // Only the designated preparing physician's identity & credentials appear.
       preparingPhysician: { select: { name: true, role: true, credentialSummary: true, credentials: { select: { id: true, type: true, label: true, filename: true }, orderBy: { createdAt: "asc" } } } },
-      chronologyEvents: { orderBy: { eventDate: "asc" } },
+      chronologyEvents: { where: CHRONOLOGY_OUTPUT_WHERE, orderBy: { eventDate: "asc" } },
       conditions: { orderBy: { confidence: "desc" } },
       futureCareItems: { where: { supersededAt: null }, orderBy: { presentValue: "desc" } },
       reviewFindings: true,

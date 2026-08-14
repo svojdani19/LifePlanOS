@@ -739,6 +739,10 @@ model ChronologyEvent {
   relatedness    Relatedness @default(UNCLEAR)
 
   edited    Boolean  @default(false) // true once a human edits the AI output
+  // A treatment series' explicit membership: [{date, documentId, page}] per
+  // underlying visit, so citations point at each member's own document and a
+  // membership change is visible even when the range's end date is unchanged.
+  seriesMembers    Json?
   createdAt DateTime @default(now())
 
   @@index([caseId, eventDate])

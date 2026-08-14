@@ -18,7 +18,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { prisma } from "@/lib/db";
-import { refreshCaseRecordsWithRecovery } from "@/lib/records/buildRecords";
+import { makeRecordStore, refreshCaseRecordsWithRecovery } from "@/lib/records/buildRecords";
 import { CURRENT_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
 import { withDbRetry, createWithDbRetry } from "@/lib/dbRetry";
 import { pageMarks } from "@/lib/documents/meta";
@@ -713,7 +713,7 @@ export async function processDocumentExtraction(
     // Coalesced and self-recovering: a stale refusal retries from the newest
     // state (bounded), and completions arriving mid-build fold into one
     // follow-up rather than stacking.
-    const refreshed = await refreshCaseRecordsWithRecovery(prisma as never, doc.caseId);
+    const refreshed = await refreshCaseRecordsWithRecovery(makeRecordStore(prisma as never), doc.caseId);
     if (!refreshed.published && !refreshed.coalesced) {
       console.error(`[extraction] records not republished for case ${doc.caseId}: ${refreshed.history.at(-1)?.reason ?? refreshed.status}`);
     }

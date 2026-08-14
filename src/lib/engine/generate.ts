@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { CHRONOLOGY_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
 import { packFor, type CareTemplate } from "@/lib/engine/specialty";
 import { CONDITION_CARE, BASELINE_CARE, resolveConditionKeys } from "@/lib/engine/careLibrary";
 import { project, type CaseAssumptions } from "@/lib/engine/cost";
@@ -360,7 +361,7 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
   // the canonical builder's protections (reviewed-event preservation, series,
   // stale-build refusal, lineage suppression). The canonical records pipeline
   // is the ONE writer; the plan reads what it published.
-  const chronologyCount = await prisma.chronologyEvent.count({ where: { caseId } });
+  const chronologyCount = await prisma.chronologyEvent.count({ where: { caseId, ...CHRONOLOGY_OUTPUT_WHERE } });
   // NO template fallback: when no reliable events extract from the records,
   // the chronology stays EMPTY and a clear review finding is raised instead.
   // Fabricated specialty-template timelines are never created.

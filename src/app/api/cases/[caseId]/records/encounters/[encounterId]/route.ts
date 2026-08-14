@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { refreshCaseRecordsWithRecovery } from "@/lib/records/buildRecords";
+import { makeRecordStore, refreshCaseRecordsWithRecovery } from "@/lib/records/buildRecords";
 import { REVIEW_VISIBLE_STATES } from "@/lib/records/encounterLifecycle";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requireCanonicalPermission, requireCase, audit } from "@/lib/tenant";
@@ -77,10 +77,15 @@ const notReviewable = (status: string | null | undefined) =>
 // without awaiting: a rebuild composes prose and takes minutes, and the
 // correction itself is already committed. A review-note-only edit returns
 // before this and schedules nothing.
-const scheduleDerivedRefresh = (caseId: string) => {
-  void refreshCaseRecordsWithRecovery(prisma as never, caseId).catch((error) =>
-    console.error(`[review] derived refresh failed for case ${caseId}: ${String(error).slice(0, 200)}`),
-  );
+const scheduleDerivedRefresh = (caseId: string, afterPublish?: () => void) => {
+  void refreshCaseRecordsWithRecovery(makeRecordStore(prisma as never), caseId)
+    .then((outcome) => {
+      // Plan regeneration reads the chronology, so it must run AFTER the
+      // corrected records publish — fired independently, it raced the refresh
+      // and could regenerate the plan from the pre-correction timeline.
+      if (afterPublish && (outcome.published || outcome.coalesced)) afterPublish();
+    })
+    .catch((error) => console.error(`[review] derived refresh failed for case ${caseId}: ${String(error).slice(0, 200)}`));
 };
 type Params = { params: Promise<{ caseId: string; encounterId: string }> };
 
@@ -229,9 +234,9 @@ export async function PATCH(req: Request, { params: paramsPromise }: Params) {
     // Rebuilding immediately keeps the case coherent; the reviewer is told it
     // is happening rather than discovering it.
     const outlookChanged = input.analysisClass !== undefined || dateProvided;
-    if (outlookChanged) scheduleRegeneration(params.caseId, ctx.user.id);
-    // Material fields changed: one coalesced rebuild from the newest state.
-    scheduleDerivedRefresh(params.caseId);
+    // Material fields changed: one coalesced rebuild from the newest state,
+    // and plan regeneration only after it publishes.
+    scheduleDerivedRefresh(params.caseId, outlookChanged ? () => scheduleRegeneration(params.caseId, ctx.user.id) : undefined);
 
     return ok({
       encounter: updated,

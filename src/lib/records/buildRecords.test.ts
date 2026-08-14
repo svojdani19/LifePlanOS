@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   buildRecords,
+  makeRecordStore,
   caseFingerprint,
   caseLockKey,
   collapseTreatmentSeries,
@@ -285,7 +286,12 @@ describe("citations for a record filed in two documents", () => {
 describe("publishing a rebuilt case", () => {
   const store = (over: Partial<RecordStore> = {}, reviewedEvents: never[] = []) => {
     const calls = { updated: 0, created: 0, deleted: 0 };
+    let expected: string | null = null;
     const base: RecordStore = {
+      lockCase: async () => {},
+      // Agrees with whatever was built, unless the test overrides: these fakes
+      // exist to test publication mechanics, not staleness.
+      currentFingerprint: async () => expected ?? "",
       document: {
         update: async () => {
           calls.updated++;
@@ -303,11 +309,12 @@ describe("publishing a rebuilt case", () => {
           calls.created += data.length;
           return null;
         },
+        updateMany: async ({ where }) => ({ count: (where.id as { in: string[] }).in.length }),
       },
       $transaction: async (work) => work({ ...base, ...over }),
       ...over,
     };
-    return { store: base, calls };
+    return { store: base, calls, agreeWith: (fp: string) => { expected = fp; } };
   };
 
   it("publishes a complete build and keeps reviewed events", async () => {
@@ -316,6 +323,7 @@ describe("publishing a rebuilt case", () => {
       { eventDate: new Date("2020-01-01T00:00:00Z"), eventType: "CLINIC_VISIT", provider: "Someone Else", sourceDocumentId: "other" },
     ] as never[];
     const { store: s, calls } = store({}, reviewed);
+    (s as { currentFingerprint(caseId: string): Promise<string> }).currentFingerprint = async () => built.fingerprint;
     const result = await persistRecords(s, CASE, built);
     expect(result.published).toBe(true);
     expect(result.reviewedKept).toBe(1);
@@ -343,7 +351,8 @@ describe("publishing a rebuilt case", () => {
       },
     ] as never[];
 
-    const { store: s, calls } = store({}, reviewed);
+    const { store: s, calls, agreeWith } = store({}, reviewed);
+    agreeWith(built.fingerprint);
     const result = await persistRecords(s, CASE, built);
     expect(result.published).toBe(true);
     expect(result.draftsSuppressed).toBe(1);
@@ -362,7 +371,8 @@ describe("publishing a rebuilt case", () => {
     const reviewed = [
       { eventDate: twin.eventDate, eventType: "SURGERY", provider: twin.provider, sourceDocumentId: twin.sourceDocumentId },
     ] as never[];
-    const { store: s } = store({}, reviewed);
+    const { store: s, agreeWith } = store({}, reviewed);
+    agreeWith(built.fingerprint);
     const result = await persistRecords(s, CASE, built);
     expect(result.draftsSuppressed).toBe(0);
   });
@@ -549,9 +559,11 @@ describe("a reviewed series does not swallow the visits added after it", () => {
     relevanceScore: 50,
   });
 
-  const storeWithReviewed = (reviewed: Record<string, unknown>[]) => {
+  const storeWithReviewed = (reviewed: Record<string, unknown>[], fingerprintOf?: () => string) => {
     const calls = { created: 0, staleMarked: [] as string[] };
     const base: RecordStore = {
+      lockCase: async () => {},
+      currentFingerprint: async () => fingerprintOf?.() ?? "",
       document: { update: async () => null },
       chronologyEvent: {
         count: async () => reviewed.length,
@@ -587,7 +599,7 @@ describe("a reviewed series does not swallow the visits added after it", () => {
       provider: "Michael Crone, DC",
       sourceDocumentId: "doc-1",
     };
-    const { store: s, calls } = storeWithReviewed([reviewedSeries]);
+    const { store: s, calls } = storeWithReviewed([reviewedSeries], () => built.fingerprint);
     const result = await persistRecords(s, CASE, built);
     expect(result.published).toBe(true);
     expect(result.draftsSuppressed).toBe(0);
@@ -609,7 +621,7 @@ describe("a reviewed series does not swallow the visits added after it", () => {
       provider: "Michael Crone, DC",
       sourceDocumentId: "doc-1",
     };
-    const { store: s, calls } = storeWithReviewed([reviewedSeries]);
+    const { store: s, calls } = storeWithReviewed([reviewedSeries], () => built.fingerprint);
     const result = await persistRecords(s, CASE, built);
     expect(result.draftsSuppressed).toBe(1);
     expect(result.reviewedMarkedStale).toBe(0);
@@ -619,11 +631,14 @@ describe("a reviewed series does not swallow the visits added after it", () => {
   it("a series asserts no clinical findings and cites every member", () => {
     const [series] = collapseTreatmentSeries(["2023-07-07", "2023-07-12", "2023-07-19"].map(visit));
     // Constructed clean: the first visit's findings and page must not span the
-    // range, and every documented date is listed.
+    // range. Membership is PERSISTED — each member's own date, document and
+    // page — rather than narrated into an unreadable date list.
     expect(series.sourcePage).toBeNull();
     expect(series.procedure).toBeUndefined();
-    expect(series.summary).toContain("07/07/2023, 07/12/2023, 07/19/2023");
     expect(series.recordType).toBe("TREATMENT_SERIES");
+    expect(series.seriesMembers).toHaveLength(3);
+    expect((series.seriesMembers as { date: string }[])[0]).toMatchObject({ date: "2023-07-07", documentId: "doc-1", page: 1 });
+    expect(series.sourceFingerprint).toMatch(/^[0-9a-f]{32}$/);
   });
 
   it("a forty-six-day gap breaks the series", () => {
@@ -881,5 +896,203 @@ describe("recovering from a stale-build refusal", () => {
     expect(second.coalesced).toBe(true);
     expect(second.status).toMatch(/Updating from newer case information/);
     await first;
+  });
+});
+
+describe("series membership changes that keep the same end date", () => {
+  const visit = (iso: string, page = 1): ChronologyDraft => ({
+    caseId: CASE,
+    eventDate: new Date(`${iso}T00:00:00Z`),
+    eventType: "THERAPY",
+    specialty: null,
+    recordType: null,
+    provider: "Michael Crone, DC",
+    facility: "Houston Spine and Rehabilitation",
+    summary: "Therapy visit; tolerated well.",
+    sourceDocumentId: "doc-1",
+    sourcePage: page,
+    reviewStatus: "AI_DRAFT",
+    dateInferred: false,
+    relevanceScore: 50,
+  });
+
+  it("an internal visit added without moving the end still changes the fingerprint", () => {
+    // The end-date discriminator alone could not see this: same start, same
+    // end, one more visit inside. The membership hash can.
+    const [three] = collapseTreatmentSeries(["2023-07-07", "2023-07-12", "2023-07-19"].map((d) => visit(d)));
+    const [four] = collapseTreatmentSeries(["2023-07-07", "2023-07-10", "2023-07-12", "2023-07-19"].map((d) => visit(d)));
+    expect(three.eventDateEnd?.getTime()).toBe(four.eventDateEnd?.getTime());
+    expect(three.sourceFingerprint).not.toBe(four.sourceFingerprint);
+  });
+
+  it("a structured diagnosis change breaks the series whatever the summary says", () => {
+    const events = ["2023-07-07", "2023-07-12", "2023-07-19", "2023-07-26"].map((d) => visit(d));
+    events[2] = { ...events[2], diagnosis: "Lumbar radiculopathy, new right foot drop" };
+    events[1] = { ...events[1], diagnosis: "Lumbar strain" };
+    const out = collapseTreatmentSeries(events);
+    expect(out.filter((e) => e.recordType === "TREATMENT_SERIES")).toHaveLength(0);
+  });
+});
+
+describe("a reviewed event whose SOURCE changed is stale, not authoritative", () => {
+  const contentStore = (reviewed: Record<string, unknown>[], fingerprintOf: () => string) => {
+    const calls = { created: 0, staleMarked: [] as string[] };
+    const base: RecordStore = {
+      lockCase: async () => {},
+      currentFingerprint: async () => fingerprintOf(),
+      document: { update: async () => null },
+      chronologyEvent: {
+        count: async () => reviewed.length,
+        findMany: async () => reviewed as never,
+        deleteMany: async () => ({ count: 0 }),
+        createMany: async ({ data }) => {
+          calls.created += data.length;
+          return null;
+        },
+        updateMany: async ({ where }) => {
+          const ids = (where.id as { in: string[] }).in;
+          calls.staleMarked.push(...ids);
+          return { count: ids.length };
+        },
+      },
+      $transaction: async (work) => work(base),
+    };
+    return { store: base, calls };
+  };
+
+  it("inserts the corrected draft and marks the content-changed review stale", async () => {
+    // Identity alone let the source change under a reviewed entry while date,
+    // provider and range stayed put: the stale review stayed "reviewed" and
+    // the corrected draft was the one suppressed.
+    const built = await build(
+      `Progress Note Date of Service: 03/18/2024 ${filler()} lumbar radiculopathy ${filler()}`,
+      [row({ id: "r" })],
+      12,
+      true,
+    );
+    expect(built.chronology.length).toBeGreaterThan(0);
+    const draft = built.chronology[0];
+    expect(draft.sourceFingerprint).toBeTruthy();
+    const reviewed = [
+      {
+        id: "reviewed-old-content",
+        eventDate: draft.eventDate,
+        eventDateEnd: null,
+        eventType: draft.eventType,
+        provider: draft.provider,
+        sourceDocumentId: draft.sourceDocumentId,
+        sourceFingerprint: "a-hash-of-content-that-no-longer-exists",
+      },
+    ] as never[];
+    const { store: s, calls } = contentStore(reviewed as never, () => built.fingerprint);
+    const result = await persistRecords(s, CASE, built);
+    expect(result.published).toBe(true);
+    expect(result.draftsSuppressed).toBe(0);
+    expect(result.reviewedMarkedStale).toBe(1);
+    expect(calls.staleMarked).toContain("reviewed-old-content");
+    expect(calls.created).toBe(built.chronology.length);
+  });
+
+  it("still suppresses when the reviewed content matches exactly", async () => {
+    const built = await build(
+      `Progress Note Date of Service: 03/18/2024 ${filler()} lumbar radiculopathy ${filler()}`,
+      [row({ id: "r" })],
+      12,
+      true,
+    );
+    const draft = built.chronology[0];
+    const reviewed = [
+      {
+        id: "reviewed-same-content",
+        eventDate: draft.eventDate,
+        eventDateEnd: null,
+        eventType: draft.eventType,
+        provider: draft.provider,
+        sourceDocumentId: draft.sourceDocumentId,
+        sourceFingerprint: draft.sourceFingerprint,
+      },
+    ] as never[];
+    const { store: s } = contentStore(reviewed as never, () => built.fingerprint);
+    const result = await persistRecords(s, CASE, built);
+    expect(result.draftsSuppressed).toBe(1);
+    expect(result.reviewedMarkedStale).toBe(0);
+  });
+});
+
+describe("the production adapter wires the safeguards to the RIGHT client", () => {
+  // The advisory lock existed, was described, and had never once held: the
+  // script adapter executed it through the OUTER client — a different
+  // connection whose implicit transaction released the lock the instant the
+  // statement finished — and the live callers passed raw Prisma, which had
+  // neither safeguard, both being optional. Every fake store in this file
+  // faithfully implemented the interface the real adapter got wrong. This test
+  // asks the question those tests never asked: WHICH client runs the lock.
+  const fakePrisma = () => {
+    const executed = { onTx: [] as string[], onOuter: [] as string[] };
+    const outer: Record<string, unknown> = {
+      case: { findUnique: async () => ({ clientName: null }) },
+      document: {
+        findMany: async () => [{ id: "doc-1", pageCount: 1, extractedText: "Progress Note Date of Service: 03/18/2024 lumbar radiculopathy" }],
+        update: async () => null,
+      },
+      extractedEncounter: { findMany: async () => [row({ id: "r" })] },
+      chronologyEvent: {
+        count: async () => 0,
+        findMany: async () => [],
+        deleteMany: async () => ({ count: 0 }),
+        createMany: async () => null,
+        updateMany: async () => ({ count: 0 }),
+      },
+      $executeRawUnsafe: async (sql: string) => {
+        executed.onOuter.push(sql);
+        return 1;
+      },
+      $transaction: async (work: (tx: unknown) => Promise<unknown>) => {
+        const tx = {
+          ...outer,
+          $executeRawUnsafe: async (sql: string) => {
+            executed.onTx.push(sql);
+            return 1;
+          },
+        };
+        return work(tx);
+      },
+    };
+    return { prisma: outer, executed };
+  };
+
+  it("takes the advisory lock through the transaction client, never the outer one", async () => {
+    const { prisma, executed } = fakePrisma();
+    const store = makeRecordStore(prisma as never);
+    // pageCount must match what the fake database reports: the first run of
+    // this very test refused publication because the fixture built with a
+    // different page count than the store re-read — the fingerprint doing its
+    // job against the test's own inconsistency.
+    const built = await build("Progress Note Date of Service: 03/18/2024 lumbar radiculopathy", [row({ id: "r" })], 1);
+    const result = await persistRecords(store, CASE, built);
+    expect(result.published).toBe(true);
+    expect(executed.onTx.some((sql) => /pg_advisory_xact_lock/.test(sql))).toBe(true);
+    expect(executed.onOuter).toHaveLength(0);
+  });
+
+  it("re-reads the fingerprint inside the transaction and refuses a moved case", async () => {
+    const { prisma } = fakePrisma();
+    const store = makeRecordStore(prisma as never);
+    const built = await build("Progress Note Date of Service: 03/18/2024 lumbar radiculopathy", [row({ id: "r" })], 1);
+    // Sabotage: the case's rows change after the build read them.
+    (prisma.extractedEncounter as { findMany: () => Promise<unknown[]> }).findMany = async () => [
+      { ...row({ id: "r" }), factualSummary: "changed while building" },
+    ];
+    const result = await persistRecords(store, CASE, built);
+    expect(result.published).toBe(false);
+    expect(result.staleBuild).toBe(true);
+  });
+
+  it("agrees and publishes when the case has not moved", async () => {
+    const { prisma } = fakePrisma();
+    const store = makeRecordStore(prisma as never);
+    const built = await build("Progress Note Date of Service: 03/18/2024 lumbar radiculopathy", [row({ id: "r" })], 1);
+    const result = await persistRecords(store, CASE, built);
+    expect(result.published).toBe(true);
   });
 });

@@ -174,3 +174,20 @@ export const REVIEW_VISIBLE_WHERE = {
   status: { in: REVIEW_VISIBLE_STATES as unknown as string[] },
   supersededById: null,
 } as const;
+
+// ── The same two questions, asked of chronology events ───────────────────────
+//
+// The encounter split above was built and the chronology's copy of the problem
+// was missed: report loaders took every chronologyEvent unscoped, so once a
+// stale reviewed series and its fresh comparison draft sat side by side — the
+// intended review state — a report contained BOTH.
+
+/** Chronology rows that may appear in reports, exports and plan generation. */
+export const CHRONOLOGY_OUTPUT_WHERE = {
+  reviewStatus: { notIn: ["STALE", "SUPERSEDED", "REJECTED"] as string[] },
+} as const;
+
+/** Chronology rows the review experience shows: current plus stale-for-comparison. */
+export const CHRONOLOGY_REVIEW_WHERE = {
+  reviewStatus: { notIn: ["SUPERSEDED", "REJECTED"] as string[] },
+} as const;

@@ -428,7 +428,7 @@ function humanList(items: string[]): string {
 }
 
 // One sentence tying the event to the causation map and the care plan.
-function significance(hay: string, condNames: string[], careServices: string[]): string | null {
+export function significance(hay: string, condNames: string[], careServices: string[]): string | null {
   const dx = condNames.filter((n) => documentsDiagnosis(hay, n));
   const care = careServices.filter((s) => groundsCare(hay, s)).slice(0, 3);
   const parts: string[] = [];

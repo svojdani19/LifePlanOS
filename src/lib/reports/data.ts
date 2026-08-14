@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { getStructuredRecord } from "@/lib/records/structuredRecord";
+import { CHRONOLOGY_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
 import {
   runIntegrityCheck,
   hasPatientRecordSupport,
@@ -325,7 +326,9 @@ export async function loadReportData(caseId: string): Promise<ReportData> {
           credentials: { select: { id: true, type: true, label: true, filename: true }, orderBy: { createdAt: "asc" } },
         },
       },
-      chronologyEvents: { orderBy: { eventDate: "asc" } },
+      // Output scope: a stale series awaiting re-review must not appear in a
+      // report beside the fresh draft that replaces it.
+      chronologyEvents: { where: CHRONOLOGY_OUTPUT_WHERE, orderBy: { eventDate: "asc" } },
       conditions: { orderBy: { confidence: "desc" } },
       futureCareItems: { where: { supersededAt: null }, orderBy: { presentValue: "desc" }, include: { condition: true } },
       reviewFindings: true,

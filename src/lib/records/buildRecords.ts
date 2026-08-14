@@ -19,7 +19,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { MEDICAL_TIMELINE_CLASSES, type AnalysisClass } from "@/lib/documents/analysisClass";
-import { classifySegment } from "@/lib/engine/chronology";
+import { classifySegment, significance } from "@/lib/engine/chronology";
 import {
   billingDocumentedCare,
   claimIsSubstantive,
@@ -34,6 +34,7 @@ import { CURRENT_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
 import { authoritativeFacts, claimDiscrepancies, type ReviewableRow } from "@/lib/records/humanAuthority";
 import { yearProfile, type YearProfile } from "@/lib/records/dateSanity";
 import {
+  appearanceOf,
   chronologyMateriality,
   classesCompatible,
   consolidateIntoNotes,
@@ -54,6 +55,15 @@ import { renderEntry, writeEntry } from "@/lib/records/entryWriter";
 import { findNotes, noteAt, type DocumentNote } from "@/lib/records/noteStructure";
 import { prepareDocument } from "@/lib/records/rowSpans";
 import { prepareDocumentText } from "@/lib/records/sectionLedger";
+
+/**
+ * The verbatim excerpt behind an event — already server-verified against the
+ * source at extraction, so it is a citation, not a paraphrase.
+ */
+function quoteOf(claims: readonly { excerpt?: string | null }[]): string | null {
+  const excerpt = claims.map((c) => c.excerpt?.trim()).find((e) => e && e.length >= 12);
+  return excerpt ? excerpt.slice(0, 300) : null;
+}
 
 /** Which chronology column a written section belongs in. */
 const FIELD_FOR: Record<string, string> = {
@@ -134,6 +144,13 @@ export interface ChronologyDraft {
   reviewStatus: string;
   dateInferred: boolean;
   relevanceScore: number;
+  /**
+   * Content identity of what this event rests on: the note's claim hash for an
+   * ordinary event, the membership hash for a series. A reviewed event whose
+   * source hash no longer matches is reviewing content the case no longer
+   * contains.
+   */
+  sourceFingerprint?: string | null;
   [column: string]: unknown;
 }
 
@@ -190,6 +207,13 @@ export interface BuildOptions {
   documents: readonly RecordSource[];
   /** Compose prose. False builds structure only — used by tests and dry runs. */
   write?: boolean;
+  /**
+   * Case context for chronology enrichment: the diagnosed conditions and the
+   * anticipated care services. Optional — without it events still carry their
+   * verbatim source quote, and significance stays null rather than generic.
+   */
+  enrichment?: { conditions: string[]; careServices: string[] };
+
   /**
    * Ask an adjudicator about the pairs the rules leave undecided.
    *
@@ -456,6 +480,21 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
         reviewStatus: "AI_DRAFT",
         dateInferred: resolved.inferred,
         relevanceScore: billingCare ? 40 : 50,
+        sourceFingerprint: appearanceOf(note).contentHash,
+        // Enrichment the retired second writer used to provide, now a pure
+        // stage of the ONE writer: the verbatim excerpt behind the event, and
+        // — when the case's conditions and planned care are supplied — which
+        // of them this event documents or supports. Removing the second
+        // writer without porting these left every report entry with the same
+        // generic significance sentence.
+        sourceQuote: quoteOf(note.claims),
+        clinicalSignificance: options.enrichment
+          ? significance(
+              note.claims.map((c) => `${c.value} ${c.excerpt}`).join("\n"),
+              options.enrichment.conditions,
+              options.enrichment.careServices,
+            )
+          : null,
       };
       for (const section of sections) {
         const column = FIELD_FOR[section.key];
@@ -759,12 +798,15 @@ export interface PersistResult {
 /** The database surface persistence needs. Narrow, so tests can supply a fake. */
 export interface RecordStore {
   /**
-   * Serialize this case against other processes, and report what the case looks
-   * like now. Optional so a test store need not implement it; when absent, the
-   * build publishes as before.
+   * Serialize this case against other processes, and report what the case
+   * looks like now. REQUIRED. These were optional "so a test store need not
+   * implement it" — and the production callers passed a raw Prisma client that
+   * implemented neither, so both safeguards silently skipped in exactly the
+   * environment they were built for. A store that cannot lock and re-read the
+   * case has no business publishing.
    */
-  lockCase?(caseId: string): Promise<void>;
-  currentFingerprint?(caseId: string): Promise<string>;
+  lockCase(caseId: string): Promise<void>;
+  currentFingerprint(caseId: string): Promise<string>;
   document: {
     update(args: { where: { id: string }; data: { segments: unknown } }): Promise<unknown>;
   };
@@ -813,13 +855,13 @@ export async function persistRecords(
     // One publication per case at a time, across processes. An in-memory guard
     // cannot do this: the live pipeline and the rebuild script are different
     // processes, and both publish.
-    await tx.lockCase?.(caseId);
+    await tx.lockCase(caseId);
 
     // The case may have moved while this build was composing — another document
     // finished extracting, or a reviewer corrected a record. Publishing a
     // result read from older data would silently drop their work.
-    const now = await tx.currentFingerprint?.(caseId);
-    if (now !== undefined && now !== built.fingerprint) {
+    const now = await tx.currentFingerprint(caseId);
+    if (now !== built.fingerprint) {
       return {
         published: false,
         documentsUpdated: 0,
@@ -835,7 +877,7 @@ export async function persistRecords(
     // are checked against, so a reviewed event does not gain a draft twin.
     const reviewed = await tx.chronologyEvent.findMany({
       where: { caseId, reviewStatus: { not: "AI_DRAFT" } },
-      select: { id: true, eventDate: true, eventDateEnd: true, eventType: true, provider: true, sourceDocumentId: true },
+      select: { id: true, eventDate: true, eventDateEnd: true, eventType: true, provider: true, sourceDocumentId: true, sourceFingerprint: true },
     });
     const reviewedKept = reviewed.length;
     // Suppression must see the series END as well as the base identity. With
@@ -849,7 +891,7 @@ export async function persistRecords(
     const endOf = (e: { eventDateEnd?: Date | null }) => e.eventDateEnd?.toISOString().slice(0, 10) ?? "";
     const fullKey = (e: Parameters<typeof chronologyLineageKey>[0] & { eventDateEnd?: Date | null }) =>
       `${chronologyLineageKey(e)}|${endOf(e)}`;
-    const alreadyReviewed = new Set(reviewed.map(fullKey));
+    const reviewedByFull = new Map(reviewed.map((e) => [fullKey(e), e]));
     const reviewedByBase = new Map(reviewed.map((e) => [chronologyLineageKey(e), e]));
 
     for (const [documentId, segments] of built.segmentsByDocument) {
@@ -860,16 +902,34 @@ export async function persistRecords(
 
     // A draft for an event a human already reviewed is not inserted. The
     // reviewed event stands; the draft would only be a second copy of it.
-    const toInsert = built.chronology.filter((event) => !alreadyReviewed.has(fullKey(event)));
+    // A draft is suppressed only when a reviewed event covers the SAME content:
+    // identity match alone let source text change under a reviewed entry while
+    // its date, provider and range stayed put — the old entry remained
+    // "reviewed", and the corrected draft was the one withheld.
+    const contentChanged: string[] = [];
+    const toInsert = built.chronology.filter((event) => {
+      const held = reviewedByFull.get(fullKey(event)) as { id?: string; sourceFingerprint?: string | null } | undefined;
+      if (!held) return true;
+      if (held.sourceFingerprint && event.sourceFingerprint && held.sourceFingerprint !== event.sourceFingerprint) {
+        if (held.id) contentChanged.push(held.id);
+        return true; // the corrected draft goes in beside the now-stale review
+      }
+      // Legacy reviewed rows without a stored fingerprint cannot be compared;
+      // they keep the old suppression behaviour rather than being churned.
+      return false;
+    });
     const suppressed = built.chronology.length - toInsert.length;
 
     // Reviewed entries whose membership moved on: same identity, new end.
-    const grewStale = toInsert
-      .map((event) => {
-        const held = reviewedByBase.get(chronologyLineageKey(event));
-        return held && endOf(held) !== endOf(event) ? held.id : null;
-      })
-      .filter((id): id is string => Boolean(id));
+    const grewStale = [
+      ...contentChanged,
+      ...toInsert
+        .map((event) => {
+          const held = reviewedByBase.get(chronologyLineageKey(event));
+          return held && endOf(held) !== endOf(event) ? held.id : null;
+        })
+        .filter((id): id is string => Boolean(id)),
+    ];
     if (grewStale.length && tx.chronologyEvent.updateMany) {
       await tx.chronologyEvent.updateMany({
         where: { id: { in: [...new Set(grewStale)] } },
@@ -897,6 +957,8 @@ export async function persistRecords(
 
 /** What loading a case's sources needs from the database. */
 export interface RecordLoader {
+  condition?: { findMany(args: never): Promise<{ name: string }[]> };
+  futureCareItem?: { findMany(args: never): Promise<{ service: string }[]> };
   case: { findUnique(args: { where: { id: string }; select: { clientName: true } }): Promise<{ clientName: string | null } | null> };
   document: {
     findMany(args: {
@@ -960,11 +1022,20 @@ export async function refreshCaseRecords(
     sources.push({ id: doc.id, pageCount: doc.pageCount, extractedText: doc.extractedText, rows });
   }
 
+  const [conditions, careItems] = await Promise.all([
+    db.condition?.findMany({ where: { caseId }, select: { name: true } } as never) ?? Promise.resolve([]),
+    db.futureCareItem?.findMany({ where: { caseId, supersededAt: null }, select: { service: true } } as never) ?? Promise.resolve([]),
+  ]);
+
   const built = await buildRecords({
     caseId,
     patientName: theCase?.clientName ?? null,
     documents: sources,
     write: options.write ?? true,
+    enrichment: {
+      conditions: conditions.map((c) => c.name),
+      careServices: careItems.map((c) => c.service),
+    },
   });
   const persisted = await persistRecords(db, caseId, built);
   return { built, persisted };
@@ -1141,8 +1212,6 @@ export function collapseTreatmentSeries(events: readonly ChronologyDraft[]): Chr
         const first = run[0];
         const last = run[run.length - 1];
         const kind = first.eventType === "THERAPY" ? "therapy" : "follow-up";
-        const dates = run.map((e) => fmt(e.eventDate));
-        const pages = [...new Set(run.map((e) => e.sourcePage).filter((p): p is number => typeof p === "number"))];
         out.push({
           // Constructed, never spread: a series inherits no visit's findings.
           caseId: first.caseId,
@@ -1153,22 +1222,50 @@ export function collapseTreatmentSeries(events: readonly ChronologyDraft[]): Chr
           recordType: "TREATMENT_SERIES",
           provider: first.provider,
           facility: first.facility,
+          // Count and range only: a fifty-visit course listed date by date is
+          // unreadable prose. The full membership — each visit's date,
+          // document and page — is PERSISTED on the row for details and
+          // citation, not narrated in the summary.
           summary:
             `${run.length} documented ${kind} visits from ${fmt(first.eventDate)} to ${fmt(last.eventDate)}` +
             `${first.provider ? ` with ${first.provider}` : ""}. ` +
-            `Documented dates: ${dates.join(", ")}${pages.length ? ` (pp. ${pages.sort((a, b) => a - b).join(", ")})` : ""}. ` +
-            `Each visit's findings and citations are retained in the record details.`,
+            `Each visit's date, findings and citations are retained in the record details.`,
+          seriesMembers: run.map((e) => ({
+            date: e.eventDate.toISOString().slice(0, 10),
+            documentId: e.sourceDocumentId,
+            page: e.sourcePage ?? null,
+          })),
           sourceDocumentId: first.sourceDocumentId,
           sourcePage: null,
           reviewStatus: "AI_DRAFT",
           dateInferred: false,
           relevanceScore: first.relevanceScore,
+          // Membership identity: any member added, removed or re-paged changes
+          // this, INCLUDING changes that keep the same end date — the case the
+          // end-date discriminator alone could not see.
+          sourceFingerprint: createHash("sha256")
+            .update(run.map((e) => `${e.eventDate.toISOString()}|${e.sourceDocumentId}|${e.sourcePage ?? ""}`).join("\n"))
+            .digest("hex")
+            .slice(0, 32),
         });
       } else {
         out.push(...run);
       }
       run = [];
     };
+    const normText = (v: unknown) => String(v ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    // A material change in the STRUCTURED fields between consecutive members
+    // breaks the run — a new diagnosis, a medication change or a functional
+    // change is a development however routine the summary reads. Only checked
+    // when both sides state the field: wording drift over an absent baseline
+    // is not a change.
+    const structuredChange = (previous: ChronologyDraft, event: ChronologyDraft) =>
+      (["diagnosis", "medications", "functionalStatus", "restrictions", "workStatus"] as const).some((field) => {
+        const before = normText(previous[field]);
+        const after = normText(event[field]);
+        return Boolean(before) && Boolean(after) && before !== after;
+      });
+
     for (const event of ordered) {
       if (!eligible(event)) {
         flush();
@@ -1179,6 +1276,8 @@ export function collapseTreatmentSeries(events: readonly ChronologyDraft[]): Chr
       if (previous && event.eventDate.getTime() - previous.eventDate.getTime() > MAX_SERIES_GAP_DAYS * 86_400_000) {
         // A break in care ends the series; a new one may begin after it.
         flush();
+      } else if (previous && structuredChange(previous, event)) {
+        flush();
       }
       run.push(event);
     }
@@ -1187,3 +1286,107 @@ export function collapseTreatmentSeries(events: readonly ChronologyDraft[]): Chr
   return out.sort((a, b) => a.eventDate.getTime() - b.eventDate.getTime());
 }
 
+
+// ── The one production store ─────────────────────────────────────────────────
+
+/** The Prisma surface the adapter needs, structurally typed. */
+export interface PrismaLike {
+  case: { findUnique(args: never): Promise<{ clientName: string | null } | null> };
+  document: {
+    findMany(args: never): Promise<{ id: string; pageCount: number | null; extractedText: string | null }[]>;
+    update(args: never): Promise<unknown>;
+  };
+  extractedEncounter: { findMany(args: never): Promise<unknown[]> };
+  chronologyEvent: {
+    count(args: never): Promise<number>;
+    findMany(args: never): Promise<unknown[]>;
+    deleteMany(args: never): Promise<{ count: number }>;
+    createMany(args: never): Promise<unknown>;
+    updateMany(args: never): Promise<{ count: number }>;
+  };
+  $transaction<T>(work: (tx: PrismaLike & { $executeRawUnsafe(sql: string, ...args: unknown[]): Promise<unknown> }) => Promise<T>, opts?: { timeout?: number }): Promise<T>;
+}
+
+const ROW_SELECT_FOR_FINGERPRINT = {
+  id: true,
+  sourceDocumentId: true,
+  analysisClass: true,
+  encounterDate: true,
+  dateStatus: true,
+  segmentKey: true,
+  provider: true,
+  facility: true,
+  page: true,
+  pageEnd: true,
+  substanceClass: true,
+  claims: true,
+  status: true,
+  factualSummary: true,
+  encounterType: true,
+  providerCredentials: true,
+  verifiedContentHash: true,
+} as const;
+
+/** The case as it stands right now, read through the given client. */
+export async function readCaseFingerprint(client: PrismaLike, caseId: string): Promise<string> {
+  const documents = await client.document.findMany({
+    where: { caseId },
+    select: { id: true, pageCount: true, extractedText: true },
+  } as never);
+  const sources: RecordSource[] = [];
+  for (const doc of documents) {
+    const rows = (await client.extractedEncounter.findMany({
+      where: { caseId, sourceDocumentId: doc.id, ...CURRENT_OUTPUT_WHERE },
+      select: ROW_SELECT_FOR_FINGERPRINT,
+    } as never)) as unknown as RecordSource["rows"];
+    sources.push({ id: doc.id, pageCount: doc.pageCount, extractedText: doc.extractedText, rows });
+  }
+  return caseFingerprint(sources);
+}
+
+/**
+ * The one adapter every production caller uses to publish records.
+ *
+ * The safeguards existed and did not run. The live pipeline and the review
+ * route passed the raw Prisma client — which has neither lockCase nor
+ * currentFingerprint, both optional, so production silently skipped the
+ * advisory lock AND the stale-build recheck. Worse, the manual script's
+ * adapter took the lock through the OUTER client: pg_advisory_xact_lock on a
+ * different connection, in its own implicit transaction, released the instant
+ * that single statement finished. The lock this codebase described, tested
+ * around and relied on had never once actually held.
+ *
+ * The tests shared the blame: every fake store faithfully implemented the
+ * interface the real adapter got wrong. This adapter is therefore the ONLY
+ * sanctioned path — both safeguards run through the transaction client, on
+ * the same connection the publication writes use — and its own test asserts
+ * WHICH client executes the lock, not merely that something does.
+ */
+export function makeRecordStore(db: PrismaLike): RecordLoader & RecordStore {
+  const wrap = (client: PrismaLike, tx?: { $executeRawUnsafe(sql: string, ...args: unknown[]): Promise<unknown> }): RecordLoader & RecordStore => ({
+    case: { findUnique: (args) => db.case.findUnique(args as never) },
+    condition: { findMany: (args) => (db as unknown as { condition: { findMany(a: never): Promise<{ name: string }[]> } }).condition.findMany(args) },
+    futureCareItem: { findMany: (args) => (db as unknown as { futureCareItem: { findMany(a: never): Promise<{ service: string }[]> } }).futureCareItem.findMany(args) },
+    document: {
+      findMany: (args) => db.document.findMany(args as never),
+      update: ({ where, data }) => client.document.update({ where, data } as never),
+    },
+    extractedEncounter: { findMany: (args) => db.extractedEncounter.findMany(args as never) },
+    chronologyEvent: {
+      count: (args) => client.chronologyEvent.count(args as never),
+      findMany: (args) => client.chronologyEvent.findMany(args as never) as never,
+      deleteMany: (args) => client.chronologyEvent.deleteMany(args as never),
+      createMany: (args) => client.chronologyEvent.createMany({ data: args.data } as never),
+      updateMany: (args) => client.chronologyEvent.updateMany(args as never),
+    },
+    lockCase: async (caseId) => {
+      if (!tx) throw new Error("lockCase outside a transaction: the advisory lock must hold until publication commits");
+      // THROUGH THE TRANSACTION CLIENT: pg_advisory_xact_lock binds to the
+      // transaction that runs it, and this is the one that publishes.
+      await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock($1)", caseLockKey(caseId));
+    },
+    currentFingerprint: (caseId) => readCaseFingerprint((tx ?? client) as PrismaLike, caseId),
+    $transaction: (work) => db.$transaction((txClient) => work(wrap(txClient as PrismaLike, txClient)), { timeout: 120_000 }),
+  });
+  return wrap(db);
+}
