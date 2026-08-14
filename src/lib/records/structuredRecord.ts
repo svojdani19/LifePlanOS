@@ -12,7 +12,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { prisma } from "@/lib/db";
-import { ACTIVE_ENCOUNTER_WHERE } from "@/lib/records/encounterLifecycle";
+import { CURRENT_OUTPUT_WHERE, REVIEW_BLOCKING_STATES, REVIEW_VISIBLE_WHERE } from "@/lib/records/encounterLifecycle";
 import { requiresDate } from "@/lib/documents/analysisClass";
 import { detectVerificationDrift } from "@/lib/records/verifiedContent";
 
@@ -110,6 +110,7 @@ export interface StructuredRecord {
      *  automated audit is a quality signal, never a review. */
     pendingHumanReview: number;
     stale: number;
+    generationLoss: number;
     /** Clinical entries the system could not date — a real gap to close. */
     undatedClinical: number;
     /** Non-clinical material with no visit date because none applies. */
@@ -159,12 +160,16 @@ export function toStructuredEncounter(e: {
 }
 
 /** Tenant-scoped: firmId comes from the authenticated context, never the client. */
-export async function getStructuredRecord(caseId: string, firmId: string): Promise<StructuredRecord> {
+export async function getStructuredRecord(caseId: string, firmId: string, options: { scope?: "review" | "output" } = {}): Promise<StructuredRecord> {
   const [documents, runs, encounters] = await Promise.all([
     prisma.document.findMany({ where: { caseId, firmId }, orderBy: { createdAt: "asc" } }),
     prisma.recordExtraction.findMany({ where: { caseId, firmId }, orderBy: { createdAt: "desc" } }),
     prisma.extractedEncounter.findMany({
-      where: { caseId, firmId, ...ACTIVE_ENCOUNTER_WHERE },
+      // Two callers, two questions. The review surface must SEE stale human
+      // work and generation-loss candidates in order to resolve them; report
+      // data must NOT read facts from rows describing a source that changed or
+      // a result the current extraction could not reproduce.
+      where: { caseId, firmId, ...(options.scope === "output" ? CURRENT_OUTPUT_WHERE : REVIEW_VISIBLE_WHERE) },
       orderBy: [{ encounterDate: "asc" }, { page: "asc" }],
     }),
   ]);
@@ -251,6 +256,9 @@ export async function getStructuredRecord(caseId: string, firmId: string): Promi
       aiAuditPassed: countBy("AI_AUDIT_PASSED"),
       pendingHumanReview: countBy("AI_DRAFT") + countBy("AI_AUDIT_PASSED"),
       stale: countBy("STALE"),
+      // Prior machine results the current extraction did not reproduce,
+      // waiting on a reviewer to confirm or reject.
+      generationLoss: countBy("GENERATION_LOSS"),
       // Undated is TWO different facts. A clinic note the system could not
       // date is a gap to close; a consent form or a charge page has no visit
       // date because it is not a visit, and counting the two together turned
@@ -275,7 +283,7 @@ export async function factualReviewState(caseId: string, firmId: string): Promis
     getStructuredRecord(caseId, firmId),
     prisma.chronologyEvent.findMany({ where: { caseId }, select: { reviewStatus: true, edited: true } }),
     prisma.extractedEncounter.findMany({
-      where: { caseId, firmId, ...ACTIVE_ENCOUNTER_WHERE },
+      where: { caseId, firmId, ...CURRENT_OUTPUT_WHERE },
       select: {
         status: true, auditResult: true, verifiedContentHash: true, dateStatus: true, encounterDate: true,
         provider: true, facility: true, encounterType: true, factualSummary: true, synthesis: true, claims: true,
@@ -286,6 +294,15 @@ export async function factualReviewState(caseId: string, firmId: string): Promis
   const blockers: string[] = [];
   if (record.counts.pendingHumanReview > 0) blockers.push(`${record.counts.pendingHumanReview} extracted encounter(s) are pending human review (AI drafts, including audit-passed drafts — an automated audit is not a human review).`);
   if (record.counts.stale > 0) blockers.push(`${record.counts.stale} reviewed encounter(s) are stale after source changes and need re-review.`);
+  if (record.counts.generationLoss > 0) blockers.push(`${record.counts.generationLoss} prior machine encounter(s) were not reproduced by the current extraction and need a reviewer to confirm or reject them.`);
+  // Belt and braces: the blocker states are queried EXPLICITLY, so a future
+  // change to either scoped query cannot silently blind the completion gate.
+  const blocking = await prisma.extractedEncounter.count({
+    where: { caseId, firmId, status: { in: REVIEW_BLOCKING_STATES as unknown as string[] }, supersededById: null },
+  });
+  if (blocking > 0 && record.counts.stale === 0 && record.counts.generationLoss === 0) {
+    blockers.push(`${blocking} encounter(s) are awaiting review resolution.`);
+  }
   if (record.counts.failedDocs > 0) blockers.push(`${record.counts.failedDocs} document(s) failed extraction or OCR and need attention.`);
   if (record.counts.pendingOcr > 0) blockers.push(`${record.counts.pendingOcr} document(s) are still being OCR'd.`);
   const draftEvents = events.filter((e) => e.reviewStatus === "AI_DRAFT" && !e.edited).length;

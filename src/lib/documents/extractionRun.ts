@@ -18,8 +18,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { prisma } from "@/lib/db";
-import { refreshCaseRecords } from "@/lib/records/buildRecords";
-import { ACTIVE_ENCOUNTER_WHERE } from "@/lib/records/encounterLifecycle";
+import { refreshCaseRecordsWithRecovery } from "@/lib/records/buildRecords";
+import { CURRENT_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
 import { withDbRetry, createWithDbRetry } from "@/lib/dbRetry";
 import { pageMarks } from "@/lib/documents/meta";
 import { segmentEncounters } from "@/lib/engine/chronology";
@@ -30,7 +30,7 @@ import { inheritDatesWithinDocument } from "@/lib/documents/dateInheritance";
 import { stripChartFurniture } from "@/lib/documents/chartStructure";
 import {
   chunkDocumentText,
-  extractEncountersFromChunk,
+  extractChunkComplete,
   validateEncounters,
   consolidateEncounters,
   renderFactualSummary,
@@ -215,8 +215,16 @@ export async function processDocumentExtraction(
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
   const processChunk = async (chunk: (typeof chunks)[number]): Promise<ChunkResult> => {
-    let encounters = await extractEncountersFromChunk(chunk, { provider: opts.provider, exemplarGuidance });
-    const candidates = encounters.reduce((s, e) => s + e.claims.length, 0);
+    // Complete extraction: an overflowing range is subdivided at page
+    // boundaries the server chose, and only a single page that STILL overflows
+    // comes back unresolved — recorded, and fatal to a "complete" audit.
+    const extraction = await extractChunkComplete(chunk, { provider: opts.provider, exemplarGuidance });
+    let encounters = extraction.encounters;
+    if (extraction.subdivisions) telemetrySubdivisions += extraction.subdivisions;
+    if (extraction.unresolvedPages.length) {
+      unresolvedOverflowPages.push(...extraction.unresolvedPages);
+    }
+    const candidates = encounters.reduce((s: number, e: { claims: unknown[] }) => s + e.claims.length, 0);
     const rejected: string[] = [];
     const critic: string[] = [];
     let disputed = 0;
@@ -295,6 +303,12 @@ export async function processDocumentExtraction(
   if (configError) return fail((configError as Error).message);
 
   const warningsSeed: string[] = [];
+  // Overflow accounting: how many server-chosen subdivisions ran, and which
+  // pages still overflowed after the depth bound. Unresolved pages are marked
+  // TRUNCATED in the ledger, which the completion gate already treats as
+  // content missing from the record — fail closed, never "complete".
+  let telemetrySubdivisions = 0;
+  const unresolvedOverflowPages: number[] = [];
   const validated: ValidatedEncounter[] = [];
   const rejects: string[] = [];
   const criticFindings: string[] = [];
@@ -419,6 +433,11 @@ export async function processDocumentExtraction(
     ...failedSections,
     ...coverageGaps,
     ...(synthesisWarning ? [synthesisWarning] : []),
+    ...(unresolvedOverflowPages.length
+      ? [
+          `extraction overflow unresolved on page(s) ${[...new Set(unresolvedOverflowPages)].sort((a, b) => a - b).join(", ")}: the range yielded more than one bounded response can carry even after subdivision; content beyond the cap is not represented and requires human review`,
+        ]
+      : []),
     ...rejects.slice(0, 40),
   ];
 
@@ -440,6 +459,13 @@ export async function processDocumentExtraction(
     }
   }
   const pageRows = buildPageLedger({ doc, text, marks, failedRanges, sourceClipped: truncated, coveredPages });
+  // A page whose extraction overflowed unresolved is a page whose content is
+  // not fully represented — exactly what TRUNCATED means to the gate.
+  for (const row of pageRows) {
+    if (unresolvedOverflowPages.includes(row.pageNumber) && row.status === "READABLE") {
+      row.status = "TRUNCATED" as typeof row.status;
+    }
+  }
   await persistPageLedger(pageRows).catch((e) => {
     // Ledger persistence failing must not lose the extraction, but it MUST be
     // visible: without the ledger the audit cannot call this complete.
@@ -479,7 +505,7 @@ export async function processDocumentExtraction(
 
   // ── Persist with review lineage ────────────────────────────────────────────
   const prior = await withDbRetry(() =>
-    prisma.extractedEncounter.findMany({ where: { caseId: doc.caseId, sourceDocumentId: doc.id, ...ACTIVE_ENCOUNTER_WHERE } }),
+    prisma.extractedEncounter.findMany({ where: { caseId: doc.caseId, sourceDocumentId: doc.id, ...CURRENT_OUTPUT_WHERE } }),
   );
   const priorHuman = prior.filter((p) => ["HUMAN_EDITED", "REVIEWED", "VERIFIED", "STALE"].includes(p.status));
   // Machine-produced drafts — including ones that passed the audit — may be
@@ -659,6 +685,8 @@ export async function processDocumentExtraction(
       chunksProcessed: endIndex - startIndex,
       retries,
       failedChunks: failedSections.length,
+      subdivisions: telemetrySubdivisions,
+      overflowPages: unresolvedOverflowPages.length,
       concurrency,
       criticEnabled: criticEnabled(),
       elapsedMs: Date.now() - startedAt.getTime(),
@@ -678,9 +706,12 @@ export async function processDocumentExtraction(
   // other. Failure here is reported and does not fail the run: the extraction
   // output is already safely persisted, and the previous records survive.
   try {
-    const refreshed = await refreshCaseRecords(prisma as never, doc.caseId);
-    if (!refreshed.persisted.published) {
-      console.error(`[extraction] records not republished for case ${doc.caseId}: ${refreshed.persisted.reason}`);
+    // Coalesced and self-recovering: a stale refusal retries from the newest
+    // state (bounded), and completions arriving mid-build fold into one
+    // follow-up rather than stacking.
+    const refreshed = await refreshCaseRecordsWithRecovery(prisma as never, doc.caseId);
+    if (!refreshed.published && !refreshed.coalesced) {
+      console.error(`[extraction] records not republished for case ${doc.caseId}: ${refreshed.history.at(-1)?.reason ?? refreshed.status}`);
     }
   } catch (error) {
     console.error(`[extraction] records refresh failed for case ${doc.caseId}: ${String(error).slice(0, 200)}`);

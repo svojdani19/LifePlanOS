@@ -30,7 +30,7 @@ import {
 } from "@/lib/records/clinicalSubstance";
 import { resolveDate, isDocumented, type DateBasis, type ResolvedDate, type UnresolvedReason } from "@/lib/records/dateResolution";
 import { createHash } from "node:crypto";
-import { ACTIVE_ENCOUNTER_WHERE } from "@/lib/records/encounterLifecycle";
+import { CURRENT_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
 import { authoritativeFacts, claimDiscrepancies, type ReviewableRow } from "@/lib/records/humanAuthority";
 import { yearProfile, type YearProfile } from "@/lib/records/dateSanity";
 import {
@@ -121,6 +121,8 @@ export interface RecordSegment {
 export interface ChronologyDraft {
   caseId: string;
   eventDate: Date;
+  /** Set on a series entry: the last documented date in the run. */
+  eventDateEnd?: Date;
   eventType: string;
   specialty: string | null;
   recordType: string | null;
@@ -477,7 +479,7 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
   return {
     fingerprint: caseFingerprint(documents),
     segmentsByDocument,
-    chronology,
+    chronology: collapseTreatmentSeries(chronology),
     failures,
     adjudicationAudit,
     stats: {
@@ -893,7 +895,7 @@ export async function refreshCaseRecords(
     const rows = (await db.extractedEncounter.findMany({
       // Superseded, rejected and failed rows are history. They stay in the
       // database for audit and out of everything downstream.
-      where: { caseId, sourceDocumentId: doc.id, ...ACTIVE_ENCOUNTER_WHERE },
+      where: { caseId, sourceDocumentId: doc.id, ...CURRENT_OUTPUT_WHERE },
       select: ROW_SELECT,
     })) as unknown as MergeableRow[];
     sources.push({ id: doc.id, pageCount: doc.pageCount, extractedText: doc.extractedText, rows });
@@ -907,4 +909,180 @@ export async function refreshCaseRecords(
   });
   const persisted = await persistRecords(db, caseId, built);
   return { built, persisted };
+}
+
+// ── Recovering from a stale-build refusal ────────────────────────────────────
+
+/**
+ * Bounded automatic retries after a stale-build refusal.
+ *
+ * Two, because each retry re-reads the case from scratch: a case busy enough
+ * to move three times during three consecutive builds is a case where a human
+ * is actively working, and the next document completion or material edit will
+ * schedule a fresh build anyway. Unbounded retries against a busy case would
+ * be the rebuild loop this exists to prevent.
+ */
+export const MAX_STALE_RETRIES = 2;
+
+export interface RefreshOutcome {
+  published: boolean;
+  /** True when this call found a refresh already running and folded into it. */
+  coalesced: boolean;
+  attempts: number;
+  /** One entry per attempt: the fingerprint built from, and what happened. */
+  history: { builtFrom: string; outcome: "PUBLISHED" | "STALE_REFUSED" | "FAILED"; reason?: string }[];
+  /** Non-alarming user-facing status for the refusal-and-retry path. */
+  status: string;
+}
+
+/**
+ * One refresh in flight per case per process; later requests coalesce.
+ *
+ * Cross-process serialization is the advisory lock inside persistRecords; this
+ * map only prevents one PROCESS from stacking duplicate builds when several
+ * documents finish in quick succession. A request arriving mid-build marks
+ * rerun — the newest state is read AFTER the current build finishes, so any
+ * number of arrivals collapse into at most one follow-up build.
+ */
+const refreshInFlight = new Map<string, { rerun: boolean }>();
+
+export async function refreshCaseRecordsWithRecovery(
+  db: RecordLoader & RecordStore,
+  caseId: string,
+  options: { write?: boolean } = {},
+): Promise<RefreshOutcome> {
+  const inFlight = refreshInFlight.get(caseId);
+  if (inFlight) {
+    inFlight.rerun = true;
+    return {
+      published: false,
+      coalesced: true,
+      attempts: 0,
+      history: [],
+      status: "Updating from newer case information.",
+    };
+  }
+
+  const flight = { rerun: false };
+  refreshInFlight.set(caseId, flight);
+  const history: RefreshOutcome["history"] = [];
+  let published = false;
+  let attempts = 0;
+
+  try {
+    do {
+      flight.rerun = false;
+      let retries = 0;
+      for (;;) {
+        attempts++;
+        const { built, persisted } = await refreshCaseRecords(db, caseId, options);
+        if (persisted.published) {
+          history.push({ builtFrom: built.fingerprint, outcome: "PUBLISHED" });
+          published = true;
+          break;
+        }
+        if (persisted.staleBuild) {
+          history.push({ builtFrom: built.fingerprint, outcome: "STALE_REFUSED", reason: persisted.reason });
+          if (retries >= MAX_STALE_RETRIES) break;
+          retries++;
+          continue; // rebuild from the newest state
+        }
+        // A non-stale refusal (composition failures): the previous complete
+        // output is intact by design, and retrying would repeat the failure.
+        history.push({ builtFrom: built.fingerprint, outcome: "FAILED", reason: persisted.reason });
+        break;
+      }
+    } while (flight.rerun);
+  } finally {
+    refreshInFlight.delete(caseId);
+  }
+
+  return {
+    published,
+    coalesced: false,
+    attempts,
+    history,
+    status: published
+      ? "Records updated."
+      : "Records could not be updated automatically; the previous complete version is still shown. Retry from the Records page.",
+  };
+}
+
+// ── Repetitive treatment series ──────────────────────────────────────────────
+
+/** Event kinds that can form a routine series. */
+const SERIES_ELIGIBLE_TYPES = new Set(["THERAPY", "CLINIC_VISIT"]);
+
+/**
+ * Content that breaks a visit out of a series however routine its neighbours
+ * are: a procedure, a study, an admission, a new or worsening problem, a
+ * restriction — the material developments a chronology exists to show.
+ */
+const SERIES_BREAK =
+  /\b(?:surger\w*|operat\w*|procedur\w*|inject\w*|mri|ct\s+scan|x-?ray|imaging|radiograph|admit\w*|admission|discharg\w*|referr\w*|new\b|worsen\w*|deteriorat\w*|restrict\w*|complicat\w*|fracture|impression|abnormal|positive\s+for)\b/i;
+
+/** A run must be at least this long before collapsing earns its keep. */
+export const MIN_SERIES_RUN = 3;
+
+/**
+ * Collapse runs of routine, same-provider, same-facility, same-kind visits
+ * into one series entry carrying the documented range and count.
+ *
+ * Twelve unchanged chiropractic visits are twelve stored encounters and ONE
+ * chronology line — every individual date, fact and citation stays in the
+ * Records details underneath. The series summary states only what is
+ * deterministically known: how many documented visits, from when to when, of
+ * what kind. It never describes findings, because a finding true of one visit
+ * generalised across a series is an invention; and it never implies treatment
+ * between the documented dates.
+ *
+ * Different providers, facilities or kinds never combine, and any visit whose
+ * summary carries a material development breaks the run and stands alone.
+ */
+export function collapseTreatmentSeries(events: readonly ChronologyDraft[]): ChronologyDraft[] {
+  const keyOf = (e: ChronologyDraft) =>
+    `${e.eventType}|${(e.provider ?? "").toLowerCase().replace(/[^a-z]/g, "")}|${(e.facility ?? "").toLowerCase().replace(/[^a-z]/g, "")}`;
+  const eligible = (e: ChronologyDraft) =>
+    SERIES_ELIGIBLE_TYPES.has(e.eventType) && !SERIES_BREAK.test(e.summary ?? "");
+
+  const byKey = new Map<string, ChronologyDraft[]>();
+  for (const event of events) {
+    const list = byKey.get(keyOf(event));
+    if (list) list.push(event);
+    else byKey.set(keyOf(event), [event]);
+  }
+
+  const out: ChronologyDraft[] = [];
+  for (const list of byKey.values()) {
+    const ordered = [...list].sort((a, b) => a.eventDate.getTime() - b.eventDate.getTime());
+    let run: ChronologyDraft[] = [];
+    const flush = () => {
+      if (run.length >= MIN_SERIES_RUN) {
+        const first = run[0];
+        const last = run[run.length - 1];
+        const fmt = (d: Date) => `${String(d.getUTCMonth() + 1).padStart(2, "0")}/${String(d.getUTCDate()).padStart(2, "0")}/${d.getUTCFullYear()}`;
+        const kind = first.eventType === "THERAPY" ? "therapy" : "follow-up";
+        out.push({
+          ...first,
+          eventDateEnd: last.eventDate,
+          summary:
+            `${run.length} documented ${kind} visits from ${fmt(first.eventDate)} to ${fmt(last.eventDate)}` +
+            `${first.provider ? ` with ${first.provider}` : ""}` +
+            `; each visit's date, findings and citations are retained in the record details.`,
+        });
+      } else {
+        out.push(...run);
+      }
+      run = [];
+    };
+    for (const event of ordered) {
+      if (eligible(event)) run.push(event);
+      else {
+        flush();
+        out.push(event);
+      }
+    }
+    flush();
+  }
+  return out.sort((a, b) => a.eventDate.getTime() - b.eventDate.getTime());
 }

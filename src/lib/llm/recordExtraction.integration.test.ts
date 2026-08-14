@@ -190,7 +190,7 @@ async function runPipeline(): Promise<{ chunk: DocumentChunk; validated: Validat
   expect(truncated).toBe(false);
   expect(chunks.length).toBe(1); // six short pages fit one chunk
   const chunk = chunks[0];
-  const encounters = await extractEncountersFromChunk(chunk, { provider: providerReturning(MODEL_OUTPUT) });
+  const { encounters } = await extractEncountersFromChunk(chunk, { provider: providerReturning(MODEL_OUTPUT) });
   const { accepted, rejected } = validateEncounters(chunk, encounters);
   return { chunk, validated: consolidateEncounters(accepted), rejected };
 }

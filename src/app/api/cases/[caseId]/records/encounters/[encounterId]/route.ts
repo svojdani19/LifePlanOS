@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { refreshCaseRecordsWithRecovery } from "@/lib/records/buildRecords";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requireCanonicalPermission, requireCase, audit } from "@/lib/tenant";
 import { recordCorrectionExemplar, type CorrectionCategory } from "@/lib/llm/correctionExemplars";
@@ -62,6 +63,17 @@ const actionSchema = z.object({
   failureCode: z.enum(FAILURE_CODES).optional(),
 });
 
+
+// A material correction changes what the derived Records and chronology should
+// say, so one coalesced rebuild is scheduled from the newest case state. Fired
+// without awaiting: a rebuild composes prose and takes minutes, and the
+// correction itself is already committed. A review-note-only edit returns
+// before this and schedules nothing.
+const scheduleDerivedRefresh = (caseId: string) => {
+  void refreshCaseRecordsWithRecovery(prisma as never, caseId).catch((error) =>
+    console.error(`[review] derived refresh failed for case ${caseId}: ${String(error).slice(0, 200)}`),
+  );
+};
 type Params = { params: Promise<{ caseId: string; encounterId: string }> };
 
 /**
@@ -207,6 +219,9 @@ export async function PATCH(req: Request, { params: paramsPromise }: Params) {
     // is happening rather than discovering it.
     const outlookChanged = input.analysisClass !== undefined || dateProvided;
     if (outlookChanged) scheduleRegeneration(params.caseId, ctx.user.id);
+    // Material fields changed: one coalesced rebuild from the newest state.
+    scheduleDerivedRefresh(params.caseId);
+
     return ok({
       encounter: updated,
       ...(outlookChanged
@@ -240,6 +255,8 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
         data: { status: "SUPERSEDED", staleReason: `Rejected on human review${input.note ? `: ${input.note}` : ""}`, reviewedById: ctx.user.id, reviewedAt: new Date() },
       });
       await audit(ctx, "records.encounter_reject", { type: "extractedEncounter", id: existing.id, caseId: params.caseId });
+      // A rejected row must leave the derived output it was part of.
+      scheduleDerivedRefresh(params.caseId);
       return ok({ encounter: updated });
     }
 
@@ -327,6 +344,9 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
       caseId: params.caseId,
       meta: verify ? { verifiedContentHash: currentHash } : {},
     });
+    // Confirming a STALE or GENERATION_LOSS candidate — or reviewing anything —
+    // can change what the derived output may say; regenerate from newest state.
+    scheduleDerivedRefresh(params.caseId);
     return ok({ encounter: updated });
   } catch (err) {
     return handleError(err);

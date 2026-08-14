@@ -42,7 +42,7 @@ vi.mock("@/lib/db", () => ({
     // complete, so the authority-gate scenarios stay focused on authority.
     document: { findMany: vi.fn(async () => []) },
     recordExtraction: { findMany: vi.fn(async () => []) },
-    extractedEncounter: { findMany: deps.extractedEncounterFindMany },
+    extractedEncounter: { findMany: deps.extractedEncounterFindMany, count: vi.fn(async () => 0) },
     chronologyEvent: { findMany: deps.chronologyEventFindMany },
     sourcePage: { findMany: vi.fn(async () => [] as { status: string }[]) },
   },

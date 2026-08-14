@@ -354,7 +354,7 @@ export async function loadReportData(caseId: string): Promise<ReportData> {
   const caseData = c as unknown as RDCase;
   const { integrity, includedIds } = computeIntegrity(caseData.futureCareItems, caseData.conditions);
 
-  const structuredRecord = await getStructuredRecord(caseId, c.firmId).catch(() => undefined);
+  const structuredRecord = await getStructuredRecord(caseId, c.firmId, { scope: "output" }).catch(() => undefined);
 
   return {
     case: caseData,

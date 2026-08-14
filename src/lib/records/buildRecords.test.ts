@@ -3,7 +3,12 @@ import {
   buildRecords,
   caseFingerprint,
   caseLockKey,
+  collapseTreatmentSeries,
+  MIN_SERIES_RUN,
   persistRecords,
+  refreshCaseRecordsWithRecovery,
+  MAX_STALE_RETRIES,
+  type ChronologyDraft,
   sortForDisplay,
   type RecordSegment,
   type RecordStore,
@@ -563,5 +568,146 @@ describe("an out-of-order packet", () => {
     // ever taken from neighbours in the wrong order.
     if (middle) expect(middle.unresolvedReason).toBeTruthy();
     expect(vi.isMockFunction(build)).toBe(false);
+  });
+});
+
+describe("routine treatment collapses to a series; material visits stand alone", () => {
+  const visit = (iso: string, over: Partial<ChronologyDraft> = {}): ChronologyDraft => ({
+    caseId: CASE,
+    eventDate: new Date(`${iso}T00:00:00Z`),
+    eventType: "THERAPY",
+    specialty: null,
+    recordType: null,
+    provider: "Michael Crone, DC",
+    facility: "Houston Spine and Rehabilitation",
+    summary: "Therapy visit with electrical stimulation and hot/cold packs; tolerated well.",
+    sourceDocumentId: "doc-1",
+    sourcePage: 1,
+    reviewStatus: "AI_DRAFT",
+    dateInferred: false,
+    relevanceScore: 50,
+    ...over,
+  });
+
+  it("collapses a run of routine visits into one dated series entry", () => {
+    const events = ["2023-07-07", "2023-07-12", "2023-07-19", "2023-07-26"].map((d) => visit(d));
+    const out = collapseTreatmentSeries(events);
+    expect(out).toHaveLength(1);
+    expect(out[0].summary).toContain("4 documented therapy visits");
+    expect(out[0].summary).toContain("07/07/2023");
+    expect(out[0].summary).toContain("07/26/2023");
+    expect(out[0].eventDateEnd?.toISOString().slice(0, 10)).toBe("2023-07-26");
+  });
+
+  it("never invents continuity, findings or improvement", () => {
+    const out = collapseTreatmentSeries(["2023-07-07", "2023-07-12", "2023-07-19"].map((d) => visit(d)));
+    // The series states only what is deterministically known: count, range,
+    // kind, provider. A finding true of one visit generalised across a series
+    // is an invention.
+    expect(out[0].summary).not.toMatch(/improv|progress|continuous|daily|weekly|stimulation|tolerated/i);
+  });
+
+  it("breaks a material visit out of the series", () => {
+    const events = [
+      visit("2023-07-07"),
+      visit("2023-07-12"),
+      visit("2023-07-19"),
+      visit("2023-07-21", { summary: "New MRI ordered after worsening radicular pain into the right foot." }),
+      visit("2023-07-26"),
+      visit("2023-08-02"),
+      visit("2023-08-09"),
+    ];
+    const out = collapseTreatmentSeries(events);
+    const material = out.find((e) => /MRI/.test(e.summary));
+    expect(material).toBeDefined();
+    expect(out.filter((e) => /documented therapy visits/.test(e.summary))).toHaveLength(2);
+  });
+
+  it("never combines different providers or facilities", () => {
+    const events = [
+      visit("2023-07-07"),
+      visit("2023-07-12", { provider: "Someone Else, DC" }),
+      visit("2023-07-19"),
+      visit("2023-07-26"),
+    ];
+    const out = collapseTreatmentSeries(events);
+    expect(out.some((e) => e.provider === "Someone Else, DC" && !/documented/.test(e.summary))).toBe(true);
+  });
+
+  it("leaves short runs alone", () => {
+    const out = collapseTreatmentSeries(["2023-07-07", "2023-07-12"].map((d) => visit(d)));
+    expect(out).toHaveLength(2);
+    expect(MIN_SERIES_RUN).toBeGreaterThan(2);
+  });
+
+  it("leaves independent clinically meaningful events visible", () => {
+    const events = [
+      visit("2023-07-07", { eventType: "SURGERY", summary: "Laminectomy performed." }),
+      visit("2023-07-08", { eventType: "IMAGING", summary: "MRI lumbar spine: L5-S1 protrusion." }),
+    ];
+    expect(collapseTreatmentSeries(events)).toHaveLength(2);
+  });
+});
+
+describe("recovering from a stale-build refusal", () => {
+  const loaderFor = (fingerprints: string[]) => {
+    // A store whose "current" fingerprint is consumed one refusal at a time:
+    // the first build(s) find the case moved; the last finds it settled.
+    let call = 0;
+    const base: Record<string, unknown> = {
+      case: { findUnique: async () => ({ clientName: null }) },
+      document: {
+        findMany: async () => [
+          { id: "doc-1", pageCount: 1, extractedText: "Progress Note Date of Service: 03/18/2024 lumbar radiculopathy" },
+        ],
+        update: async () => null,
+      },
+      extractedEncounter: { findMany: async () => [row({ id: "r" })] },
+      chronologyEvent: {
+        count: async () => 0,
+        findMany: async () => [],
+        deleteMany: async () => ({ count: 0 }),
+        createMany: async () => null,
+      },
+      lockCase: async () => {},
+      currentFingerprint: async () => fingerprints[Math.min(call++, fingerprints.length - 1)],
+    };
+    base.$transaction = async (work: (tx: unknown) => Promise<unknown>) => work(base);
+    return base as never;
+  };
+
+  it("retries from the newest state and publishes when the case settles", async () => {
+    // Attempt 1 builds F, case says F' -> refused. Attempt 2 rebuilds; case
+    // now agrees -> published. One flight, bounded.
+    const real = caseFingerprint([
+      { id: "doc-1", pageCount: 1, extractedText: "Progress Note Date of Service: 03/18/2024 lumbar radiculopathy", rows: [row({ id: "r" })] },
+    ]);
+    const db = loaderFor(["moved-on", real]);
+    const outcome = await refreshCaseRecordsWithRecovery(db, "case-recovery-1", { write: false });
+    expect(outcome.published).toBe(true);
+    expect(outcome.attempts).toBe(2);
+    expect(outcome.history[0].outcome).toBe("STALE_REFUSED");
+    expect(outcome.history[1].outcome).toBe("PUBLISHED");
+  });
+
+  it("exhausts bounded retries, keeps the prior output, and reports visibly", async () => {
+    const db = loaderFor(["never-matches"]);
+    const outcome = await refreshCaseRecordsWithRecovery(db, "case-recovery-2", { write: false });
+    expect(outcome.published).toBe(false);
+    expect(outcome.attempts).toBe(1 + MAX_STALE_RETRIES);
+    expect(outcome.history.every((h) => h.outcome === "STALE_REFUSED")).toBe(true);
+    expect(outcome.status).toMatch(/previous complete version/i);
+  });
+
+  it("coalesces a request arriving while a refresh is running", async () => {
+    const real = caseFingerprint([
+      { id: "doc-1", pageCount: 1, extractedText: "Progress Note Date of Service: 03/18/2024 lumbar radiculopathy", rows: [row({ id: "r" })] },
+    ]);
+    const db = loaderFor([real]);
+    const first = refreshCaseRecordsWithRecovery(db, "case-recovery-3", { write: false });
+    const second = await refreshCaseRecordsWithRecovery(db, "case-recovery-3", { write: false });
+    expect(second.coalesced).toBe(true);
+    expect(second.status).toMatch(/Updating from newer case information/);
+    await first;
   });
 });

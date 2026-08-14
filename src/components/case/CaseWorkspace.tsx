@@ -1191,8 +1191,8 @@ function ChronologyPanel({ data, canEdit, canVerify = false, call }: { data: Any
                 )}
                 {/* Human-review status + factual verification (records.verify). */}
                 <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
-                  <span className={cn("rounded-full px-2 py-0.5 font-medium", e.reviewStatus === "VERIFIED" ? "bg-emerald-100 text-emerald-800" : e.reviewStatus === "REVIEWED" ? "bg-sky-100 text-sky-800" : e.reviewStatus === "HUMAN_EDITED" || e.edited ? "bg-amber-100 text-amber-800" : e.reviewStatus === "STALE" ? "bg-red-100 text-red-700" : "bg-slate-100 text-slate-600")}>
-                    {e.reviewStatus === "VERIFIED" ? "Human-verified" : e.reviewStatus === "REVIEWED" ? "Human-reviewed" : e.reviewStatus === "HUMAN_EDITED" || e.edited ? "Human-edited" : e.reviewStatus === "STALE" ? "Stale — source changed" : "AI draft — pending review"}
+                  <span className={cn("rounded-full px-2 py-0.5 font-medium", e.reviewStatus === "VERIFIED" ? "bg-emerald-100 text-emerald-800" : e.reviewStatus === "REVIEWED" ? "bg-sky-100 text-sky-800" : e.reviewStatus === "HUMAN_EDITED" || e.edited ? "bg-amber-100 text-amber-800" : e.reviewStatus === "STALE" ? "bg-red-100 text-red-700" : e.reviewStatus === "GENERATION_LOSS" ? "bg-orange-100 text-orange-800" : "bg-slate-100 text-slate-600")}>
+                    {e.reviewStatus === "VERIFIED" ? "Human-verified" : e.reviewStatus === "REVIEWED" ? "Human-reviewed" : e.reviewStatus === "HUMAN_EDITED" || e.edited ? "Human-edited" : e.reviewStatus === "STALE" ? "Stale — source changed" : e.reviewStatus === "GENERATION_LOSS" ? "Not reproduced by current extraction — confirm or reject" : "AI draft — pending review"}
                   </span>
                   {e.staleReason && <span className="text-red-600">{e.staleReason}</span>}
                   {canVerify && e.reviewStatus !== "VERIFIED" && (
@@ -4183,6 +4183,7 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
     : st === "REVIEWED" ? ["Human-reviewed", "bg-sky-100 text-sky-800"]
     : st === "HUMAN_EDITED" || edited ? ["Human-edited", "bg-amber-100 text-amber-800"]
     : st === "STALE" ? ["Stale — source changed", "bg-red-100 text-red-700"]
+    : st === "GENERATION_LOSS" ? ["Not reproduced by current extraction — confirm or reject", "bg-orange-100 text-orange-800"]
     : st === "AI_AUDIT_PASSED" ? ["AI draft — audit passed, pending review", "bg-teal-50 text-teal-700"]
     : ["AI draft — pending review", "bg-slate-100 text-slate-600"];
 

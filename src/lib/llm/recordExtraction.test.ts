@@ -5,6 +5,7 @@ import { describe, it, expect } from "vitest";
 import {
   chunkDocumentText,
   buildExtractionPrompt,
+  extractChunkComplete,
   extractEncountersFromChunk,
   validateEncounters,
   consolidateEncounters,
@@ -112,7 +113,7 @@ describe("strict output handling (fail closed)", () => {
   it("a corrected retry is accepted", async () => {
     const good = JSON.stringify({ encounters: [encounter()] });
     const p = fakeProvider(["nope", good]);
-    const out = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
+    const { encounters: out } = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
     expect(out).toHaveLength(1);
   });
 
@@ -410,7 +411,7 @@ describe("strictness policy — grounding fails closed, advisory fields tolerate
 
   it("a response omitting confidence, page, provider, facility and type still parses", async () => {
     const p = fakeProvider([JSON.stringify({ encounters: [minimal] })]);
-    const out = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
+    const { encounters: out } = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
     expect(out).toHaveLength(1);
     expect(out[0].claims[0].confidence).toBeNull(); // unstated, never invented
     expect(out[0].claims[0].page).toBeNull();
@@ -450,14 +451,14 @@ describe("length bounds CLIP — an over-long field never discards a document", 
 
   it("an over-long warning is clipped, not fatal (observed on a real 2-page record)", async () => {
     const p = fakeProvider([JSON.stringify({ encounters: [withOverlong({ warning: "w".repeat(900) })] })]);
-    const out = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
+    const { encounters: out } = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
     expect(out[0].claims[0].warning).toHaveLength(200);
     expect(p.calls.length).toBe(1); // accepted first time — no wasted retry
   });
 
   it("an over-long value clips while its excerpt still grounds the claim", async () => {
     const p = fakeProvider([JSON.stringify({ encounters: [withOverlong({ value: "Lumbar radiculopathy " + "x".repeat(900) })] })]);
-    const out = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
+    const { encounters: out } = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
     expect(out[0].claims[0].value.length).toBeLessThanOrEqual(600);
     // Still validates: the excerpt is unchanged and verbatim in the source.
     expect(validateEncounters(chunkOf(NOTE), out).accepted).toHaveLength(1);
@@ -470,7 +471,7 @@ describe("length bounds CLIP — an over-long field never discards a document", 
       providerCredentials: "MD, ".repeat(60),
     };
     const p = fakeProvider([JSON.stringify({ encounters: [body] })]);
-    const out = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
+    const { encounters: out } = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
     expect(out[0].encounterType!.length).toBeLessThanOrEqual(120);
     expect(out[0].providerCredentials!.length).toBeLessThanOrEqual(120);
   });
@@ -498,28 +499,50 @@ describe("format tolerance — parsing variance never fails a document", () => {
       ["March 14, 2025", "2025-03-14"],
     ] as const) {
       const p = fakeProvider([JSON.stringify({ encounters: [enc({ date: given })] })]);
-      const out = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
+      const { encounters: out } = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
       expect(out[0].date, given).toBe(want);
     }
   });
 
   it("an unrecognizable date becomes null (undated review) rather than failing", async () => {
     const p = fakeProvider([JSON.stringify({ encounters: [enc({ date: "sometime last spring" })] })]);
-    const out = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
+    const { encounters: out } = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
     expect(out[0].date).toBeNull();
   });
 
   it("a lowercase dateStatus is normalized rather than rejected", async () => {
     const p = fakeProvider([JSON.stringify({ encounters: [enc({ dateStatus: "documented", date: "2025-03-14" })] })]);
-    const out = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
+    const { encounters: out } = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
     expect(out[0].dateStatus).toBe("DOCUMENTED");
   });
 
-  it("an over-full claim list surrenders the overflow, not the document", async () => {
-    const many = Array.from({ length: 60 }, () => ({ field: "assessment", value: "Lumbar radiculopathy", excerpt: "Assessment: Lumbar radiculopathy" }));
+  it("a 60-claim encounter keeps all 60 claims as ONE encounter", async () => {
+    // The old schema sliced to the first 40 and threw the rest away without
+    // recording that anything was lost — a 60-fact visit silently became a
+    // 40-fact visit. More facts must never mean fewer facts, and must never
+    // mean more encounters either.
+    const many = Array.from({ length: 60 }, (_, i) => ({ field: "assessment", value: `Finding ${i}`, excerpt: "Assessment: Lumbar radiculopathy" }));
     const p = fakeProvider([JSON.stringify({ encounters: [enc({ date: "2025-03-14", claims: many })] })]);
-    const out = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
-    expect(out[0].claims).toHaveLength(40);
+    const result = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
+    expect(result.encounters).toHaveLength(1);
+    expect(result.encounters[0].claims).toHaveLength(60);
+    expect(result.incomplete).toBe(false);
+  });
+
+  it("more than 12 genuine encounters all survive one response", async () => {
+    const lots = Array.from({ length: 20 }, (_, i) => enc({ date: `2025-03-${String(i + 1).padStart(2, "0")}` }));
+    const p = fakeProvider([JSON.stringify({ encounters: lots })]);
+    const result = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
+    expect(result.encounters).toHaveLength(20);
+    expect(result.incomplete).toBe(false);
+  });
+
+  it("a response landing exactly at a parse cap reads as possibly short", async () => {
+    // At-cap is indistinguishable from a list the model would have continued.
+    const cap = Array.from({ length: 300 }, (_, i) => ({ field: "assessment", value: `Finding ${i}`, excerpt: "Assessment: Lumbar radiculopathy" }));
+    const p = fakeProvider([JSON.stringify({ encounters: [enc({ date: "2025-03-14", claims: cap })] })]);
+    const result = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
+    expect(result.incomplete).toBe(true);
   });
 });
 
@@ -691,7 +714,7 @@ describe("JSON escape repair (OCR backslashes)", () => {
   it("a response with an unescaped OCR backslash parses instead of failing the document", async () => {
     const payload = `{"encounters":[{"dateStatus":"DOCUMENTED","date":"2025-03-14","dateExcerpt":"Date of Service: 03/14/2025","claims":[{"field":"assessment","value":"Radiculopathy at L4\\5","excerpt":"Assessment: Lumbar radiculopathy"}]}]}`;
     const p = fakeProvider([payload]);
-    const out = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
+    const { encounters: out } = await extractEncountersFromChunk(chunkOf(NOTE), { provider: p });
     expect(out).toHaveLength(1);
     expect(p.calls.length).toBe(1); // repaired on first pass — no retry burned
   });
@@ -875,5 +898,45 @@ describe("the prompt asks for completeness, not a sample", () => {
     for (const t of ["IMAGING_REPORT", "OPERATIVE_NOTE", "DEPOSITION", "BILLING_RECORD"]) {
       expect(promptFor(t), t).toMatch(/EVERY fact the excerpt documents/);
     }
+  });
+});
+
+describe("bounded continuation: overflow subdivides at server-chosen boundaries", () => {
+  const enc = (over: Record<string, unknown>) => ({
+    dateStatus: "DOCUMENTED",
+    dateExcerpt: "Date of Service: 03/14/2025",
+    claims: [{ field: "assessment", value: "Lumbar radiculopathy", excerpt: "Assessment: Lumbar radiculopathy" }],
+    ...over,
+  });
+  const page = (n: number, body: string) => ({ page: n, text: `${body}\nAssessment: Lumbar radiculopathy\nDate of Service: 03/1${n}/2025` });
+  const twoPageChunk = () => ({
+    ...chunkOf(NOTE),
+    pageSlices: [page(1, "PROGRESS NOTE page one"), page(2, "PROGRESS NOTE page two")],
+    text: "PROGRESS NOTE page one\nPROGRESS NOTE page two\nAssessment: Lumbar radiculopathy",
+  });
+  const atCap = () =>
+    JSON.stringify({
+      encounters: [enc({ date: "2025-03-14", claims: Array.from({ length: 300 }, (_, i) => ({ field: "assessment", value: `Finding ${i}`, excerpt: "Assessment: Lumbar radiculopathy" })) })],
+    });
+  const normal = (date: string) => JSON.stringify({ encounters: [enc({ date })] });
+
+  it("subdivides an overflowing multi-page range and keeps every half's encounters", async () => {
+    // Full chunk answers at cap -> the server splits at its own page boundary
+    // and re-extracts each half. No model-proposed offset is ever trusted.
+    const p = fakeProvider([atCap(), normal("2025-03-11"), normal("2025-03-12")]);
+    const result = await extractChunkComplete(twoPageChunk(), { provider: p });
+    expect(result.subdivisions).toBe(1);
+    expect(result.encounters).toHaveLength(2);
+    expect(result.unresolvedPages).toEqual([]);
+  });
+
+  it("returns a single page that still overflows as unresolved, never as covered", async () => {
+    const single = { ...chunkOf(NOTE), pageSlices: [page(4, "DENSE PAGE")], text: "DENSE PAGE" };
+    const p = fakeProvider([atCap()]);
+    const result = await extractChunkComplete(single, { provider: p });
+    expect(result.unresolvedPages).toEqual([4]);
+    // What DID come back is kept — the overflow is recorded, not the content
+    // discarded.
+    expect(result.encounters).toHaveLength(1);
   });
 });

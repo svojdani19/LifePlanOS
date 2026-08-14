@@ -460,15 +460,20 @@ const encounterSchema = z
     provider: provenanceSchema.nullable().optional().default(null),
     providerCredentials: optionalClipped(120),
     facility: provenanceSchema.nullable().optional().default(null),
-    // Volume caps also clip: a chart yielding 45 claims should surrender the
-    // overflow, not the whole document.
-    claims: z.array(claimSchema).max(300).transform((a) => a.slice(0, 40)),
+    // The cap is a per-response PARSE bound, not a keep-list. The old
+    // transform sliced to the first 40 claims and threw the rest away without
+    // recording that anything was lost — a 60-fact visit silently became a
+    // 40-fact visit. Oversize is now handled by marking the response
+    // incomplete and subdividing the source range.
+    claims: z.array(claimSchema).max(300),
   })
   .strict();
 export type LlmEncounter = z.infer<typeof encounterSchema>;
 
 export const extractionOutputSchema = z
-  .object({ encounters: z.array(encounterSchema).max(100).transform((a) => a.slice(0, 12)) })
+  // Same principle: the thirteenth genuine encounter in a range must not
+  // vanish because a transform kept the first twelve.
+  .object({ encounters: z.array(encounterSchema).max(100) })
   .strict();
 
 export class ExtractionOutputError extends Error {
@@ -601,7 +606,67 @@ export interface ExtractOptions {
   exemplarGuidance?: string[];
 }
 
-export async function extractEncountersFromChunk(chunk: DocumentChunk, opts: ExtractOptions = {}): Promise<LlmEncounter[]> {
+export interface ChunkExtraction {
+  encounters: LlmEncounter[];
+  /**
+   * True when this response may not carry everything the source range holds —
+   * the model needed the compact retry, or an array landed exactly at its
+   * parse cap. An incomplete response is a reason to subdivide the range, and
+   * failing that, a fact to record — never a result to pass off as whole.
+   */
+  incomplete: boolean;
+}
+
+/** How many times one chunk may be halved before overflow is recorded instead. */
+export const MAX_SUBDIVISION_DEPTH = 3;
+
+/**
+ * Extract a chunk completely, subdividing on overflow.
+ *
+ * The server controls every boundary: a subdivision is a split of the chunk's
+ * own page slices, never a model-proposed offset. Each half re-enters the same
+ * bounded extraction; fragments of a note that crosses the split are
+ * consolidated downstream by the same machinery that already joins chunks.
+ * A single page that still overflows cannot be subdivided — its pages are
+ * returned as unresolved so the caller can record them and fail the audit
+ * closed, rather than pretending the range was covered.
+ */
+export async function extractChunkComplete(
+  chunk: DocumentChunk,
+  opts: ExtractOptions = {},
+  depth = 0,
+): Promise<{ encounters: LlmEncounter[]; unresolvedPages: number[]; subdivisions: number }> {
+  const result = await extractEncountersFromChunk(chunk, opts);
+  if (!result.incomplete) return { encounters: result.encounters, unresolvedPages: [], subdivisions: 0 };
+
+  const splittable = chunk.pageSlices.length > 1 && depth < MAX_SUBDIVISION_DEPTH;
+  if (!splittable) {
+    return {
+      encounters: result.encounters,
+      unresolvedPages: chunk.pageSlices.map((s) => s.page),
+      subdivisions: 0,
+    };
+  }
+
+  const mid = Math.ceil(chunk.pageSlices.length / 2);
+  const halves = [chunk.pageSlices.slice(0, mid), chunk.pageSlices.slice(mid)].map((slices) => ({
+    ...chunk,
+    text: slices.map((s) => s.text).join("\n"),
+    pageSlices: slices,
+    pageStart: slices[0]?.page ?? chunk.pageStart,
+    pageEnd: slices[slices.length - 1]?.page ?? chunk.pageEnd,
+  }));
+
+  const parts = [] as Awaited<ReturnType<typeof extractChunkComplete>>[];
+  for (const half of halves) parts.push(await extractChunkComplete(half, opts, depth + 1));
+  return {
+    encounters: parts.flatMap((p) => p.encounters),
+    unresolvedPages: parts.flatMap((p) => p.unresolvedPages),
+    subdivisions: 1 + parts.reduce((n, p) => n + p.subdivisions, 0),
+  };
+}
+
+export async function extractEncountersFromChunk(chunk: DocumentChunk, opts: ExtractOptions = {}): Promise<ChunkExtraction> {
   const provider = opts.provider ?? getProvider();
   if (provider.name === "mock") {
     // The demo mock cannot produce grounded structured output — this is an
@@ -627,8 +692,14 @@ export async function extractEncountersFromChunk(chunk: DocumentChunk, opts: Ext
     return parsed.data.encounters;
   };
 
+  // An array landing exactly at its parse cap is indistinguishable from one
+  // the model would have continued; treat it as possibly short.
+  const atCap = (encounters: LlmEncounter[]) =>
+    encounters.length >= 100 || encounters.some((e) => e.claims.length >= 300);
+
   try {
-    return await attempt();
+    const encounters = await attempt();
+    return { encounters, incomplete: atCap(encounters) };
   } catch (first) {
     // ONE controlled retry with the failure named; then fail closed. A
     // truncated response is a SIZE problem, so the retry asks for a more
@@ -639,7 +710,12 @@ export async function extractEncountersFromChunk(chunk: DocumentChunk, opts: Ext
       ? `Your previous output was rejected (${reason}). The response was too long to be valid JSON. Return the SAME facts more compactly: keep every excerpt under 200 characters (quote only the sentence that carries the fact), and emit at most the 6 most substantive claims per encounter. Return ONLY the corrected JSON object — no prose.`
       : `Your previous output was rejected (${reason}). Return ONLY the corrected JSON object — no prose.`;
     try {
-      return await attempt(guidance);
+      const encounters = await attempt(guidance);
+      // The compact retry asked for "the most substantive claims", which is a
+      // per-call bound, not the whole truth of the range. What it returns is
+      // real; what it omitted is why this response is INCOMPLETE, so the range
+      // is subdivided rather than the omission passed off as coverage.
+      return { encounters, incomplete: truncated || atCap(encounters) };
     } catch (second) {
       throw new ExtractionOutputError(`structured output failed after retry: ${second instanceof Error ? second.message.slice(0, 200) : "invalid"}`);
     }
