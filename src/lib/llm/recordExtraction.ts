@@ -832,7 +832,64 @@ export function dateAppearsOutsideArtifactContext(text: string, iso: string): bo
  * stays unknown — never coerced to 1). Excerpts spanning a page break are
  * attributed to the page where they START.
  */
-export function locateExcerpt(chunk: DocumentChunk, excerpt: string): { ok: boolean; page: number | null; reason?: string } {
+/**
+ * A bounded fuzzy search for OCR-corrupted excerpts.
+ *
+ * On a real billing production, whole encounters died with "no claims survived
+ * validation": the model quoted the page faithfully, the OCR text it was
+ * checked against differed by a handful of scanner artifacts, and exact
+ * inclusion failed on furniture rather than substance.
+ *
+ * The budget is deliberately mean: one edit per twenty characters, capped at
+ * eight, and nothing shorter than 24 normalized characters is ever fuzzy-matched
+ * — a short string within a few edits of something else is a coincidence, not a
+ * citation. Anchoring on three exact 8-character islands keeps the scan cheap
+ * and demands that most of the excerpt is still letter-perfect; an excerpt the
+ * OCR mangled beyond that is not evidence a reviewer could check by eye, and
+ * still fails.
+ */
+export function fuzzyIncludes(haystack: string, needle: string): boolean {
+  if (needle.length < 24) return false;
+  const budget = Math.min(8, Math.floor(needle.length / 20));
+  const anchors = [needle.slice(0, 8), needle.slice(Math.floor(needle.length / 2) - 4, Math.floor(needle.length / 2) + 4), needle.slice(-8)];
+  const starts = new Set<number>();
+  for (const [i, anchor] of anchors.entries()) {
+    let at = -1;
+    while ((at = haystack.indexOf(anchor, at + 1)) >= 0 && starts.size < 200) {
+      const offset = i === 0 ? 0 : i === 1 ? Math.floor(needle.length / 2) - 4 : needle.length - 8;
+      starts.add(Math.max(0, at - offset));
+    }
+  }
+  for (const start of starts) {
+    for (let slack = -budget; slack <= budget; slack++) {
+      const from = start + (slack < 0 ? slack : 0);
+      if (from < 0) continue;
+      const window = haystack.slice(from, from + needle.length + budget);
+      if (window.length + budget < needle.length) continue;
+      if (boundedEditDistance(window.slice(0, needle.length + Math.max(0, slack)), needle, budget) <= budget) return true;
+    }
+  }
+  return false;
+}
+
+/** Levenshtein with an early exit once the budget is exceeded. */
+function boundedEditDistance(a: string, b: string, budget: number): number {
+  if (Math.abs(a.length - b.length) > budget) return budget + 1;
+  let previous = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const current = [i];
+    let rowMin = i;
+    for (let j = 1; j <= b.length; j++) {
+      current[j] = Math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+      if (current[j] < rowMin) rowMin = current[j];
+    }
+    if (rowMin > budget) return budget + 1;
+    previous = current;
+  }
+  return previous[b.length];
+}
+
+export function locateExcerpt(chunk: DocumentChunk, excerpt: string): { ok: boolean; page: number | null; reason?: string; fuzzy?: boolean } {
   const target = norm(excerpt);
   if (target.length < 3) return { ok: false, page: null, reason: "excerpt too short" };
   for (const slice of chunk.pageSlices) {
@@ -854,7 +911,17 @@ export function locateExcerpt(chunk: DocumentChunk, excerpt: string): { ok: bool
       return { ok: true, page: chunk.pageStart };
     }
   }
-  if (!norm(chunk.text).includes(target)) return { ok: false, page: null, reason: "excerpt not found in the source text" };
+  if (!norm(chunk.text).includes(target)) {
+    // Last resort before rejection: the OCR text may differ from what the
+    // model faithfully quoted by a few scanner artifacts. The match is still
+    // required to be nearly letter-perfect, and it is marked, so a reviewer
+    // can see which citations rest on a tolerant match.
+    for (const slice of chunk.pageSlices) {
+      if (fuzzyIncludes(norm(slice.text), target)) return { ok: true, page: slice.page, fuzzy: true };
+    }
+    if (fuzzyIncludes(norm(chunk.text), target)) return { ok: true, page: chunk.pageStart, fuzzy: true };
+    return { ok: false, page: null, reason: "excerpt not found in the source text" };
+  }
   // Present in the chunk but not within any single page slice: it spans a page
   // break. Attribute it to the page holding its opening words.
   const head = target.split(" ").slice(0, 8).join(" ");
@@ -1014,6 +1081,25 @@ export function validateEncounters(chunk: DocumentChunk, encounters: LlmEncounte
       const claimType = typed.claimType;
       if (typed.rejected) warnings.push(typed.rejected);
       if (!claimTypeCompatible(profile.klass, claimType)) {
+        // A billing production cannot ASSERT a clinical fact — but a billed
+        // service line is documentary evidence the service was charged for,
+        // which is exactly what a damages chronology cites it for. Dropping
+        // these outright was the second-largest recall killer on a real case:
+        // "Office visit 99213, billed 10/19/2023" died five times over as an
+        // impermissible PROCEDURE_PERFORMED, and the visit vanished from the
+        // record. The claim survives DEMOTED to ADMINISTRATIVE — the ledger
+        // line it always was — never silently upgraded, and a downstream
+        // reader sees a billing record, not a clinical finding.
+        if (
+          profile.klass === "FINANCIAL" &&
+          ("PROCEDURE_PERFORMED" === claimType || "COMPLETED_TREATMENT" === claimType)
+        ) {
+          warnings.push(
+            `claim demoted [${claim.field}/${claimType} -> ADMINISTRATIVE]: a billing document evidences the charge, not the clinical fact`,
+          );
+          claims.push({ ...claim, claimType: "ADMINISTRATIVE", page: chk.page });
+          continue;
+        }
         rejected.push(`claim rejected [${claim.field}/${claimType}]: a ${profile.klass.toLowerCase().replace(/_/g, " ")} document cannot assert a clinical fact of this kind`);
         continue;
       }

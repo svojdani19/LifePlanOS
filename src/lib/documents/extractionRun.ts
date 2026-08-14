@@ -582,12 +582,48 @@ export async function processDocumentExtraction(
   // Prior drafts are superseded by this run (pointing at the run's first row
   // when one exists — enough to walk the lineage).
   if (priorDrafts.length) {
-    await withDbRetry(() =>
-      prisma.extractedEncounter.updateMany({
-        where: { id: { in: priorDrafts.map((p) => p.id) } },
-        data: { status: "SUPERSEDED", supersededById: created[0] ?? null },
-      }),
+    // Re-extraction is not deterministic. Measured on a real case, a re-run
+    // recovered one date and LOST another the previous generation had — and a
+    // supersede-everything policy turns that variance into silent erasure of
+    // care from the chronology. So a prior row whose date the new generation
+    // failed to reproduce is retained as STALE — active, visible, flagged for
+    // review — rather than buried. A failed row is never retained: it was not
+    // trustworthy in its own generation either.
+    const newRows = created.length
+      ? await withDbRetry(() =>
+          prisma.extractedEncounter.findMany({ where: { id: { in: created } }, select: { encounterDate: true } }),
+        )
+      : [];
+    const newDates = new Set(
+      newRows.map((r) => r.encounterDate?.toISOString().slice(0, 10)).filter((d): d is string => Boolean(d)),
     );
+    const lost = priorDrafts.filter((p) => {
+      if (p.status === "EXTRACTION_FAILED") return false;
+      const day = p.encounterDate?.toISOString().slice(0, 10);
+      return Boolean(day) && !newDates.has(day as string);
+    });
+    const lostIds = new Set(lost.map((l) => l.id));
+    if (lost.length) {
+      const lostDates = [...new Set(lost.map((l) => l.encounterDate!.toISOString().slice(0, 10)))].sort();
+      warnings.push(
+        `generation loss: this extraction produced no rows dated ${lostDates.join(", ")}; the prior generation's ${lost.length} row(s) for those dates were retained as STALE for review`,
+      );
+      await withDbRetry(() =>
+        prisma.extractedEncounter.updateMany({
+          where: { id: { in: [...lostIds] } },
+          data: { status: "STALE" },
+        }),
+      );
+    }
+    const superseded = priorDrafts.filter((p) => !lostIds.has(p.id));
+    if (superseded.length) {
+      await withDbRetry(() =>
+        prisma.extractedEncounter.updateMany({
+          where: { id: { in: superseded.map((p) => p.id) } },
+          data: { status: "SUPERSEDED", supersededById: created[0] ?? null },
+        }),
+      );
+    }
   }
 
   // ── Close the run ─────────────────────────────────────────────────────────
