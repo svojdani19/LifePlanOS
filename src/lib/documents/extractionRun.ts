@@ -511,6 +511,7 @@ export async function processDocumentExtraction(
   );
 
   const created: string[] = [];
+  const createdDates = new Set<string>();
   for (const e of encounters) {
     // A current (non-stale) human row already covers this encounter — do not
     // create a duplicate AI candidate beside preserved human work.
@@ -578,6 +579,11 @@ export async function processDocumentExtraction(
     );
 
     created.push(row.id);
+    // The dates this generation actually produced, collected as the rows are
+    // written. Asking the database back for rows we just created was an extra
+    // round-trip whose only purpose was to learn what this loop already knew.
+    const createdDay = e.encounterDate?.toISOString().slice(0, 10);
+    if (createdDay) createdDates.add(createdDay);
   }
   // Prior drafts are superseded by this run (pointing at the run's first row
   // when one exists — enough to walk the lineage).
@@ -585,18 +591,16 @@ export async function processDocumentExtraction(
     // Re-extraction is not deterministic. Measured on a real case, a re-run
     // recovered one date and LOST another the previous generation had — and a
     // supersede-everything policy turns that variance into silent erasure of
-    // care from the chronology. So a prior row whose date the new generation
-    // failed to reproduce is retained as STALE — active, visible, flagged for
-    // review — rather than buried. A failed row is never retained: it was not
-    // trustworthy in its own generation either.
-    const newRows = created.length
-      ? await withDbRetry(() =>
-          prisma.extractedEncounter.findMany({ where: { id: { in: created } }, select: { encounterDate: true } }),
-        )
-      : [];
-    const newDates = new Set(
-      newRows.map((r) => r.encounterDate?.toISOString().slice(0, 10)).filter((d): d is string => Boolean(d)),
-    );
+    // care from the chronology. A prior machine row whose date the new
+    // generation failed to reproduce is therefore kept as a GENERATION_LOSS
+    // candidate: stored with its lineage and a reason, surfaced for review,
+    // and EXCLUDED from records until a human confirms it. The first version
+    // marked these STALE, which is an active state — so a fact the current
+    // extraction could not reproduce flowed straight back into the chronology
+    // as an ordinary draft, on no authority but an earlier model's. A failed
+    // row is never retained: it was not trustworthy in its own generation
+    // either.
+    const newDates = createdDates;
     const lost = priorDrafts.filter((p) => {
       if (p.status === "EXTRACTION_FAILED") return false;
       const day = p.encounterDate?.toISOString().slice(0, 10);
@@ -606,12 +610,15 @@ export async function processDocumentExtraction(
     if (lost.length) {
       const lostDates = [...new Set(lost.map((l) => l.encounterDate!.toISOString().slice(0, 10)))].sort();
       warnings.push(
-        `generation loss: this extraction produced no rows dated ${lostDates.join(", ")}; the prior generation's ${lost.length} row(s) for those dates were retained as STALE for review`,
+        `generation loss: this extraction produced no rows dated ${lostDates.join(", ")}; the prior generation's ${lost.length} row(s) were kept as generation-loss candidates — excluded from records until a reviewer confirms or restores them`,
       );
       await withDbRetry(() =>
         prisma.extractedEncounter.updateMany({
           where: { id: { in: [...lostIds] } },
-          data: { status: "STALE" },
+          data: {
+            status: "GENERATION_LOSS",
+            staleReason: `Prior machine result not reproduced by extraction run ${runId}; excluded from records until a reviewer confirms or restores it.`,
+          },
         }),
       );
     }

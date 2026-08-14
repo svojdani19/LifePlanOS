@@ -428,6 +428,84 @@ describe("overlapping rebuilds", () => {
     expect(calls.locked).toBe(1);
   });
 
+  it("changes when only a claim's value changes", () => {
+    // The first fingerprint skipped claim content entirely, so a build reading
+    // rewritten claims could publish over one reading the originals unnoticed.
+    const base = () => [{ id: "doc-1", pageCount: 1, extractedText: "x", rows: [row({ id: "r" })] }];
+    const changed = base();
+    changed[0].rows[0] = {
+      ...changed[0].rows[0],
+      claims: [{ field: "assessment", value: "A DIFFERENT finding", excerpt: "lumbar radiculopathy" }],
+    };
+    expect(caseFingerprint(changed)).not.toBe(caseFingerprint(base()));
+  });
+
+  it("changes when only a claim's excerpt or page changes", () => {
+    const base = () => [{ id: "doc-1", pageCount: 1, extractedText: "x", rows: [row({ id: "r" })] }];
+    const excerpt = base();
+    excerpt[0].rows[0] = {
+      ...excerpt[0].rows[0],
+      claims: [{ field: "assessment", value: "Lumbar radiculopathy documented", excerpt: "different excerpt" }],
+    };
+    const page = base();
+    page[0].rows[0] = {
+      ...page[0].rows[0],
+      claims: [{ field: "assessment", value: "Lumbar radiculopathy documented", excerpt: "lumbar radiculopathy", page: 7 }],
+    };
+    expect(caseFingerprint(excerpt)).not.toBe(caseFingerprint(base()));
+    expect(caseFingerprint(page)).not.toBe(caseFingerprint(base()));
+  });
+
+  it("changes when the text changes to different content of the same length", () => {
+    // Length was the old proxy, and two texts of equal length are not the same
+    // text.
+    const a = [{ id: "doc-1", pageCount: 1, extractedText: "abcdef", rows: [row({ id: "r" })] }];
+    const b = [{ id: "doc-1", pageCount: 1, extractedText: "abcdeg", rows: [row({ id: "r" })] }];
+    expect(caseFingerprint(a)).not.toBe(caseFingerprint(b));
+  });
+
+  it("ignores document and row order", () => {
+    const r1 = row({ id: "r1" });
+    const r2 = row({ id: "r2" });
+    const forward = [
+      { id: "doc-1", pageCount: 1, extractedText: "x", rows: [r1, r2] },
+      { id: "doc-2", pageCount: 1, extractedText: "y", rows: [] },
+    ];
+    const backward = [
+      { id: "doc-2", pageCount: 1, extractedText: "y", rows: [] },
+      { id: "doc-1", pageCount: 1, extractedText: "x", rows: [r2, r1] },
+    ];
+    expect(caseFingerprint(forward)).toBe(caseFingerprint(backward));
+  });
+
+  it("refuses publication when only claims changed while the build ran", async () => {
+    const built = await build(`Progress Note Date of Service: 03/18/2024 ${filler()}`, [row({ id: "r" })]);
+    const changedNow = caseFingerprint([
+      {
+        id: "doc-1",
+        pageCount: 12,
+        extractedText: `Progress Note Date of Service: 03/18/2024 ${filler()}`,
+        rows: [{ ...row({ id: "r" }), claims: [{ field: "assessment", value: "Rewritten while building", excerpt: "e" }] }],
+      },
+    ]);
+    const { store: s, calls } = storeWith(changedNow);
+    const result = await persistRecords(s, CASE, built);
+    expect(result.published).toBe(false);
+    expect(result.staleBuild).toBe(true);
+    expect(calls.updated).toBe(0);
+  });
+
+  it("refuses publication when the text changed to equal-length content while the build ran", async () => {
+    const text = `Progress Note Date of Service: 03/18/2024 ${filler()}`;
+    const built = await build(text, [row({ id: "r" })]);
+    const altered = text.slice(0, -1) + (text.endsWith("!") ? "?" : "!");
+    const changedNow = caseFingerprint([{ id: "doc-1", pageCount: 12, extractedText: altered, rows: [row({ id: "r" })] }]);
+    const { store: s, calls } = storeWith(changedNow);
+    const result = await persistRecords(s, CASE, built);
+    expect(result.published).toBe(false);
+    expect(calls.created).toBe(0);
+  });
+
   it("changes fingerprint when a reviewer corrects a record", async () => {
     // A rebuild that missed a correction is exactly the one that must not
     // publish, so a corrected field has to move the fingerprint.

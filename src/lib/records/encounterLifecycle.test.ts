@@ -42,6 +42,21 @@ describe("which rows still describe the case", () => {
     expect(isActiveEncounter({ status: "REVIEWED", supersededById: "later-row" })).toBe(false);
   });
 
+  it("keeps a machine generation-loss candidate out of everything downstream", () => {
+    // A fact the current extraction cannot reproduce must not remain part of
+    // the chronology merely because an earlier model generated it. The row is
+    // stored for review; it is not active.
+    expect(isActiveEncounter({ status: "GENERATION_LOSS" })).toBe(false);
+    expect(ACTIVE_ENCOUNTER_WHERE.status.in).not.toContain("GENERATION_LOSS");
+  });
+
+  it("keeps machine loss distinct from stale HUMAN work", () => {
+    // STALE marks a reviewed row whose source changed. A person put their name
+    // to it, so it stays visible; a lost machine draft has no such standing.
+    expect(isActiveEncounter({ status: "STALE" })).toBe(true);
+    expect(isActiveEncounter({ status: "GENERATION_LOSS" })).toBe(false);
+  });
+
   it("treats an unclassified state as inactive", () => {
     // A state nobody has classified is not one to feed into a medico-legal
     // document on the assumption it is fine. Deny-lists are what produced the
@@ -81,6 +96,7 @@ describe("the definition itself", () => {
       { id: "superseded", status: "SUPERSEDED" },
       { id: "replaced", status: "VERIFIED", supersededById: "reviewed" },
       { id: "failed", status: "EXTRACTION_FAILED" },
+      { id: "genloss", status: "GENERATION_LOSS" },
     ];
     expect(activeEncounters(rows).map((r) => r.id)).toEqual(["draft", "reviewed"]);
   });

@@ -260,6 +260,60 @@ describe("review lineage across regeneration", () => {
   });
 });
 
+describe("generation loss: a date the new extraction cannot reproduce", () => {
+  // GOOD_JSON produces exactly one encounter, dated 2025-03-14. A prior
+  // machine row dated any other day is a date the new generation lost.
+  const lostRow = (over: Record<string, unknown> = {}) => ({
+    id: "enc-lost",
+    status: "AI_DRAFT",
+    encounterDate: new Date("2024-11-02T00:00:00Z"),
+    provider: "Someone Earlier, MD",
+    page: null,
+    sourceFingerprint: "old",
+    ...over,
+  });
+
+  it("keeps an omitted prior AI_DRAFT as a reviewable candidate, excluded from records", async () => {
+    // The first version marked these STALE — an ACTIVE state — so a fact the
+    // current extraction could not reproduce flowed straight back into the
+    // chronology on no authority but an earlier model's.
+    db.encounters.push(lostRow());
+    await processDocumentExtraction("doc-1", { provider: provider([GOOD_JSON]), exemplarGuidance: [] });
+    const lost = db.encounters.find((e) => e.id === "enc-lost")!;
+    expect(lost.status).toBe("GENERATION_LOSS");
+    expect(String(lost.staleReason)).toMatch(/not reproduced/i);
+    expect(String(lost.staleReason)).toMatch(/excluded from records/i);
+    // Stored and traceable — never deleted, never pointed at a replacement.
+    expect(lost.supersededById ?? null).toBeNull();
+    expect(lost.encounterDate).toEqual(new Date("2024-11-02T00:00:00Z"));
+  });
+
+  it("treats an omitted prior AI_AUDIT_PASSED the same way", async () => {
+    db.encounters.push(lostRow({ status: "AI_AUDIT_PASSED" }));
+    await processDocumentExtraction("doc-1", { provider: provider([GOOD_JSON]), exemplarGuidance: [] });
+    expect(db.encounters.find((e) => e.id === "enc-lost")!.status).toBe("GENERATION_LOSS");
+  });
+
+  it("never retains a failed row: EXTRACTION_FAILED is superseded as before", async () => {
+    db.encounters.push(lostRow({ status: "EXTRACTION_FAILED" }));
+    await processDocumentExtraction("doc-1", { provider: provider([GOOD_JSON]), exemplarGuidance: [] });
+    expect(db.encounters.find((e) => e.id === "enc-lost")!.status).toBe("SUPERSEDED");
+  });
+
+  it("a later extraction reproducing the case does not create an uncontrolled duplicate", async () => {
+    db.encounters.push(lostRow());
+    await processDocumentExtraction("doc-1", { provider: provider([GOOD_JSON]), exemplarGuidance: [] });
+    await processDocumentExtraction("doc-1", { provider: provider([GOOD_JSON]), exemplarGuidance: [], force: true });
+    // The candidate stays a candidate — untouched by the second run — and the
+    // active set holds exactly the newest generation.
+    expect(db.encounters.find((e) => e.id === "enc-lost")!.status).toBe("GENERATION_LOSS");
+    const active = db.encounters.filter(
+      (e) => ["AI_DRAFT", "AI_AUDIT_PASSED"].includes(e.status as string) && !e.supersededById,
+    );
+    expect(active).toHaveLength(1);
+  });
+});
+
 describe("any-size processing: fault containment", () => {
   // A two-chunk document: the first section is good clinical text, the second
   // contains a marker the fake provider treats as a poison pill.

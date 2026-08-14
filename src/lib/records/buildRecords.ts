@@ -615,35 +615,58 @@ export type { AnalysisClass };
  * build, started before a document finished extracting, could publish over a
  * newer one and quietly drop that document's records.
  *
- * The fingerprint covers what a build's output depends on: which documents and
- * rows were active, and every human correction, because a rebuild that misses a
- * correction is exactly the case that must not publish. It deliberately does
- * NOT cover claim text — an extraction that rewrites a claim without changing
- * the row set produces the same records, and refusing to publish then would
- * livelock a busy case.
+ * The fingerprint covers everything the build's output actually depends on.
+ *
+ * The first version hashed the extracted text's LENGTH and skipped claim
+ * content entirely, on the theory that a rewritten claim with an unchanged row
+ * set produces the same records. That theory was wrong on every count that
+ * matters: claims determine summaries, materiality, classification, dates,
+ * citations and chronology content, and the text determines note boundaries,
+ * date resolution and attribution. Two texts of equal length are not the same
+ * text, and a build read from either could publish over the other unnoticed.
+ *
+ * Determinism: documents and rows sort by id; claims keep their STORED order,
+ * because claim order reaches the writer and the duplicate fold; JSON encoding
+ * makes every field boundary explicit; the text is length-prefixed so content
+ * can never be confused with the metadata around it. Nothing volatile — no
+ * timestamps of reading, no database return order — participates.
  */
 export function caseFingerprint(documents: readonly RecordSource[]): string {
   const hash = createHash("sha256");
   for (const doc of [...documents].sort((a, b) => a.id.localeCompare(b.id))) {
-    hash.update(`d:${doc.id}:${doc.pageCount ?? 0}:${doc.extractedText?.length ?? 0}\n`);
+    const text = doc.extractedText ?? "";
+    hash.update(`d:${doc.id}:${doc.pageCount ?? 0}:${text.length}:`);
+    hash.update(text);
+    hash.update("\n");
     for (const row of [...doc.rows].sort((a, b) => a.id.localeCompare(b.id))) {
-      // Row identity, lifecycle, and everything a reviewer can correct.
+      // Row identity, lifecycle, position, and everything a reviewer can
+      // correct — encoded as JSON so no field boundary is ambiguous.
       hash.update(
-        [
-          "r",
+        JSON.stringify([
           row.id,
           row.status ?? "",
+          // supersededById is deliberately absent: active rows always carry
+          // null there, so it cannot vary among a build's inputs.
           row.encounterDate?.toISOString() ?? "",
+          row.dateStatus ?? "",
           row.provider ?? "",
           row.providerCredentials ?? "",
           row.facility ?? "",
           row.encounterType ?? "",
           row.analysisClass ?? "",
           row.substanceClass ?? "",
+          row.page ?? null,
+          row.pageEnd ?? null,
+          row.segmentKey ?? "",
+          row.verifiedContentHash ?? "",
           // The wording itself, so an edited summary changes the fingerprint.
           row.factualSummary ?? "",
-        ].join(":") + "\n",
+          // Every claim property downstream construction reads, in stored
+          // order.
+          row.claims.map((c) => [c.field, c.value, c.excerpt, c.page ?? null, c.claimType ?? ""]),
+        ]),
       );
+      hash.update("\n");
     }
   }
   return hash.digest("hex");

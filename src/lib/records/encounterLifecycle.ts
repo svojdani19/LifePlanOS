@@ -36,6 +36,7 @@ export const ENCOUNTER_STATES = [
   "REJECTED",
   "SUPERSEDED",
   "EXTRACTION_FAILED",
+  "GENERATION_LOSS",
 ] as const;
 
 export type EncounterState = (typeof ENCOUNTER_STATES)[number];
@@ -63,7 +64,23 @@ export const ACTIVE_ENCOUNTER_STATES: readonly EncounterState[] = [
  * SUPERSEDED is a row replaced by a later extraction of the same source.
  * EXTRACTION_FAILED never produced trustworthy content in the first place.
  */
-export const INACTIVE_ENCOUNTER_STATES: readonly EncounterState[] = ["REJECTED", "SUPERSEDED", "EXTRACTION_FAILED"];
+/**
+ * GENERATION_LOSS is a prior machine result the current extraction did not
+ * reproduce. It is NOT active: a fact the current extraction cannot reproduce
+ * must not remain part of the current chronology merely because an earlier
+ * model generated it. It is also not SUPERSEDED — nothing replaced it — and
+ * not STALE, which marks HUMAN work whose source changed and stays visible
+ * precisely because a person put their name to it. The row is kept, with its
+ * lineage and a reason, for a reviewer to confirm or restore through the
+ * existing review action; until a human does, it contributes nothing
+ * downstream.
+ */
+export const INACTIVE_ENCOUNTER_STATES: readonly EncounterState[] = [
+  "REJECTED",
+  "SUPERSEDED",
+  "EXTRACTION_FAILED",
+  "GENERATION_LOSS",
+];
 
 export interface LifecycleRow {
   status?: string | null;
