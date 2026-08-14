@@ -31,6 +31,7 @@ import {
 import { resolveDate, isDocumented, type DateBasis, type ResolvedDate, type UnresolvedReason } from "@/lib/records/dateResolution";
 import { createHash } from "node:crypto";
 import { CURRENT_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
+import { PROVENANCE_UPGRADE_STALE_REASON } from "@/lib/records/provenanceUpgrade";
 import { authoritativeFacts, claimDiscrepancies, type ReviewableRow } from "@/lib/records/humanAuthority";
 import { yearProfile, type YearProfile } from "@/lib/records/dateSanity";
 import {
@@ -788,6 +789,8 @@ export interface PersistResult {
   draftsSuppressed?: number;
   /** Reviewed events marked stale because their series membership changed. */
   reviewedMarkedStale?: number;
+  /** Legacy reviews staled once because they predate content fingerprinting. */
+  reviewedUnverifiable?: number;
   /** True when publication was refused because the case moved on. */
   staleBuild?: boolean;
   reason?: string;
@@ -875,7 +878,7 @@ export async function persistRecords(
     // are checked against, so a reviewed event does not gain a draft twin.
     const reviewed = await tx.chronologyEvent.findMany({
       where: { caseId, reviewStatus: { not: "AI_DRAFT" } },
-      select: { id: true, eventDate: true, eventDateEnd: true, eventType: true, provider: true, sourceDocumentId: true, sourceFingerprint: true },
+      select: { id: true, eventDate: true, eventDateEnd: true, eventType: true, provider: true, sourceDocumentId: true, sourceFingerprint: true, reviewStatus: true },
     });
     const reviewedKept = reviewed.length;
     // Suppression must see the series END as well as the base identity. With
@@ -905,18 +908,38 @@ export async function persistRecords(
     // its date, provider and range stayed put — the old entry remained
     // "reviewed", and the corrected draft was the one withheld.
     const contentChanged: string[] = [];
+    const unverifiable: string[] = [];
     const toInsert = built.chronology.filter((event) => {
-      const held = reviewedByFull.get(fullKey(event)) as { id?: string; sourceFingerprint?: string | null } | undefined;
+      const held = reviewedByFull.get(fullKey(event)) as { id?: string; sourceFingerprint?: string | null; reviewStatus?: string | null } | undefined;
       if (!held) return true;
       if (held.sourceFingerprint && event.sourceFingerprint && held.sourceFingerprint !== event.sourceFingerprint) {
         if (held.id) contentChanged.push(held.id);
         return true; // the corrected draft goes in beside the now-stale review
       }
-      // Legacy reviewed rows without a stored fingerprint cannot be compared;
-      // they keep the old suppression behaviour rather than being churned.
+      // A human-authored review without a stored fingerprint cannot PROVE it
+      // still matches the source. The first version kept the old suppression
+      // ("rather than being churned") — which meant an unverifiable authority
+      // could withhold a corrected draft indefinitely, and backfilling a hash
+      // as if the reviewer had approved today's content would be worse. So:
+      // one-time provenance upgrade. The review goes STALE with a reason that
+      // says exactly this, the fresh draft goes in beside it, and a reviewer
+      // confirms or rejects once. Rows already out of review (STALE,
+      // SUPERSEDED, REJECTED) keep plain suppression — re-staling a rejected
+      // event would resurrect it.
+      if (!held.sourceFingerprint && held.id && ["HUMAN_EDITED", "REVIEWED", "VERIFIED"].includes(held.reviewStatus ?? "")) {
+        unverifiable.push(held.id);
+        return true;
+      }
       return false;
     });
     const suppressed = built.chronology.length - toInsert.length;
+
+    if (unverifiable.length && tx.chronologyEvent.updateMany) {
+      await tx.chronologyEvent.updateMany({
+        where: { id: { in: unverifiable } },
+        data: { reviewStatus: "STALE", staleReason: PROVENANCE_UPGRADE_STALE_REASON },
+      });
+    }
 
     // Reviewed entries whose membership moved on: same identity, new end.
     const grewStale = [
@@ -947,6 +970,7 @@ export async function persistRecords(
       reviewedKept,
       draftsSuppressed: suppressed,
       reviewedMarkedStale: [...new Set(grewStale)].length,
+      reviewedUnverifiable: unverifiable.length,
     };
   });
 }

@@ -49,6 +49,7 @@ import { DOC_TYPE_GROUPS, TYPE_LABEL, TYPE_GROUP } from "@/lib/documents/taxonom
 import { pageRange } from "@/lib/documents/meta";
 import { recordEncounters, narrativeFor } from "@/lib/documents/recordSummary";
 import { structuredConfidence } from "@/lib/engine/citationQuality";
+import { PROVENANCE_UPGRADE_STALE_REASON } from "@/lib/records/provenanceUpgrade";
 import { buildRecommendationDossier, type DossierCondition, type DossierChronoEvent, type DossierCase, type EvidenceItem, type RecommendationDossier } from "@/lib/engine/medicalNecessity";
 import { buildReasoningAssessment, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningAssessment, type ReasoningItem } from "@/lib/engine/clinicalReasoning";
 import { filterSortCare, type CareSortKey } from "@/lib/uiFilters";
@@ -1201,6 +1202,12 @@ function ChronologyPanel({ data, canEdit, canVerify = false, call }: { data: Any
                   {canVerify && e.reviewStatus === "VERIFIED" && (
                     <button className="btn-outline px-2 py-0.5 text-[11px]" onClick={() => call(`/api/cases/${data.id}/chronology/${e.id}`, "POST", { action: "reopen" })}>Reopen</button>
                   )}
+                  {/* A STALE copy is resolved either by re-verifying it (above)
+                      or by dismissing it in favor of the fresh draft: reopen
+                      returns it to AI_DRAFT, which the next rebuild replaces. */}
+                  {canVerify && e.reviewStatus === "STALE" && (
+                    <button className="btn-outline px-2 py-0.5 text-[11px]" onClick={() => call(`/api/cases/${data.id}/chronology/${e.id}`, "POST", { action: "reopen" })}>Dismiss stale copy</button>
+                  )}
                 </div>
 
                 {/* Source citation for the encounter. */}
@@ -1247,6 +1254,29 @@ function ChronologyPanel({ data, canEdit, canVerify = false, call }: { data: Any
         {data.documents.length === 1 ? "record" : "records"}
         {excluded > 0 ? ` (${excluded} without a bearing on the complaint were excluded)` : ""}.
       </p>
+
+      {/* One-time provenance upgrade: reviews that predate content
+          fingerprinting were staled beside fresh drafts. Shown only while any
+          remain unresolved, then disappears for good. */}
+      {(() => {
+        const upgraded = (data.chronologyEvents as AnyRec[]).filter(
+          (e) => e.reviewStatus === "STALE" && e.staleReason === PROVENANCE_UPGRADE_STALE_REASON,
+        ).length;
+        if (!upgraded) return null;
+        return (
+          <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2.5 text-sm text-amber-900">
+            <p className="font-semibold">One-time re-review: {upgraded} previously reviewed {upgraded === 1 ? "event predates" : "events predate"} content verification.</p>
+            <p className="mt-1 text-amber-800">
+              These events were reviewed before the system stored a content fingerprint, so their content can no longer be
+              proven to match the records. Nothing was deleted: each is marked{" "}
+              <span className="font-medium">Stale — source changed</span> with a fresh draft beside it for comparison.
+              For each one, either <span className="font-medium">Verify</span> the stale entry if its content is still
+              correct, or <span className="font-medium">Dismiss stale copy</span> to keep the fresh draft. This notice
+              disappears once all are resolved and will not recur.
+            </p>
+          </div>
+        );
+      })()}
 
       {/* Search + type chips + jump-to-year */}
       <div className="flex flex-wrap items-center gap-2">

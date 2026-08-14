@@ -15,6 +15,7 @@ import {
   type RecordStore,
 } from "@/lib/records/buildRecords";
 import type { MergeableRow } from "@/lib/records/entryMerge";
+import { PROVENANCE_UPGRADE_STALE_REASON } from "@/lib/records/provenanceUpgrade";
 import { findNotes } from "@/lib/records/noteStructure";
 
 // Synthetic throughout. Every fixture below is written to look like the charts
@@ -956,7 +957,7 @@ describe("series membership changes that keep the same end date", () => {
 
 describe("a reviewed event whose SOURCE changed is stale, not authoritative", () => {
   const contentStore = (reviewed: Record<string, unknown>[], fingerprintOf: () => string) => {
-    const calls = { created: 0, staleMarked: [] as string[] };
+    const calls = { created: 0, staleMarked: [] as string[], staleReasons: [] as (string | undefined)[] };
     const base: RecordStore = {
       lockCase: async () => {},
       currentFingerprint: async () => fingerprintOf(),
@@ -969,9 +970,10 @@ describe("a reviewed event whose SOURCE changed is stale, not authoritative", ()
           calls.created += data.length;
           return null;
         },
-        updateMany: async ({ where }) => {
+        updateMany: async ({ where, data }) => {
           const ids = (where.id as { in: string[] }).in;
           calls.staleMarked.push(...ids);
+          calls.staleReasons.push(...ids.map(() => (data as { staleReason?: string }).staleReason));
           return { count: ids.length };
         },
       },
@@ -1036,6 +1038,70 @@ describe("a reviewed event whose SOURCE changed is stale, not authoritative", ()
     const result = await persistRecords(s, CASE, built);
     expect(result.draftsSuppressed).toBe(1);
     expect(result.reviewedMarkedStale).toBe(0);
+  });
+
+  it("stales a legacy review with no stored fingerprint ONCE, with the provenance reason", async () => {
+    // The first version kept the old suppression for these rows — an
+    // unverifiable authority withholding corrected drafts indefinitely.
+    // Backfilling a hash would be worse: it would assert the reviewer approved
+    // today's content. So the review is staled once, honestly labeled, with
+    // the fresh draft inserted beside it for a one-time human decision.
+    const built = await build(
+      `Progress Note Date of Service: 03/18/2024 ${filler()} lumbar radiculopathy ${filler()}`,
+      [row({ id: "r" })],
+      12,
+      true,
+    );
+    const draft = built.chronology[0];
+    const reviewed = [
+      {
+        id: "reviewed-before-fingerprints",
+        eventDate: draft.eventDate,
+        eventDateEnd: null,
+        eventType: draft.eventType,
+        provider: draft.provider,
+        sourceDocumentId: draft.sourceDocumentId,
+        sourceFingerprint: null,
+        reviewStatus: "REVIEWED",
+      },
+    ] as never[];
+    const { store: s, calls } = contentStore(reviewed as never, () => built.fingerprint);
+    const result = await persistRecords(s, CASE, built);
+    expect(result.published).toBe(true);
+    expect(result.draftsSuppressed).toBe(0);
+    expect(result.reviewedUnverifiable).toBe(1);
+    expect(calls.staleMarked).toContain("reviewed-before-fingerprints");
+    expect(calls.staleReasons).toContain(PROVENANCE_UPGRADE_STALE_REASON);
+    expect(calls.created).toBe(built.chronology.length);
+  });
+
+  it("does not resurrect a rejected or already-stale row through the provenance upgrade", async () => {
+    // Marking a REJECTED event STALE would pull it back into the review
+    // surface; a row already out of review keeps plain suppression.
+    const built = await build(
+      `Progress Note Date of Service: 03/18/2024 ${filler()} lumbar radiculopathy ${filler()}`,
+      [row({ id: "r" })],
+      12,
+      true,
+    );
+    const draft = built.chronology[0];
+    const rejected = [
+      {
+        id: "rejected-long-ago",
+        eventDate: draft.eventDate,
+        eventDateEnd: null,
+        eventType: draft.eventType,
+        provider: draft.provider,
+        sourceDocumentId: draft.sourceDocumentId,
+        sourceFingerprint: null,
+        reviewStatus: "REJECTED",
+      },
+    ] as never[];
+    const { store: s, calls } = contentStore(rejected as never, () => built.fingerprint);
+    const result = await persistRecords(s, CASE, built);
+    expect(result.reviewedUnverifiable).toBe(0);
+    expect(result.draftsSuppressed).toBe(1);
+    expect(calls.staleMarked).toHaveLength(0);
   });
 });
 
