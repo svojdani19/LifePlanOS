@@ -1216,6 +1216,26 @@ function ChronologyPanel({ data, canEdit, canVerify = false, call }: { data: Any
                     {e.sourcePage ? `, p. ${e.sourcePage}` : ""}
                   </a>
                 )}
+
+                {/* Treatment-series membership: the series row asserts a count
+                    and range, so every member visit must stay citable — each
+                    date links to its own document and page. */}
+                {Array.isArray(e.seriesMembers) && e.seriesMembers.length > 0 && (
+                  <div className="mt-1.5 text-xs text-ink-700">
+                    <span className="font-semibold text-ink-600">Series visits ({e.seriesMembers.length}): </span>
+                    {(e.seriesMembers as { date?: string; documentId?: string; page?: number | null }[]).map((m, i) => (
+                      <a
+                        key={`${m.date}-${i}`}
+                        href={m.documentId ? `/api/cases/${data.id}/documents/${m.documentId}/view` : undefined}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mr-2 whitespace-nowrap text-brand-700 hover:underline"
+                      >
+                        {m.date}{m.page ? ` (p. ${m.page})` : ""}
+                      </a>
+                    ))}
+                  </div>
+                )}
               </div>
     );
   };

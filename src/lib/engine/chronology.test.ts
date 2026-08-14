@@ -245,3 +245,36 @@ describe("sameProvider — abbreviated chart and billing name forms", () => {
     expect(sameProvider("Chen, MD", "Irwin, PA-C")).toBe(false);
   });
 });
+
+import { significanceOf } from "./chronology";
+
+describe("significanceOf — computed at display time, never stored", () => {
+  // Stored significance described the plan as it stood at the LAST records
+  // rebuild; computed against the caller's current conditions and services it
+  // always describes the plan the reader is actually looking at.
+  const event = {
+    summary: "Follow-up for lumbar radiculopathy; continues physical therapy.",
+    diagnosis: "Lumbar radiculopathy",
+    treatment: "Continue physical therapy",
+  };
+
+  it("ties an event to the conditions and services supplied NOW", () => {
+    const text = significanceOf(event, ["Lumbar radiculopathy"], ["Physical therapy"]);
+    expect(text).toMatch(/Documents Lumbar radiculopathy/);
+    expect(text).toMatch(/[Pp]hysical therapy/);
+  });
+
+  it("changes when the plan changes, with the event untouched", () => {
+    const before = significanceOf(event, ["Lumbar radiculopathy"], ["Physical therapy"]);
+    const after = significanceOf(event, ["Cervical strain"], ["Home exercise program"]);
+    expect(before).not.toBe(after);
+  });
+
+  it("returns null rather than a generic sentence when nothing matches", () => {
+    expect(significanceOf(event, ["Traumatic brain injury"], ["Attendant care"])).toBeNull();
+  });
+
+  it("returns null for an empty event", () => {
+    expect(significanceOf({}, ["Lumbar radiculopathy"], [])).toBeNull();
+  });
+});

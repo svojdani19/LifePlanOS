@@ -2,6 +2,7 @@ import { functionalFinding } from "@/lib/engine/integrity";
 import type { Block } from "./doc";
 import { originLabel } from "./data";
 import { projectionNote, type ProjectionInputs } from "@/lib/engine/projectionProvenance";
+import { seriesCitation, seriesMembersOf } from "@/lib/records/seriesCitation";
 import {
   buildVisitLedger,
   buildDiagnosesEvolution,
@@ -116,6 +117,12 @@ function projectionSentence(it: RDFutureCareItem): string {
 }
 
 function eventSource(data: ReportData, e: RDChronoEvent): string {
+  // A treatment series cites every member visit, not just the first document.
+  const fromSeries = seriesCitation(
+    seriesMembersOf(e.seriesMembers),
+    (id) => (id ? data.case.documents.find((d) => d.id === id)?.filename ?? "record on file" : "record on file"),
+  );
+  if (fromSeries) return fromSeries;
   const doc = e.sourceDocumentId ? data.case.documents.find((d) => d.id === e.sourceDocumentId) : undefined;
   return `Source: ${doc ? doc.filename : "record on file"}${e.sourcePage ? `, p. ${e.sourcePage}` : ""}.`;
 }

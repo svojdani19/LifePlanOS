@@ -427,6 +427,48 @@ function humanList(items: string[]): string {
   return `${u.slice(0, -1).join(", ")}, and ${u[u.length - 1]}`;
 }
 
+/**
+ * Display-time significance for a persisted chronology event.
+ *
+ * Computed where the event is SHOWN or EXPORTED, never stored on the canonical
+ * row. A stored sentence describes the conditions and care plan as they stood
+ * at the last records rebuild — and the plan regenerates independently of the
+ * chronology, so a stored sentence quietly described an OLD plan. Worse, a
+ * chronology enriched from the plan feeds the plan's next generation: a
+ * feedback loop. The canonical chronology stays evidence-only; this ties each
+ * event to whatever the case says NOW, at the moment a reader looks.
+ */
+export function significanceOf(
+  event: {
+    summary?: string | null;
+    diagnosis?: string | null;
+    treatment?: string | null;
+    procedure?: string | null;
+    objectiveFindings?: string | null;
+    imagingFindings?: string | null;
+    medications?: string | null;
+    functionalStatus?: string | null;
+    sourceQuote?: string | null;
+  },
+  condNames: string[],
+  careServices: string[],
+): string | null {
+  const hay = [
+    event.summary,
+    event.diagnosis,
+    event.treatment,
+    event.procedure,
+    event.objectiveFindings,
+    event.imagingFindings,
+    event.medications,
+    event.functionalStatus,
+    event.sourceQuote,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return hay ? significance(hay, condNames, careServices) : null;
+}
+
 // One sentence tying the event to the causation map and the care plan.
 export function significance(hay: string, condNames: string[], careServices: string[]): string | null {
   const dx = condNames.filter((n) => documentsDiagnosis(hay, n));

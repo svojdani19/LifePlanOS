@@ -6,6 +6,8 @@ import { prisma } from "@/lib/db";
 import { ROLE_PERMISSIONS } from "@/lib/rbac";
 import { effectiveLegacyPermissions, effectiveAssignmentTemplates, isAttorneyPresentation } from "@/lib/authz/effective";
 import { assumptionsFor } from "@/lib/engine/generate";
+import { significanceOf } from "@/lib/engine/chronology";
+import { CHRONOLOGY_REVIEW_WHERE } from "@/lib/records/encounterLifecycle";
 import { rankPrecedents } from "@/lib/precedents/match";
 import { CaseWorkspace } from "@/components/case/CaseWorkspace";
 
@@ -59,7 +61,9 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
     include: {
       createdBy: { select: { name: true } },
       documents: { orderBy: { createdAt: "desc" } },
-      chronologyEvents: { orderBy: { eventDate: "asc" } },
+      // Review scope: current events plus STALE for re-review comparison;
+      // superseded and rejected history stays out of the workspace.
+      chronologyEvents: { where: CHRONOLOGY_REVIEW_WHERE, orderBy: { eventDate: "asc" } },
       conditions: { orderBy: { confidence: "desc" } },
       futureCareItems: { where: { supersededAt: null }, orderBy: { presentValue: "desc" } },
       assumptionChanges: { orderBy: { createdAt: "desc" }, take: 20 },
@@ -70,6 +74,17 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
     },
   });
   if (!c) notFound();
+
+  // Significance is computed at display time against the case's CURRENT
+  // conditions and care items — never stored on the row, where it would
+  // describe whatever the plan said at the last records rebuild.
+  {
+    const condNames = c.conditions.map((x) => x.name).filter(Boolean);
+    const careServices = c.futureCareItems.map((x) => x.service).filter(Boolean);
+    for (const e of c.chronologyEvents) {
+      e.clinicalSignificance = significanceOf(e, condNames, careServices);
+    }
+  }
 
   // Absolute number of open export-blocking integrity findings — the items
   // standing between this case and ANY final report.

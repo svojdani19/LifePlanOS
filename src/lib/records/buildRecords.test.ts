@@ -886,16 +886,36 @@ describe("recovering from a stale-build refusal", () => {
     expect(outcome.status).toMatch(/previous complete version/i);
   });
 
-  it("coalesces a request arriving while a refresh is running", async () => {
+  it("coalesces a request arriving while a refresh is running, and waits for it", async () => {
+    // The coalesced caller must not learn "published" before it is true: a
+    // caller chaining plan regeneration on the outcome would regenerate from
+    // the pre-publication chronology. So the second call resolves only after
+    // the flight it folded into has actually finished, with that flight's
+    // real result.
     const real = caseFingerprint([
       { id: "doc-1", pageCount: 1, extractedText: "Progress Note Date of Service: 03/18/2024 lumbar radiculopathy", rows: [row({ id: "r" })] },
     ]);
     const db = loaderFor([real]);
-    const first = refreshCaseRecordsWithRecovery(db, "case-recovery-3", { write: false });
+    let firstSettled = false;
+    const first = refreshCaseRecordsWithRecovery(db, "case-recovery-3", { write: false }).then((o) => {
+      firstSettled = true;
+      return o;
+    });
     const second = await refreshCaseRecordsWithRecovery(db, "case-recovery-3", { write: false });
     expect(second.coalesced).toBe(true);
-    expect(second.status).toMatch(/Updating from newer case information/);
-    await first;
+    // By the time the coalesced caller resolves, the flight has completed.
+    expect(firstSettled).toBe(true);
+    expect(second.published).toBe((await first).published);
+  });
+
+  it("reports a failed flight honestly to the caller that coalesced into it", async () => {
+    const db = loaderFor(["never-matches"]);
+    const first = refreshCaseRecordsWithRecovery(db, "case-recovery-4", { write: false });
+    const second = await refreshCaseRecordsWithRecovery(db, "case-recovery-4", { write: false });
+    expect(second.coalesced).toBe(true);
+    expect(second.published).toBe(false);
+    expect(second.status).toMatch(/previous complete version/i);
+    expect((await first).published).toBe(false);
   });
 });
 
@@ -1094,5 +1114,64 @@ describe("the production adapter wires the safeguards to the RIGHT client", () =
     const built = await build("Progress Note Date of Service: 03/18/2024 lumbar radiculopathy", [row({ id: "r" })], 1);
     const result = await persistRecords(store, CASE, built);
     expect(result.published).toBe(true);
+  });
+});
+
+describe("what breaks a routine series", () => {
+  const visit = (iso: string, over: Partial<ChronologyDraft> = {}): ChronologyDraft => ({
+    caseId: CASE,
+    eventDate: new Date(`${iso}T00:00:00Z`),
+    eventType: "THERAPY",
+    specialty: null,
+    recordType: null,
+    provider: "Michael Crone, DC",
+    facility: "Houston Spine and Rehabilitation",
+    summary: "Therapy visit; tolerated well.",
+    sourceDocumentId: "doc-1",
+    sourcePage: 1,
+    reviewStatus: "AI_DRAFT",
+    dateInferred: false,
+    relevanceScore: 50,
+    ...over,
+  });
+  const dates = ["2023-07-03", "2023-07-07", "2023-07-12", "2023-07-19", "2023-07-24", "2023-07-28"];
+
+  it("a diagnosis APPEARING against a blank baseline breaks the run", () => {
+    // The first visit documenting a new diagnosis mid-course is a development;
+    // burying it inside "6 routine visits" hides exactly what a reviewer needs.
+    const events = dates.map((d, i) => visit(d, i === 3 ? { diagnosis: "New right foot drop" } : {}));
+    const out = collapseTreatmentSeries(events);
+    const series = out.filter((e) => e.recordType === "TREATMENT_SERIES");
+    // The run splits at the appearance: three visits before, and the visit
+    // carrying the new diagnosis starts the run after.
+    expect(series.length).toBeGreaterThanOrEqual(1);
+    expect(series.some((s) => s.eventDateEnd && s.eventDateEnd < new Date("2023-07-19T00:00:00Z"))).toBe(true);
+  });
+
+  it("a restriction appearing breaks; medications appearing does not", () => {
+    const restricted = dates.map((d, i) => visit(d, i === 3 ? { restrictions: "No lifting over 10 lbs" } : {}));
+    const meds = dates.map((d, i) => visit(d, i === 3 ? { medications: "Cyclobenzaprine 10 mg" } : {}));
+    const restrictedSeries = collapseTreatmentSeries(restricted).filter((e) => e.recordType === "TREATMENT_SERIES");
+    const medsSeries = collapseTreatmentSeries(meds).filter((e) => e.recordType === "TREATMENT_SERIES");
+    // Restrictions appearing splits the run into two shorter series.
+    expect(restrictedSeries.length).toBe(2);
+    // A med list the extractor captured on one visit only is variance, not a
+    // regimen change: the run stays whole.
+    expect(medsSeries.length).toBe(1);
+    expect(medsSeries[0].seriesMembers).toHaveLength(6);
+  });
+
+  it("a field DISAPPEARING never breaks the run", () => {
+    const events = dates.map((d, i) => visit(d, i === 0 ? { diagnosis: "Lumbar strain" } : {}));
+    const out = collapseTreatmentSeries(events).filter((e) => e.recordType === "TREATMENT_SERIES");
+    expect(out).toHaveLength(1);
+  });
+});
+
+describe("the patient's name is a build input", () => {
+  it("changes the fingerprint, because consolidation excludes the patient by name", () => {
+    const docs = [{ id: "doc-1", pageCount: 1, extractedText: "Progress note", rows: [row({ id: "r" })] }];
+    expect(caseFingerprint(docs, { patientName: "Derrick McHenry" })).not.toBe(caseFingerprint(docs, { patientName: "Derrick McHale" }));
+    expect(caseFingerprint(docs, { patientName: "Derrick McHenry" })).toBe(caseFingerprint(docs, { patientName: "Derrick McHenry" }));
   });
 });

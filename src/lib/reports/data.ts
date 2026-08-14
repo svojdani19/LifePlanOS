@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { getStructuredRecord } from "@/lib/records/structuredRecord";
 import { CHRONOLOGY_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
+import { significanceOf } from "@/lib/engine/chronology";
 import {
   runIntegrityCheck,
   hasPatientRecordSupport,
@@ -70,6 +71,8 @@ export interface RDChronoEvent {
   sourceDocumentId?: string | null;
   sourcePage?: number | null;
   sourceQuote?: string | null;
+  /** [{date, documentId, page}] persisted on TREATMENT_SERIES rows. */
+  seriesMembers?: unknown;
 }
 
 /** { documentId?, filename?, page?, quote? } rows stored on Condition.evidenceSources. */
@@ -355,6 +358,17 @@ export async function loadReportData(caseId: string): Promise<ReportData> {
   });
 
   const caseData = c as unknown as RDCase;
+
+  // Significance is computed HERE, against the conditions and care items this
+  // report actually contains — never read from the row. A stored sentence
+  // described the plan as it stood at the last records rebuild, which is not
+  // necessarily the plan this report presents.
+  const condNames = caseData.conditions.map((x) => x.name).filter(Boolean) as string[];
+  const careServices = caseData.futureCareItems.map((x) => x.service).filter(Boolean) as string[];
+  for (const e of caseData.chronologyEvents) {
+    e.clinicalSignificance = significanceOf(e, condNames, careServices);
+  }
+
   const { integrity, includedIds } = computeIntegrity(caseData.futureCareItems, caseData.conditions);
 
   const structuredRecord = await getStructuredRecord(caseId, c.firmId, { scope: "output" }).catch(() => undefined);

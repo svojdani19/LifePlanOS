@@ -19,6 +19,8 @@ import {
 } from "docx";
 import { prisma } from "@/lib/db";
 import { assumptionsFor } from "@/lib/engine/generate";
+import { significanceOf } from "@/lib/engine/chronology";
+import { seriesCitation, seriesMembersOf } from "@/lib/records/seriesCitation";
 import { runIntegrityCheck, reviewLabel, evaluateCitation, functionalFinding, hasPatientRecordSupport, type RecInput, type CondInput, type PerItem, type IntegrityFinding } from "@/lib/engine/integrity";
 import { buildRecommendationDossier, type DossierCondition, type DossierChronoEvent, type DossierCase, type EvidenceItem } from "@/lib/engine/medicalNecessity";
 import { buildReasoningAssessment, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningItem, type ReasoningAssessment } from "@/lib/engine/clinicalReasoning";
@@ -264,6 +266,15 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
       attestations: { where: { status: "ACTIVE" }, orderBy: { signedAt: "desc" } },
     },
   });
+
+  // Significance is computed against THIS report's conditions and care items,
+  // never read from the row: a stored sentence described the plan as it stood
+  // at the last records rebuild, not the plan this document presents.
+  const sigConditions = c.conditions.map((x) => x.name).filter(Boolean);
+  const sigServices = c.futureCareItems.map((x) => x.service).filter(Boolean);
+  for (const e of c.chronologyEvents) {
+    e.clinicalSignificance = significanceOf(e, sigConditions, sigServices);
+  }
 
   // EPIC-011 — interviews woven into each recommendation's dossier + a Current
   // Complaints section. Provider names resolved for provider opinions.
@@ -803,7 +814,12 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     if (e.functionalStatus) body.push(labeled("Functional impact", e.functionalStatus));
     if (e.restrictions || e.workStatus) body.push(labeled("Work restrictions", [e.restrictions, e.workStatus].filter(Boolean).join("; ")));
     body.push(labeled("Clinical significance", e.clinicalSignificance || `This encounter documents part of the treatment course for ${lc(primaryDx)} and informs the future care projected in this plan.`));
-    body.push(sourceLine(`Source: ${src ? src.filename : "record on file"}${e.sourcePage ? `, p. ${e.sourcePage}` : ""}.`));
+    // A treatment series cites every member visit; an ordinary event its page.
+    const fromSeries = seriesCitation(
+      seriesMembersOf((e as { seriesMembers?: unknown }).seriesMembers),
+      (id) => (id ? docById.get(id)?.filename ?? "record on file" : "record on file"),
+    );
+    body.push(sourceLine(fromSeries ?? `Source: ${src ? src.filename : "record on file"}${e.sourcePage ? `, p. ${e.sourcePage}` : ""}.`));
   }
 
   // ══ PRE-INJURY HISTORY ═══════════════════════════════════════════════════════

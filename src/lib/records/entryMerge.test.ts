@@ -14,7 +14,10 @@ import {
   mergeRows,
   MAX_CLAIMS_PER_ENTRY,
   pageAttributionUsable,
+  appearanceOf,
+  citationFingerprintOf,
   type MergeableRow,
+  type MergedEntry,
 } from "@/lib/records/entryMerge";
 
 // Rows drawn from one note overlap in the source text; that overlap is the
@@ -858,5 +861,68 @@ describe("folding a chart back into the notes it was signed as", () => {
     const earlier = { ...at(0, "Fernando Techy, MD", "Surgery"), encounterDate: new Date("2023-01-02T00:00:00Z") };
     const notes = consolidateIntoNotes([later, earlier]);
     expect(notes[0].encounterDate?.getUTCFullYear()).toBe(2023);
+  });
+});
+
+describe("two hashes for two questions: identity vs what-the-entry-states", () => {
+  // appearanceOf's contentHash decides whether two documents carry COPIES of
+  // one record, so it is value-only: copies legitimately differ in excerpt and
+  // page. citationFingerprintOf backs the staleness check on reviewed
+  // chronology events, where a corrected excerpt, page or source IS a change.
+  // One hash serving both roles silently kept reviewed events current through
+  // citation corrections.
+  const entry = (over: Partial<MergedEntry> = {}): MergedEntry => ({
+    rowIds: ["r1"],
+    sourceDocumentId: "doc-1",
+    klass: "PROGRESS_NOTE" as MergedEntry["klass"],
+    encounterDate: new Date("2024-03-15T00:00:00Z"),
+    provider: "Dana Rivers, MD",
+    facility: "East Clinic",
+    pageStart: 4,
+    pageEnd: 5,
+    claims: [{ id: "c1", field: "assessment", value: "Lumbar radiculopathy", excerpt: "Assessment: Lumbar radiculopathy", page: 4 }],
+    mergedClasses: [],
+    ...over,
+  });
+
+  it("a corrected page number changes the citation fingerprint but not identity", () => {
+    const before = entry();
+    const after = entry({ claims: [{ ...before.claims[0], page: 7 }] });
+    expect(appearanceOf(before).contentHash).toBe(appearanceOf(after).contentHash);
+    expect(citationFingerprintOf(before)).not.toBe(citationFingerprintOf(after));
+  });
+
+  it("a corrected excerpt changes the citation fingerprint but not identity", () => {
+    const before = entry();
+    const after = entry({ claims: [{ ...before.claims[0], excerpt: "Impression: Lumbar radiculopathy at L5-S1" }] });
+    expect(appearanceOf(before).contentHash).toBe(appearanceOf(after).contentHash);
+    expect(citationFingerprintOf(before)).not.toBe(citationFingerprintOf(after));
+  });
+
+  it("a different source document changes the citation fingerprint", () => {
+    expect(citationFingerprintOf(entry())).not.toBe(citationFingerprintOf(entry({ sourceDocumentId: "doc-2" })));
+  });
+
+  it("a changed claim value changes both", () => {
+    const before = entry();
+    const after = entry({ claims: [{ ...before.claims[0], value: "Cervical strain" }] });
+    expect(appearanceOf(before).contentHash).not.toBe(appearanceOf(after).contentHash);
+    expect(citationFingerprintOf(before)).not.toBe(citationFingerprintOf(after));
+  });
+
+  it("is stable under claim reordering, like the identity hash", () => {
+    const a = entry({
+      claims: [
+        { id: "c1", field: "assessment", value: "Lumbar radiculopathy", excerpt: "e1", page: 4 },
+        { id: "c2", field: "plan", value: "Continue PT", excerpt: "e2", page: 5 },
+      ],
+    });
+    const b = entry({
+      claims: [
+        { id: "c2", field: "plan", value: "Continue PT", excerpt: "e2", page: 5 },
+        { id: "c1", field: "assessment", value: "Lumbar radiculopathy", excerpt: "e1", page: 4 },
+      ],
+    });
+    expect(citationFingerprintOf(a)).toBe(citationFingerprintOf(b));
   });
 });

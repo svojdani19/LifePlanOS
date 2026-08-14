@@ -528,6 +528,10 @@ function absorbCopy(twin: MergedEntry, other: MergedEntry): void {
 
 /** This entry as an appearance in its own document. */
 export function appearanceOf(entry: MergedEntry): RecordAppearance {
+  // Value-only ON PURPOSE: this hash decides whether two documents carry
+  // copies of the same record, and copies legitimately differ in excerpt and
+  // page. Anything asking "did what this entry STATES change?" wants
+  // citationFingerprintOf instead.
   const text = entry.claims.map((c) => `${c.field}:${c.value}`).sort().join("\n");
   return {
     documentId: entry.sourceDocumentId,
@@ -537,6 +541,24 @@ export function appearanceOf(entry: MergedEntry): RecordAppearance {
     provider: entry.provider,
     contentHash: createHash("sha256").update(text).digest("hex").slice(0, 32),
   };
+}
+
+/**
+ * A fingerprint of everything an entry tells a reader — values AND citations.
+ *
+ * The staleness check on a reviewed chronology event asks a different question
+ * than duplicate identity: not "is this the same record?" but "did anything
+ * this event states change?" — and a corrected excerpt, page or source is a
+ * change a reviewer signed off without seeing. Reusing the identity hash for
+ * both quietly kept reviewed events current through citation corrections.
+ */
+export function citationFingerprintOf(entry: MergedEntry): string {
+  const claims = entry.claims
+    .map((c) => [c.field, c.value, c.excerpt ?? "", c.page ?? "", c.claimType ?? ""].join("\u0000"))
+    .sort()
+    .join("\n");
+  const source = [entry.sourceDocumentId, entry.pageStart ?? "", entry.pageEnd ?? ""].join("|");
+  return createHash("sha256").update(`${source}\n${claims}`).digest("hex").slice(0, 32);
 }
 
 /** Union of both sides' appearances, one per document, page ranges widened. */

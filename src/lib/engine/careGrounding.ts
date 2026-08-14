@@ -26,6 +26,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { prisma } from "@/lib/db";
+import { CURRENT_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
 import { resolveTimeline, anatomyKey, type Resolved, type TemporalFact } from "@/lib/engine/temporalResolution";
 import { statedQuantities } from "@/lib/engine/projectionProvenance";
 
@@ -67,16 +68,17 @@ export const supportsCare = (c: TimedCitation) => c.temporal.supportsFutureCare;
 
 const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
 
-const ACTIVE = ["AI_DRAFT", "AI_AUDIT_PASSED", "HUMAN_EDITED", "REVIEWED", "VERIFIED"];
-
 /** Load the case's validated-claim support surface. Tenant-scoped by caseId. */
 const INPATIENT_CONTEXT_RE = /inpatient|hospital|med.?surg|icu|emergency|admission|discharge summary|ambulance|transport|nursing/i;
 
 export async function loadRecordCareSupport(caseId: string, dateOfInjury?: Date | null): Promise<RecordCareSupport> {
   const encounters = await prisma.extractedEncounter.findMany({
     // Only encounters classified as CLINICAL care inform the plan; ancillary
-    // logs and paperwork do not (their claims still appear in reports).
-    where: { caseId, status: { in: ACTIVE }, OR: [{ substanceClass: null }, { substanceClass: "CLINICAL" }] },
+    // logs and paperwork do not (their claims still appear in reports). The
+    // lifecycle scope is the shared CURRENT_OUTPUT definition — the hand-rolled
+    // status list this replaces had already drifted (it never excluded rows
+    // carrying a successor), and would drift again on the next state.
+    where: { caseId, ...CURRENT_OUTPUT_WHERE, OR: [{ substanceClass: null }, { substanceClass: "CLINICAL" }] },
     select: { claims: true, encounterDate: true, provider: true, sourceDocumentId: true, encounterType: true },
   });
   const doiIso = dateOfInjury ? dateOfInjury.toISOString().slice(0, 10) : null;

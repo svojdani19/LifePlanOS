@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { makeRecordStore, refreshCaseRecordsWithRecovery } from "@/lib/records/buildRecords";
-import { REVIEW_VISIBLE_STATES } from "@/lib/records/encounterLifecycle";
+import { REVIEW_VISIBLE_STATES, isCurrentOutput } from "@/lib/records/encounterLifecycle";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requireCanonicalPermission, requireCase, audit } from "@/lib/tenant";
 import { recordCorrectionExemplar, type CorrectionCategory } from "@/lib/llm/correctionExemplars";
@@ -29,6 +29,27 @@ import { ok, handleError } from "@/lib/api";
 
 /** Fields whose change alters the MEANING a verifier signed off on. */
 const MATERIAL_FIELDS = ["factualSummary", "provider", "providerCredentials", "facility", "encounterType", "encounterDate", "substanceClass", "analysisClass"] as const;
+
+// ── When does a review action invalidate the care plan? ──────────────────────
+//
+// One rule, stated once: the plan regenerates when a review action changes the
+// plan's INPUT SET — either the membership of a row in it, or a field the plan
+// generator actually reads. Anything else refreshes the derived Records and
+// chronology but leaves the plan alone.
+//
+// Membership: a rejected row leaves the output set; confirming a STALE or
+// GENERATION_LOSS row (by review, verify, or edit) brings it back in.
+//
+// Fields: careGrounding reads encounterDate, provider, encounterType and
+// substanceClass off each encounter (CLINICAL/unclassified only), and
+// analysisClass governs chronology admission. Editing any of these on a row in
+// the output set changes what the plan would be built from. factualSummary,
+// facility and credentials are displayed, not planned from.
+//
+// The previous rule (analysisClass or date only) was assembled per call site,
+// and each site missed differently: substanceClass edits changed the plan's
+// inputs without regenerating, and rejection never regenerated at all.
+const PLAN_INPUT_FIELDS = ["encounterDate", "provider", "encounterType", "substanceClass", "analysisClass"] as const;
 
 const patchSchema = z.object({
   factualSummary: z.string().min(3).max(2000).optional(),
@@ -81,9 +102,10 @@ const scheduleDerivedRefresh = (caseId: string, afterPublish?: () => void) => {
   void refreshCaseRecordsWithRecovery(makeRecordStore(prisma as never), caseId)
     .then((outcome) => {
       // Plan regeneration reads the chronology, so it must run AFTER the
-      // corrected records publish — fired independently, it raced the refresh
-      // and could regenerate the plan from the pre-correction timeline.
-      if (afterPublish && (outcome.published || outcome.coalesced)) afterPublish();
+      // corrected records publish. A coalesced outcome now carries the real
+      // publication result of the flight it folded into — gating on
+      // `coalesced` itself fired regeneration before that flight published.
+      if (afterPublish && outcome.published) afterPublish();
     })
     .catch((error) => console.error(`[review] derived refresh failed for case ${caseId}: ${String(error).slice(0, 200)}`));
 };
@@ -162,6 +184,9 @@ export async function PATCH(req: Request, { params: paramsPromise }: Params) {
     const editedFields = new Set<string>(Array.isArray(existing.editedFields) ? (existing.editedFields as string[]) : []);
     for (const f of materialTouched) editedFields.add(f);
     const dateProvided = input.encounterDate !== undefined;
+    // Captured from the row AS READ, before the status write below moves it to
+    // HUMAN_EDITED: the question is whether the plan was built without this row.
+    const restoredToOutput = !isCurrentOutput(existing);
 
     // Compare-and-set on updatedAt: an edit lands on the exact version that
     // was read, or not at all.
@@ -228,12 +253,11 @@ export async function PATCH(req: Request, { params: paramsPromise }: Params) {
         ...(revokesVerification ? { revokedVerification: true, reason: input.reviewNote } : {}),
       },
     });
-    // A reclassification or a newly supplied date changes what the record
-    // SAYS, so everything derived from it — the records outlook, the
-    // chronology, the care plan — is out of date the moment it is saved.
-    // Rebuilding immediately keeps the case coherent; the reviewer is told it
-    // is happening rather than discovering it.
-    const outlookChanged = input.analysisClass !== undefined || dateProvided;
+    // The plan-invalidation rule (see PLAN_INPUT_FIELDS): regenerate when a
+    // plan-input field changed, or when this edit pulls a row the plan was not
+    // using (STALE / GENERATION_LOSS, now HUMAN_EDITED) back into the output.
+    const planInputTouched = materialTouched.some((f) => (PLAN_INPUT_FIELDS as readonly string[]).includes(f));
+    const outlookChanged = planInputTouched || restoredToOutput;
     // Material fields changed: one coalesced rebuild from the newest state,
     // and plan regeneration only after it publishes.
     scheduleDerivedRefresh(params.caseId, outlookChanged ? () => scheduleRegeneration(params.caseId, ctx.user.id) : undefined);
@@ -243,10 +267,9 @@ export async function PATCH(req: Request, { params: paramsPromise }: Params) {
       ...(outlookChanged
         ? {
             regenerationTriggered: true,
-            regenerationReason:
-              input.analysisClass !== undefined
-                ? "The record type changed, so the chronology and care plan are being rebuilt from the corrected record."
-                : "A date was assigned, so the chronology and care plan are being rebuilt from the corrected record.",
+            regenerationReason: restoredToOutput && !planInputTouched
+              ? "This correction restored the record to the case, so the chronology and care plan are being rebuilt to include it."
+              : "A field the care plan depends on changed, so the chronology and care plan are being rebuilt from the corrected record.",
           }
         : {}),
     });
@@ -268,14 +291,21 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
       return ok({ error: `This encounter is historical (${existing.status}) and cannot be verified, reviewed or rejected. Work with the current row that replaced it.` }, 409);
     }
 
+    // Membership in the plan's input set, judged from the row AS READ — the
+    // status writes below change it.
+    const wasPlanInput = isCurrentOutput(existing);
+
     if (input.action === "reject") {
       const updated = await prisma.extractedEncounter.update({
         where: { id: existing.id },
         data: { status: "SUPERSEDED", staleReason: `Rejected on human review${input.note ? `: ${input.note}` : ""}`, reviewedById: ctx.user.id, reviewedAt: new Date() },
       });
       await audit(ctx, "records.encounter_reject", { type: "extractedEncounter", id: existing.id, caseId: params.caseId });
-      // A rejected row must leave the derived output it was part of.
-      scheduleDerivedRefresh(params.caseId);
+      // A rejected row must leave the derived output it was part of — and if it
+      // WAS part of the plan's input set, the plan is invalid until rebuilt.
+      // Rejecting a row the plan never used (STALE, GENERATION_LOSS) refreshes
+      // the review surface without regenerating.
+      scheduleDerivedRefresh(params.caseId, wasPlanInput ? () => scheduleRegeneration(params.caseId, ctx.user.id) : undefined);
       return ok({ encounter: updated });
     }
 
@@ -363,9 +393,10 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
       caseId: params.caseId,
       meta: verify ? { verifiedContentHash: currentHash } : {},
     });
-    // Confirming a STALE or GENERATION_LOSS candidate — or reviewing anything —
-    // can change what the derived output may say; regenerate from newest state.
-    scheduleDerivedRefresh(params.caseId);
+    // Reviewing anything refreshes the derived output; confirming a STALE or
+    // GENERATION_LOSS candidate additionally restores a row the plan was NOT
+    // built from into its input set, which invalidates the plan itself.
+    scheduleDerivedRefresh(params.caseId, !wasPlanInput ? () => scheduleRegeneration(params.caseId, ctx.user.id) : undefined);
     return ok({ encounter: updated });
   } catch (err) {
     return handleError(err);

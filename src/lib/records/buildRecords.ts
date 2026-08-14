@@ -19,7 +19,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { MEDICAL_TIMELINE_CLASSES, type AnalysisClass } from "@/lib/documents/analysisClass";
-import { classifySegment, significance } from "@/lib/engine/chronology";
+import { classifySegment } from "@/lib/engine/chronology";
 import {
   billingDocumentedCare,
   claimIsSubstantive,
@@ -34,7 +34,7 @@ import { CURRENT_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
 import { authoritativeFacts, claimDiscrepancies, type ReviewableRow } from "@/lib/records/humanAuthority";
 import { yearProfile, type YearProfile } from "@/lib/records/dateSanity";
 import {
-  appearanceOf,
+  citationFingerprintOf,
   chronologyMateriality,
   classesCompatible,
   consolidateIntoNotes,
@@ -207,12 +207,6 @@ export interface BuildOptions {
   documents: readonly RecordSource[];
   /** Compose prose. False builds structure only — used by tests and dry runs. */
   write?: boolean;
-  /**
-   * Case context for chronology enrichment: the diagnosed conditions and the
-   * anticipated care services. Optional — without it events still carry their
-   * verbatim source quote, and significance stays null rather than generic.
-   */
-  enrichment?: { conditions: string[]; careServices: string[] };
 
   /**
    * Ask an adjudicator about the pairs the rules leave undecided.
@@ -480,21 +474,17 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
         reviewStatus: "AI_DRAFT",
         dateInferred: resolved.inferred,
         relevanceScore: billingCare ? 40 : 50,
-        sourceFingerprint: appearanceOf(note).contentHash,
-        // Enrichment the retired second writer used to provide, now a pure
-        // stage of the ONE writer: the verbatim excerpt behind the event, and
-        // — when the case's conditions and planned care are supplied — which
-        // of them this event documents or supports. Removing the second
-        // writer without porting these left every report entry with the same
-        // generic significance sentence.
+        // The CITATION fingerprint, not the duplicate-identity hash: a
+        // reviewed event must go stale when a page, excerpt or source is
+        // corrected, not only when claim values change.
+        sourceFingerprint: citationFingerprintOf(note),
+        // The verbatim excerpt behind the event — evidence, so it belongs on
+        // the canonical row. Clinical SIGNIFICANCE deliberately does not:
+        // stored at build time it described the conditions and care plan as
+        // they stood at the last rebuild, and fed the plan's next generation
+        // its own commentary. Renderers compute it fresh via significanceOf().
         sourceQuote: quoteOf(note.claims),
-        clinicalSignificance: options.enrichment
-          ? significance(
-              note.claims.map((c) => `${c.value} ${c.excerpt}`).join("\n"),
-              options.enrichment.conditions,
-              options.enrichment.careServices,
-            )
-          : null,
+        clinicalSignificance: null,
       };
       for (const section of sections) {
         const column = FIELD_FOR[section.key];
@@ -545,7 +535,7 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
   });
 
   return {
-    fingerprint: caseFingerprint(documents),
+    fingerprint: caseFingerprint(documents, { patientName: options.patientName ?? null }),
     segmentsByDocument,
     chronology: collapseTreatmentSeries(withoutBillingTwins),
     failures,
@@ -701,8 +691,16 @@ export type { AnalysisClass };
  * can never be confused with the metadata around it. Nothing volatile — no
  * timestamps of reading, no database return order — participates.
  */
-export function caseFingerprint(documents: readonly RecordSource[]): string {
+export function caseFingerprint(
+  documents: readonly RecordSource[],
+  context: { patientName?: string | null } = {},
+): string {
   const hash = createHash("sha256");
+  // The patient's name is a build input too: note consolidation excludes the
+  // patient from author attribution by name, so a corrected clientName can
+  // change how fragments group. Left out, a build reading the old name could
+  // publish over one that read the correction.
+  hash.update(`p:${context.patientName ?? ""}\n`);
   for (const doc of [...documents].sort((a, b) => a.id.localeCompare(b.id))) {
     const text = doc.extractedText ?? "";
     hash.update(`d:${doc.id}:${doc.pageCount ?? 0}:${text.length}:`);
@@ -957,8 +955,6 @@ export async function persistRecords(
 
 /** What loading a case's sources needs from the database. */
 export interface RecordLoader {
-  condition?: { findMany(args: never): Promise<{ name: string }[]> };
-  futureCareItem?: { findMany(args: never): Promise<{ service: string }[]> };
   case: { findUnique(args: { where: { id: string }; select: { clientName: true } }): Promise<{ clientName: string | null } | null> };
   document: {
     findMany(args: {
@@ -1022,20 +1018,11 @@ export async function refreshCaseRecords(
     sources.push({ id: doc.id, pageCount: doc.pageCount, extractedText: doc.extractedText, rows });
   }
 
-  const [conditions, careItems] = await Promise.all([
-    db.condition?.findMany({ where: { caseId }, select: { name: true } } as never) ?? Promise.resolve([]),
-    db.futureCareItem?.findMany({ where: { caseId, supersededAt: null }, select: { service: true } } as never) ?? Promise.resolve([]),
-  ]);
-
   const built = await buildRecords({
     caseId,
     patientName: theCase?.clientName ?? null,
     documents: sources,
     write: options.write ?? true,
-    enrichment: {
-      conditions: conditions.map((c) => c.name),
-      careServices: careItems.map((c) => c.service),
-    },
   });
   const persisted = await persistRecords(db, caseId, built);
   return { built, persisted };
@@ -1073,8 +1060,20 @@ export interface RefreshOutcome {
  * documents finish in quick succession. A request arriving mid-build marks
  * rerun — the newest state is read AFTER the current build finishes, so any
  * number of arrivals collapse into at most one follow-up build.
+ *
+ * A coalesced caller does not return early with a guess: it WAITS on the
+ * flight it folded into and reports that flight's real publication result.
+ * Returning `coalesced: true` immediately looked harmless until a caller
+ * chained plan regeneration on it — regenerating the plan from the
+ * pre-publication chronology, which is exactly the race the sequencing exists
+ * to prevent.
  */
-const refreshInFlight = new Map<string, { rerun: boolean }>();
+interface InFlightRefresh {
+  rerun: boolean;
+  /** Resolves — never rejects — with whether the flight published. */
+  done: Promise<boolean>;
+}
+const refreshInFlight = new Map<string, InFlightRefresh>();
 
 export async function refreshCaseRecordsWithRecovery(
   db: RecordLoader & RecordStore,
@@ -1084,16 +1083,20 @@ export async function refreshCaseRecordsWithRecovery(
   const inFlight = refreshInFlight.get(caseId);
   if (inFlight) {
     inFlight.rerun = true;
+    const published = await inFlight.done;
     return {
-      published: false,
+      published,
       coalesced: true,
       attempts: 0,
       history: [],
-      status: "Updating from newer case information.",
+      status: published
+        ? "Records updated."
+        : "Records could not be updated automatically; the previous complete version is still shown. Retry from the Records page.",
     };
   }
 
-  const flight = { rerun: false };
+  let resolveDone!: (published: boolean) => void;
+  const flight: InFlightRefresh = { rerun: false, done: new Promise((r) => (resolveDone = r)) };
   refreshInFlight.set(caseId, flight);
   const history: RefreshOutcome["history"] = [];
   let published = false;
@@ -1125,6 +1128,9 @@ export async function refreshCaseRecordsWithRecovery(
     } while (flight.rerun);
   } finally {
     refreshInFlight.delete(caseId);
+    // Wake coalesced callers even when a build attempt threw: they receive
+    // published=false rather than hanging or an unhandled rejection.
+    resolveDone(published);
   }
 
   return {
@@ -1256,15 +1262,29 @@ export function collapseTreatmentSeries(events: readonly ChronologyDraft[]): Chr
     const normText = (v: unknown) => String(v ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
     // A material change in the STRUCTURED fields between consecutive members
     // breaks the run — a new diagnosis, a medication change or a functional
-    // change is a development however routine the summary reads. Only checked
-    // when both sides state the field: wording drift over an absent baseline
-    // is not a change.
-    const structuredChange = (previous: ChronologyDraft, event: ChronologyDraft) =>
-      (["diagnosis", "medications", "functionalStatus", "restrictions", "workStatus"] as const).some((field) => {
+    // change is a development however routine the summary reads.
+    //
+    // Two asymmetric rules, because absence of extraction is not clinical
+    // absence:
+    //   • A field stated on BOTH sides that differs is a change.
+    //   • A diagnosis, restriction or work status APPEARING against a blank
+    //     baseline is a development too — the first visit that documents a new
+    //     diagnosis mid-course must not be buried inside "12 routine visits".
+    // Medications and functional status are exempt from the appearance rule
+    // (a visit where the med list simply was not extracted is variance, not a
+    // regimen change), and a field DISAPPEARING never breaks: the extractor
+    // not repeating something is no evidence it stopped being true.
+    const structuredChange = (previous: ChronologyDraft, event: ChronologyDraft) => {
+      const changedWhileStated = (["diagnosis", "medications", "functionalStatus", "restrictions", "workStatus"] as const).some((field) => {
         const before = normText(previous[field]);
         const after = normText(event[field]);
         return Boolean(before) && Boolean(after) && before !== after;
       });
+      const appeared = (["diagnosis", "restrictions", "workStatus"] as const).some(
+        (field) => !normText(previous[field]) && Boolean(normText(event[field])),
+      );
+      return changedWhileStated || appeared;
+    };
 
     for (const event of ordered) {
       if (!eligible(event)) {
@@ -1329,6 +1349,7 @@ const ROW_SELECT_FOR_FINGERPRINT = {
 
 /** The case as it stands right now, read through the given client. */
 export async function readCaseFingerprint(client: PrismaLike, caseId: string): Promise<string> {
+  const theCase = await client.case.findUnique({ where: { id: caseId }, select: { clientName: true } } as never);
   const documents = await client.document.findMany({
     where: { caseId },
     select: { id: true, pageCount: true, extractedText: true },
@@ -1341,7 +1362,7 @@ export async function readCaseFingerprint(client: PrismaLike, caseId: string): P
     } as never)) as unknown as RecordSource["rows"];
     sources.push({ id: doc.id, pageCount: doc.pageCount, extractedText: doc.extractedText, rows });
   }
-  return caseFingerprint(sources);
+  return caseFingerprint(sources, { patientName: theCase?.clientName ?? null });
 }
 
 /**
@@ -1365,8 +1386,6 @@ export async function readCaseFingerprint(client: PrismaLike, caseId: string): P
 export function makeRecordStore(db: PrismaLike): RecordLoader & RecordStore {
   const wrap = (client: PrismaLike, tx?: { $executeRawUnsafe(sql: string, ...args: unknown[]): Promise<unknown> }): RecordLoader & RecordStore => ({
     case: { findUnique: (args) => db.case.findUnique(args as never) },
-    condition: { findMany: (args) => (db as unknown as { condition: { findMany(a: never): Promise<{ name: string }[]> } }).condition.findMany(args) },
-    futureCareItem: { findMany: (args) => (db as unknown as { futureCareItem: { findMany(a: never): Promise<{ service: string }[]> } }).futureCareItem.findMany(args) },
     document: {
       findMany: (args) => db.document.findMany(args as never),
       update: ({ where, data }) => client.document.update({ where, data } as never),
