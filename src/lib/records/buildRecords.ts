@@ -52,6 +52,7 @@ import {
   type MergedEntry,
 } from "@/lib/records/entryMerge";
 import { adjudicateDuplicates, candidatePairs, type AdjudicationRecord } from "@/lib/records/duplicateAdjudication";
+import { adjudicatePatientAttribution } from "@/lib/records/patientAttribution";
 import { renderEntry, writeEntry } from "@/lib/records/entryWriter";
 import { findNotes, noteAt, type DocumentNote } from "@/lib/records/noteStructure";
 import { prepareDocument } from "@/lib/records/rowSpans";
@@ -176,6 +177,8 @@ export interface BuildStats {
   billingDocumented: number;
   /** Present only when adjudication ran. */
   adjudication?: { candidates: number; asked: number; merged: number; failed: number; truncated: boolean };
+  /** Present only when patient-attribution adjudication ran. */
+  patientAttribution?: { candidates: number; asked: number; cleared: { provider: string; date: string | null; reason: string }[]; failed: number };
 }
 
 export interface BuiltRecords {
@@ -266,6 +269,21 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
   }
 
   const deduped = dedupeAcrossDocuments(perDocument);
+
+  // Before anything reasons about "the same named clinician": is a provider
+  // name actually the PATIENT's, OCR-mangled past the deterministic
+  // exclusion's reach? Cleared first, so a fabricated shared name cannot pair
+  // records in duplicate adjudication below.
+  let patientAttribution: BuildStats["patientAttribution"];
+  if (shouldAdjudicate) {
+    const outcome = await adjudicatePatientAttribution(deduped, options.patientName);
+    patientAttribution = {
+      candidates: outcome.candidates,
+      asked: outcome.asked,
+      cleared: outcome.cleared,
+      failed: outcome.failed,
+    };
+  }
 
   // The rules have now made every call they can. What remains undecided — one
   // clinician, one day, two productions, partial agreement — is put to an
@@ -558,6 +576,7 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
       claimDiscrepancies: discrepancies.size,
       billingDocumented,
       adjudication,
+      patientAttribution,
     },
   };
 }

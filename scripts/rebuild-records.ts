@@ -158,6 +158,14 @@ function report(built: Awaited<ReturnType<typeof buildRecords>>) {
   writer fallbacks      ${stats.fallbacks}
   failures              ${stats.failures}`);
 
+  if (stats.patientAttribution) {
+    const pa = stats.patientAttribution;
+    console.log(`\n  patient-name attribution: ${pa.candidates} resembling the patient, ${pa.asked} asked, ${pa.cleared.length} cleared, ${pa.failed} failed`);
+    for (const c of pa.cleared) {
+      console.log(`    cleared  ${c.date ?? "undated"}  "${c.provider}"  ${c.reason.slice(0, 90)}`);
+    }
+  }
+
   if (stats.adjudication) {
     const a = stats.adjudication;
     console.log(`\n  duplicate adjudication: ${a.candidates} undecided pairs, ${a.asked} asked, ${a.merged} merged, ${a.failed} failed`);
