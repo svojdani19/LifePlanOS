@@ -4283,10 +4283,13 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
         // need attention, and a 16-row ER packet read as 16 obligations.
         // Grouping is presentation only: every row stays reachable and
         // reviewable, and nothing about their storage or gating changes.
-        const bucketOf = (e: AnyRec): "attention" | "ready" | "copies" | "paperwork" | "resolved" => {
+        const bucketOf = (e: AnyRec): "attention" | "corroborated" | "ready" | "copies" | "paperwork" | "resolved" => {
           if (["VERIFIED", "REVIEWED", "HUMAN_EDITED"].includes(e.status)) return "resolved";
           // Stale and lost rows demand a decision wherever they are filed.
           if (e.status === "STALE" || e.status === "GENERATION_LOSS") return "attention";
+          // An independent re-read DISAGREED with some of this row's facts —
+          // that is a finding, and it outranks the audit having passed.
+          if (e.corroboration?.result === "NOT_CORROBORATED") return "attention";
           // A copy of a record whose primary card lives in another document:
           // the decision there covers it, so it does not queue here.
           if (e.reviewedWith) return "copies";
@@ -4294,16 +4297,25 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
           // crowd the clinical queue. It reviews on its own time.
           if ((e.substanceClass ?? "CLINICAL") !== "CLINICAL") return "paperwork";
           if (e.dateStatus === "UNKNOWN") return "attention";
+          // The strongest machine evidence: audit passed AND an independent
+          // blind re-read reproduced every fact. Still pending a human — the
+          // machine cannot attest — but it waits in the quietest queue.
+          if (e.status === "AI_AUDIT_PASSED" && e.corroboration?.result === "CORROBORATED") return "corroborated";
           // The adversarial audit passed and nothing is flagged: reviewable
           // with one click, but not shouting.
           if (e.status === "AI_AUDIT_PASSED") return "ready";
           return "attention";
         };
-        const groups = { attention: [] as AnyRec[], ready: [] as AnyRec[], copies: [] as AnyRec[], paperwork: [] as AnyRec[], resolved: [] as AnyRec[] };
+        const groups = { attention: [] as AnyRec[], corroborated: [] as AnyRec[], ready: [] as AnyRec[], copies: [] as AnyRec[], paperwork: [] as AnyRec[], resolved: [] as AnyRec[] };
         for (const e of encounters) groups[bucketOf(e)].push(e);
 
         const renderEncounter = (e: AnyRec) => {
-        const [lbl, cls] = encStatus(e.status, false);
+        // Corroboration refines the chip, never the status: attestation is
+        // still a human's to give.
+        const [lbl, cls] =
+          e.status === "AI_AUDIT_PASSED" && e.corroboration?.result === "CORROBORATED"
+            ? ["Machine-corroborated — independent re-read agrees; pending human review", "bg-violet-50 text-violet-700"]
+            : encStatus(e.status, false);
         const [subLbl, subCls] = substanceChip(e.substanceClass ?? null);
         return (
           <div key={e.id} className="mt-2 rounded border border-ink-100 bg-white p-2">
@@ -4398,6 +4410,14 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
               <p key={`w${i}`} className="mt-0.5 text-[11px] text-amber-700">{w}</p>
             ))}
             {e.staleReason && <p className="mt-0.5 text-[11px] text-red-700">{e.staleReason}</p>}
+            {/* An independent re-read that could NOT reproduce some facts is a
+                finding for the reviewer, named by field. */}
+            {e.corroboration?.result === "NOT_CORROBORATED" && (
+              <p className="mt-0.5 text-[11px] text-amber-800">
+                An independent re-read of the source reproduced {e.corroboration.reproduced} of {e.corroboration.total} extracted facts.
+                Not reproduced: {(e.corroboration.unreproducedFields ?? []).join(", ") || "(fields unavailable)"} — check these against the source before verifying.
+              </p>
+            )}
             {/* What one decision on this card signs, stated before the click. */}
             {(e.copies ?? []).length > 0 && (
               <div className="mt-1 rounded border border-sky-100 bg-sky-50/60 p-1.5 text-[11px] text-sky-900">
@@ -4444,6 +4464,7 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
             {groups.attention.length === 0 && encounters.length > 0 && (
               <p className="mt-2 text-[11px] text-emerald-700">Nothing here needs attention right now.</p>
             )}
+            {foldedGroup("corroborated", "Machine-corroborated — an independent re-read reproduced every fact; pending human review", groups.corroborated, "bg-violet-50 text-violet-700")}
             {foldedGroup("ready", "Audit passed — ready to confirm", groups.ready, "bg-teal-50 text-teal-700")}
             {foldedGroup("copies", "Copies — reviewed with their primary record in another document", groups.copies, "bg-sky-50 text-sky-700")}
             {foldedGroup("paperwork", "Paperwork — administrative & ancillary, not on the chronology", groups.paperwork, "bg-zinc-100 text-zinc-600")}

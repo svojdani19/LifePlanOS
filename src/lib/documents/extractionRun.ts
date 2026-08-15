@@ -48,6 +48,7 @@ import { runCritic, adjudicateDisputes, applyAdjudications, isDisputing } from "
 import { auditFactualRecord, type AuditEncounter } from "@/lib/llm/factualAudit";
 import { encounterContentHash } from "@/lib/records/verifiedContent";
 import { classifyEncounterSubstance } from "@/lib/records/encounterSubstance";
+import { corroborateRows } from "@/lib/records/corroboration";
 import { LlmConfigError } from "@/lib/llm";
 
 /**
@@ -660,6 +661,31 @@ export async function processDocumentExtraction(
           data: { status: "SUPERSEDED", supersededById: created[0] ?? null },
         }),
       );
+    }
+  }
+
+  // ── Machine corroboration ─────────────────────────────────────────────────
+  // Rows that are clean on every server-side check get one independent blind
+  // read of their source span; reproduced facts are recorded as a quality
+  // tier. Never a verification, never a promotion — a corroborated row still
+  // waits for a human, it just waits in a quieter queue. Failures record
+  // nothing. RECORD_CORROBORATION=off skips the pass entirely.
+  if (process.env.RECORD_CORROBORATION !== "off" && created.length) {
+    try {
+      const freshRows = await prisma.extractedEncounter.findMany({
+        where: { id: { in: created }, status: "AI_AUDIT_PASSED" },
+        select: { id: true, status: true, dateStatus: true, page: true, pageEnd: true, warnings: true, claims: true },
+      });
+      const outcome = await corroborateRows(freshRows, text);
+      for (const [rowId, verdict] of outcome.verdicts) {
+        await withDbRetry(() => prisma.extractedEncounter.update({ where: { id: rowId }, data: { corroboration: verdict as never } }));
+      }
+      if (outcome.asked) {
+        warnings.push(`machine corroboration: ${outcome.candidates} candidate(s), ${outcome.corroborated} corroborated by an independent re-read, ${outcome.failed} read(s) failed`);
+      }
+    } catch (error) {
+      // Corroboration is additive evidence; its failure must never fail a run.
+      warnings.push(`machine corroboration skipped: ${String(error).slice(0, 120)}`);
     }
   }
 

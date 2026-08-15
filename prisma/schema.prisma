@@ -1934,6 +1934,12 @@ model ExtractedEncounter {
   auditResult      String?
   auditFindings    Json? // string[] — PHI-safe reasons the audit raised
   auditedAt        DateTime?
+  // Machine corroboration: an INDEPENDENT blind re-read of the row's source
+  // span reproduced (or failed to reproduce) its facts. A quality tier, never
+  // a verification — corroboration cannot set VERIFIED or satisfy the human
+  // gate. { result: CORROBORATED|NOT_CORROBORATED, at, model, promptVersion,
+  //   reproduced, total, unreproducedFields: string[] }
+  corroboration    Json?
   // Sentence -> supporting claim ids for the synthesized summary.
   sentenceClaimMap Json?
   // Content hash of the claim set + summary a human verified, so a final

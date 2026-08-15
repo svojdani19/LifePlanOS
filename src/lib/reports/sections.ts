@@ -401,6 +401,34 @@ export function recordsReviewed(data: ReportData): Block[] {
   return blocks;
 }
 
+/**
+ * What kind of verification actually stands behind these records.
+ *
+ * A report must never let a machine check read as a human one. This states
+ * the three tiers by count and says plainly what each does and does not
+ * assert: only a human signature is attestation; machine corroboration is an
+ * independent reproduction of the extracted facts and nothing more.
+ */
+export function verificationBasis(data: ReportData): Block[] {
+  const sr = data.structuredRecord;
+  if (!sr) return [p("Verification basis is not available for records processed by the legacy pipeline.")];
+  const c = sr.counts;
+  const humanAttested = c.verified + c.reviewed + c.humanEdited;
+  const corroborated = c.machineCorroborated ?? 0;
+  const machineOnly = Math.max(0, c.pendingHumanReview - corroborated);
+  return [
+    p(
+      `Of ${c.encounters} extracted record entr${c.encounters === 1 ? "y" : "ies"}: ${humanAttested} carr${humanAttested === 1 ? "ies" : "y"} a human reviewer's attestation; ` +
+        `${corroborated} ${corroborated === 1 ? "is" : "are"} machine-corroborated and await${corroborated === 1 ? "s" : ""} human review; ` +
+        `${machineOnly} remain${machineOnly === 1 ? "s" : ""} an unreviewed machine draft.`,
+    ),
+    p(
+      "Machine corroboration means a second, independent reading of the source document — performed without sight of the extracted content — reproduced every fact recorded for that entry. It is evidence that the extraction is a faithful transcription. It is NOT a clinical review, and it is not a substitute for the reviewing professional's attestation; entries so marked have not been attested by a person.",
+      true,
+    ),
+  ];
+}
+
 export function processingLimitations(data: ReportData): Block[] {
   const lims = data.structuredRecord?.limitations ?? [];
   if (!lims.length) return [p("No processing or OCR limitations were identified for the records as processed.")];

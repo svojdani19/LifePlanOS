@@ -63,6 +63,12 @@ export interface StructuredEncounter {
   copies?: { id: string; filename: string; page: number | null; summary: string; status: string }[];
   /** Set on a copy row: the document whose primary card reviews it. */
   reviewedWith?: { filename: string } | null;
+  /**
+   * Machine corroboration: an independent blind re-read reproduced (or did
+   * not reproduce) this row's facts. Quality evidence only — never satisfies
+   * the human review gate.
+   */
+  corroboration?: { result: string; reproduced: number; total: number; unreproducedFields?: string[] } | null;
 }
 
 export interface StructuredDocument {
@@ -114,6 +120,9 @@ export interface StructuredRecord {
     aiDraft: number;
     /** AI drafts that passed the automated audit — still pending a human. */
     aiAuditPassed: number;
+    /** Audit-passed drafts an independent blind re-read also reproduced —
+     *  the strongest machine evidence; still pending a human. */
+    machineCorroborated: number;
     /** Everything awaiting HUMAN review: AI_DRAFT + AI_AUDIT_PASSED. An
      *  automated audit is a quality signal, never a review. */
     pendingHumanReview: number;
@@ -136,7 +145,7 @@ export function toStructuredEncounter(e: {
   factualSummary: string; synthesis: string | null; claims: unknown; page: number | null; pageEnd: number | null;
   ocrConfidence: number | null; warnings: unknown; status: string; substanceClass?: string | null; substanceReason?: string | null;
   analysisClass?: string | null; attributionName?: string | null; attributionRole?: string | null;
-  reviewedAt: Date | null; verifiedAt: Date | null; staleReason: string | null;
+  reviewedAt: Date | null; verifiedAt: Date | null; staleReason: string | null; corroboration?: unknown;
 }): StructuredEncounter {
   return {
     id: e.id,
@@ -164,6 +173,10 @@ export function toStructuredEncounter(e: {
     reviewedAt: e.reviewedAt?.toISOString() ?? null,
     verifiedAt: e.verifiedAt?.toISOString() ?? null,
     staleReason: e.staleReason,
+    corroboration:
+      e.corroboration && typeof e.corroboration === "object"
+        ? (e.corroboration as StructuredEncounter["corroboration"])
+        : null,
   };
 }
 
@@ -315,6 +328,7 @@ export async function getStructuredRecord(caseId: string, firmId: string, option
       humanEdited: countBy("HUMAN_EDITED"),
       aiDraft: countBy("AI_DRAFT"),
       aiAuditPassed: countBy("AI_AUDIT_PASSED"),
+      machineCorroborated: all.filter((e) => e.status === "AI_AUDIT_PASSED" && e.corroboration?.result === "CORROBORATED").length,
       pendingHumanReview: countBy("AI_DRAFT") + countBy("AI_AUDIT_PASSED"),
       stale: countBy("STALE"),
       // Prior machine results the current extraction did not reproduce,

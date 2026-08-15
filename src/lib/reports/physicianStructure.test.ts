@@ -63,7 +63,7 @@ const record = (encounters: StructuredEncounter[]): StructuredRecord => ({
   documents: [doc(encounters)],
   undated: [],
   limitations: [],
-  counts: { encounters: encounters.length, verified: 0, reviewed: 0, humanEdited: 0, aiDraft: encounters.length, aiAuditPassed: 0, pendingHumanReview: encounters.length, stale: 0, generationLoss: 0, undatedClinical: 0, undatedNonClinical: 0, failedDocs: 0, pendingOcr: 0 },
+  counts: { encounters: encounters.length, verified: 0, reviewed: 0, humanEdited: 0, aiDraft: encounters.length, aiAuditPassed: 0, machineCorroborated: 0, pendingHumanReview: encounters.length, stale: 0, generationLoss: 0, undatedClinical: 0, undatedNonClinical: 0, failedDocs: 0, pendingOcr: 0 },
 });
 
 describe("visit ledger", () => {

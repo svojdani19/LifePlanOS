@@ -251,6 +251,8 @@ const MEDICAL_RECORD_SUMMARY: Def = {
       ...S.caseHeader(data),
       { kind: "h1", text: "Medical Records Reviewed" },
       ...S.recordsLedger(data),
+      { kind: "h1", text: "Verification Basis" },
+      ...S.verificationBasis(data),
       { kind: "h1", text: "Processing and OCR Limitations" },
       ...S.processingLimitations(data),
       { kind: "h1", text: "Treating Providers' Diagnoses" },
