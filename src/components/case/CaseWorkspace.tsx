@@ -4204,6 +4204,7 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
   const [editingEnc, setEditingEnc] = useState<string | null>(null);
   const [draftSummary, setDraftSummary] = useState("");
   const [regenNotice, setRegenNotice] = useState<string | null>(null);
+  const [groupError, setGroupError] = useState<string | null>(null);
   if (!doc) return null;
   const ex = doc.extraction ?? {};
   const encounters: AnyRec[] = doc.encounters ?? [];
@@ -4230,20 +4231,38 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
 
   // A review decision on a primary card covers its cross-document copies —
   // the card lists them (file, page, their own summary) BEFORE the click, so
-  // the reviewer knows exactly what one decision signs. Copies already
-  // carrying a human decision are left alone, and corrections (PATCH) never
-  // fan out: a correction is about one row's exact content.
+  // the reviewer knows exactly what one decision signs.
+  //
+  // ONE request, decided server-side, all-or-none. Fanning out from here —
+  // verify the primary, then fire a request per copy — meant a copy could
+  // fail silently while the card claimed the decision covered it. Each row is
+  // sent with the hash of the content displayed, so a row that changed since
+  // it was shown blocks the whole decision instead of being signed unseen.
+  // Corrections never group: a correction is about one row's exact content.
   async function reviewWithCopies(e: AnyRec, action: "verify" | "review" | "reject") {
-    await act(e.id, "POST", { action });
     const pending = (e.copies ?? []).filter((c: AnyRec) => !["VERIFIED", "REVIEWED", "HUMAN_EDITED"].includes(c.status));
-    for (const c of pending) {
-      await fetch(`/api/cases/${caseId}/records/encounters/${c.id}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action }),
-      }).catch(() => {});
+    if (!pending.length) {
+      await act(e.id, "POST", { action, expectedContentHash: e.contentHash });
+      return;
     }
-    if (pending.length) onChanged();
+    setBusy(e.id);
+    const res = await fetch(`/api/cases/${caseId}/records/encounters/group`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action,
+        rows: [
+          { id: e.id, expectedContentHash: e.contentHash },
+          ...pending.map((c: AnyRec) => ({ id: c.id, expectedContentHash: c.contentHash })),
+        ],
+      }),
+    }).catch(() => null);
+    const out = (await res?.json().catch(() => ({}))) as { error?: string; problems?: { id: string; reason: string }[] };
+    setBusy(null);
+    // A refused group changed nothing; say so rather than leaving the reviewer
+    // believing copies were covered.
+    setGroupError(res && res.ok ? null : (out?.error ?? "The group decision could not be applied; nothing was changed."));
+    onChanged();
   }
 
   const encStatus = (st: string, edited: boolean) =>
@@ -4269,6 +4288,13 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
         {ex.truncated && <span className="text-[11px] text-amber-700">Partially processed — document exceeds the processing bound</span>}
       </div>
       {ex.error && <p className="mt-1 text-[11px] text-red-700">{ex.error}</p>}
+      {groupError && (
+        <div className="mt-2 flex items-start gap-2 rounded border border-red-200 bg-red-50 p-2 text-[11px] text-red-800">
+          <span className="font-medium">Nothing was changed.</span>
+          <span>{groupError}</span>
+          <button type="button" className="ml-auto underline" onClick={() => setGroupError(null)}>Dismiss</button>
+        </div>
+      )}
       {regenNotice && (
         <div className="mt-2 flex items-start gap-2 rounded border border-amber-200 bg-amber-50 p-2 text-[11px] text-amber-900">
           <span className="font-medium">Re-running the pipeline.</span>
@@ -4314,7 +4340,7 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
         // still a human's to give.
         const [lbl, cls] =
           e.status === "AI_AUDIT_PASSED" && e.corroboration?.result === "CORROBORATED"
-            ? ["Machine-corroborated — independent re-read agrees; pending human review", "bg-violet-50 text-violet-700"]
+            ? ["Machine-corroborated — blind second reading agrees; pending human review", "bg-violet-50 text-violet-700"]
             : encStatus(e.status, false);
         const [subLbl, subCls] = substanceChip(e.substanceClass ?? null);
         return (
@@ -4414,7 +4440,7 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
                 finding for the reviewer, named by field. */}
             {e.corroboration?.result === "NOT_CORROBORATED" && (
               <p className="mt-0.5 text-[11px] text-amber-800">
-                An independent re-read of the source reproduced {e.corroboration.reproduced} of {e.corroboration.total} extracted facts.
+                A blind second reading of the source reproduced {e.corroboration.reproduced} of {e.corroboration.total} extracted facts.
                 Not reproduced: {(e.corroboration.unreproducedFields ?? []).join(", ") || "(fields unavailable)"} — check these against the source before verifying.
               </p>
             )}
@@ -4464,7 +4490,7 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
             {groups.attention.length === 0 && encounters.length > 0 && (
               <p className="mt-2 text-[11px] text-emerald-700">Nothing here needs attention right now.</p>
             )}
-            {foldedGroup("corroborated", "Machine-corroborated — an independent re-read reproduced every fact; pending human review", groups.corroborated, "bg-violet-50 text-violet-700")}
+            {foldedGroup("corroborated", "Machine-corroborated — a blind second reading reproduced every fact; pending human review", groups.corroborated, "bg-violet-50 text-violet-700")}
             {foldedGroup("ready", "Audit passed — ready to confirm", groups.ready, "bg-teal-50 text-teal-700")}
             {foldedGroup("copies", "Copies — reviewed with their primary record in another document", groups.copies, "bg-sky-50 text-sky-700")}
             {foldedGroup("paperwork", "Paperwork — administrative & ancillary, not on the chronology", groups.paperwork, "bg-zinc-100 text-zinc-600")}

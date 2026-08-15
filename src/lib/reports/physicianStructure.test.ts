@@ -19,6 +19,7 @@ let seq = 0;
 const enc = (over: Partial<StructuredEncounter>): StructuredEncounter => ({
   id: `e${++seq}`,
   sourceDocumentId: "doc-1",
+  contentHash: "0".repeat(64),
   dateStatus: "DOCUMENTED",
   encounterDate: "2025-03-14",
   encounterDateEnd: null,

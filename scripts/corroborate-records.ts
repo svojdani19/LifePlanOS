@@ -11,7 +11,12 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { PrismaClient } from "@/generated/prisma";
-import { corroborateRows, type CorroborationRow } from "@/lib/records/corroboration";
+import {
+  corroborateRows,
+  configuredCorroborationModel,
+  CORROBORATION_COMPARATOR_VERSION,
+  type CorroborationRow,
+} from "@/lib/records/corroboration";
 
 const db = new PrismaClient();
 
@@ -44,10 +49,17 @@ async function main() {
       where: { caseId: theCase.id, sourceDocumentId: doc.id, status: "AI_AUDIT_PASSED" },
       select: { id: true, status: true, dateStatus: true, page: true, pageEnd: true, warnings: true, claims: true, corroboration: true },
     });
-    // Only rows not yet corroborated (JSON-null filtering is clearer here).
-    const rows = fetched.filter((r) => r.corroboration == null) as CorroborationRow[];
+    // Rows not yet corroborated, plus any graded under superseded rules — a
+    // verdict from a comparator that could bless a negated finding must not
+    // stand just because it is already written.
+    const rows = fetched.filter((r) => {
+      const v = r.corroboration as { comparatorVersion?: string } | null;
+      return v == null || v.comparatorVersion !== CORROBORATION_COMPARATOR_VERSION;
+    }) as CorroborationRow[];
     if (!rows.length) continue;
-    const outcome = await corroborateRows(rows, doc.extractedText ?? "");
+    const outcome = await corroborateRows(rows, doc.extractedText ?? "", {
+      model: configuredCorroborationModel() ?? process.env.ANTHROPIC_MODEL ?? null,
+    });
     for (const [rowId, verdict] of outcome.verdicts) {
       await db.extractedEncounter.update({ where: { id: rowId }, data: { corroboration: verdict as never } });
     }

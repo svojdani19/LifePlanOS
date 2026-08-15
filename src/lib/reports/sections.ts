@@ -423,7 +423,7 @@ export function verificationBasis(data: ReportData): Block[] {
         `${machineOnly} remain${machineOnly === 1 ? "s" : ""} an unreviewed machine draft.`,
     ),
     p(
-      "Machine corroboration means a second, independent reading of the source document — performed without sight of the extracted content — reproduced every fact recorded for that entry. It is evidence that the extraction is a faithful transcription. It is NOT a clinical review, and it is not a substitute for the reviewing professional's attestation; entries so marked have not been attested by a person.",
+      "Machine corroboration means a second reading of the source document — performed BLIND, without sight of the extracted content — reproduced every fact recorded for that entry, and agreed exactly on negation, laterality, anatomy, dates and quantities. Unless a separate model is configured for it, that second reading is performed by the same model as the extraction, so it is evidence of faithful transcription rather than of independent judgement. It is NOT a clinical review, and it is not a substitute for the reviewing professional's attestation; entries so marked have not been attested by a person.",
       true,
     ),
   ];

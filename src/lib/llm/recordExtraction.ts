@@ -835,6 +835,12 @@ export interface ValidatedEncounter {
    */
   unresolvedDisputes?: number;
   /**
+   * Entry fields the source CONTRADICTS (an upheld WRONG_DATE/WRONG_PROVIDER).
+   * Never rewritten automatically — nothing established the right value — so
+   * it travels with the entry and blocks it for a human.
+   */
+  contradictedFields?: string[];
+  /**
    * Which entry of the model's output this was validated from.
    *
    * Validation drops entries, so positions shift; anything computed against
@@ -1354,6 +1360,7 @@ export function consolidateEncounters(list: ValidatedEncounter[]): ValidatedEnco
     // the therapist and the clinic even when each was stated on a different
     // page.
     match.unresolvedDisputes = (match.unresolvedDisputes ?? 0) + (e.unresolvedDisputes ?? 0);
+    match.contradictedFields = [...new Set([...(match.contradictedFields ?? []), ...(e.contradictedFields ?? [])])];
     match.provider ??= e.provider;
     match.providerCredentials ??= e.providerCredentials;
     match.facility ??= e.facility;

@@ -12,6 +12,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { prisma } from "@/lib/db";
+import { encounterContentHash } from "@/lib/records/verifiedContent";
 import { CURRENT_OUTPUT_WHERE, REVIEW_BLOCKING_STATES, REVIEW_VISIBLE_WHERE } from "@/lib/records/encounterLifecycle";
 import { requiresDate } from "@/lib/documents/analysisClass";
 import { detectVerificationDrift } from "@/lib/records/verifiedContent";
@@ -60,7 +61,7 @@ export interface StructuredEncounter {
    * documents that the canonical build folded into the same entry. The
    * primary card discloses them and one review decision covers them.
    */
-  copies?: { id: string; filename: string; page: number | null; summary: string; status: string }[];
+  copies?: { id: string; filename: string; page: number | null; summary: string; status: string; contentHash: string }[];
   /** Set on a copy row: the document whose primary card reviews it. */
   reviewedWith?: { filename: string } | null;
   /**
@@ -69,6 +70,13 @@ export interface StructuredEncounter {
    * the human review gate.
    */
   corroboration?: { result: string; reproduced: number; total: number; unreproducedFields?: string[] } | null;
+  /**
+   * Hash of the exact content being displayed. Sent back with a review
+   * decision so the server can refuse to sign content that changed after the
+   * reviewer looked at it — for every row a group decision covers, not just
+   * the one whose card carried the button.
+   */
+  contentHash: string;
 }
 
 export interface StructuredDocument {
@@ -173,6 +181,16 @@ export function toStructuredEncounter(e: {
     reviewedAt: e.reviewedAt?.toISOString() ?? null,
     verifiedAt: e.verifiedAt?.toISOString() ?? null,
     staleReason: e.staleReason,
+    contentHash: encounterContentHash({
+      dateStatus: e.dateStatus,
+      encounterDate: e.encounterDate,
+      provider: e.provider,
+      facility: e.facility,
+      encounterType: e.encounterType,
+      factualSummary: e.factualSummary,
+      synthesis: e.synthesis ?? null,
+      claims: e.claims as never,
+    } as never),
     corroboration:
       e.corroboration && typeof e.corroboration === "object"
         ? (e.corroboration as StructuredEncounter["corroboration"])
@@ -220,6 +238,7 @@ export function linkCopies(
           page: c.page,
           summary: c.factualSummary,
           status: c.status,
+          contentHash: c.contentHash,
         })),
       ];
       for (const c of copies) c.reviewedWith = { filename: nameOf.get(d.id) ?? d.filename };

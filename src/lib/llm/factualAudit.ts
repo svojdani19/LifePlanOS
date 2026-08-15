@@ -53,6 +53,12 @@ export interface AuditEncounter {
    * rows, which is what kept the review queue from ever draining.
    */
   unresolvedDisputes?: number;
+  /**
+   * Fields of THIS entry the source contradicts, confirmed by adjudication.
+   * Stronger than an unresolved dispute: the disagreement was settled against
+   * the extraction, and no verified replacement value exists.
+   */
+  contradictedFields?: string[];
 }
 
 export interface AuditInput {
@@ -71,6 +77,17 @@ export interface AuditInput {
    * Entry-specific ones travel on the entry (AuditEncounter.unresolvedDisputes).
    */
   unresolvedDisputes: number;
+  /**
+   * Encounters the CRITIC says the source contains and the extraction missed.
+   *
+   * These were collected, written to the run record, and read by nothing — so
+   * a second pass could name an omitted encounter while every row still
+   * passed and the case stayed exportable. An omission is under-extraction:
+   * the draft is not the record.
+   */
+  criticOmissions?: number;
+  /** Places the critic could not tell where one note ends and the next begins. */
+  unclearBoundaries?: number;
   /** True once every uploaded document covering the period finished processing. */
   allDocumentsProcessed: boolean;
 }
@@ -167,6 +184,18 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
     sawIncomplete = true;
     findings.push(`${input.coverageGaps} dated note header(s) in the source have no extracted encounter; the record may be under-extracted.`);
   }
+  if ((input.criticOmissions ?? 0) > 0) {
+    sawIncomplete = true;
+    findings.push(
+      `${input.criticOmissions} encounter(s) present in the source were not extracted, per the independent critic pass; the draft does not represent the whole record.`,
+    );
+  }
+  if ((input.unclearBoundaries ?? 0) > 0) {
+    sawReviewNeeded = true;
+    findings.push(
+      `${input.unclearBoundaries} place(s) in the source where one note's boundary could not be determined; entries there may combine or split records.`,
+    );
+  }
   if (input.truncatedSource) {
     sawIncomplete = true;
     findings.push("The source text was clipped at the storage cap; content beyond it is not represented.");
@@ -199,6 +228,13 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
   const seen = new Map<string, number>();
   for (const [index, e] of input.encounters.entries()) {
     const label = e.encounterDate ?? "undated";
+
+    // Fields adjudication confirmed the source contradicts.
+    if (e.contradictedFields?.length) {
+      sawConflict = true;
+      ownConflict[index] = true;
+      findings.push(`The source contradicts the extracted ${e.contradictedFields.join(" and ")} for the entry shown as ${label}; a reviewer must set it from the record.`);
+    }
 
     // Disputes about THIS entry that no adjudicator could settle.
     if ((e.unresolvedDisputes ?? 0) > 0) {

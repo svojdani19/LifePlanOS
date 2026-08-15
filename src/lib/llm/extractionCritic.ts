@@ -218,14 +218,33 @@ export interface Adjudication {
 export const ADJUDICATION_BATCH = 8;
 
 /**
+ * Dispute types that are about the ENCOUNTER, not about one of its claims.
+ *
+ * A wrong service date or a wrong treating clinician is an attribution error
+ * for the whole entry, so these legitimately carry no claim index. The first
+ * version of the deterministic pass discarded every dispute it could not tie
+ * to a claim, which swept exactly these away — turning a blocking conflict
+ * into silence, in a change whose stated purpose was better adjudication.
+ */
+const ENCOUNTER_FIELD_TYPES = new Map<string, string>([
+  ["WRONG_DATE", "date"],
+  ["WRONG_PROVIDER", "provider"],
+]);
+
+/** The encounter field a dispute is about, when it is about one. */
+export const disputedField = (type: string): string | null => ENCOUNTER_FIELD_TYPES.get(type) ?? null;
+
+/**
  * Settle what needs no model at all.
  *
  * Two checks the server can make against the source itself, both of which
  * previously cost a model call and — worse — could come back UNRESOLVED and
  * mark the whole document a source conflict:
  *
- *   • The dispute names no claim that exists in this extraction. Nothing can
+ *   • The dispute names no target that exists in this extraction. Nothing can
  *     be removed and nothing can be confirmed; the criticism is unusable.
+ *     A criticism about the ENTRY's date or provider is not in this class —
+ *     it has a target, and it must still be answered.
  *   • The criticism quotes source text that does not appear in the source.
  *     A critic that misquotes the document cannot overturn a cited claim.
  *
@@ -242,8 +261,9 @@ export function resolveDeterministically(
   for (const issue of disputes) {
     const enc = issue.encounterIndex != null ? encounters[issue.encounterIndex] : undefined;
     const claim = enc && issue.claimIndex != null ? enc.claims[issue.claimIndex] : undefined;
-    if (!claim) {
-      settled.push({ issue, ruling: "DISCARDED", reason: "the criticism names no claim that exists in this extraction" });
+    const aboutTheEntry = Boolean(enc) && disputedField(issue.type) !== null;
+    if (!claim && !aboutTheEntry) {
+      settled.push({ issue, ruling: "DISCARDED", reason: "the criticism names no claim or entry that exists in this extraction" });
       continue;
     }
     const cited = (issue.excerpt ?? "").trim();
@@ -385,10 +405,18 @@ export function applyAdjudications(
   unresolvedUnattributed: number;
   /** Disputes discarded as unusable; they resolve nothing and block nothing. */
   discarded: number;
+  /**
+   * Entry fields the source CONTRADICTS, by encounter index — an upheld
+   * WRONG_DATE or WRONG_PROVIDER. Nothing verified the correct value, so the
+   * field is never rewritten here; it is recorded so the entry blocks on a
+   * human. Dropping it silently was the failure this replaces.
+   */
+  contradictedFieldsByEncounter: Map<number, string[]>;
   notes: string[];
 } {
   const drop = new Map<number, Set<number>>();
   const unresolvedByEncounter = new Map<number, number>();
+  const contradictedFieldsByEncounter = new Map<number, string[]>();
   let unresolved = 0;
   let unresolvedUnattributed = 0;
   let discarded = 0;
@@ -410,6 +438,18 @@ export function applyAdjudications(
     if (a.ruling !== "UPHELD") continue;
     const ei = a.issue.encounterIndex;
     const ci = a.issue.claimIndex;
+    // An upheld criticism of the ENTRY's date or provider: the source
+    // contradicts what was extracted, but nothing here established the right
+    // value, and writing one would be inventing content. Record the
+    // contradiction against the entry so it blocks on a human.
+    const field = disputedField(a.issue.type);
+    if (field && ei != null && encounters[ei]) {
+      const held = contradictedFieldsByEncounter.get(ei) ?? [];
+      if (!held.includes(field)) held.push(field);
+      contradictedFieldsByEncounter.set(ei, held);
+      notes.push(`source contradicts the extracted ${field} [${a.issue.type}]: ${a.reason}`);
+      continue;
+    }
     if (ei == null || ci == null) continue;
     if (!drop.has(ei)) drop.set(ei, new Set());
     drop.get(ei)!.add(ci);
@@ -423,5 +463,5 @@ export function applyAdjudications(
     removed += e.claims.length - claims.length;
     return { ...e, claims };
   });
-  return { encounters: out, removed, unresolved, unresolvedByEncounter, unresolvedUnattributed, discarded, notes };
+  return { encounters: out, removed, unresolved, unresolvedByEncounter, unresolvedUnattributed, discarded, contradictedFieldsByEncounter, notes };
 }

@@ -212,6 +212,12 @@ export async function processDocumentExtraction(
     unresolvedPerAccepted: number[];
     /** Unresolved disputes naming no entry, so they cannot be pinned to one. */
     unresolvedUnattributed: number;
+    /** Entry fields the source contradicts, aligned to accepted entries. */
+    contradictedPerAccepted: string[][];
+    /** Critic omissions: encounters it says the extraction missed. */
+    omissions: number;
+    /** Critic findings that the note boundaries could not be determined. */
+    unclearBoundaries: number;
   };
   const results: (ChunkResult | { failed: string; failedRange?: { pageStart: number | null; pageEnd: number | null; reason: string } })[] = new Array(chunks.length);
 
@@ -247,13 +253,22 @@ export async function processDocumentExtraction(
     let unresolved = 0;
     let unresolvedUnattributed = 0;
     let unresolvedByEncounter = new Map<number, number>();
+    let contradictedByEncounter = new Map<number, string[]>();
+    let omissions = 0;
+    let unclearBoundaries = 0;
     if (criticEnabled() && encounters.length) {
       const critique = await runCritic(chunk, encounters, { provider: opts.provider });
       rejected.push(...critique.rejected);
       for (const issue of critique.issues) {
-        // Omissions and boundary problems are reported for human attention;
-        // they cannot be auto-corrected without inventing content.
+        // Omissions and boundary problems cannot be auto-corrected without
+        // inventing content — but they are evidence the record in hand is
+        // incomplete, so they are COUNTED into the audit, not merely logged.
+        // Collected and then read by nothing was the earlier failure: the
+        // critic could name an encounter the extraction missed while every
+        // row still passed.
         critic.push(`${issue.type}: ${issue.detail}`);
+        if (issue.type === "MISSING_ENCOUNTER") omissions++;
+        if (issue.type === "UNCLEAR_SOURCE_BOUNDARY") unclearBoundaries++;
       }
       const disputes = critique.issues.filter(isDisputing);
       disputed = disputes.length;
@@ -265,6 +280,7 @@ export async function processDocumentExtraction(
         unresolved = applied.unresolved;
         unresolvedUnattributed = applied.unresolvedUnattributed;
         unresolvedByEncounter = applied.unresolvedByEncounter;
+        contradictedByEncounter = applied.contradictedFieldsByEncounter;
         rejected.push(...applied.notes);
       }
     }
@@ -277,7 +293,13 @@ export async function processDocumentExtraction(
     const unresolvedPerAccepted = outcome.accepted.map((e) =>
       e.sourceIndex != null ? (unresolvedByEncounter.get(e.sourceIndex) ?? 0) : 0,
     );
-    return { accepted: outcome.accepted, rejected, critic, candidates, disputed, adjudicated, unresolved, unresolvedPerAccepted, unresolvedUnattributed };
+    const contradictedPerAccepted = outcome.accepted.map((e) =>
+      e.sourceIndex != null ? (contradictedByEncounter.get(e.sourceIndex) ?? []) : [],
+    );
+    return {
+      accepted: outcome.accepted, rejected, critic, candidates, disputed, adjudicated, unresolved,
+      unresolvedPerAccepted, unresolvedUnattributed, contradictedPerAccepted, omissions, unclearBoundaries,
+    };
   };
 
   const concurrency = Math.max(1, Math.min(8, Number(process.env.RECORD_CHUNK_CONCURRENCY) || 3));
@@ -340,6 +362,10 @@ export async function processDocumentExtraction(
   let unattributedDisputes = 0;
   /** Aligned to `validated`: unresolved disputes about each accepted entry. */
   const unresolvedPerValidated: number[] = [];
+  /** Aligned to `validated`: entry fields the source contradicts. */
+  const contradictedPerValidated: string[][] = [];
+  let criticOmissions = 0;
+  let unclearBoundaries = 0;
   const failedRanges: { pageStart: number | null; pageEnd: number | null; reason: string }[] = [];
   for (const r of results) {
     if (!r) continue;
@@ -350,6 +376,9 @@ export async function processDocumentExtraction(
     }
     validated.push(...r.accepted);
     unresolvedPerValidated.push(...r.unresolvedPerAccepted);
+    contradictedPerValidated.push(...r.contradictedPerAccepted);
+    criticOmissions += r.omissions;
+    unclearBoundaries += r.unclearBoundaries;
     rejects.push(...r.rejected);
     criticFindings.push(...r.critic);
     candidateCount += r.candidates;
@@ -421,6 +450,7 @@ export async function processDocumentExtraction(
   // whole productions into source conflict over one contested claim.
   validated.forEach((e, i) => {
     e.unresolvedDisputes = unresolvedPerValidated[i] ?? 0;
+    e.contradictedFields = contradictedPerValidated[i] ?? [];
   });
 
   const consolidated = consolidateEncounters(validated);
@@ -524,6 +554,7 @@ export async function processDocumentExtraction(
     page: e.page,
     status: "AI_DRAFT",
     unresolvedDisputes: e.unresolvedDisputes ?? 0,
+    contradictedFields: e.contradictedFields ?? [],
   }));
   const audit = auditFactualRecord({
     encounters: auditEncounters,
@@ -535,6 +566,8 @@ export async function processDocumentExtraction(
     // Only the disputes that name no entry are document-level; the rest travel
     // on the entries they are about.
     unresolvedDisputes: unattributedDisputes,
+    criticOmissions,
+    unclearBoundaries,
     allDocumentsProcessed: facts.allDocumentsProcessed,
   });
 
@@ -709,7 +742,7 @@ export async function processDocumentExtraction(
         where: { id: { in: created }, status: "AI_AUDIT_PASSED" },
         select: { id: true, status: true, dateStatus: true, page: true, pageEnd: true, warnings: true, claims: true },
       });
-      const outcome = await corroborateRows(freshRows, text);
+      const outcome = await corroborateRows(freshRows, text, { model: prov.model, sourceFingerprint });
       for (const [rowId, verdict] of outcome.verdicts) {
         await withDbRetry(() => prisma.extractedEncounter.update({ where: { id: rowId }, data: { corroboration: verdict as never } }));
       }

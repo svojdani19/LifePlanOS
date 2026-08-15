@@ -29,6 +29,31 @@ import { pageMarks } from "@/lib/documents/meta";
 
 export const CORROBORATION_PROMPT_VERSION = "2026-08-14.blind-reproduction";
 
+/**
+ * The COMPARATOR's version, bumped whenever grading changes.
+ *
+ * A verdict is only as good as the rules that produced it. The first
+ * comparator could grade a negated finding as reproduced, so verdicts it
+ * wrote must not stand on the strength of a rule that no longer exists:
+ * anything graded under an older version is regraded rather than trusted.
+ */
+export const CORROBORATION_COMPARATOR_VERSION = "2026-08-15.discriminant-gate.2";
+
+/**
+ * What this tier may honestly be called.
+ *
+ * The reader is BLIND — it never sees the stored claims — which is the
+ * substantive part. It is not necessarily a DIFFERENT model: unless
+ * RECORD_CORROBORATION_MODEL names one, it is the same provider that produced
+ * the extraction, and calling that "independent" overstated the separation.
+ * The label follows the configuration rather than the aspiration.
+ */
+export const corroborationLabel = (distinctModel: boolean): string =>
+  distinctModel ? "independent second reading" : "blind second reading";
+
+/** A separately configured model for the second pass, when one is set. */
+export const configuredCorroborationModel = (): string | null => process.env.RECORD_CORROBORATION_MODEL?.trim() || null;
+
 export interface CorroborationClaim {
   field: string;
   value: string;
@@ -49,8 +74,15 @@ export interface CorroborationRow {
 export interface CorroborationVerdict {
   result: "CORROBORATED" | "NOT_CORROBORATED";
   at: string;
+  /** The model that actually read the source; never a guess. */
   model: string;
+  /** True only when a separately configured model performed the re-read. */
+  distinctModel: boolean;
   promptVersion: string;
+  /** The grading rules that produced this verdict. */
+  comparatorVersion: string;
+  /** The source bytes the re-read was performed against. */
+  sourceFingerprint: string | null;
   /** How many stored claims the independent reading reproduced. */
   reproduced: number;
   total: number;
@@ -112,16 +144,139 @@ const tokensOf = (s: string): Set<string> =>
       .filter((w) => w.length >= 3 && !STOP.has(w)),
   );
 
+// ── Discriminants: the features that may never be approximated ───────────────
+//
+// Token overlap alone certified the OPPOSITE of the record. "no acute
+// fracture" and "acute fracture" share every token the comparison could see,
+// because a two-letter word was filtered out as noise before the two
+// statements were compared — so a negated finding corroborated its positive.
+// "Gabapentin 10 mg" and "Gabapentin 100 mg" agreed for the same reason: the
+// numbers were tokens like any other, and one differing token stayed above a
+// 70% bar.
+//
+// So these features are extracted and compared EXACTLY, before any semantic
+// comparison runs. They are the ones where being approximately right is being
+// wrong: whether a thing was found or ruled out, which side of the body,
+// which anatomy, when, how much, and whether care was delivered or only
+// proposed.
+
+// NOTE: the boolean discriminants are tested with NON-GLOBAL patterns on
+// purpose. `RegExp.test` on a /g regex advances lastIndex and is therefore
+// stateful across calls — the same statement answered differently on
+// alternate invocations, which silently flipped negation and
+// delivered-versus-proposed. Only the set extractors below use /g, and they
+// use matchAll, which does not share that hazard.
+const NEGATION_SRC =
+  String.raw`\b(?:no|not|non|none|negative|without|absent|denies|denied|deny|ruled out|r/o|unremarkable|nil|never|declined|refused|discontinued|stopped|withheld)\b`;
+const STATUS_PLANNED_SRC = String.raw`\b(?:recommend\w*|plan\w*|propos\w*|advis\w*|schedul\w*|consider\w*|offer\w*|candidate for)\b`;
+const STATUS_DONE_SRC =
+  String.raw`\b(?:perform\w*|complet\w*|underwent|administered|administer|given|received|inject(?:ed|ion\s+was\s+(?:given|performed))|excised|repaired|resected|delivered|done)\b`;
+const NEGATION_TEST = new RegExp(NEGATION_SRC, "i");
+const STATUS_PLANNED_TEST = new RegExp(STATUS_PLANNED_SRC, "i");
+const STATUS_DONE_TEST = new RegExp(STATUS_DONE_SRC, "i");
+const LATERALITY_RE = /\b(?:left|right|bilateral|lft|rt|unilateral)\b/gi;
+const ANATOMY_RE =
+  /\b(?:c[1-8]|t(?:1[0-2]|[1-9])|l[1-5]|s[1-5])(?:\s*-\s*(?:c[1-8]|t(?:1[0-2]|[1-9])|l[1-5]|s[1-5]))?\b|\b(?:cervical|thoracic|lumbar|lumbosacral|sacral|coccyx|knee|hip|shoulder|ankle|wrist|elbow|foot|hand|neck|back|head|brain|chest|abdomen)\b/gi;
+const DATE_RE = /\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b\d{4}-\d{2}-\d{2}\b/g;
+/** A number, with its unit when one follows — "10 mg" and "100 mg" differ. */
+const QUANTITY_RE = /\b\d{1,3}(?:,\d{3})+(?:\.\d+)?\b|\b\d+(?:\.\d+)?\b/g;
+/** "1,000.00", "1000.00" and "1000" are one amount, not three. */
+const normalizeNumber = (raw: string): string => {
+  const plain = raw.replace(/,/g, "");
+  return plain.includes(".") ? plain.replace(/0+$/, "").replace(/\.$/, "") : plain;
+};
+/**
+ * Counts written as words. Records say "two views" as readily as "2 views",
+ * and a comparison that only saw digits let "Two views" corroborate against
+ * "Three views" — found by the safeguard-claims suite on its first run.
+ * Normalized to digits so "two views" and "2 views" still agree.
+ */
+const NUMBER_WORDS: Record<string, string> = {
+  one: "1", two: "2", three: "3", four: "4", five: "5", six: "6",
+  seven: "7", eight: "8", nine: "9", ten: "10", eleven: "11", twelve: "12",
+};
+// Only when the word QUANTIFIES something ("two views"), never the pronoun
+// use ("one of the notes"), which would fire on ordinary prose.
+const NUMBER_WORD_RE = /\b(one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?!of\b)(?=[a-z])/gi;
+
+const setOf = (s: string, re: RegExp): Set<string> => {
+  const out = new Set<string>();
+  for (const m of s.toLowerCase().matchAll(re)) out.add(m[0].replace(/\s+/g, "").replace(/,/g, ""));
+  return out;
+};
+
+const sameSet = (a: Set<string>, b: Set<string>): boolean => a.size === b.size && [...a].every((x) => b.has(x));
+
+/** The safety-critical features of a statement, for exact comparison. */
+export function discriminantsOf(text: string): {
+  negated: boolean;
+  laterality: Set<string>;
+  anatomy: Set<string>;
+  dates: Set<string>;
+  quantities: Set<string>;
+  planned: boolean;
+  performed: boolean;
+} {
+  const lower = text.toLowerCase();
+  return {
+    negated: NEGATION_TEST.test(lower),
+    laterality: setOf(text, LATERALITY_RE),
+    anatomy: setOf(text, ANATOMY_RE),
+    dates: setOf(text, DATE_RE),
+    quantities: new Set([
+      ...[...text.matchAll(QUANTITY_RE)].map((m) => normalizeNumber(m[0])),
+      ...[...text.toLowerCase().matchAll(NUMBER_WORD_RE)].map((m) => NUMBER_WORDS[m[1]]),
+    ]),
+    planned: STATUS_PLANNED_TEST.test(lower),
+    performed: STATUS_DONE_TEST.test(lower),
+  };
+}
+
+/**
+ * Do two statements agree on every feature that may not be approximated?
+ *
+ * Deliberately asymmetric on ANATOMY and DATES: an independent reading may
+ * state a fact in a fuller sentence that mentions more anatomy or carries the
+ * encounter date, and that is not disagreement. What is forbidden is the
+ * claim asserting something the reading does not contain — and, for negation,
+ * laterality and delivered-versus-proposed status, any difference at all.
+ */
+export function discriminantsAgree(claimValue: string, fact: string): boolean {
+  const c = discriminantsOf(claimValue);
+  const f = discriminantsOf(fact);
+  if (c.negated !== f.negated) return false;
+  // DELIVERED-versus-not is the discriminant that matters, and it catches the
+  // dangerous direction both ways: care recorded as performed against a
+  // reading that only proposes it, and the reverse. Comparing "planned"
+  // separately does not — an independent reading naturally paraphrases a plan
+  // claim as "the plan is to…", which is agreement, not contradiction.
+  if (c.performed !== f.performed) return false;
+  if (!sameSet(c.laterality, f.laterality)) return false;
+  // Every quantity the CLAIM asserts must appear in the reading, exactly.
+  // Directional on purpose: a reading that states the amount alongside a date
+  // and a code has not disagreed about the amount, and demanding set equality
+  // rejected every billing row in the corpus. The dangerous direction is
+  // still closed — "10 mg" is not among {100 mg}, so it cannot pass.
+  for (const q of c.quantities) if (!f.quantities.has(q)) return false;
+  // Every anatomy and date the CLAIM asserts must appear in the reading.
+  for (const a of c.anatomy) if (!f.anatomy.has(a)) return false;
+  for (const d of c.dates) if (!f.dates.has(d)) return false;
+  return true;
+}
+
 /**
  * Is a stored claim's substance present in the independent reading?
- * Deterministic: some single reproduced fact must cover at least 70% of the
- * claim's distinctive tokens. Wording may differ; the facts may not.
+ *
+ * Two gates, in order. The reading must agree on every discriminant above —
+ * exactly — and only then may wording differ: some single reproduced fact
+ * must also cover at least 70% of the claim's distinctive tokens.
  */
 export function claimReproduced(claimValue: string, facts: readonly string[]): boolean {
   const claim = tokensOf(claimValue);
   if (!claim.size) return false;
   const needed = Math.ceil(claim.size * 0.7);
   return facts.some((fact) => {
+    if (!discriminantsAgree(claimValue, fact)) return false;
     const have = tokensOf(fact);
     let covered = 0;
     for (const t of claim) if (have.has(t)) covered++;
@@ -164,7 +319,7 @@ export interface CorroborationOutcome {
 export async function corroborateRows(
   rows: readonly CorroborationRow[],
   docText: string,
-  options: { provider?: LlmProvider; concurrency?: number } = {},
+  options: { provider?: LlmProvider; concurrency?: number; model?: string | null; sourceFingerprint?: string | null } = {},
 ): Promise<CorroborationOutcome> {
   const candidates = rows.filter((r) => meetsCorroborationBar(r, docText));
   const outcome: CorroborationOutcome = { candidates: candidates.length, asked: 0, corroborated: 0, failed: 0, verdicts: new Map() };
@@ -201,8 +356,14 @@ export async function corroborateRows(
           const verdict: CorroborationVerdict = {
             result: unreproduced.length === 0 ? "CORROBORATED" : "NOT_CORROBORATED",
             at: new Date().toISOString(),
-            model: (llm as { model?: string }).model ?? "unknown",
+            // The resolved model, passed in by the caller that configured the
+            // provider. Reading it off the provider produced "unknown" on
+            // every production row, because LlmProvider carries no model.
+            model: options.model ?? (llm as { model?: string }).model ?? "unrecorded",
+            distinctModel: Boolean(configuredCorroborationModel()),
             promptVersion: CORROBORATION_PROMPT_VERSION,
+            comparatorVersion: CORROBORATION_COMPARATOR_VERSION,
+            sourceFingerprint: options.sourceFingerprint ?? null,
             reproduced: claims.length - unreproduced.length,
             total: claims.length,
             unreproducedFields: [...new Set(unreproduced.map((c) => c.field))].slice(0, 20),
