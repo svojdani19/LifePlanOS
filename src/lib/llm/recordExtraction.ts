@@ -829,6 +829,19 @@ export interface ValidatedEncounter {
    */
   attributionName: string | null;
   attributionRole: string | null;
+  /**
+   * Disputes about this entry the adjudicator could not settle. Summed when
+   * entries consolidate, so a merged entry carries every conflict about it.
+   */
+  unresolvedDisputes?: number;
+  /**
+   * Which entry of the model's output this was validated from.
+   *
+   * Validation drops entries, so positions shift; anything computed against
+   * the pre-validation array — an adjudicator's per-entry rulings, above all —
+   * needs this to find its entry again rather than tainting a neighbour's.
+   */
+  sourceIndex?: number;
 }
 
 export interface ValidationOutcome {
@@ -1028,7 +1041,7 @@ export function validateEncounters(chunk: DocumentChunk, encounters: LlmEncounte
   // finding the document cannot make.
   const profile = profileForChunk(chunk);
 
-  for (const enc of encounters) {
+  for (const [sourceIndex, enc] of encounters.entries()) {
     const warnings: string[] = [];
     const claims: ExtractedClaim[] = [];
 
@@ -1257,6 +1270,7 @@ export function validateEncounters(chunk: DocumentChunk, encounters: LlmEncounte
       classificationConfidence: chunk.classificationConfidence ?? null,
       attributionName: attribution,
       attributionRole: attribution ? profile.attribution : null,
+      sourceIndex,
       });
   }
   return { accepted, rejected };
@@ -1339,6 +1353,7 @@ export function consolidateEncounters(list: ValidatedEncounter[]): ValidatedEnco
     // Keep the side that actually named something: a merged entry should carry
     // the therapist and the clinic even when each was stated on a different
     // page.
+    match.unresolvedDisputes = (match.unresolvedDisputes ?? 0) + (e.unresolvedDisputes ?? 0);
     match.provider ??= e.provider;
     match.providerCredentials ??= e.providerCredentials;
     match.facility ??= e.facility;

@@ -44,6 +44,15 @@ export interface AuditEncounter {
   claims: AuditClaim[];
   page: number | null;
   status: string;
+  /**
+   * Disputes about THIS entry that the adjudicator could not settle.
+   *
+   * A conflict belongs to the entry it is about. Counting every unresolved
+   * dispute document-wide put whole productions into source conflict over a
+   * disagreement about one claim in one entry — on McHenry, 505 of 547 current
+   * rows, which is what kept the review queue from ever draining.
+   */
+  unresolvedDisputes?: number;
 }
 
 export interface AuditInput {
@@ -57,7 +66,10 @@ export interface AuditInput {
   coverageGaps?: number;
   /** The source text arrived clipped at the storage cap. */
   truncatedSource?: boolean;
-  /** Claims the critic contested and no adjudicator resolved. */
+  /**
+   * Unresolved disputes that name no entry, so they cannot be pinned to one.
+   * Entry-specific ones travel on the entry (AuditEncounter.unresolvedDisputes).
+   */
   unresolvedDisputes: number;
   /** True once every uploaded document covering the period finished processing. */
   allDocumentsProcessed: boolean;
@@ -66,6 +78,16 @@ export interface AuditInput {
 export interface AuditOutcome {
   result: AuditResult;
   findings: string[]; // PHI-safe
+  /**
+   * One result per input encounter, in order.
+   *
+   * The document-level `result` answers "is this document's processing sound
+   * as a whole"; this answers "is THIS entry sound", which is what a row's
+   * status should reflect. An entry inherits every document-level defect that
+   * genuinely bears on it — unreadable pages, unprocessed sections, missing
+   * coverage — but not a conflict that belongs to a different entry.
+   */
+  perEncounter: AuditResult[];
 }
 
 /** Causal / future-care language that a FACTUAL record may not assert. */
@@ -102,6 +124,19 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
   let sawFailure = false;
   let sawIncomplete = false;
   let sawReviewNeeded = false;
+
+  // Flags raised by facts about the DOCUMENT — unreadable pages, unprocessed
+  // sections, missing coverage. Every entry inherits these: an entry drawn
+  // from a partly-processed record is itself part of a partly-processed
+  // record. Kept separate from flags an individual entry raises, which must
+  // NOT spread to its neighbours.
+  let docConflict = false;
+  let docFailure = false;
+  let docIncomplete = false;
+  let docReview = false;
+  const ownConflict: boolean[] = input.encounters.map(() => false);
+  const ownFailure: boolean[] = input.encounters.map(() => false);
+  const ownReview: boolean[] = input.encounters.map(() => false);
 
   // ── 1. Source completeness ────────────────────────────────────────────────
   const unreadable = input.pages.filter((p) => ["UNREADABLE", "OCR_FAILED", "BLANK"].includes(p.status));
@@ -153,13 +188,28 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
 
   const readablePages = new Set(input.pages.filter((p) => p.status !== "PENDING_OCR").map((p) => p.pageNumber));
 
+  // Everything raised so far is a fact about the document, and every entry
+  // inherits it. What the per-entry loop raises below belongs to its entry.
+  docConflict = sawConflict;
+  docFailure = sawFailure;
+  docIncomplete = sawIncomplete;
+  docReview = sawReviewNeeded;
+
   // ── 3. Per-encounter checks ───────────────────────────────────────────────
   const seen = new Map<string, number>();
-  for (const e of input.encounters) {
+  for (const [index, e] of input.encounters.entries()) {
     const label = e.encounterDate ?? "undated";
+
+    // Disputes about THIS entry that no adjudicator could settle.
+    if ((e.unresolvedDisputes ?? 0) > 0) {
+      sawConflict = true;
+      ownConflict[index] = true;
+      findings.push(`${e.unresolvedDisputes} extraction disagreement(s) about the entry for ${label} remain unresolved.`);
+    }
 
     if (!e.claims.length) {
       sawFailure = true;
+      ownFailure[index] = true;
       findings.push(`An encounter (${label}) carries no supporting claims.`);
       continue;
     }
@@ -168,19 +218,26 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
       // Citation integrity.
       if (!c.excerpt || c.excerpt.trim().length < 3) {
         sawFailure = true;
+        ownFailure[index] = true;
         findings.push(`A claim (${c.field}, ${label}) has no supporting excerpt.`);
       }
       if (c.page != null && readablePages.size && !readablePages.has(c.page)) {
         sawConflict = true;
+        ownConflict[index] = true;
         findings.push(`A claim cites page ${c.page}, which is not an established page of its source document.`);
       }
-      if (c.warning && /low-confidence OCR/.test(c.warning)) sawReviewNeeded = true;
+      if (c.warning && /low-confidence OCR/.test(c.warning)) {
+        sawReviewNeeded = true;
+        ownReview[index] = true;
+      }
       if (c.warning && /carried forward/.test(c.warning)) {
         sawReviewNeeded = true;
+        ownReview[index] = true;
       }
       // Factual record may not assert causation or future-care necessity.
       if (CAUSAL_RE.test(c.value)) {
         sawConflict = true;
+        ownConflict[index] = true;
         findings.push(`A claim (${c.field}, ${label}) asserts causation or future-care necessity, which is not a documented record fact.`);
       }
     }
@@ -188,10 +245,12 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
     // Summary integrity.
     if (CAUSAL_RE.test(e.factualSummary)) {
       sawConflict = true;
+      ownConflict[index] = true;
       findings.push(`The factual summary for ${label} asserts causation or future-care necessity.`);
     }
     if (NO_TREATMENT_RE.test(e.factualSummary)) {
       sawFailure = true;
+      ownFailure[index] = true;
       findings.push(`The factual summary for ${label} states that no treatment occurred, which the absence of records cannot establish.`);
     }
 
@@ -204,11 +263,13 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
         const support = map[s] ?? map[norm(s)];
         if (!support || support.length === 0) {
           sawFailure = true;
+          ownFailure[index] = true;
           findings.push(`A synthesized sentence for ${label} has no mapped supporting claim.`);
           continue;
         }
         if (support.some((id) => !claimIds.has(id))) {
           sawConflict = true;
+          ownConflict[index] = true;
           findings.push(`A synthesized sentence for ${label} cites a claim id that is not part of this encounter.`);
         }
       }
@@ -232,15 +293,20 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
   const dupes = [...seen.values()].filter((n) => n > 1).length;
   if (dupes > 0) {
     sawReviewNeeded = true;
+    docReview = true;
     findings.push(`${dupes} apparent duplicate encounter group(s) require review.`);
   }
 
   // ── 4. Chronological ordering of dated encounters ─────────────────────────
+  // Disclosed, never a flag. Productions arrive in whatever order the
+  // custodian assembled them — reverse-chronological charts are routine, and
+  // billing packets are ordered by claim — so extraction order says nothing
+  // about whether the extraction is faithful. Treating it as a review flag
+  // knocked practically every document out of PASS on a fact about filing.
   const dated = input.encounters.filter((e) => e.encounterDate).map((e) => e.encounterDate!);
   const sorted = [...dated].sort();
   if (dated.join("|") !== sorted.join("|")) {
-    sawReviewNeeded = true;
-    findings.push("Dated encounters are not in chronological order as presented.");
+    findings.push("Dated encounters appear in the source in an order other than chronological; the chronology orders them by date.");
   }
 
   // ── 5. Nothing extracted at all ───────────────────────────────────────────
@@ -248,22 +314,25 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
     return {
       result: input.pages.length === 0 ? "FAILED" : "EXTRACTION_INCOMPLETE",
       findings: [...findings, "No encounters were extracted from the available source pages."],
+      perEncounter: [],
     };
   }
 
   // Severity order: a hard integrity failure outranks a source conflict, which
   // outranks incompleteness, which outranks an ordinary review flag.
-  const result: AuditResult = sawFailure
-    ? "FAILED"
-    : sawConflict
-      ? "SOURCE_CONFLICT"
-      : sawIncomplete
-        ? "EXTRACTION_INCOMPLETE"
-        : sawReviewNeeded
-          ? "NEEDS_HUMAN_REVIEW"
-          : "PASS";
+  const grade = (failure: boolean, conflict: boolean, incomplete: boolean, review: boolean): AuditResult =>
+    failure ? "FAILED" : conflict ? "SOURCE_CONFLICT" : incomplete ? "EXTRACTION_INCOMPLETE" : review ? "NEEDS_HUMAN_REVIEW" : "PASS";
 
-  return { result, findings };
+  const result = grade(sawFailure, sawConflict, sawIncomplete, sawReviewNeeded);
+
+  // Each entry: what the DOCUMENT's own state implies for it, plus what the
+  // entry itself raised. A neighbour's unresolved dispute is not this entry's
+  // conflict.
+  const perEncounter = input.encounters.map((_, i) =>
+    grade(docFailure || ownFailure[i], docConflict || ownConflict[i], docIncomplete, docReview || ownReview[i]),
+  );
+
+  return { result, findings, perEncounter };
 }
 
 /** Split synthesized prose into sentences for claim mapping. */

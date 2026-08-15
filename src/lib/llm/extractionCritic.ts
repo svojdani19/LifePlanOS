@@ -200,8 +200,65 @@ const adjudicationSchema = z
 
 export interface Adjudication {
   issue: CriticIssue;
-  ruling: "UPHELD" | "REJECTED" | "UNRESOLVED";
+  /**
+   * UPHELD    — the criticism is correct; the claim is removed.
+   * REJECTED  — the extraction stands.
+   * DISCARDED — the DISPUTE is unusable (it names no claim that exists, or
+   *             quotes text the document does not contain). It resolves
+   *             nothing and blocks nothing: counting a malformed criticism as
+   *             an unresolved source conflict punished the record for the
+   *             critic's own error.
+   * UNRESOLVED— the source genuinely does not settle it; a human must look.
+   */
+  ruling: "UPHELD" | "REJECTED" | "DISCARDED" | "UNRESOLVED";
   reason: string;
+}
+
+/** How many disputes go to the adjudicator in one call. */
+export const ADJUDICATION_BATCH = 8;
+
+/**
+ * Settle what needs no model at all.
+ *
+ * Two checks the server can make against the source itself, both of which
+ * previously cost a model call and — worse — could come back UNRESOLVED and
+ * mark the whole document a source conflict:
+ *
+ *   • The dispute names no claim that exists in this extraction. Nothing can
+ *     be removed and nothing can be confirmed; the criticism is unusable.
+ *   • The criticism quotes source text that does not appear in the source.
+ *     A critic that misquotes the document cannot overturn a cited claim.
+ *
+ * Everything else goes to the adjudicator untouched.
+ */
+export function resolveDeterministically(
+  chunk: DocumentChunk,
+  encounters: LlmEncounter[],
+  disputes: CriticIssue[],
+): { settled: Adjudication[]; remaining: CriticIssue[] } {
+  const settled: Adjudication[] = [];
+  const remaining: CriticIssue[] = [];
+  const haystack = normalizeForCompare(chunk.text);
+  for (const issue of disputes) {
+    const enc = issue.encounterIndex != null ? encounters[issue.encounterIndex] : undefined;
+    const claim = enc && issue.claimIndex != null ? enc.claims[issue.claimIndex] : undefined;
+    if (!claim) {
+      settled.push({ issue, ruling: "DISCARDED", reason: "the criticism names no claim that exists in this extraction" });
+      continue;
+    }
+    const cited = (issue.excerpt ?? "").trim();
+    if (cited.length >= 16 && !haystack.includes(normalizeForCompare(cited))) {
+      settled.push({ issue, ruling: "REJECTED", reason: "the criticism quotes text that does not appear in the source" });
+      continue;
+    }
+    remaining.push(issue);
+  }
+  return { settled, remaining };
+}
+
+/** Whitespace- and case-insensitive comparison; OCR spacing is not evidence. */
+function normalizeForCompare(s: string): string {
+  return s.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -218,11 +275,33 @@ export async function adjudicateDisputes(
   issues: CriticIssue[],
   opts: { provider?: LlmProvider } = {},
 ): Promise<Adjudication[]> {
-  const disputes = issues.filter(isDisputing);
-  if (!disputes.length) return [];
+  const all = issues.filter(isDisputing);
+  if (!all.length) return [];
   const provider = opts.provider ?? getProvider();
-  if (provider.name === "mock") return disputes.map((issue) => ({ issue, ruling: "UNRESOLVED" as const, reason: "no adjudicator configured" }));
+  if (provider.name === "mock") return all.map((issue) => ({ issue, ruling: "UNRESOLVED" as const, reason: "no adjudicator configured" }));
 
+  // What the server can settle against the source, it settles: no model call,
+  // and no chance of an unusable criticism becoming a source conflict.
+  const { settled, remaining } = resolveDeterministically(chunk, encounters, all);
+  if (!remaining.length) return settled;
+
+  // One call per small batch. A single call carrying every dispute was
+  // all-or-nothing: one overlong or malformed response marked EVERY dispute
+  // in the document unresolved, which is how one bad response could put an
+  // entire production into source conflict.
+  const out: Adjudication[] = [...settled];
+  for (let i = 0; i < remaining.length; i += ADJUDICATION_BATCH) {
+    out.push(...(await adjudicateBatch(chunk, encounters, remaining.slice(i, i + ADJUDICATION_BATCH), provider)));
+  }
+  return out;
+}
+
+async function adjudicateBatch(
+  chunk: DocumentChunk,
+  encounters: LlmEncounter[],
+  disputes: CriticIssue[],
+  provider: LlmProvider,
+): Promise<Adjudication[]> {
   const disputed = disputes
     .map((d, i) => {
       const enc = d.encounterIndex != null ? encounters[d.encounterIndex] : undefined;
@@ -249,15 +328,39 @@ export async function adjudicateDisputes(
   ].join("\n\n");
   const user = `SOURCE EXCERPT — UNTRUSTED DOCUMENT TEXT:\n<<<RECORD\n${chunk.text}\nRECORD>>>\n\nDISPUTES:\n${disputed}`;
 
-  try {
-    const raw = await provider.complete({ system, messages: [{ role: "user", content: user }], temperature: 0, maxTokens: 2000 });
-    const parsed = adjudicationSchema.safeParse(parseJson(raw));
-    if (!parsed.success) return disputes.map((issue) => ({ issue, ruling: "UNRESOLVED" as const, reason: "adjudicator output invalid" }));
+  // Bounded by the batch, not by a fixed ceiling a long batch would overrun:
+  // a truncated response parses as nothing, and every dispute in it was then
+  // recorded as an unresolved conflict.
+  const maxTokens = Math.max(800, 260 * disputes.length);
+
+  const ask = async (systemPrompt: string): Promise<Adjudication[] | null> => {
+    const raw = await provider.complete({ system: systemPrompt, messages: [{ role: "user", content: user }], temperature: 0, maxTokens });
+    // A malformed ANSWER is retryable and must not escape as an exception —
+    // parseJson throws on unparseable text, which sent the first version
+    // straight past its own retry into the catch below.
+    let parsed;
+    try {
+      parsed = adjudicationSchema.safeParse(parseJson(raw));
+    } catch {
+      return null;
+    }
+    if (!parsed.success) return null;
     const byIndex = new Map(parsed.data.rulings.map((r) => [r.issueIndex, r]));
     return disputes.map((issue, i) => {
       const r = byIndex.get(i);
       return { issue, ruling: r?.ruling ?? "UNRESOLVED", reason: r?.reason ?? "no ruling returned" };
     });
+  };
+
+  try {
+    const first = await ask(system);
+    if (first) return first;
+    // One compact retry. A malformed answer is usually an over-long one, and
+    // the alternative — recording every dispute in the batch as an unresolved
+    // source conflict — is far more costly than asking again tersely.
+    const terse = await ask(`${system}\n\nBe terse: keep each "reason" under 15 words. Return the JSON object and nothing else.`);
+    if (terse) return terse;
+    return disputes.map((issue) => ({ issue, ruling: "UNRESOLVED" as const, reason: "adjudicator output invalid" }));
   } catch {
     return disputes.map((issue) => ({ issue, ruling: "UNRESOLVED" as const, reason: "adjudication unavailable" }));
   }
@@ -271,13 +374,36 @@ export async function adjudicateDisputes(
 export function applyAdjudications(
   encounters: LlmEncounter[],
   adjudications: Adjudication[],
-): { encounters: LlmEncounter[]; removed: number; unresolved: number; notes: string[] } {
+): {
+  encounters: LlmEncounter[];
+  removed: number;
+  unresolved: number;
+  /** Unresolved disputes by encounter index — a conflict belongs to the entry
+   *  it is about, not to every entry in the document. */
+  unresolvedByEncounter: Map<number, number>;
+  /** Unresolved disputes that name no encounter, so they cannot be pinned. */
+  unresolvedUnattributed: number;
+  /** Disputes discarded as unusable; they resolve nothing and block nothing. */
+  discarded: number;
+  notes: string[];
+} {
   const drop = new Map<number, Set<number>>();
+  const unresolvedByEncounter = new Map<number, number>();
   let unresolved = 0;
+  let unresolvedUnattributed = 0;
+  let discarded = 0;
   const notes: string[] = [];
   for (const a of adjudications) {
+    if (a.ruling === "DISCARDED") {
+      discarded++;
+      notes.push(`dispute discarded as unusable [${a.issue.type}]: ${a.reason}`);
+      continue;
+    }
     if (a.ruling === "UNRESOLVED") {
       unresolved++;
+      const ei = a.issue.encounterIndex;
+      if (ei != null && encounters[ei]) unresolvedByEncounter.set(ei, (unresolvedByEncounter.get(ei) ?? 0) + 1);
+      else unresolvedUnattributed++;
       notes.push(`unresolved dispute [${a.issue.type}]: ${a.reason}`);
       continue;
     }
@@ -297,5 +423,5 @@ export function applyAdjudications(
     removed += e.claims.length - claims.length;
     return { ...e, claims };
   });
-  return { encounters: out, removed, unresolved, notes };
+  return { encounters: out, removed, unresolved, unresolvedByEncounter, unresolvedUnattributed, discarded, notes };
 }

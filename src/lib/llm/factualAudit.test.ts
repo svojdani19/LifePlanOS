@@ -164,11 +164,17 @@ describe("presentation-level review flags", () => {
     expect(r.findings.join(" ")).toMatch(/duplicate/);
   });
 
-  it("out-of-order dated encounters require review", () => {
+  it("discloses out-of-order dated encounters without holding the draft for review", () => {
+    // Productions arrive in whatever order the custodian assembled them —
+    // reverse-chronological charts are routine, billing packets are ordered by
+    // claim. Extraction order says nothing about whether the extraction is
+    // faithful, and flagging it knocked practically every document out of PASS
+    // on a fact about filing. Disclosed, not gated.
     const r = auditFactualRecord(
       base({ encounters: [encounter({ encounterDate: "2025-05-01" }), encounter({ id: "e2", encounterDate: "2025-03-14" })] }),
     );
-    expect(r.result).toBe("NEEDS_HUMAN_REVIEW");
+    expect(r.result).toBe("PASS");
+    expect(r.findings.join(" ")).toMatch(/order other than chronological/);
   });
 
   it("zero encounters with pages present is EXTRACTION_INCOMPLETE, not PASS", () => {
@@ -191,5 +197,50 @@ describe("unprocessed content blocks completeness", () => {
     const r = auditFactualRecord(base({ truncatedSource: true }));
     expect(r.result).toBe("EXTRACTION_INCOMPLETE");
     expect(r.findings.join(" ")).toMatch(/clipped at the storage cap/);
+  });
+});
+
+describe("a conflict belongs to the entry it is about", () => {
+  // Counting every unresolved dispute document-wide put whole productions
+  // into source conflict over a disagreement about ONE claim in ONE entry —
+  // on McHenry, 505 of 547 current rows, which is what kept the review queue
+  // from ever draining.
+  it("marks only the disputed entry as conflicted", () => {
+    const r = auditFactualRecord(
+      base({
+        encounters: [
+          encounter({ id: "e1", encounterDate: "2025-03-14", unresolvedDisputes: 2 }),
+          encounter({ id: "e2", encounterDate: "2025-03-15" }),
+        ],
+      }),
+    );
+    expect(r.perEncounter).toEqual(["SOURCE_CONFLICT", "PASS"]);
+    // The document as a whole still reports the conflict.
+    expect(r.result).toBe("SOURCE_CONFLICT");
+    expect(r.findings.join(" ")).toMatch(/2 extraction disagreement\(s\) about the entry for 2025-03-14/);
+  });
+
+  it("spreads a dispute that names no entry, because it cannot be pinned", () => {
+    const r = auditFactualRecord(
+      base({ encounters: [encounter({ id: "e1" }), encounter({ id: "e2", encounterDate: "2025-03-15" })], unresolvedDisputes: 1 }),
+    );
+    expect(r.perEncounter).toEqual(["SOURCE_CONFLICT", "SOURCE_CONFLICT"]);
+  });
+
+  it("still gives every entry the document's own incompleteness", () => {
+    // An entry drawn from a partly-processed record is itself part of a
+    // partly-processed record; the export gate must keep seeing this.
+    const r = auditFactualRecord(
+      base({ encounters: [encounter({ id: "e1" }), encounter({ id: "e2", encounterDate: "2025-03-15" })], coverageGaps: 3 }),
+    );
+    expect(r.perEncounter).toEqual(["EXTRACTION_INCOMPLETE", "EXTRACTION_INCOMPLETE"]);
+  });
+
+  it("keeps one entry's integrity failure off its neighbours", () => {
+    const r = auditFactualRecord(
+      base({ encounters: [encounter({ id: "e1", claims: [] }), encounter({ id: "e2", encounterDate: "2025-03-15" })] }),
+    );
+    expect(r.perEncounter[0]).toBe("FAILED");
+    expect(r.perEncounter[1]).toBe("PASS");
   });
 });

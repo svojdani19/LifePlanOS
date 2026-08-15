@@ -208,6 +208,10 @@ export async function processDocumentExtraction(
     disputed: number;
     adjudicated: number;
     unresolved: number;
+    /** Unresolved disputes attributed to accepted encounters, in their order. */
+    unresolvedPerAccepted: number[];
+    /** Unresolved disputes naming no entry, so they cannot be pinned to one. */
+    unresolvedUnattributed: number;
   };
   const results: (ChunkResult | { failed: string; failedRange?: { pageStart: number | null; pageEnd: number | null; reason: string } })[] = new Array(chunks.length);
 
@@ -241,6 +245,8 @@ export async function processDocumentExtraction(
     let disputed = 0;
     let adjudicated = 0;
     let unresolved = 0;
+    let unresolvedUnattributed = 0;
+    let unresolvedByEncounter = new Map<number, number>();
     if (criticEnabled() && encounters.length) {
       const critique = await runCritic(chunk, encounters, { provider: opts.provider });
       rejected.push(...critique.rejected);
@@ -257,12 +263,21 @@ export async function processDocumentExtraction(
         encounters = applied.encounters;
         adjudicated = rulings.filter((r) => r.ruling !== "UNRESOLVED").length;
         unresolved = applied.unresolved;
+        unresolvedUnattributed = applied.unresolvedUnattributed;
+        unresolvedByEncounter = applied.unresolvedByEncounter;
         rejected.push(...applied.notes);
       }
     }
     const outcome = validateEncounters(chunk, encounters);
     rejected.push(...outcome.rejected);
-    return { accepted: outcome.accepted, rejected, critic, candidates, disputed, adjudicated, unresolved };
+    // Follow each unresolved dispute to the entry it is about. Validation
+    // drops entries, so the pre-validation index only survives via
+    // sourceIndex — without it a dispute would land on whichever entry
+    // happened to take the vacated position.
+    const unresolvedPerAccepted = outcome.accepted.map((e) =>
+      e.sourceIndex != null ? (unresolvedByEncounter.get(e.sourceIndex) ?? 0) : 0,
+    );
+    return { accepted: outcome.accepted, rejected, critic, candidates, disputed, adjudicated, unresolved, unresolvedPerAccepted, unresolvedUnattributed };
   };
 
   const concurrency = Math.max(1, Math.min(8, Number(process.env.RECORD_CHUNK_CONCURRENCY) || 3));
@@ -322,6 +337,9 @@ export async function processDocumentExtraction(
   let disputedCount = 0;
   let adjudicatedCount = 0;
   let unresolvedDisputes = 0;
+  let unattributedDisputes = 0;
+  /** Aligned to `validated`: unresolved disputes about each accepted entry. */
+  const unresolvedPerValidated: number[] = [];
   const failedRanges: { pageStart: number | null; pageEnd: number | null; reason: string }[] = [];
   for (const r of results) {
     if (!r) continue;
@@ -331,12 +349,14 @@ export async function processDocumentExtraction(
       continue;
     }
     validated.push(...r.accepted);
+    unresolvedPerValidated.push(...r.unresolvedPerAccepted);
     rejects.push(...r.rejected);
     criticFindings.push(...r.critic);
     candidateCount += r.candidates;
     disputedCount += r.disputed;
     adjudicatedCount += r.adjudicated;
     unresolvedDisputes += r.unresolved;
+    unattributedDisputes += r.unresolvedUnattributed;
   }
 
   // Every chunk failing is a document-level failure, not a partial result.
@@ -395,6 +415,13 @@ export async function processDocumentExtraction(
   } catch {
     /* the cross-check is an auditor; its failure never blocks extraction */
   }
+
+  // Pin each unresolved dispute to the entry it is about before consolidation
+  // merges entries (which sums the counts). Document-wide counting is what put
+  // whole productions into source conflict over one contested claim.
+  validated.forEach((e, i) => {
+    e.unresolvedDisputes = unresolvedPerValidated[i] ?? 0;
+  });
 
   const consolidated = consolidateEncounters(validated);
 
@@ -496,6 +523,7 @@ export async function processDocumentExtraction(
     claims: e.claims.map((c, j) => ({ id: `c${j}`, field: c.field, claimType: c.claimType, value: c.value, excerpt: c.excerpt, page: c.page, warning: c.warning })),
     page: e.page,
     status: "AI_DRAFT",
+    unresolvedDisputes: e.unresolvedDisputes ?? 0,
   }));
   const audit = auditFactualRecord({
     encounters: auditEncounters,
@@ -504,7 +532,9 @@ export async function processDocumentExtraction(
     failedSections: failedSections.length,
     coverageGaps: coverageGaps.length,
     truncatedSource: truncated,
-    unresolvedDisputes,
+    // Only the disputes that name no entry are document-level; the rest travel
+    // on the entries they are about.
+    unresolvedDisputes: unattributedDisputes,
     allDocumentsProcessed: facts.allDocumentsProcessed,
   });
 
@@ -543,7 +573,7 @@ export async function processDocumentExtraction(
 
   const created: string[] = [];
   const createdDates = new Set<string>();
-  for (const e of encounters) {
+  for (const [encIndex, e] of encounters.entries()) {
     // A current (non-stale) human row already covers this encounter — do not
     // create a duplicate AI candidate beside preserved human work.
     const key = encounterKey({ encounterDate: e.encounterDate, provider: e.provider, page: e.page });
@@ -591,8 +621,11 @@ export async function processDocumentExtraction(
             // stays a plain AI_DRAFT and carries the reasons. Neither is verified —
             // an audit says the system found nothing wrong, which is not the same
             // as a human agreeing the record is right.
-            status: audit.result === "PASS" ? "AI_AUDIT_PASSED" : "AI_DRAFT",
-            auditResult: audit.result,
+            // The audit result for THIS entry: every document-level defect it
+            // inherits, plus what it raised itself — but not a conflict that
+            // belongs to a different entry.
+            status: (audit.perEncounter[encIndex] ?? audit.result) === "PASS" ? "AI_AUDIT_PASSED" : "AI_DRAFT",
+            auditResult: audit.perEncounter[encIndex] ?? audit.result,
             auditFindings: audit.findings.slice(0, 20) as never,
             auditedAt: new Date(),
             sourceFingerprint,

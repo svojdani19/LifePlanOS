@@ -158,3 +158,75 @@ describe("adjudication", () => {
     expect(adj).toEqual([]);
   });
 });
+
+describe("what the server settles without a model", () => {
+  const dispute = (over: Partial<CriticIssue> = {}): CriticIssue =>
+    ({ type: "UNSUPPORTED_CLAIM", encounterIndex: 0, claimIndex: 1, excerpt: null, detail: "the cited text does not support this", ...over }) as CriticIssue;
+
+  const never = (): LlmProvider => ({ name: "fake", complete: async () => { throw new Error("must not be called"); } });
+
+  it("discards a criticism that names a claim which does not exist", async () => {
+    // It can neither remove anything nor confirm anything; counting it as an
+    // unresolved source conflict punished the record for the critic's error.
+    const out = await adjudicateDisputes(chunkOf(SOURCE), encounters, [dispute({ claimIndex: 47 })], { provider: never() });
+    expect(out).toHaveLength(1);
+    expect(out[0].ruling).toBe("DISCARDED");
+    const applied = applyAdjudications(encounters, out);
+    expect(applied.discarded).toBe(1);
+    expect(applied.unresolved).toBe(0);
+  });
+
+  it("rejects a criticism quoting text the document does not contain", async () => {
+    const out = await adjudicateDisputes(
+      chunkOf(SOURCE),
+      encounters,
+      [dispute({ excerpt: "Patient underwent total knee arthroplasty on this date." })],
+      { provider: never() },
+    );
+    expect(out[0].ruling).toBe("REJECTED");
+    expect(out[0].reason).toMatch(/does not appear in the source/);
+  });
+
+  it("still asks about a criticism whose evidence IS in the source", async () => {
+    const out = await adjudicateDisputes(
+      chunkOf(SOURCE),
+      encounters,
+      [dispute({ excerpt: "Plan: Recommend epidural steroid injection at L4-L5." })],
+      { provider: provider([JSON.stringify({ rulings: [{ issueIndex: 0, ruling: "UPHELD", reason: "the source recommends it" }] })]) },
+    );
+    expect(out[0].ruling).toBe("UPHELD");
+  });
+});
+
+describe("one bad answer must not conflict a whole document", () => {
+  const many = (n: number): CriticIssue[] =>
+    Array.from({ length: n }, () => ({ type: "UNSUPPORTED_CLAIM", encounterIndex: 0, claimIndex: 1, excerpt: null, detail: "disputed" }) as CriticIssue);
+
+  it("retries a malformed answer tersely before giving up on the batch", async () => {
+    const out = await adjudicateDisputes(chunkOf(SOURCE), encounters, many(2), {
+      provider: provider(["not json at all", JSON.stringify({ rulings: [{ issueIndex: 0, ruling: "REJECTED", reason: "stands" }, { issueIndex: 1, ruling: "REJECTED", reason: "stands" }] })]),
+    });
+    expect(out.map((o) => o.ruling)).toEqual(["REJECTED", "REJECTED"]);
+  });
+
+  it("confines an unparseable batch to itself", async () => {
+    // 10 disputes = two batches. The first answers, the second never parses;
+    // only the second batch may go unresolved.
+    const good = JSON.stringify({ rulings: Array.from({ length: 8 }, (_, i) => ({ issueIndex: i, ruling: "REJECTED", reason: "stands" })) });
+    const out = await adjudicateDisputes(chunkOf(SOURCE), encounters, many(10), { provider: provider([good, "garbage", "garbage"]) });
+    expect(out.filter((o) => o.ruling === "REJECTED")).toHaveLength(8);
+    expect(out.filter((o) => o.ruling === "UNRESOLVED")).toHaveLength(2);
+  });
+});
+
+describe("an unresolved conflict belongs to its own entry", () => {
+  it("attributes unresolved disputes by encounter, and counts unattributable ones apart", () => {
+    const applied = applyAdjudications(encounters, [
+      { issue: { type: "UNSUPPORTED_CLAIM", encounterIndex: 0, claimIndex: 1, excerpt: null, detail: "d" } as CriticIssue, ruling: "UNRESOLVED", reason: "source silent" },
+      { issue: { type: "MISSING_ENCOUNTER", encounterIndex: null, claimIndex: null, excerpt: null, detail: "d" } as CriticIssue, ruling: "UNRESOLVED", reason: "source silent" },
+    ]);
+    expect(applied.unresolved).toBe(2);
+    expect(applied.unresolvedByEncounter.get(0)).toBe(1);
+    expect(applied.unresolvedUnattributed).toBe(1);
+  });
+});
