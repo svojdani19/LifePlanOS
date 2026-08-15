@@ -4,6 +4,8 @@
 import { describe, it, expect } from "vitest";
 import {
   chunkDocumentText,
+  salvageClaims,
+  extractionOutputSchema,
   buildExtractionPrompt,
   extractChunkComplete,
   extractEncountersFromChunk,
@@ -938,5 +940,73 @@ describe("bounded continuation: overflow subdivides at server-chosen boundaries"
     // What DID come back is kept — the overflow is recorded, not the content
     // discarded.
     expect(result.encounters).toHaveLength(1);
+  });
+});
+
+describe("one unparseable claim must not cost the page", () => {
+  // The corpus failure, exactly: 14 of 15 failed sections died because ONE
+  // claim's excerpt came back under three characters, which failed the claims
+  // array, the payload, the chunk, and finally an entire page of a medical
+  // record. Grounding fails closed for the ungrounded CLAIM; its neighbours
+  // are not ungrounded.
+  const payloadWithBadClaim = {
+    encounters: [
+      {
+        dateStatus: "DOCUMENTED",
+        date: "2025-03-14",
+        dateExcerpt: "Date of Service: 03/14/2025",
+        encounterType: "Clinic visit",
+        claims: [
+          { field: "assessment", value: "Lumbar radiculopathy", excerpt: "Assessment: Lumbar radiculopathy", page: 1 },
+          { field: "medications", value: "Ibuprofen 600 mg", excerpt: "x", page: 1 },
+          { field: "treatment", value: "Continue therapy", excerpt: "Plan: Continue therapy", page: 1 },
+        ],
+      },
+    ],
+  };
+
+  it("keeps the sound claims and drops only the unparseable one", () => {
+    const { payload, salvage } = salvageClaims(payloadWithBadClaim);
+    const parsed = extractionOutputSchema.safeParse(payload);
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data.encounters[0].claims).toHaveLength(2);
+    expect(salvage).toHaveLength(1);
+    expect(salvage[0]).toMatch(/medications/);
+  });
+
+  it("names the field and the reason, never the value", () => {
+    const { salvage } = salvageClaims(payloadWithBadClaim);
+    expect(salvage[0]).toMatch(/at least 3 character/);
+    expect(salvage.join(" ")).not.toMatch(/Ibuprofen/);
+  });
+
+  it("drops an entry no claim survived, because nothing could be cited", () => {
+    const { payload, salvage } = salvageClaims({
+      encounters: [{ dateStatus: "UNKNOWN", claims: [{ field: "assessment", value: "x", excerpt: "y" }] }],
+    });
+    expect((payload as { encounters: unknown[] }).encounters).toHaveLength(0);
+    expect(salvage.join(" ")).toMatch(/no claim survived/);
+  });
+
+  it("leaves a sound payload untouched", () => {
+    const good = {
+      encounters: [
+        {
+          dateStatus: "DOCUMENTED",
+          date: "2025-03-14",
+          dateExcerpt: "Date of Service: 03/14/2025",
+          claims: [{ field: "assessment", value: "Lumbar radiculopathy", excerpt: "Assessment: Lumbar radiculopathy", page: 1 }],
+        },
+      ],
+    };
+    const { payload, salvage } = salvageClaims(good);
+    expect(salvage).toHaveLength(0);
+    expect(extractionOutputSchema.safeParse(payload).success).toBe(true);
+  });
+
+  it("passes through anything that is not a payload it understands", () => {
+    for (const junk of [null, "text", 42, {}, { encounters: "no" }]) {
+      expect(() => salvageClaims(junk)).not.toThrow();
+    }
   });
 });

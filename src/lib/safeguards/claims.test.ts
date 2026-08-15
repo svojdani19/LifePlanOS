@@ -51,6 +51,7 @@ describe("the safeguard registry keeps itself honest", () => {
 
 /** Safeguards refuted below; the registry test requires one entry per claim. */
 const REFUTED = [
+  { id: "claim-salvage" },
   { id: "machine-corroboration" },
   { id: "dispute-adjudication" },
   { id: "group-review" },
@@ -260,6 +261,46 @@ describe("refuting: 'one review covers every copy'", () => {
     expect(fn).toMatch(/encounters\/group/);
     // No swallowed per-copy failures.
     expect(fn).not.toMatch(/\.catch\(\(\) => \{\}\)/);
+  });
+});
+
+describe("refuting: 'the sound claims were kept'", () => {
+  it("does not turn an unusable response into an empty page", async () => {
+    // 14 of 15 failed sections in the corpus died because ONE claim's excerpt
+    // was two characters long. Salvaging that is right; salvaging a response
+    // where NOTHING parsed would report "this page contained nothing", which
+    // is a false statement about the record rather than about the model.
+    const { salvageClaims } = await import("@/lib/llm/recordExtraction");
+    const allBad = { encounters: [{ dateStatus: "UNKNOWN", claims: [{ field: "assessment", value: "x" }] }] };
+    const { payload } = salvageClaims(allBad);
+    expect((payload as { encounters: unknown[] }).encounters).toHaveLength(0);
+    // The caller must treat "sent entries, kept none" as a failure, not a result.
+    const src = await import("node:fs/promises").then((fs) => fs.readFile("src/lib/llm/recordExtraction.ts", "utf8"));
+    expect(src).toMatch(/no entry survived parsing/);
+  });
+
+  it("marks a salvaged page incomplete so its range is re-read", async () => {
+    const src = await import("node:fs/promises").then((fs) => fs.readFile("src/lib/llm/recordExtraction.ts", "utf8"));
+    expect(src).toMatch(/incomplete: atCap\(encounters\) \|\| salvage\.length > 0/);
+  });
+
+  it("names the field it dropped without quoting the record", async () => {
+    const { salvageClaims } = await import("@/lib/llm/recordExtraction");
+    const { salvage } = salvageClaims({
+      encounters: [
+        {
+          dateStatus: "DOCUMENTED",
+          date: "2025-03-14",
+          dateExcerpt: "Date of Service: 03/14/2025",
+          claims: [
+            { field: "assessment", value: "Lumbar radiculopathy", excerpt: "Assessment: Lumbar radiculopathy", page: 1 },
+            { field: "medications", value: "Ibuprofen 600 mg", excerpt: "x", page: 1 },
+          ],
+        },
+      ],
+    });
+    expect(salvage.join(" ")).toMatch(/medications/);
+    expect(salvage.join(" ")).not.toMatch(/Ibuprofen/);
   });
 });
 

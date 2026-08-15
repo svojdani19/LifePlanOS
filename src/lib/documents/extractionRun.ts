@@ -247,6 +247,9 @@ export async function processDocumentExtraction(
     }
     const candidates = encounters.reduce((s: number, e: { claims: unknown[] }) => s + e.claims.length, 0);
     const rejected: string[] = [];
+    // A page kept by dropping an unparseable claim says so. Salvage that is
+    // not disclosed is indistinguishable from a page that had nothing wrong.
+    if (extraction.salvage?.length) rejected.push(...extraction.salvage);
     const critic: string[] = [];
     let disputed = 0;
     let adjudicated = 0;

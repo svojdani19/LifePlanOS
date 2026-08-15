@@ -1,6 +1,7 @@
 # 33 — Reducing what a reviewer must decide
 
-Status: **design, awaiting decisions.** No behaviour changes with this document.
+Status: **#3 implemented (it turned out to be a defect); #1, #4 and #5
+specified and awaiting build.** No decision is outstanding for any of them.
 Measured against REF-2026-0005 (McHenry, 23 documents / 1,357 pages) on
 2026-08-15, after the review-4 fixes landed (`59aacc6`).
 
@@ -88,36 +89,54 @@ new claim + refutation for exactly this.
 
 ---
 
-## 3. Scope a failed section to the pages it covers
+## 3. ~~Scope a failed section to the pages it covers~~ — WITHDRAWN
 
-**The finding.** 438 rows carry *"N section(s) of the source could not be
-processed"*, which sets EXTRACTION_INCOMPLETE for **every** row in that
-document. On the re-extracted document, one unprocessable chunk held all 80
-otherwise-clean rows below PASS.
+**This proposal was wrong, and the measurement that retired it is worth
+keeping.** The original idea: 438 rows carry *"N section(s) of the source
+could not be processed"*, which marks the whole document incomplete, so scope
+the mark to the failed pages instead. That would have re-scoped a real signal
+on a spatial assumption (pages 12–14 are fine because pages 200–204 failed),
+and it would have needed a judgement call about how far "near" reaches.
 
-**The change.** `failedRanges` is already recorded per chunk with
-`pageStart`/`pageEnd`. Pass it into the audit and treat the incompleteness as
-belonging to entries whose pages fall inside — or adjacent to — a failed range,
-instead of to the document. The document-level finding stays, the case-level
-export gate stays, and the Records limitations banner keeps disclosing it.
+Then the failures themselves were counted:
 
-**This one re-scopes a real signal rather than removing a problem**, so it is
-the decision that most deserves an explicit yes. The argument for: an entry
-extracted from pages 12–14 is not less faithful because pages 200–204 failed,
-and today's rule means one bad chunk in a 625-page file makes the entire file
-unreviewable-as-clean. The argument against: a failed section could contain
-the note that contradicts an entry elsewhere, so "nowhere near" is a spatial
-assumption about a document, not a logical guarantee.
+```
+documents with >=1 failed section    4 of 23
+failed sections total               15
+reason (14 of 15)  structured output failed after retry:
+                   schema: encounters.0.claims.11.excerpt:
+                   String must contain at least 3 character(s)
+```
 
-**Proposed middle:** scope it, and additionally mark any entry whose date also
-appears inside a failed range as NEEDS_HUMAN_REVIEW rather than PASS — so
-temporal proximity, not just page proximity, is respected.
+Fourteen of fifteen failures were **one claim whose excerpt came back under
+three characters**, which failed the claims array, the payload, the chunk, and
+finally an entire page of a medical record. Not an unreadable page. Not a
+provider outage. Our own schema, discarding a page over one malformed field.
 
-**Files.** `src/lib/documents/extractionRun.ts` (pass `failedRanges`),
-`src/lib/llm/factualAudit.ts` (per-entry incompleteness).
+That contradicts the pipeline's stated policy — *grounding fails closed,
+everything else bends* — because grounding is supposed to fail closed for the
+CLAIM that is ungrounded, not for its neighbours.
 
-**Decision needed:** approve the scoping, and choose plain page-scoping vs the
-proposed middle.
+**Implemented instead (`salvageClaims`, recordExtraction.ts):**
+
+- each claim is parsed on its own; an unparseable one is dropped with a
+  PHI-free reason naming its field, and the rest of the page survives;
+- an entry left with no claims is dropped — an entry with nothing to cite is
+  not an entry;
+- if entries were sent and NONE survived, the response throws as before, so a
+  model answering unusably still fails loudly instead of reporting an empty
+  page (three existing fail-closed tests hold this line and were what caught
+  the first version of this change);
+- any salvage marks the response INCOMPLETE, which the existing machinery
+  already handles by subdividing the range and re-asking — so a salvaged page
+  is re-read on a smaller range rather than passed off as whole.
+
+The document-level rule for a section that genuinely cannot be processed is
+**unchanged and still strict**. The population it applies to should now be
+close to zero. Registered in the safeguard registry as `claim-salvage`, with
+refutations.
+
+**Decision needed:** none. It was a defect.
 
 ---
 
@@ -132,17 +151,20 @@ header dates with NO extracted row          9
 ```
 
 So the real recall gap is **9 dates**, and the 347 is the same document-wide
-amplification as #3. Three documents account for 6 of the 9 (River Oaks 3,
+amplification #3 turned out to suffer from. Three documents account for 6 of the 9 (River Oaks 3,
 St Joseph 2, Emergency Hospital MR AFF 2).
 
 **The change.** Two parts, in order:
-1. Attribute the finding to the document, not to every row — same fix shape as
-   #3. This is where the 347 goes away.
+1. Attribute the finding to the document, not to every row. This is where the
+   347 goes away. Unlike #3, there is no root cause to remove here: a header
+   with no encounter is a real gap; only its amplification onto every sibling
+   row is the artefact.
 2. Treat the 9 as an extraction-recall bug and inspect them individually. Do
    **not** suppress them: a dated header with no encounter is exactly the
    under-extraction the critic-omission work exists to surface.
 
-**Files.** Same two as #3, plus a short investigation of the 9 dates.
+**Files.** `src/lib/documents/extractionRun.ts`, `src/lib/llm/factualAudit.ts`,
+plus a short investigation of the 9 dates.
 
 **Decision needed:** none for part 1. Part 2 is a bug hunt, not a design.
 
@@ -194,12 +216,13 @@ finding only sets NEEDS_HUMAN_REVIEW, so it is not what holds rows out of PASS
 | 1 | Note-level review surface | 561 → 227 decisions | fidelity | no |
 | 5 | Duplicate-key defect | 176 findings | defect | no |
 | 4 | Coverage-gap scoping (+9 recall bugs) | 347 | scoping + bug | part 2 only |
-| 3 | Failed-section scoping | 438 | **re-scoping a real signal** | **yes** |
+| 3 | ~~Failed-section scoping~~ → fixed the root cause instead | 438 | defect | no |
 
 Everything above leaves the human review gate, the export gate and per-row
-provenance untouched. #1 and #5 are strict improvements; #3 and #4-part-1
-change what a signal is attached to, and #3 is the one where a reasonable
-person could say no.
+provenance untouched. #1, #3 and #5 are strict improvements; #4-part-1 changes
+what a signal is attached to. Nothing here now requires a judgement call — the
+one item that did (#3) dissolved once its failures were counted, which is the
+general lesson: measure the population before designing a policy for it.
 
 Each change lands with a claim + refutation in `src/lib/safeguards/claims.ts`,
 so the label it puts in front of a physician is testable.

@@ -117,6 +117,20 @@ export const SAFEGUARD_CLAIMS: SafeguardClaim[] = [
     consequenceIfOverclaimed: "An audit-passed row could be exported as though a person had checked it.",
   },
   {
+    id: "claim-salvage",
+    module: "src/lib/llm/recordExtraction.ts",
+    labels: ["claim dropped", "encounter dropped: no claim survived parsing"],
+    asserts:
+      "A single unparseable claim was dropped, with its field and the reason recorded, and the rest of its page was kept — and the page is marked incomplete so the range is re-read rather than presented as whole.",
+    doesNotAssert: [
+      "that a response where nothing survived is an empty page",
+      "that a salvaged page carries everything its source range holds",
+      "that the dropped claim was wrong about the record",
+    ],
+    consequenceIfOverclaimed:
+      "A model answering unusably would read as a page that simply contained nothing, which is the same false statement as a bad extraction — only quieter.",
+  },
+  {
     id: "provenance-upgrade",
     module: "src/lib/records/provenanceUpgrade.ts",
     labels: ["One-time provenance upgrade"],

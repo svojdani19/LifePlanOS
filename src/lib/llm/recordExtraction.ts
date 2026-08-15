@@ -395,6 +395,61 @@ const provenanceSchema = z
   })
   .strict();
 
+/**
+ * Drop the claims that cannot be parsed; keep the page.
+ *
+ * The schema's strictness is right about a CLAIM and was catastrophic about
+ * its neighbours: one claim whose excerpt came back two characters long failed
+ * the claims array, which failed the payload, which failed the chunk — and an
+ * entire page of a medical record went unextracted. Measured on the corpus,
+ * 14 of 15 failed sections died exactly this way, and every one of them took
+ * a whole page's worth of sound claims down with it.
+ *
+ * That is not the documented policy. Grounding fails closed FOR THE CLAIM
+ * THAT IS UNGROUNDED; everything else bends. So each claim is parsed on its
+ * own, the ones that cannot be are dropped with a PHI-free reason, and the
+ * rest of the page survives. An encounter left with no claims at all is
+ * dropped too — an entry with nothing to cite is not an entry — and the
+ * downstream validator still checks every surviving excerpt verbatim against
+ * the source.
+ */
+export function salvageClaims(payload: unknown): { payload: unknown; salvage: string[] } {
+  const salvage: string[] = [];
+  if (!payload || typeof payload !== "object") return { payload, salvage };
+  const root = payload as { encounters?: unknown };
+  if (!Array.isArray(root.encounters)) return { payload, salvage };
+
+  const encounters = root.encounters.map((raw) => {
+    if (!raw || typeof raw !== "object") return raw;
+    const enc = raw as { claims?: unknown };
+    if (!Array.isArray(enc.claims)) return raw;
+    const kept: unknown[] = [];
+    for (const claim of enc.claims) {
+      const parsed = claimSchema.safeParse(claim);
+      if (parsed.success) {
+        kept.push(claim);
+        continue;
+      }
+      // Field names and the schema's own reason only — never the value.
+      const field = (claim as { field?: unknown })?.field;
+      const why = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`)[0] ?? "invalid";
+      salvage.push(`claim dropped (${typeof field === "string" ? field : "unknown field"}): ${why}`);
+    }
+    return { ...enc, claims: kept };
+  });
+
+  const withClaims = encounters.filter((e) => {
+    const claims = (e as { claims?: unknown })?.claims;
+    if (Array.isArray(claims) && claims.length === 0) {
+      salvage.push("encounter dropped: no claim survived parsing, so nothing could be cited");
+      return false;
+    }
+    return true;
+  });
+
+  return { payload: { ...root, encounters: withClaims }, salvage };
+}
+
 const claimSchema = z
   .object({
     // GROUNDING — mandatory, fails closed. Without a field, a value, and an
@@ -615,6 +670,12 @@ export interface ChunkExtraction {
    * failing that, a fact to record — never a result to pass off as whole.
    */
   incomplete: boolean;
+  /**
+   * Claims (or whole entries) dropped because they could not be parsed, with
+   * PHI-free reasons. Recorded so a salvaged page discloses what it lost
+   * rather than presenting as untouched.
+   */
+  salvage?: string[];
 }
 
 /** How many times one chunk may be halved before overflow is recorded instead. */
@@ -635,9 +696,9 @@ export async function extractChunkComplete(
   chunk: DocumentChunk,
   opts: ExtractOptions = {},
   depth = 0,
-): Promise<{ encounters: LlmEncounter[]; unresolvedPages: number[]; subdivisions: number }> {
+): Promise<{ encounters: LlmEncounter[]; unresolvedPages: number[]; subdivisions: number; salvage: string[] }> {
   const result = await extractEncountersFromChunk(chunk, opts);
-  if (!result.incomplete) return { encounters: result.encounters, unresolvedPages: [], subdivisions: 0 };
+  if (!result.incomplete) return { encounters: result.encounters, unresolvedPages: [], subdivisions: 0, salvage: result.salvage ?? [] };
 
   const splittable = chunk.pageSlices.length > 1 && depth < MAX_SUBDIVISION_DEPTH;
   if (!splittable) {
@@ -652,6 +713,7 @@ export async function extractChunkComplete(
       encounters: result.encounters,
       unresolvedPages: pages,
       subdivisions: 0,
+      salvage: result.salvage ?? [],
     };
   }
 
@@ -670,6 +732,7 @@ export async function extractChunkComplete(
     encounters: parts.flatMap((p) => p.encounters),
     unresolvedPages: parts.flatMap((p) => p.unresolvedPages),
     subdivisions: 1 + parts.reduce((n, p) => n + p.subdivisions, 0),
+    salvage: [...(result.salvage ?? []), ...parts.flatMap((p) => p.salvage)],
   };
 }
 
@@ -692,11 +755,24 @@ export async function extractEncountersFromChunk(chunk: DocumentChunk, opts: Ext
       maxTokens: MAX_OUTPUT_TOKENS,
     });
 
-  const attempt = async (extra?: string): Promise<LlmEncounter[]> => {
+  const attempt = async (extra?: string): Promise<{ encounters: LlmEncounter[]; salvage: string[] }> => {
     const raw = await ask(extra);
-    const parsed = extractionOutputSchema.safeParse(parseJsonStrict(raw));
+    const original = parseJsonStrict(raw);
+    const { payload, salvage } = salvageClaims(original);
+    const parsed = extractionOutputSchema.safeParse(payload);
     if (!parsed.success) throw new ExtractionOutputError(`schema: ${parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).slice(0, 5).join("; ")}`);
-    return parsed.data.encounters;
+    // Salvage is for an ISOLATED defect. A response where nothing survived is
+    // not a page with one bad claim — it is a failed response, and it must
+    // fail loudly so the retry and the fail-closed path run. Returning an
+    // empty page here would turn "the model answered unusably" into "this
+    // page contained nothing", which is the same lie in a quieter voice.
+    const sent = Array.isArray((original as { encounters?: unknown[] })?.encounters)
+      ? ((original as { encounters: unknown[] }).encounters as unknown[]).length
+      : 0;
+    if (sent > 0 && parsed.data.encounters.length === 0) {
+      throw new ExtractionOutputError(`schema: no entry survived parsing (${salvage[0] ?? "all claims invalid"})`);
+    }
+    return { encounters: parsed.data.encounters, salvage };
   };
 
   // An array landing exactly at its parse cap is indistinguishable from one
@@ -705,8 +781,12 @@ export async function extractEncountersFromChunk(chunk: DocumentChunk, opts: Ext
     encounters.length >= 100 || encounters.some((e) => e.claims.length >= 300);
 
   try {
-    const encounters = await attempt();
-    return { encounters, incomplete: atCap(encounters) };
+    const { encounters, salvage } = await attempt();
+    // Salvage means this response is not the whole of its range: the existing
+    // incompleteness machinery subdivides and re-asks, which usually recovers
+    // the dropped claim cleanly on a smaller range. A salvaged page is never
+    // passed off as untouched.
+    return { encounters, incomplete: atCap(encounters) || salvage.length > 0, salvage };
   } catch (first) {
     // ONE controlled retry with the failure named; then fail closed. A
     // truncated response is a SIZE problem, so the retry asks for a more
@@ -717,12 +797,12 @@ export async function extractEncountersFromChunk(chunk: DocumentChunk, opts: Ext
       ? `Your previous output was rejected (${reason}). The response was too long to be valid JSON. Return the SAME facts more compactly: keep every excerpt under 200 characters (quote only the sentence that carries the fact), and emit at most the 6 most substantive claims per encounter. Return ONLY the corrected JSON object — no prose.`
       : `Your previous output was rejected (${reason}). Return ONLY the corrected JSON object — no prose.`;
     try {
-      const encounters = await attempt(guidance);
+      const { encounters, salvage } = await attempt(guidance);
       // The compact retry asked for "the most substantive claims", which is a
       // per-call bound, not the whole truth of the range. What it returns is
       // real; what it omitted is why this response is INCOMPLETE, so the range
       // is subdivided rather than the omission passed off as coverage.
-      return { encounters, incomplete: truncated || atCap(encounters) };
+      return { encounters, incomplete: truncated || atCap(encounters) || salvage.length > 0, salvage };
     } catch (second) {
       throw new ExtractionOutputError(`structured output failed after retry: ${second instanceof Error ? second.message.slice(0, 200) : "invalid"}`);
     }
