@@ -4258,7 +4258,30 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
           <button type="button" className="ml-auto underline" onClick={() => setRegenNotice(null)}>Dismiss</button>
         </div>
       )}
-      {encounters.map((e) => {
+      {(() => {
+        // ── Triage, so the review area holds only what needs a human NOW ─────
+        // A flat list put consent forms, audit-passed drafts and already-
+        // reviewed rows shoulder to shoulder with the few rows that genuinely
+        // need attention, and a 16-row ER packet read as 16 obligations.
+        // Grouping is presentation only: every row stays reachable and
+        // reviewable, and nothing about their storage or gating changes.
+        const bucketOf = (e: AnyRec): "attention" | "ready" | "paperwork" | "resolved" => {
+          if (["VERIFIED", "REVIEWED", "HUMAN_EDITED"].includes(e.status)) return "resolved";
+          // Stale and lost rows demand a decision wherever they are filed.
+          if (e.status === "STALE" || e.status === "GENERATION_LOSS") return "attention";
+          // Paperwork never feeds the chronology or the plan; it should not
+          // crowd the clinical queue. It reviews on its own time.
+          if ((e.substanceClass ?? "CLINICAL") !== "CLINICAL") return "paperwork";
+          if (e.dateStatus === "UNKNOWN") return "attention";
+          // The adversarial audit passed and nothing is flagged: reviewable
+          // with one click, but not shouting.
+          if (e.status === "AI_AUDIT_PASSED") return "ready";
+          return "attention";
+        };
+        const groups = { attention: [] as AnyRec[], ready: [] as AnyRec[], paperwork: [] as AnyRec[], resolved: [] as AnyRec[] };
+        for (const e of encounters) groups[bucketOf(e)].push(e);
+
+        const renderEncounter = (e: AnyRec) => {
         const [lbl, cls] = encStatus(e.status, false);
         const [subLbl, subCls] = substanceChip(e.substanceClass ?? null);
         return (
@@ -4363,7 +4386,35 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
             )}
           </div>
         );
-      })}
+        };
+
+        const foldedGroup = (key: string, label: string, rows: AnyRec[], toneCls: string) =>
+          rows.length === 0 ? null : (
+            <details key={key} className="mt-2">
+              <summary className={cn("cursor-pointer select-none rounded px-2 py-1 text-[11px] font-medium", toneCls)}>
+                {label} ({rows.length})
+              </summary>
+              {rows.map(renderEncounter)}
+            </details>
+          );
+
+        return (
+          <>
+            {groups.attention.length > 0 && (encounters.length > groups.attention.length) && (
+              <p className="mt-2 text-[11px] font-medium text-ink-600">
+                Needs review ({groups.attention.length} of {encounters.length})
+              </p>
+            )}
+            {groups.attention.map(renderEncounter)}
+            {groups.attention.length === 0 && encounters.length > 0 && (
+              <p className="mt-2 text-[11px] text-emerald-700">Nothing here needs attention right now.</p>
+            )}
+            {foldedGroup("ready", "Audit passed — ready to confirm", groups.ready, "bg-teal-50 text-teal-700")}
+            {foldedGroup("paperwork", "Paperwork — administrative & ancillary, not on the chronology", groups.paperwork, "bg-zinc-100 text-zinc-600")}
+            {foldedGroup("resolved", "Resolved — human-reviewed", groups.resolved, "bg-emerald-50 text-emerald-700")}
+          </>
+        );
+      })()}
     </div>
   );
 }
