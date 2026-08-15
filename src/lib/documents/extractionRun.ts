@@ -80,7 +80,22 @@ const encounterKey = (e: { encounterDate: Date | null; provider: string | null; 
 
 export async function processDocumentExtraction(
   documentId: string,
-  opts: ExtractOptions & { actorUserId?: string | null; force?: boolean } = {},
+  opts: ExtractOptions & {
+    actorUserId?: string | null;
+    force?: boolean;
+    /**
+     * Skip the case-wide records rebuild this run would otherwise trigger.
+     *
+     * Every completed document rebuilds the WHOLE case, which is right for a
+     * single upload and quadratic for a bulk re-extraction: on a 23-document
+     * case each two-page file took eighteen minutes, essentially all of it
+     * re-composing the other twenty-two documents' notes. A caller
+     * re-extracting many documents sets this and rebuilds ONCE at the end.
+     * The derived records are stale until it does — so only a caller that
+     * will actually perform that rebuild may pass it.
+     */
+    deferDerivedRefresh?: boolean;
+  } = {},
 ): Promise<ExtractionRunResult> {
   const startedAt = new Date();
   // A read, and the one that actually failed in the field: nine documents
@@ -805,16 +820,24 @@ export async function processDocumentExtraction(
   // described identically; they were not, and every fix to one missed the
   // other. Failure here is reported and does not fail the run: the extraction
   // output is already safely persisted, and the previous records survive.
-  try {
-    // Coalesced and self-recovering: a stale refusal retries from the newest
-    // state (bounded), and completions arriving mid-build fold into one
-    // follow-up rather than stacking.
-    const refreshed = await refreshCaseRecordsWithRecovery(makeRecordStore(prisma as never), doc.caseId);
-    if (!refreshed.published && !refreshed.coalesced) {
-      console.error(`[extraction] records not republished for case ${doc.caseId}: ${refreshed.history.at(-1)?.reason ?? refreshed.status}`);
+  // A bulk re-extraction rebuilds ONCE at the end instead of after every
+  // document. The rebuild covers the whole case, so doing it per document is
+  // quadratic: on this 23-document case a two-page file took eighteen
+  // minutes, nearly all of it re-composing the other twenty-two documents.
+  if (opts.deferDerivedRefresh) {
+    console.log(`[extraction] derived rebuild deferred to the caller for case ${doc.caseId}`);
+  } else {
+    try {
+      // Coalesced and self-recovering: a stale refusal retries from the newest
+      // state (bounded), and completions arriving mid-build fold into one
+      // follow-up rather than stacking.
+      const refreshed = await refreshCaseRecordsWithRecovery(makeRecordStore(prisma as never), doc.caseId);
+      if (!refreshed.published && !refreshed.coalesced) {
+        console.error(`[extraction] records not republished for case ${doc.caseId}: ${refreshed.history.at(-1)?.reason ?? refreshed.status}`);
+      }
+    } catch (error) {
+      console.error(`[extraction] records refresh failed for case ${doc.caseId}: ${String(error).slice(0, 200)}`);
     }
-  } catch (error) {
-    console.error(`[extraction] records refresh failed for case ${doc.caseId}: ${String(error).slice(0, 200)}`);
   }
 
   return { extractionId: runId, status: "COMPLETE", accepted: encounters.length, rejected: rejects.length };
