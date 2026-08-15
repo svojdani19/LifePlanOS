@@ -1,7 +1,8 @@
 # 33 — Reducing what a reviewer must decide
 
-Status: **#3 implemented (it turned out to be a defect); #1, #4 and #5
-specified and awaiting build.** No decision is outstanding for any of them.
+Status: **#3, #4 and #5 implemented — all three turned out to be defects.
+#1 (note-level review) specified and awaiting build.** No decision is
+outstanding for any of them.
 Measured against REF-2026-0005 (McHenry, 23 documents / 1,357 pages) on
 2026-08-15, after the review-4 fixes landed (`59aacc6`).
 
@@ -140,73 +141,63 @@ refutations.
 
 ---
 
-## 4. Coverage gaps are mostly amplification, not missing records
+## 4. Coverage gaps belong to the document, not to every entry — IMPLEMENTED
 
-**The finding.** 347 rows carry *"N dated note header(s) have no extracted
-encounter"*. Measured directly against the segmenter:
+**The finding.** 347 rows carried *"N dated note header(s) have no extracted
+encounter"*. Measured against the segmenter:
 
 ```
 dated note headers found across the case   47
 header dates with NO extracted row          9
 ```
 
-So the real recall gap is **9 dates**, and the 347 is the same document-wide
-amplification #3 turned out to suffer from. Three documents account for 6 of the 9 (River Oaks 3,
-St Joseph 2, Emergency Hospital MR AFF 2).
+The real recall gap is **9 dates**; the 347 was the same amplification #3
+suffered from. Three documents hold 6 of the 9 (River Oaks 3, St Joseph 2,
+Emergency Hospital MR AFF 2).
 
-**The change.** Two parts, in order:
-1. Attribute the finding to the document, not to every row. This is where the
-   347 goes away. Unlike #3, there is no root cause to remove here: a header
-   with no encounter is a real gap; only its amplification onto every sibling
-   row is the artefact.
-2. Treat the 9 as an extraction-recall bug and inspect them individually. Do
-   **not** suppress them: a dated header with no encounter is exactly the
-   under-extraction the critic-omission work exists to surface.
+**What was implemented.** A missed encounter makes the RECORD incomplete; it
+does not make the entries that *were* produced defective. So the finding is now
+document-only: it sets the document's audit result and stays off `perEncounter`.
 
-**Files.** `src/lib/documents/extractionRun.ts`, `src/lib/llm/factualAudit.ts`,
-plus a short investigation of the 9 dates.
+Removing it from the rows would have quietly weakened the export gate — once
+every row is human-reviewed, the per-row `EXTRACTION_INCOMPLETE` was the only
+thing carrying "a note was missed" into `factualReviewState`. So the gate now
+carries it explicitly: `RecordExtraction.coverageGaps` is persisted per run
+(additive migration `20260816000000`), and `coverageGapBlocker()` — pure and
+exported so the guarantee is *tested*, not asserted — blocks completion while
+any latest-run gap remains. A re-extraction that closes the gap stops blocking,
+because only each document's newest run counts.
 
-**Decision needed:** none for part 1. Part 2 is a bug hunt, not a design.
+**Still outstanding:** the 9 genuine misses are a recall bug to hunt. They are
+not suppressed — they block the case gate until extraction finds them or a
+human resolves them.
 
----
+## 5. A two-row duplicate marked a whole document — IMPLEMENTED
 
-## 5. The "duplicate encounter groups" finding is a false positive
-
-**The finding, and it is the surprising one.** 176 rows carry *"N apparent
-duplicate encounter group(s) require review."* The audit's duplicate key is
-document + date + provider. Inspecting the largest groups:
+**Correction to the original finding, which was wrong.** This document first
+claimed the audit's duplicate key was defective — grouping on an empty
+provider — based on a measurement that reconstructed the key as
+`document + date + provider`. The real key already includes a 60-character
+summary prefix. Re-measured with the actual key:
 
 ```
-42 rows, 42 DISTINCT summaries   2024-03-15  (no provider named)
-   p3  inpatient admission — Admission type was elective.
-   p1  laboratory results — Phosphorus Serum collected 03/21/2024 05:05AM…
-   p1  post-operative orders — Laboratory testing performed at SOUS MEDICAL LAB…
-28 rows, 28 DISTINCT summaries   2025-07-14  (no provider named)
-20 rows, 20 DISTINCT summaries   2025-12-03  (no provider named)
+real duplicate groups across the case   1   (2 rows, one genuine repeat)
 ```
 
-These are not duplicates. They are the many distinct records of a single
-**inpatient day** — admission, labs, orders, consults — none of which names a
-provider, so the key collapses them all together. Every group with a large
-count shares one property: `provider` is empty.
+The key is sound. The defect was the same amplification as #3 and #4: those
+2 rows sit in River Oaks, and the finding set a document-wide review flag, so
+**all 176 rows of that document were marked as needing review because two of
+them repeat.**
 
-**The change.** An ABSENT provider is not a distinguishing value and must not
-be a grouping value either. The duplicate check should require a named
-provider, or content similarity, before calling two entries apparent
-duplicates. This is the same lesson already learned in
-`consolidateEncounters` (`valuesCompatible`: a missing value is not evidence of
-a different visit) — it simply never reached the audit's own duplicate check.
+**What was implemented.** Duplicate detection now remembers the group's
+MEMBERS, not just a count, and marks only those entries. Its neighbours are
+untouched.
 
-**Files.** `src/lib/llm/factualAudit.ts`, the `seen` map around the
-per-encounter loop. Small and self-contained.
-
-**Expected effect.** 176 rows lose a finding that was never true. Note this
-finding only sets NEEDS_HUMAN_REVIEW, so it is not what holds rows out of PASS
-— but it is noise in front of a physician, and it is wrong.
-
-**Decision needed:** none. This is a defect.
-
----
+**Method note worth keeping.** Two of this document's five findings were
+produced by measuring a reconstruction of the code rather than the code.
+Re-deriving a key by hand is a guess; importing the real one is not. The
+duplicate finding survived only because the second measurement contradicted
+the first.
 
 ## Order, and what each is worth
 
@@ -214,8 +205,8 @@ finding only sets NEEDS_HUMAN_REVIEW, so it is not what holds rows out of PASS
 | --- | --- | --- | --- | --- |
 | — | Re-extract 22 documents | ~425 → est. <100 | operational | no |
 | 1 | Note-level review surface | 561 → 227 decisions | fidelity | no |
-| 5 | Duplicate-key defect | 176 findings | defect | no |
-| 4 | Coverage-gap scoping (+9 recall bugs) | 347 | scoping + bug | part 2 only |
+| 5 | Duplicate finding amplified to a whole document | 176 rows | defect | no |
+| 4 | Coverage gaps → document + case gate (+9 recall bugs) | 347 | defect + bug | no |
 | 3 | ~~Failed-section scoping~~ → fixed the root cause instead | 438 | defect | no |
 
 Everything above leaves the human review gate, the export gate and per-row

@@ -246,6 +246,25 @@ export function linkCopies(
   }
 }
 
+/**
+ * The completion blocker for a record that is missing encounters.
+ *
+ * Coverage gaps stopped being copied onto every row of their document — an
+ * entry is not defective because a DIFFERENT note was missed — so the gate
+ * must carry them explicitly, or a fully reviewed case would export over a
+ * known missing encounter. Latest run per document only: an earlier run's
+ * gaps are not this record's gaps.
+ *
+ * Exported and pure so the guarantee is testable rather than merely asserted.
+ */
+export function coverageGapBlocker(runs: readonly { sourceDocumentId: string; coverageGaps?: number | null }[]): string | null {
+  const latest = new Map<string, number>();
+  for (const r of runs) if (!latest.has(r.sourceDocumentId)) latest.set(r.sourceDocumentId, r.coverageGaps ?? 0);
+  const missed = [...latest.values()].reduce((n, g) => n + g, 0);
+  if (missed <= 0) return null;
+  return `${missed} dated note header(s) across the records produced no extracted encounter; the record may be under-extracted and needs human review.`;
+}
+
 /** Tenant-scoped: firmId comes from the authenticated context, never the client. */
 export async function getStructuredRecord(caseId: string, firmId: string, options: { scope?: "review" | "output" } = {}): Promise<StructuredRecord> {
   const [documents, runs, encounters] = await Promise.all([
@@ -373,7 +392,7 @@ export async function getStructuredRecord(caseId: string, firmId: string, option
  * credential; medical opinions have their own gated workflows.
  */
 export async function factualReviewState(caseId: string, firmId: string): Promise<{ complete: boolean; blockers: string[] }> {
-  const [record, events, encounters, pages] = await Promise.all([
+  const [record, events, encounters, pages, runs] = await Promise.all([
     getStructuredRecord(caseId, firmId),
     prisma.chronologyEvent.findMany({ where: { caseId }, select: { reviewStatus: true, edited: true } }),
     prisma.extractedEncounter.findMany({
@@ -384,6 +403,12 @@ export async function factualReviewState(caseId: string, firmId: string): Promis
       },
     }),
     prisma.sourcePage.findMany({ where: { caseId, firmId }, select: { status: true } }).catch(() => [] as { status: string }[]),
+    // Under-extraction is a fact about a DOCUMENT, so the gate reads it from
+    // the document's latest run rather than from every row of that document
+    // carrying it as its own defect.
+    prisma.recordExtraction
+      .findMany({ where: { caseId, firmId, status: "COMPLETE" }, orderBy: { createdAt: "desc" }, select: { sourceDocumentId: true, coverageGaps: true } })
+      .catch(() => [] as { sourceDocumentId: string; coverageGaps: number }[]),
   ]);
   const blockers: string[] = [];
   if (record.counts.pendingHumanReview > 0) blockers.push(`${record.counts.pendingHumanReview} extracted encounter(s) are pending human review (AI drafts, including audit-passed drafts — an automated audit is not a human review).`);
@@ -409,6 +434,13 @@ export async function factualReviewState(caseId: string, firmId: string): Promis
   // would be a claim about the whole record that nobody can support.
   const badPages = pages.filter((p) => ["UNREADABLE", "OCR_FAILED", "PENDING_OCR", "TRUNCATED"].includes(p.status)).length;
   if (badPages > 0) blockers.push(`${badPages} source page(s) are unreadable, truncated or still processing.`);
+
+  // A dated note the extraction never produced an encounter for is content
+  // missing from the record — the same class of defect as an unreadable page,
+  // and it must block a final export for the same reason. Latest run per
+  // document only: an earlier run's gaps are not this record's gaps.
+  const underExtracted = coverageGapBlocker(runs);
+  if (underExtracted) blockers.push(underExtracted);
 
   // Audit outcomes: anything other than PASS is, by definition, not a complete
   // draft — so it cannot become a final export.

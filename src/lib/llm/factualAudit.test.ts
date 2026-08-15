@@ -228,10 +228,13 @@ describe("a conflict belongs to the entry it is about", () => {
   });
 
   it("still gives every entry the document's own incompleteness", () => {
-    // An entry drawn from a partly-processed record is itself part of a
-    // partly-processed record; the export gate must keep seeing this.
+    // An entry drawn from a partly-PROCESSED record is itself part of a
+    // partly-processed record: content it sits among was never read. (A
+    // missed encounter is different — the record is incomplete, but each
+    // entry that was produced is faithful, so that one is carried by the
+    // case-level gate instead. See coverageGapBlocker.)
     const r = auditFactualRecord(
-      base({ encounters: [encounter({ id: "e1" }), encounter({ id: "e2", encounterDate: "2025-03-15" })], coverageGaps: 3 }),
+      base({ encounters: [encounter({ id: "e1" }), encounter({ id: "e2", encounterDate: "2025-03-15" })], failedSections: 3 }),
     );
     expect(r.perEncounter).toEqual(["EXTRACTION_INCOMPLETE", "EXTRACTION_INCOMPLETE"]);
   });

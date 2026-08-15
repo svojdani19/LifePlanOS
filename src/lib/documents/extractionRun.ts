@@ -768,6 +768,7 @@ export async function processDocumentExtraction(
     chunkCount: chunks.length,
     chunksTotal: chunks.length,
     chunksDone: endIndex,
+    coverageGaps: coverageGaps.length,
     candidateCount,
     acceptedCount: encounters.reduce((s, e) => s + e.claims.length, 0),
     rejectedCount: rejects.length,

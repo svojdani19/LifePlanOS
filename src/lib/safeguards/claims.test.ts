@@ -235,8 +235,36 @@ describe("refuting: 'audit passed'", () => {
   });
 
   it("does not hide document incompleteness from any entry", () => {
-    const r = auditFactualRecord(auditBase({ coverageGaps: 2 }));
+    const r = auditFactualRecord(auditBase({ failedSections: 2 }));
     expect(r.perEncounter[0]).toBe("EXTRACTION_INCOMPLETE");
+  });
+
+  it("does not let a missed encounter escape the CASE gate when it leaves the rows", async () => {
+    // Coverage gaps stopped being copied onto every row of their document.
+    // That is only honest if the gate still refuses to complete over them —
+    // otherwise a fully reviewed case would export past a note nobody read.
+    const { coverageGapBlocker } = await import("@/lib/records/structuredRecord");
+    const r = auditFactualRecord(auditBase({ coverageGaps: 2 }));
+    expect(r.perEncounter[0]).toBe("PASS"); // the entry itself is sound…
+    expect(r.result).toBe("EXTRACTION_INCOMPLETE"); // …the document is not…
+    // …and the case cannot complete.
+    expect(coverageGapBlocker([{ sourceDocumentId: "d1", coverageGaps: 2 }])).toMatch(/no extracted encounter/);
+    expect(coverageGapBlocker([{ sourceDocumentId: "d1", coverageGaps: 0 }])).toBeNull();
+  });
+
+  it("counts only each document's LATEST run, so a fixed gap stops blocking", async () => {
+    const { coverageGapBlocker } = await import("@/lib/records/structuredRecord");
+    // Runs arrive newest-first; the re-extraction that closed the gap wins.
+    expect(coverageGapBlocker([
+      { sourceDocumentId: "d1", coverageGaps: 0 },
+      { sourceDocumentId: "d1", coverageGaps: 5 },
+    ])).toBeNull();
+  });
+
+  it("marks only the duplicated entries, not their document", () => {
+    const dup = auditEnc({ id: "a" });
+    const r = auditFactualRecord(auditBase({ encounters: [dup, auditEnc({ id: "b" }), auditEnc({ id: "c", encounterDate: "2025-04-01" })] }));
+    expect(r.perEncounter).toEqual(["NEEDS_HUMAN_REVIEW", "NEEDS_HUMAN_REVIEW", "PASS"]);
   });
 });
 

@@ -1831,6 +1831,11 @@ model RecordExtraction {
   error            String? // actionable failure reason (no PHI)
   // Multi-pass provenance: what the critic and adjudicator contributed.
   criticFindings   Json? // string[] — PHI-safe critic observations
+  // Dated note headers the deterministic segmenter found with no extracted
+  // encounter: under-extraction of THIS document. Recorded so the case-level
+  // completion gate can see it without every row of the document having to
+  // carry it as its own defect.
+  coverageGaps     Int      @default(0)
   disputedCount    Int      @default(0) // claims the critic contested
   adjudicatedCount Int      @default(0) // disputes an adjudicator resolved
   pagesTotal       Int      @default(0)

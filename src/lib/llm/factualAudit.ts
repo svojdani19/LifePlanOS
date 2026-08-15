@@ -151,6 +151,13 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
   let docFailure = false;
   let docIncomplete = false;
   let docReview = false;
+  /**
+   * Document-level incompleteness that does NOT belong to any single entry:
+   * the record is missing something, but the entries it did produce are each
+   * faithful to what they cite. It sets the document's own result and the
+   * case-level gate, and stops there.
+   */
+  let docOnlyIncomplete = false;
   const ownConflict: boolean[] = input.encounters.map(() => false);
   const ownFailure: boolean[] = input.encounters.map(() => false);
   const ownReview: boolean[] = input.encounters.map(() => false);
@@ -181,7 +188,13 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
     findings.push(`${input.failedSections} section(s) of the source could not be processed; their content is not represented.`);
   }
   if ((input.coverageGaps ?? 0) > 0) {
-    sawIncomplete = true;
+    // The DOCUMENT is under-extracted; each entry it did produce is not
+    // thereby a defective entry. Copying this onto every row made 347 rows
+    // report a problem that belonged to the document — and to the case's
+    // completion gate, which now carries it explicitly (factualReviewState
+    // reads the run's persisted coverageGaps, so export still cannot
+    // complete over a missing encounter).
+    docOnlyIncomplete = true;
     findings.push(`${input.coverageGaps} dated note header(s) in the source have no extracted encounter; the record may be under-extracted.`);
   }
   if ((input.criticOmissions ?? 0) > 0) {
@@ -225,7 +238,7 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
   docReview = sawReviewNeeded;
 
   // ── 3. Per-encounter checks ───────────────────────────────────────────────
-  const seen = new Map<string, number>();
+  const seen = new Map<string, number[]>();
   for (const [index, e] of input.encounters.entries()) {
     const label = e.encounterDate ?? "undated";
 
@@ -321,16 +334,19 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
       findings.push(`An encounter (${label}) has a disputed date that no human has resolved.`);
     }
 
-    // Duplicate detection: same document, date, provider and summary.
+    // Duplicate detection: same document, date, provider and summary. The
+    // members are remembered, not just the count — a two-row duplicate group
+    // used to mark every one of a 176-row document as needing review.
     const key = `${e.sourceDocumentId}|${e.encounterDate ?? "u"}|${norm(e.provider ?? "")}|${norm(e.factualSummary).slice(0, 60)}`;
-    seen.set(key, (seen.get(key) ?? 0) + 1);
+    seen.set(key, [...(seen.get(key) ?? []), index]);
   }
 
-  const dupes = [...seen.values()].filter((n) => n > 1).length;
-  if (dupes > 0) {
+  const duplicateGroups = [...seen.values()].filter((members) => members.length > 1);
+  if (duplicateGroups.length > 0) {
     sawReviewNeeded = true;
-    docReview = true;
-    findings.push(`${dupes} apparent duplicate encounter group(s) require review.`);
+    // The entries in the group need a look; their neighbours do not.
+    for (const members of duplicateGroups) for (const i of members) ownReview[i] = true;
+    findings.push(`${duplicateGroups.length} apparent duplicate encounter group(s) require review.`);
   }
 
   // ── 4. Chronological ordering of dated encounters ─────────────────────────
@@ -359,7 +375,7 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
   const grade = (failure: boolean, conflict: boolean, incomplete: boolean, review: boolean): AuditResult =>
     failure ? "FAILED" : conflict ? "SOURCE_CONFLICT" : incomplete ? "EXTRACTION_INCOMPLETE" : review ? "NEEDS_HUMAN_REVIEW" : "PASS";
 
-  const result = grade(sawFailure, sawConflict, sawIncomplete, sawReviewNeeded);
+  const result = grade(sawFailure, sawConflict, sawIncomplete || docOnlyIncomplete, sawReviewNeeded);
 
   // Each entry: what the DOCUMENT's own state implies for it, plus what the
   // entry itself raised. A neighbour's unresolved dispute is not this entry's
