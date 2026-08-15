@@ -4228,6 +4228,24 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
     onChanged();
   }
 
+  // A review decision on a primary card covers its cross-document copies —
+  // the card lists them (file, page, their own summary) BEFORE the click, so
+  // the reviewer knows exactly what one decision signs. Copies already
+  // carrying a human decision are left alone, and corrections (PATCH) never
+  // fan out: a correction is about one row's exact content.
+  async function reviewWithCopies(e: AnyRec, action: "verify" | "review" | "reject") {
+    await act(e.id, "POST", { action });
+    const pending = (e.copies ?? []).filter((c: AnyRec) => !["VERIFIED", "REVIEWED", "HUMAN_EDITED"].includes(c.status));
+    for (const c of pending) {
+      await fetch(`/api/cases/${caseId}/records/encounters/${c.id}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      }).catch(() => {});
+    }
+    if (pending.length) onChanged();
+  }
+
   const encStatus = (st: string, edited: boolean) =>
     st === "VERIFIED" ? ["Human-verified", "bg-emerald-100 text-emerald-800"]
     : st === "REVIEWED" ? ["Human-reviewed", "bg-sky-100 text-sky-800"]
@@ -4265,10 +4283,13 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
         // need attention, and a 16-row ER packet read as 16 obligations.
         // Grouping is presentation only: every row stays reachable and
         // reviewable, and nothing about their storage or gating changes.
-        const bucketOf = (e: AnyRec): "attention" | "ready" | "paperwork" | "resolved" => {
+        const bucketOf = (e: AnyRec): "attention" | "ready" | "copies" | "paperwork" | "resolved" => {
           if (["VERIFIED", "REVIEWED", "HUMAN_EDITED"].includes(e.status)) return "resolved";
           // Stale and lost rows demand a decision wherever they are filed.
           if (e.status === "STALE" || e.status === "GENERATION_LOSS") return "attention";
+          // A copy of a record whose primary card lives in another document:
+          // the decision there covers it, so it does not queue here.
+          if (e.reviewedWith) return "copies";
           // Paperwork never feeds the chronology or the plan; it should not
           // crowd the clinical queue. It reviews on its own time.
           if ((e.substanceClass ?? "CLINICAL") !== "CLINICAL") return "paperwork";
@@ -4278,7 +4299,7 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
           if (e.status === "AI_AUDIT_PASSED") return "ready";
           return "attention";
         };
-        const groups = { attention: [] as AnyRec[], ready: [] as AnyRec[], paperwork: [] as AnyRec[], resolved: [] as AnyRec[] };
+        const groups = { attention: [] as AnyRec[], ready: [] as AnyRec[], copies: [] as AnyRec[], paperwork: [] as AnyRec[], resolved: [] as AnyRec[] };
         for (const e of encounters) groups[bucketOf(e)].push(e);
 
         const renderEncounter = (e: AnyRec) => {
@@ -4377,11 +4398,25 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
               <p key={`w${i}`} className="mt-0.5 text-[11px] text-amber-700">{w}</p>
             ))}
             {e.staleReason && <p className="mt-0.5 text-[11px] text-red-700">{e.staleReason}</p>}
+            {/* What one decision on this card signs, stated before the click. */}
+            {(e.copies ?? []).length > 0 && (
+              <div className="mt-1 rounded border border-sky-100 bg-sky-50/60 p-1.5 text-[11px] text-sky-900">
+                <p className="font-medium">This record also appears in {e.copies.length === 1 ? "another production" : `${e.copies.length} other productions`} — one review covers every copy:</p>
+                {e.copies.map((c: AnyRec) => (
+                  <p key={c.id} className="mt-0.5 text-sky-800">
+                    {c.filename}{c.page != null ? `, p. ${c.page}` : ""} — “{c.summary}”
+                  </p>
+                ))}
+              </div>
+            )}
+            {e.reviewedWith && !["VERIFIED", "REVIEWED", "HUMAN_EDITED"].includes(e.status) && (
+              <p className="mt-1 text-[11px] text-sky-700">Copy of a record reviewed under {e.reviewedWith.filename}; the decision there covers this row. It remains individually reviewable below.</p>
+            )}
             {canVerify && (
               <div className="mt-1.5 flex gap-1.5">
-                {e.status !== "VERIFIED" && <button className="btn-outline px-2 py-0.5 text-[11px]" disabled={busy === e.id} onClick={() => act(e.id, "POST", { action: "verify" })}>Verify</button>}
+                {e.status !== "VERIFIED" && <button className="btn-outline px-2 py-0.5 text-[11px]" disabled={busy === e.id} onClick={() => reviewWithCopies(e, "verify")}>Verify</button>}
                 <button className="btn-outline px-2 py-0.5 text-[11px]" onClick={() => { setEditingEnc(e.id); setDraftSummary(e.factualSummary); }}>Correct</button>
-                <button className="btn-outline px-2 py-0.5 text-[11px] text-red-700" disabled={busy === e.id} onClick={() => act(e.id, "POST", { action: "reject" })}>Reject</button>
+                <button className="btn-outline px-2 py-0.5 text-[11px] text-red-700" disabled={busy === e.id} onClick={() => reviewWithCopies(e, "reject")}>Reject</button>
               </div>
             )}
           </div>
@@ -4410,6 +4445,7 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
               <p className="mt-2 text-[11px] text-emerald-700">Nothing here needs attention right now.</p>
             )}
             {foldedGroup("ready", "Audit passed — ready to confirm", groups.ready, "bg-teal-50 text-teal-700")}
+            {foldedGroup("copies", "Copies — reviewed with their primary record in another document", groups.copies, "bg-sky-50 text-sky-700")}
             {foldedGroup("paperwork", "Paperwork — administrative & ancillary, not on the chronology", groups.paperwork, "bg-zinc-100 text-zinc-600")}
             {foldedGroup("resolved", "Resolved — human-reviewed", groups.resolved, "bg-emerald-50 text-emerald-700")}
           </>

@@ -55,6 +55,14 @@ export interface StructuredEncounter {
   reviewedAt: string | null;
   verifiedAt: string | null;
   staleReason: string | null;
+  /**
+   * Cross-document copies of this record: review-visible rows from OTHER
+   * documents that the canonical build folded into the same entry. The
+   * primary card discloses them and one review decision covers them.
+   */
+  copies?: { id: string; filename: string; page: number | null; summary: string; status: string }[];
+  /** Set on a copy row: the document whose primary card reviews it. */
+  reviewedWith?: { filename: string } | null;
 }
 
 export interface StructuredDocument {
@@ -159,6 +167,53 @@ export function toStructuredEncounter(e: {
   };
 }
 
+/**
+ * Link cross-document copies of one record for the review surface.
+ *
+ * The canonical build already knows which rows are copies: a persisted
+ * segment's rowIds span every row folded into that entry, including copies
+ * absorbed from other documents. A reviewer was still asked to review the
+ * same emergency visit once per production it appeared in.
+ *
+ * The row from the segment's own document becomes the PRIMARY; rows from
+ * other documents become its copies, each pointing back at the primary's
+ * document. Rows of one document folded together (fragments of one note) are
+ * NOT linked — they carry different content and each deserves its own eyes.
+ * Presentation-level linkage only: storage, gating and review semantics are
+ * untouched, and every copy remains individually reviewable.
+ */
+export function linkCopies(
+  docs: readonly { id: string; filename: string; segments?: unknown }[],
+  byId: ReadonlyMap<string, StructuredEncounter>,
+): void {
+  const nameOf = new Map(docs.map((d) => [d.id, d.filename]));
+  for (const d of docs) {
+    const segments = Array.isArray(d.segments) ? (d.segments as { rowIds?: unknown }[]) : [];
+    for (const seg of segments) {
+      const rowIds = Array.isArray(seg.rowIds) ? (seg.rowIds as string[]) : [];
+      if (rowIds.length < 2) continue;
+      const rows = rowIds.map((id) => byId.get(id)).filter((r): r is StructuredEncounter => !!r);
+      const primaries = rows.filter((r) => r.sourceDocumentId === d.id);
+      const copies = rows.filter((r) => r.sourceDocumentId !== d.id);
+      if (!primaries.length || !copies.length) continue;
+      // One primary card carries the copies; the segment's first row is
+      // stable across reloads because encounters arrive date-then-page sorted.
+      const primary = primaries[0];
+      primary.copies = [
+        ...(primary.copies ?? []),
+        ...copies.map((c) => ({
+          id: c.id,
+          filename: nameOf.get(c.sourceDocumentId) ?? "record on file",
+          page: c.page,
+          summary: c.factualSummary,
+          status: c.status,
+        })),
+      ];
+      for (const c of copies) c.reviewedWith = { filename: nameOf.get(d.id) ?? d.filename };
+    }
+  }
+}
+
 /** Tenant-scoped: firmId comes from the authenticated context, never the client. */
 export async function getStructuredRecord(caseId: string, firmId: string, options: { scope?: "review" | "output" } = {}): Promise<StructuredRecord> {
   const [documents, runs, encounters] = await Promise.all([
@@ -177,6 +232,7 @@ export async function getStructuredRecord(caseId: string, firmId: string, option
   const latestRunByDoc = new Map<string, (typeof runs)[number]>();
   for (const r of runs) if (!latestRunByDoc.has(r.sourceDocumentId)) latestRunByDoc.set(r.sourceDocumentId, r);
   const encByDoc = new Map<string, StructuredEncounter[]>();
+  const encById = new Map<string, StructuredEncounter>();
   const undated: StructuredEncounter[] = [];
   for (const e of encounters) {
     const se = toStructuredEncounter(e);
@@ -184,7 +240,12 @@ export async function getStructuredRecord(caseId: string, firmId: string, option
     const arr = encByDoc.get(e.sourceDocumentId) ?? [];
     arr.push(se);
     encByDoc.set(e.sourceDocumentId, arr);
+    encById.set(se.id, se);
   }
+  // Cross-document copies of one record review together, not once per
+  // production. Runs on review scope only; report data reads facts, not
+  // review linkage.
+  if (options.scope !== "output") linkCopies(documents, encById);
 
   const limitations: string[] = [];
   let failedDocs = 0;
