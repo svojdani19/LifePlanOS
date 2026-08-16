@@ -601,7 +601,11 @@ export async function factualReviewState(caseId: string, firmId: string): Promis
   // A page that could not be read is content missing from the record, not a
   // cosmetic warning — a "complete" chronology built on the readable subset
   // would be a claim about the whole record that nobody can support.
-  const badPages = pages.filter((p) => ["UNREADABLE", "OCR_FAILED", "PENDING_OCR", "TRUNCATED"].includes(p.status)).length;
+  // BLANK is absent on purpose: the ledger records it when the document's own
+  // text layer says the page carries no content, which is a page that WAS
+  // read. FAILED is present because it is the opposite — a page inside a chunk
+  // that could not be processed, and it was missing from this gate.
+  const badPages = pages.filter((p) => ["UNREADABLE", "OCR_FAILED", "FAILED", "PENDING_OCR", "TRUNCATED"].includes(p.status)).length;
   if (badPages > 0) blockers.push(`${badPages} source page(s) are unreadable, truncated or still processing.`);
 
   // A dated note the extraction never produced an encounter for is content

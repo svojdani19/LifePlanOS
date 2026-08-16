@@ -201,7 +201,19 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
   const ownReview: boolean[] = input.encounters.map(() => false);
 
   // ── 1. Source completeness ────────────────────────────────────────────────
-  const unreadable = input.pages.filter((p) => ["UNREADABLE", "OCR_FAILED", "BLANK"].includes(p.status));
+  // BLANK is deliberately NOT here. The page ledger distinguishes two things
+  // that look identical from the outside: a page whose own native text layer
+  // carries no content (BLANK — read successfully, and there was nothing on
+  // it), and a page whose OCR returned nothing (UNREADABLE — which may be a
+  // blank sheet or a scan nobody could read, and only a human looking at the
+  // image can tell). Treating BLANK as unreadable said "this page could not be
+  // read" about a page that was read perfectly, and manufactured a blocking
+  // finding per blank sheet — routine filler in a legal production.
+  //
+  // FAILED is here for the opposite reason: it is a page inside a chunk the
+  // pipeline could not process, and it was in neither this list nor the export
+  // gate — so a page whose content was never read at all was silently sound.
+  const unreadable = input.pages.filter((p) => ["UNREADABLE", "OCR_FAILED", "FAILED"].includes(p.status));
   const pending = input.pages.filter((p) => p.status === "PENDING_OCR");
   const lowConf = input.pages.filter((p) => p.status === "LOW_CONFIDENCE");
   const truncated = input.pages.filter((p) => p.status === "TRUNCATED");
