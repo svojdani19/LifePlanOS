@@ -257,3 +257,80 @@ describe("fragments of one note must agree about who and when", () => {
     expect(note.guidance.kind).toBe("CLEAN");
   });
 });
+
+describe("an exception holds the queue; a caution does not", () => {
+  it("does not make a sound entry an exception because its DOCUMENT is incomplete", () => {
+    // This note's own guidance says "Nothing needs correcting on this card."
+    // It was in the attention queue anyway — the document-level defect copied
+    // onto every note inside it, through the inherited audit result rather
+    // than through findings. On the reference case that was 46 notes.
+    const [note] = projectNotes("doc-1", [{ rowIds: ["a"] }], [enc("a", { auditResult: "EXTRACTION_INCOMPLETE" })], []);
+    expect(note.guidance.kind).toBe("DOCUMENT_INCOMPLETE");
+    expect(note.attention).toBe("CAUTION");
+    expect(note.needsAttention).toBe(false);
+    expect(note.awaitingAttestation).toBe(true);
+    // …and it still SAYS so, so nobody signs it unaware.
+    expect(note.guidance.why).toMatch(/sound in itself/);
+  });
+
+  it("treats carried-forward text as something to read, not something to fix", () => {
+    const rows = [
+      enc("a", {
+        auditResult: "NEEDS_HUMAN_REVIEW",
+        claims: [{ field: "assessment", value: "x", excerpt: "y", page: 2, warning: "text appears carried forward from an earlier note" }],
+      } as never),
+    ];
+    const [note] = projectNotes("doc-1", [{ rowIds: ["a"] }], rows, []);
+    expect(note.guidance.kind).toBe("CARRIED_FORWARD");
+    expect(note.attention).toBe("CAUTION");
+    expect(note.needsAttention).toBe(false);
+  });
+
+  it("treats an old grade whose reason was never recorded as a caution", () => {
+    const [note] = projectNotes("doc-1", [{ rowIds: ["a"] }], [enc("a", { auditResult: "SOURCE_CONFLICT", auditVersion: null } as never)], []);
+    expect(note.guidance.kind).toBe("LEGACY_CONFLICT");
+    expect(note.attention).toBe("CAUTION");
+    expect(note.needsAttention).toBe(false);
+    expect(note.guidance.canAttest).toBe(true);
+  });
+
+  it("keeps every genuine defect an exception", () => {
+    const cases: [string, Partial<StructuredEncounter>][] = [
+      ["UNDATED", { dateStatus: "UNKNOWN", encounterDate: null }],
+      ["STALE", { status: "STALE" }],
+      ["GENERATION_LOSS", { status: "GENERATION_LOSS" }],
+      ["INTEGRITY_FAILURE", { auditResult: "FAILED" }],
+      ["CONTRADICTED_FIELD", { contradictedFields: ["date"] } as never],
+      ["UNRESOLVED_DISPUTE", { unresolvedDisputes: 2 } as never],
+    ];
+    for (const [kind, over] of cases) {
+      const [note] = projectNotes("doc-1", [{ rowIds: ["a"] }], [enc("a", over)], []);
+      expect(note.guidance.kind, kind).toBe(kind);
+      expect(note.attention, kind).toBe("EXCEPTION");
+      expect(note.needsAttention, kind).toBe(true);
+    }
+  });
+
+  it("keeps a BLOCKING finding an exception and a non-blocking one a caution", () => {
+    const blocking = projectNotes("doc-1", [{ rowIds: ["a"] }], [enc("a")], [finding({ encounterId: "a" })])[0];
+    expect(blocking.needsAttention).toBe(true);
+
+    const advisory = projectNotes(
+      "doc-1",
+      [{ rowIds: ["a"] }],
+      [enc("a")],
+      [finding({ encounterId: "a", blocking: false, severity: "WARNING", type: "PAGE_LOW_CONFIDENCE" })],
+    )[0];
+    expect(advisory.needsAttention).toBe(false);
+    // Still shown — a caution the reviewer reads before signing.
+    expect(advisory.findings).toHaveLength(1);
+    expect(advisory.attention).not.toBe("CLEAN");
+  });
+
+  it("leaves a genuinely clean note clean", () => {
+    const [note] = projectNotes("doc-1", [{ rowIds: ["a"] }], [enc("a")], []);
+    expect(note.attention).toBe("CLEAN");
+    expect(note.needsAttention).toBe(false);
+    expect(note.awaitingAttestation).toBe(true);
+  });
+});

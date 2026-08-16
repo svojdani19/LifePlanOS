@@ -47,6 +47,12 @@ export interface BurdenRow {
    * screen it was measuring.
    */
   analysisClass?: string | null;
+  /**
+   * The audit version that graded this row. Null means the run predated
+   * dispute columns and recorded no reason for its grade — a caution to check,
+   * not a defect to correct.
+   */
+  auditVersion?: string | null;
   /** Machine-corroboration verdict, when one was recorded. */
   corroborationResult?: string | null;
 }
@@ -122,6 +128,12 @@ export interface ReviewBurden {
    * stale, generation-loss, non-PASS, or undated where a date is required.
    */
   notesNeedingAttention: number;
+  /**
+   * Notes a reviewer may attest once they have read a caution: a sound entry
+   * inside an incomplete document, text carried forward from an earlier note,
+   * or an old grade whose reason was never recorded.
+   */
+  notesCarryingCaution: number;
   /** Notes with nothing open: one attestation each, still required. */
   cleanNotesAwaitingAttestation: number;
 
@@ -247,17 +259,34 @@ export function measureReviewBurden(input: BurdenInput): ReviewBurden {
     }
   }
 
-  // (2) Notes needing a human: the above, PLUS notes whose own rows are
-  // unresolved — stale, generation-loss, undated where a date is required, or
-  // a non-PASS audit result.
-  const needsAttentionByRow = (r: BurdenRow): boolean =>
+  // (2) Notes needing a human: the above, PLUS notes whose own rows cannot be
+  // attested as they stand.
+  //
+  // "Not PASS" was too coarse and made this number contradict the screen it
+  // measures. EXTRACTION_INCOMPLETE is a fact about the DOCUMENT, inherited by
+  // sound entries; NEEDS_HUMAN_REVIEW is a caution to read; and a
+  // SOURCE_CONFLICT from a run that recorded no reason gives a reviewer
+  // nothing to correct. Those are counted separately as cautions.
+  const isException = (r: BurdenRow): boolean =>
     r.status === "STALE" ||
     r.status === "GENERATION_LOSS" ||
     isUndatedAndShouldBeDated(r) ||
-    (r.auditResult != null && r.auditResult !== "PASS");
+    r.auditResult === "FAILED" ||
+    (r.auditResult === "SOURCE_CONFLICT" && r.auditVersion != null);
+  const isCaution = (r: BurdenRow): boolean =>
+    !isException(r) &&
+    (r.auditResult === "EXTRACTION_INCOMPLETE" ||
+      r.auditResult === "NEEDS_HUMAN_REVIEW" ||
+      (r.auditResult === "SOURCE_CONFLICT" && r.auditVersion == null));
+
   const notesFlagged = new Set(notesWithFindings);
   for (const n of notes) {
-    if (n.rowIds.some((id) => { const r = rowsById.get(id); return r ? needsAttentionByRow(r) : false; })) notesFlagged.add(n.id);
+    if (n.rowIds.some((id) => { const r = rowsById.get(id); return r ? isException(r) : false; })) notesFlagged.add(n.id);
+  }
+  const notesCarryingCaution = new Set<string>();
+  for (const n of notes) {
+    if (notesFlagged.has(n.id)) continue;
+    if (n.rowIds.some((id) => { const r = rowsById.get(id); return r ? isCaution(r) : false; })) notesCarryingCaution.add(n.id);
   }
 
   // ── Cross-document copies, counted from the persisted linkage ───────────
@@ -299,6 +328,7 @@ export function measureReviewBurden(input: BurdenInput): ReviewBurden {
     caseBlockers: distinctOpen.filter((f) => f.scope === "CASE" && f.blocking).length,
 
     notesNeedingAttention: notesFlagged.size,
+    notesCarryingCaution: notesCarryingCaution.size,
     cleanNotesAwaitingAttestation: notes.filter((n) => !notesFlagged.has(n.id) && n.rowIds.every((id) => CLEAN_STATUSES.has(rowsById.get(id)?.status ?? ""))).length,
 
     crossDocumentCopies,

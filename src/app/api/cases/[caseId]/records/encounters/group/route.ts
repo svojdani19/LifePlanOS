@@ -176,8 +176,23 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
     if (input.action !== "reject") {
       for (const row of rows) {
         const audit = row.auditResult ?? null;
-        if (audit === "FAILED" || audit === "SOURCE_CONFLICT") {
-          problems.push({ id: row.id, reason: `the audit ended as ${audit.replace(/_/g, " ").toLowerCase()}; correct or reject this entry first` });
+        if (audit === "FAILED") {
+          problems.push({ id: row.id, reason: "the audit ended as a failure; correct or reject this entry first" });
+        }
+        // A source conflict is refused when the run that graded it RECORDED
+        // what the conflict was — there is a specific thing to correct.
+        //
+        // A conflict from a run predating dispute columns records nothing: no
+        // disputed field, no contradicted value, no excerpt. There is nothing
+        // to correct, only something to check, and checking an entry against
+        // its cited page is exactly what attestation is. Refusing those left
+        // 204 rows on the reference case that no reviewer could ever clear —
+        // half the queue, permanently — which teaches people to ignore the
+        // queue. The card states the caution prominently and re-extraction
+        // remains offered.
+        const conflictEvidenceRecorded = row.auditVersion != null;
+        if (audit === "SOURCE_CONFLICT" && conflictEvidenceRecorded) {
+          problems.push({ id: row.id, reason: "the audit recorded a source conflict for this entry; correct or reject it first" });
         }
         if ((row.unresolvedDisputes ?? 0) > 0) {
           problems.push({ id: row.id, reason: "an extraction disagreement about this entry is unresolved" });

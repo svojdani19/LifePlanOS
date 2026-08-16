@@ -19,7 +19,7 @@
 
 import { canonicalNoteId } from "@/lib/records/reviewBurden";
 import { isOpenFinding, type FindingScope } from "@/lib/records/findingScope";
-import { guidanceFor, type ReviewGuidance } from "@/lib/records/reviewGuidance";
+import { attentionLevel, guidanceFor, type AttentionLevel, type ReviewGuidance } from "@/lib/records/reviewGuidance";
 import type { StructuredEncounter } from "@/lib/records/structuredRecord";
 
 /** Worst-first: a note may never present better than its weakest row. */
@@ -107,6 +107,8 @@ export interface ReviewableNote {
    * note — a card that says only "needs review" leaves a reviewer guessing.
    */
   guidance: ReviewGuidance;
+  /** EXCEPTION holds the queue; CAUTION is attestable once read; CLEAN is ready. */
+  attention: AttentionLevel;
   /** An exception needing correction or disposition. */
   needsAttention: boolean;
   /** Clean, and awaiting one human attestation. */
@@ -315,7 +317,15 @@ export function projectNotes(
 
     // One source of truth: a record is an exception exactly when its
     // explanation says it is. The panel and the flag cannot disagree.
-    const needsAttention = openFindings.length > 0 || guidance.kind !== "CLEAN";
+    //
+    // "Not clean" is not the same as "cannot be attested". A sound entry
+    // inside an incomplete document, or one repeating text from an earlier
+    // note, is a record a physician can read and sign — after being told what
+    // to look at. Only an EXCEPTION holds the queue; a CAUTION shows its panel
+    // and waits in the ready pile. A non-blocking finding is likewise a
+    // caution, not an obligation.
+    const level = attentionLevel(guidance);
+    const needsAttention = openFindings.some((f) => f.blocking) || level === "EXCEPTION";
 
     return {
       id,
@@ -353,9 +363,13 @@ export function projectNotes(
       fragmentDisagreement: disagreement,
       materialDisagreement: material,
       guidance,
+      attention: level,
       needsAttention,
-      // Clean means: nothing open, and every row is still a machine draft
-      // awaiting the one human decision this note deserves.
+      // Awaiting attestation means: nothing blocks it, and every row is still
+      // a machine draft awaiting the one human decision this note deserves.
+      // A note carrying a caution qualifies — reading the caution IS part of
+      // the attestation, and holding it back gave the reviewer a queue they
+      // could not drain.
       awaitingAttestation: !needsAttention && noteRows.every((r) => r.status === "AI_DRAFT" || r.status === "AI_AUDIT_PASSED"),
     };
   });

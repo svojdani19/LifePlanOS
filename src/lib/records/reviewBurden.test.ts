@@ -246,3 +246,41 @@ describe("each metric counts what its name says", () => {
     expect(burden.crossDocumentCopies).toBe(0);
   });
 });
+
+describe("the burden metric and the review queue count the same thing", () => {
+  const doc = { id: "doc-1", segments: [{ rowIds: ["a"] }] };
+  const measure = (over: Partial<BurdenRow>) =>
+    measureReviewBurden({ documents: [doc], rows: [row("a", over)], findings: [], pages: [] });
+
+  it("does not call a sound entry in an incomplete document an obligation", () => {
+    // The screen says "Nothing needs correcting on this card." The metric said
+    // otherwise about the same note.
+    const b = measure({ auditResult: "EXTRACTION_INCOMPLETE" });
+    expect(b.notesNeedingAttention).toBe(0);
+    expect(b.notesCarryingCaution).toBe(1);
+  });
+
+  it("does not count an old grade whose reason was never recorded", () => {
+    const b = measure({ auditResult: "SOURCE_CONFLICT", auditVersion: null });
+    expect(b.notesNeedingAttention).toBe(0);
+    expect(b.notesCarryingCaution).toBe(1);
+  });
+
+  it("DOES count a conflict the audit actually recorded", () => {
+    const b = measure({ auditResult: "SOURCE_CONFLICT", auditVersion: "2026-08-17.scoped-findings" });
+    expect(b.notesNeedingAttention).toBe(1);
+    expect(b.notesCarryingCaution).toBe(0);
+  });
+
+  it("counts the genuine defects", () => {
+    expect(measure({ auditResult: "FAILED" }).notesNeedingAttention).toBe(1);
+    expect(measure({ status: "STALE" }).notesNeedingAttention).toBe(1);
+    expect(measure({ status: "GENERATION_LOSS" }).notesNeedingAttention).toBe(1);
+    expect(measure({ dateStatus: "UNKNOWN", analysisClass: "CLINICAL_ENCOUNTER" }).notesNeedingAttention).toBe(1);
+  });
+
+  it("a caution never also counts as an obligation", () => {
+    const b = measure({ auditResult: "NEEDS_HUMAN_REVIEW" });
+    expect(b.notesNeedingAttention + b.notesCarryingCaution).toBe(1);
+  });
+});

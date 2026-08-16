@@ -68,6 +68,46 @@ export interface ReviewGuidance {
 }
 
 /**
+ * Is this note an EXCEPTION, or a sound record carrying a CAUTION?
+ *
+ * The distinction the review queue was missing. On the reference case 155 of
+ * 239 notes were exceptions, and 64 of them were things no reviewer could act
+ * on:
+ *
+ *   • 46 said, in their own guidance, "This entry is sound in itself; the
+ *     DOCUMENT it came from is incomplete… Nothing needs correcting on this
+ *     card." That is the very defect the scoped-finding model exists to kill —
+ *     a document-level problem copied onto every note inside it — and it was
+ *     still happening through the inherited audit RESULT rather than through
+ *     findings. The document's blocker is shown once at document scope and
+ *     gates the export; the note is fine.
+ *
+ *   • 18 carried text copied forward from an earlier note. The text is
+ *     genuinely in the source; both "yes, that is what the note says" and "no,
+ *     correct it" are legitimate outcomes of reading the page.
+ *
+ * An EXCEPTION is a note that cannot be attested as it stands — something is
+ * wrong with THIS record and a person must change or dispose of it. A CAUTION
+ * is a note a person may attest, having been told what to look at first. Both
+ * show their panel; only an exception holds the queue.
+ */
+export type AttentionLevel = "EXCEPTION" | "CAUTION" | "CLEAN";
+
+/** Kinds a reviewer can attest over, once they have read the caution. */
+const CAUTION_KINDS: ReadonlySet<ReviewGuidance["kind"]> = new Set([
+  "DOCUMENT_INCOMPLETE",
+  "LEGACY_CONFLICT",
+  "CARRIED_FORWARD",
+  "LOW_CONFIDENCE_OCR",
+  "REVIEW_FLAG",
+]);
+
+export function attentionLevel(guidance: ReviewGuidance): AttentionLevel {
+  if (guidance.kind === "CLEAN") return "CLEAN";
+  return CAUTION_KINDS.has(guidance.kind) ? "CAUTION" : "EXCEPTION";
+}
+
+/**
  * Field keys are written for code — `objectiveFindings`, `pastMedicalHistory`.
  * A reviewer is reading a sentence, so say them the way they would be said.
  */

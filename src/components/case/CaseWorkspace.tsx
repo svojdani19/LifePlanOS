@@ -4457,23 +4457,23 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
         // need attention, and a 16-row ER packet read as 16 obligations.
         // Grouping is presentation only: every row stays reachable and
         // reviewable, and nothing about their storage or gating changes.
-        const bucketOf = (e: AnyRec): "attention" | "corroborated" | "ready" | "copies" | "paperwork" | "resolved" => {
-          // A note carrying an open finding is an exception, whatever else is
-          // true of it — consolidation may never hide a problem.
+        const bucketOf = (e: AnyRec): "attention" | "caution" | "corroborated" | "ready" | "copies" | "paperwork" | "resolved" => {
+          // An EXCEPTION cannot be attested as it stands: something about this
+          // record must change or be disposed of. Consolidation may never hide
+          // one.
           if (e.needsAttention) return "attention";
           if (["VERIFIED", "REVIEWED", "HUMAN_EDITED"].includes(e.status)) return "resolved";
-          // Stale and lost rows demand a decision wherever they are filed.
-          if (e.status === "STALE" || e.status === "GENERATION_LOSS") return "attention";
-          // An independent re-read DISAGREED with some of this row's facts —
-          // that is a finding, and it outranks the audit having passed.
-          if (e.corroboration?.result === "NOT_CORROBORATED") return "attention";
           // A copy of a record whose primary card lives in another document:
           // the decision there covers it, so it does not queue here.
           if (e.reviewedWith) return "copies";
           // Paperwork never feeds the chronology or the plan; it should not
           // crowd the clinical queue. It reviews on its own time.
           if ((e.substanceClass ?? "CLINICAL") !== "CLINICAL") return "paperwork";
-          if (e.dateStatus === "UNKNOWN") return "attention";
+          // A CAUTION is a sound record with something to read first — a
+          // document that is incomplete around it, text carried forward from
+          // an earlier note, an old grade whose reason was never recorded.
+          // Attestable, so it waits in its own pile rather than blocking one.
+          if (e.attention === "CAUTION") return "caution";
           // The strongest machine evidence: audit passed AND an independent
           // blind re-read reproduced every fact. Still pending a human — the
           // machine cannot attest — but it waits in the quietest queue.
@@ -4481,9 +4481,9 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
           // The adversarial audit passed and nothing is flagged: reviewable
           // with one click, but not shouting.
           if (e.status === "AI_AUDIT_PASSED") return "ready";
-          return "attention";
+          return "ready";
         };
-        const groups = { attention: [] as AnyRec[], corroborated: [] as AnyRec[], ready: [] as AnyRec[], copies: [] as AnyRec[], paperwork: [] as AnyRec[], resolved: [] as AnyRec[] };
+        const groups = { attention: [] as AnyRec[], caution: [] as AnyRec[], corroborated: [] as AnyRec[], ready: [] as AnyRec[], copies: [] as AnyRec[], paperwork: [] as AnyRec[], resolved: [] as AnyRec[] };
         for (const n of notes) groups[bucketOf(n)].push(n);
 
         const renderEncounter = (e: AnyRec) => {
@@ -4547,7 +4547,10 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
             {/* Why this record is here and what to do about it. A card that
                 says only "needs review" makes the reviewer guess, and the
                 guess is usually to click a button the server will refuse. */}
-            {e.guidance && e.needsAttention && (
+            {/* Shown for an exception AND for a caution: a caution is the
+                thing the reviewer must read before signing, so hiding it
+                would leave them signing blind. */}
+            {e.guidance && e.attention !== "CLEAN" && (
               <div className={cn("mt-1.5 rounded border px-2 py-1.5 text-[11px]", e.guidance.canAttest ? "border-amber-200 bg-amber-50 text-amber-900" : "border-red-200 bg-red-50 text-red-900")}>
                 <p className="font-semibold">{GUIDANCE_TITLE[e.guidance.kind] ?? "Needs review"}</p>
                 <p className="mt-0.5">{e.guidance.why}</p>
@@ -4805,6 +4808,7 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
             {groups.attention.length === 0 && notes.length > 0 && (
               <p className="mt-2 text-[11px] text-emerald-700">Nothing here needs attention right now.</p>
             )}
+            {foldedGroup("caution", "Ready to confirm — read the note on each before signing", groups.caution, "bg-amber-50 text-amber-800")}
             {foldedGroup("corroborated", "Machine-corroborated — a blind second reading reproduced every fact; pending human review", groups.corroborated, "bg-violet-50 text-violet-700")}
             {foldedGroup("ready", "Audit passed — ready to confirm", groups.ready, "bg-teal-50 text-teal-700")}
             {foldedGroup("copies", "Copies — reviewed with their primary record in another document", groups.copies, "bg-sky-50 text-sky-700")}

@@ -30,7 +30,7 @@ async function main() {
   const documents = await db.document.findMany({ where: { caseId: theCase.id }, select: { id: true, segments: true } });
   const rows = await db.extractedEncounter.findMany({
     where: { caseId: theCase.id, ...CURRENT_OUTPUT_WHERE },
-    select: { id: true, sourceDocumentId: true, status: true, auditResult: true, dateStatus: true, analysisClass: true, corroboration: true },
+    select: { id: true, sourceDocumentId: true, status: true, auditResult: true, dateStatus: true, analysisClass: true, auditVersion: true, corroboration: true },
   });
   const findings = await db.recordFinding
     .findMany({
@@ -51,6 +51,7 @@ async function main() {
       // The KIND, so a legitimately dateless fee schedule is not counted as a
       // clinical dating gap.
       analysisClass: r.analysisClass,
+      auditVersion: r.auditVersion,
       corroborationResult: (r.corroboration as { result?: string } | null)?.result ?? null,
     })) as BurdenRow[],
     findings: findings as BurdenFinding[],
@@ -68,6 +69,7 @@ async function main() {
   console.log(`  decisions before consolidation    ${burden.decisionsBeforeConsolidation}`);
   console.log(`  decisions after consolidation     ${burden.decisionsAfterConsolidation}`);
   console.log(`\n  notes needing attention           ${burden.notesNeedingAttention}`);
+  console.log(`  notes carrying a caution          ${burden.notesCarryingCaution}`);
   console.log(`  clean notes awaiting attestation  ${burden.cleanNotesAwaitingAttestation}`);
   console.log(`\n  AI_DRAFT rows                     ${burden.aiDraft}`);
   console.log(`  AI_AUDIT_PASSED rows              ${burden.aiAuditPassed}`);

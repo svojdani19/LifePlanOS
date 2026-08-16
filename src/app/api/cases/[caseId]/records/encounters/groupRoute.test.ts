@@ -117,6 +117,10 @@ const makeRow = (id: string, over: Record<string, unknown> = {}) => ({
   synthesis: null,
   claims: [{ field: "assessment", value: "Lumbar radiculopathy", excerpt: "Assessment: Lumbar radiculopathy", page: 1 }],
   verifiedContentHash: null,
+  auditResult: "PASS",
+  auditVersion: "2026-08-17.scoped-findings",
+  unresolvedDisputes: 0,
+  contradictedFields: [],
   updatedAt: new Date("2026-08-01T00:00:00Z"),
   ...over,
 });
@@ -274,11 +278,37 @@ describe("what the server refuses", () => {
 });
 
 describe("the server checks the row's own state, not the button's", () => {
-  it("refuses to attest a row whose audit ended in source conflict", async () => {
-    db.state.rows.find((r) => r.id === "b")!.auditResult = "SOURCE_CONFLICT";
+  it("refuses to attest a row whose audit RECORDED a source conflict", async () => {
+    const row = db.state.rows.find((r) => r.id === "b")!;
+    row.auditResult = "SOURCE_CONFLICT";
+    row.auditVersion = "2026-08-17.scoped-findings"; // the run recorded what it found
     const res = await POST(req({ action: "verify", canonicalNoteId: noteId("doc-1", "a", "b"), rows: withHashes("a", "b") }), params);
     expect(res.status).toBe(409);
     expect((await res.json()).problems[0].reason).toMatch(/source conflict/);
+    expect(db.state.rows.every((r) => r.status !== "VERIFIED")).toBe(true);
+  });
+
+  it("allows attestation over a legacy conflict whose reason was never recorded", async () => {
+    // A run predating dispute columns recorded no disputed field, no
+    // contradicted value and no excerpt. There is nothing to correct — only
+    // something to check against the cited page, which is what attestation
+    // IS. Refusing these left 204 rows on the reference case that no reviewer
+    // could ever clear.
+    const row = db.state.rows.find((r) => r.id === "b")!;
+    row.auditResult = "SOURCE_CONFLICT";
+    row.auditVersion = null;
+    const res = await POST(req({ action: "verify", canonicalNoteId: noteId("doc-1", "a", "b"), rows: withHashes("a", "b") }), params);
+    expect(res.status).toBe(200);
+    expect(db.state.rows.filter((r) => r.status === "VERIFIED")).toHaveLength(2);
+  });
+
+  it("still refuses a legacy row that also carries persisted dispute evidence", async () => {
+    const row = db.state.rows.find((r) => r.id === "b")!;
+    row.auditResult = "SOURCE_CONFLICT";
+    row.auditVersion = null;
+    row.unresolvedDisputes = 2; // evidence exists, whatever the version says
+    const res = await POST(req({ action: "verify", canonicalNoteId: noteId("doc-1", "a", "b"), rows: withHashes("a", "b") }), params);
+    expect(res.status).toBe(409);
     expect(db.state.rows.every((r) => r.status !== "VERIFIED")).toBe(true);
   });
 
