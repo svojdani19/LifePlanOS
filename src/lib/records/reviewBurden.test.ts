@@ -174,3 +174,75 @@ describe("finding identity", () => {
     expect(distinctOpen(rows)).toHaveLength(2);
   });
 });
+
+describe("each metric counts what its name says", () => {
+  it("counts only rows whose KIND requires a date as a dating gap", () => {
+    // The Records page tells the user that fee schedules and letters need no
+    // date. The metric said otherwise, about the same rows.
+    const rows = [
+      row("clinical", { dateStatus: "UNKNOWN", analysisClass: "CLINICAL_ENCOUNTER" }),
+      row("ledger", { dateStatus: "UNKNOWN", analysisClass: "FINANCIAL" }),
+      row("letter", { dateStatus: "UNKNOWN", analysisClass: "CORRESPONDENCE_OR_GENERIC_EVIDENCE" }),
+    ];
+    const burden = measureReviewBurden({
+      documents: [{ id: "doc-1", segments: [{ rowIds: rows.map((r) => r.id) }] }],
+      rows,
+      findings: [],
+      pages: [],
+    });
+    expect(burden.undatedClinical).toBe(1);
+    expect(burden.undatedDatelessByDesign).toBe(2);
+  });
+
+  it("treats a row of unrecorded kind as needing a date — the conservative reading", () => {
+    const burden = measureReviewBurden({
+      documents: [{ id: "doc-1", segments: [{ rowIds: ["legacy"] }] }],
+      rows: [row("legacy", { dateStatus: "UNKNOWN", analysisClass: null })],
+      findings: [],
+      pages: [],
+    });
+    expect(burden.undatedClinical).toBe(1);
+  });
+
+  it("keeps notesWithFindings and notesNeedingAttention as different questions", () => {
+    // One note carries a finding; a second is stale with no finding attached.
+    // Returning one Set for both made them aliases that could never disagree.
+    const rows = [row("a"), row("b", { status: "STALE" })];
+    const burden = measureReviewBurden({
+      documents: [{ id: "doc-1", segments: [{ rowIds: ["a"] }, { rowIds: ["b"] }] }],
+      rows,
+      findings: [{ id: "f", fingerprint: "fp", scope: "ENTRY", type: "CONTRADICTED_DATE", status: "OPEN", blocking: true, encounterId: "a" }],
+      pages: [],
+    });
+    expect(burden.notesWithFindings).toBe(1);
+    expect(burden.notesNeedingAttention).toBe(2);
+  });
+
+  it("counts the cross-document copies one decision now covers", () => {
+    // The linkage IS the segment: a note assembled from two documents' rows.
+    const rows = [row("primary", { sourceDocumentId: "doc-1" }), row("copy", { sourceDocumentId: "doc-2" })];
+    const burden = measureReviewBurden({
+      documents: [
+        { id: "doc-1", segments: [{ rowIds: ["primary", "copy"] }] },
+        { id: "doc-2", segments: [] },
+      ],
+      rows,
+      findings: [],
+      pages: [],
+    });
+    expect(burden.crossDocumentCopies).toBe(1);
+    // …and it is one decision, not two.
+    expect(burden.canonicalNotes).toBe(1);
+  });
+
+  it("reports no copies when nothing is linked across documents", () => {
+    const rows = [row("a"), row("b")];
+    const burden = measureReviewBurden({
+      documents: [{ id: "doc-1", segments: [{ rowIds: ["a", "b"] }] }],
+      rows,
+      findings: [],
+      pages: [],
+    });
+    expect(burden.crossDocumentCopies).toBe(0);
+  });
+});

@@ -19,7 +19,17 @@
 // serves a live case, a test with synthetic rows, and the re-audit report.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { requiresDate } from "@/lib/documents/analysisClass";
 import type { FindingScope } from "@/lib/records/findingScope";
+
+/**
+ * Is this row a real dating gap, or material that never carries a date?
+ *
+ * A legacy row with no recorded kind is treated as needing one: the
+ * conservative reading keeps a genuine gap visible rather than excusing it.
+ */
+const isUndatedAndShouldBeDated = (r: BurdenRow): boolean =>
+  r.dateStatus === "UNKNOWN" && requiresDate((r.analysisClass ?? null) as never);
 
 /** An extraction row as the burden calculation needs it. */
 export interface BurdenRow {
@@ -28,6 +38,15 @@ export interface BurdenRow {
   status: string;
   auditResult: string | null;
   dateStatus: string | null;
+  /**
+   * The KIND of material this row came from.
+   *
+   * Without it, `undatedClinical` counted every dateless row — including the
+   * fee schedules, consent pages and records-request letters the Records page
+   * itself tells the user require no action. The metric contradicted the
+   * screen it was measuring.
+   */
+  analysisClass?: string | null;
   /** Machine-corroboration verdict, when one was recorded. */
   corroborationResult?: string | null;
 }
@@ -74,7 +93,10 @@ export interface ReviewBurden {
   machineCorroborated: number;
   stale: number;
   generationLoss: number;
+  /** Undated rows whose KIND requires a service date: a real gap to close. */
   undatedClinical: number;
+  /** Undated rows that never needed one — fee schedules, letters, consents. */
+  undatedDatelessByDesign: number;
 
   /** Distinct OPEN findings by scope, counted by identity. */
   findingsByScope: Record<string, number>;
@@ -82,7 +104,11 @@ export interface ReviewBurden {
   findingsByType: Record<string, number>;
   /** Distinct entries named by any open finding. */
   entriesWithFindings: number;
-  /** Distinct canonical notes touched by any open finding. */
+  /**
+   * Distinct canonical notes named by an open finding. STRICTLY the findings
+   * question — `notesNeedingAttention` is the broader one and includes rows
+   * that are unresolved without any finding attached.
+   */
   notesWithFindings: number;
   /** Open blockers at DOCUMENT scope, counted once per document finding. */
   documentBlockers: number;
@@ -91,12 +117,18 @@ export interface ReviewBurden {
   /** Open blockers at CASE scope. */
   caseBlockers: number;
 
-  /** Notes carrying an open note/entry/claim finding: real exceptions. */
+  /**
+   * Notes needing a human: those with a finding, plus those whose own rows are
+   * stale, generation-loss, non-PASS, or undated where a date is required.
+   */
   notesNeedingAttention: number;
   /** Notes with nothing open: one attestation each, still required. */
   cleanNotesAwaitingAttestation: number;
 
-  /** Rows that are copies of a note primarily reviewed in another document. */
+  /**
+   * Rows a canonical note consolidates from ANOTHER document — the copies one
+   * decision now covers instead of each demanding its own.
+   */
   crossDocumentCopies: number;
   /** Decisions a fragment-level surface would have demanded. */
   decisionsBeforeConsolidation: number;
@@ -197,29 +229,46 @@ export function measureReviewBurden(input: BurdenInput): ReviewBurden {
 
   const entriesWithFindings = new Set(distinctOpen.map((f) => f.encounterId).filter((x): x is string => Boolean(x)));
 
-  // A note is in attention if a finding names the note itself, or names any
-  // row the note consolidates.
+  // ── Two DIFFERENT questions, kept apart ─────────────────────────────────
+  // "How many notes has a finding been raised against?" and "how many notes
+  // need a human?" are not the same number, and returning one Set for both
+  // made them aliases that could never disagree — a metric that cannot be
+  // wrong about anything is not measuring anything.
+
+  // (1) Notes a finding actually names.
   const noteOfRow = new Map<string, string>();
   for (const n of notes) for (const rid of n.rowIds) noteOfRow.set(rid, n.id);
-  const notesFlagged = new Set<string>();
+  const notesWithFindings = new Set<string>();
   for (const f of distinctOpen) {
-    if (f.canonicalNoteId) notesFlagged.add(f.canonicalNoteId);
+    if (f.canonicalNoteId) notesWithFindings.add(f.canonicalNoteId);
     if (f.encounterId) {
       const owner = noteOfRow.get(f.encounterId);
-      if (owner) notesFlagged.add(owner);
+      if (owner) notesWithFindings.add(owner);
     }
   }
 
-  // A note also needs attention when any of its rows is itself unresolved —
-  // stale, generation-loss, undated clinical, or a non-PASS audit result.
+  // (2) Notes needing a human: the above, PLUS notes whose own rows are
+  // unresolved — stale, generation-loss, undated where a date is required, or
+  // a non-PASS audit result.
   const needsAttentionByRow = (r: BurdenRow): boolean =>
     r.status === "STALE" ||
     r.status === "GENERATION_LOSS" ||
-    r.dateStatus === "UNKNOWN" ||
+    isUndatedAndShouldBeDated(r) ||
     (r.auditResult != null && r.auditResult !== "PASS");
+  const notesFlagged = new Set(notesWithFindings);
   for (const n of notes) {
     if (n.rowIds.some((id) => { const r = rowsById.get(id); return r ? needsAttentionByRow(r) : false; })) notesFlagged.add(n.id);
   }
+
+  // ── Cross-document copies, counted from the persisted linkage ───────────
+  // A note assembled from rows in more than one document IS the duplicate
+  // linkage; every member beyond the note's own document is a copy that this
+  // consolidation spared a separate decision. Hard-coding zero reported the
+  // saving as nothing.
+  const crossDocumentCopies = notes.reduce(
+    (n, note) => n + note.rowIds.filter((id) => (rowsById.get(id)?.sourceDocumentId ?? note.documentId) !== note.documentId).length,
+    0,
+  );
 
   const countRows = (predicate: (r: BurdenRow) => boolean) => input.rows.filter(predicate).length;
 
@@ -234,12 +283,17 @@ export function measureReviewBurden(input: BurdenInput): ReviewBurden {
     machineCorroborated: countRows((r) => r.corroborationResult === "CORROBORATED"),
     stale: countRows((r) => r.status === "STALE"),
     generationLoss: countRows((r) => r.status === "GENERATION_LOSS"),
-    undatedClinical: countRows((r) => r.dateStatus === "UNKNOWN"),
+    // Only material that is SUPPOSED to carry a service date. A fee schedule,
+    // a consent page and a records-request letter are legitimately dateless,
+    // and counting them here contradicted the Records page's own disclosure
+    // that such material requires no action.
+    undatedClinical: countRows(isUndatedAndShouldBeDated),
+    undatedDatelessByDesign: countRows((r) => r.dateStatus === "UNKNOWN" && !isUndatedAndShouldBeDated(r)),
 
     findingsByScope: byScope,
     findingsByType: byType,
     entriesWithFindings: entriesWithFindings.size,
-    notesWithFindings: notesFlagged.size,
+    notesWithFindings: notesWithFindings.size,
     documentBlockers: distinctOpen.filter((f) => f.scope === "DOCUMENT" && f.blocking).length,
     pageBlockers: distinctOpen.filter((f) => f.scope === "PAGE" && f.blocking).length,
     caseBlockers: distinctOpen.filter((f) => f.scope === "CASE" && f.blocking).length,
@@ -247,7 +301,7 @@ export function measureReviewBurden(input: BurdenInput): ReviewBurden {
     notesNeedingAttention: notesFlagged.size,
     cleanNotesAwaitingAttestation: notes.filter((n) => !notesFlagged.has(n.id) && n.rowIds.every((id) => CLEAN_STATUSES.has(rowsById.get(id)?.status ?? ""))).length,
 
-    crossDocumentCopies: 0, // supplied by the caller when copy linkage is loaded
+    crossDocumentCopies,
     decisionsBeforeConsolidation: input.rows.length,
     decisionsAfterConsolidation: notes.length,
   };
