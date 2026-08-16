@@ -4345,16 +4345,25 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
    * audited PATCH; corrections remain entry-specific by construction.
    */
   async function patchNote(note: AnyRec, body: AnyRec) {
-    const rowIds: string[] = note.rowIds ?? [note.id];
+    const hashes: { rowId: string; contentHash: string }[] = note.contentHashes ?? [];
+    if (!hashes.length) return;
     setBusy(note.id);
-    for (const rowId of rowIds) {
-      await fetch(`/api/cases/${caseId}/records/encounters/${rowId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      }).catch(() => null);
-    }
+    const res = await fetch(`/api/cases/${caseId}/records/encounters/group/correct`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...body,
+        canonicalNoteId: note.id,
+        rows: hashes.map((h) => ({ id: h.rowId, expectedContentHash: h.contentHash })),
+      }),
+    }).catch(() => null);
+    const out = (await res?.json().catch(() => ({}))) as { error?: string; regenerationReason?: string };
     setBusy(null);
+    // A refused correction changed nothing. Saying so is the whole point: the
+    // previous loop discarded every response, so a half-applied correction
+    // looked identical to a successful one.
+    setGroupError(res && res.ok ? null : (out?.error ?? "The correction could not be applied; nothing was changed."));
+    if (res?.ok) setRegenNotice(out.regenerationReason ?? "The chronology and care plan are being rebuilt.");
     onChanged();
   }
 
