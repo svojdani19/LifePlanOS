@@ -90,11 +90,36 @@ export interface AuditInput {
   unclearBoundaries?: number;
   /** True once every uploaded document covering the period finished processing. */
   allDocumentsProcessed: boolean;
+  /**
+   * THIS document's own run did not finish — it paused at a chunk budget, or
+   * stopped part-way.
+   *
+   * Document-scope, not case-scope: content this document's entries sit among
+   * has not been read yet, so its own entries are genuinely incomplete. Kept
+   * separate from `allDocumentsProcessed`, which is about OTHER documents and
+   * must never change how this document's entries are graded.
+   */
+  thisDocumentIncomplete?: boolean;
+}
+
+/** A finding the audit derived, named by what it is actually about. */
+export interface ScopedAuditFinding {
+  scope: "CASE" | "DOCUMENT" | "PAGE" | "NOTE" | "ENTRY" | "CLAIM";
+  type: string;
+  blocking: boolean;
+  detail: string;
+  /** Present when the finding concerns specific pages. */
+  pageStart?: number | null;
+  pageEnd?: number | null;
+  /** Index into `input.encounters`, when the finding is about one entry. */
+  encounterIndex?: number | null;
+  claimIndex?: number | null;
+  field?: string | null;
 }
 
 export interface AuditOutcome {
   result: AuditResult;
-  findings: string[]; // PHI-safe
+  findings: string[]; // PHI-safe — LEGACY, kept for compatibility
   /**
    * One result per input encounter, in order.
    *
@@ -105,6 +130,12 @@ export interface AuditOutcome {
    * coverage — but not a conflict that belongs to a different entry.
    */
   perEncounter: AuditResult[];
+  /**
+   * The same conclusions, each named by the thing it concerns. This is what
+   * review presentation and metrics read; `findings` above is the legacy flat
+   * array that was copied onto every row.
+   */
+  scoped: ScopedAuditFinding[];
 }
 
 /** Causal / future-care language that a FACTUAL record may not assert. */
@@ -158,6 +189,13 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
    * case-level gate, and stops there.
    */
   let docOnlyIncomplete = false;
+  /**
+   * Facts about the CASE — a sibling document failed, or others are still
+   * processing. They block the case and never touch an entry's result, so
+   * processing order cannot change how an entry is graded.
+   */
+  let caseOnlyIncomplete = false;
+  const scoped: ScopedAuditFinding[] = [];
   const ownConflict: boolean[] = input.encounters.map(() => false);
   const ownFailure: boolean[] = input.encounters.map(() => false);
   const ownReview: boolean[] = input.encounters.map(() => false);
@@ -167,25 +205,38 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
   const pending = input.pages.filter((p) => p.status === "PENDING_OCR");
   const lowConf = input.pages.filter((p) => p.status === "LOW_CONFIDENCE");
   const truncated = input.pages.filter((p) => p.status === "TRUNCATED");
+  // Page problems are recorded PER PAGE. One finding per affected page keeps
+  // "page 4 is unreadable" and "page 9 is unreadable" two problems, and lets
+  // the review surface show each once where it belongs.
+  const pageFinding = (type: string, page: number, detail: string) =>
+    scoped.push({ scope: "PAGE", type, blocking: true, detail, pageStart: page, pageEnd: page });
   if (pending.length) {
     sawIncomplete = true;
     findings.push(`${pending.length} page(s) are still awaiting OCR; the record is not fully processed.`);
+    for (const pg of pending) pageFinding("PAGE_UNREADABLE", pg.pageNumber, "This page is still awaiting OCR; its content is not yet represented.");
   }
   if (unreadable.length) {
     sawIncomplete = true;
     findings.push(`${unreadable.length} page(s) could not be read; their content is absent from this draft.`);
+    for (const pg of unreadable) pageFinding("PAGE_UNREADABLE", pg.pageNumber, "This page could not be read; its content is absent from this draft.");
   }
   if (truncated.length) {
     sawIncomplete = true;
     findings.push(`${truncated.length} page(s) were truncated during processing.`);
+    for (const pg of truncated) pageFinding("PAGE_TRUNCATED", pg.pageNumber, "This page was truncated during processing; content beyond the cut is not represented.");
   }
   if (input.failedExtractions > 0) {
-    sawIncomplete = true;
+    // A DIFFERENT document failing is a case-completion fact. It says nothing
+    // about this entry, and letting it in made an entry's audit result depend
+    // on which other documents happened to be processed first.
+    caseOnlyIncomplete = true;
     findings.push(`${input.failedExtractions} document(s) failed extraction; their content is not represented.`);
+    scoped.push({ scope: "CASE", type: "DOCUMENT_EXTRACTION_FAILED", blocking: true, detail: `${input.failedExtractions} document(s) failed extraction; their content is not represented.` });
   }
   if ((input.failedSections ?? 0) > 0) {
     sawIncomplete = true;
     findings.push(`${input.failedSections} section(s) of the source could not be processed; their content is not represented.`);
+    scoped.push({ scope: "DOCUMENT", type: "SECTION_NOT_PROCESSED", blocking: true, detail: `${input.failedSections} section(s) of this document could not be processed; their content is not represented.` });
   }
   if ((input.coverageGaps ?? 0) > 0) {
     // The DOCUMENT is under-extracted; each entry it did produce is not
@@ -196,30 +247,45 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
     // complete over a missing encounter).
     docOnlyIncomplete = true;
     findings.push(`${input.coverageGaps} dated note header(s) in the source have no extracted encounter; the record may be under-extracted.`);
+    scoped.push({ scope: "DOCUMENT", type: "MISSING_ENCOUNTER", blocking: true, detail: `${input.coverageGaps} dated note header(s) in this document have no extracted encounter; the record may be under-extracted.` });
   }
   if ((input.criticOmissions ?? 0) > 0) {
     sawIncomplete = true;
     findings.push(
       `${input.criticOmissions} encounter(s) present in the source were not extracted, per the independent critic pass; the draft does not represent the whole record.`,
     );
+    scoped.push({ scope: "DOCUMENT", type: "MISSING_ENCOUNTER", blocking: true, detail: `${input.criticOmissions} encounter(s) present in this document were not extracted, per the independent critic pass.` });
   }
   if ((input.unclearBoundaries ?? 0) > 0) {
     sawReviewNeeded = true;
     findings.push(
       `${input.unclearBoundaries} place(s) in the source where one note's boundary could not be determined; entries there may combine or split records.`,
     );
+    scoped.push({ scope: "DOCUMENT", type: "UNCLEAR_NOTE_BOUNDARY", blocking: false, detail: `${input.unclearBoundaries} place(s) in this document where a note boundary could not be determined.` });
   }
   if (input.truncatedSource) {
     sawIncomplete = true;
     findings.push("The source text was clipped at the storage cap; content beyond it is not represented.");
+    scoped.push({ scope: "DOCUMENT", type: "SOURCE_CLIPPED", blocking: true, detail: "This document's text was clipped at the storage cap; content beyond it is not represented." });
   }
   if (lowConf.length) {
     sawReviewNeeded = true;
     findings.push(`${lowConf.length} page(s) have low-confidence OCR; extracted facts require verification against the source.`);
+    for (const pg of lowConf) {
+      scoped.push({ scope: "PAGE", type: "PAGE_LOW_CONFIDENCE", blocking: false, detail: "This page's OCR confidence is low; facts drawn from it need checking against the source.", pageStart: pg.pageNumber, pageEnd: pg.pageNumber });
+    }
+  }
+  if (input.thisDocumentIncomplete) {
+    sawIncomplete = true;
+    findings.push("This document's extraction did not run to completion; part of it has not been read.");
+    scoped.push({ scope: "DOCUMENT", type: "SECTION_NOT_PROCESSED", blocking: true, detail: "This document's extraction did not run to completion; part of it has not been read." });
   }
   if (!input.allDocumentsProcessed) {
-    sawIncomplete = true;
+    // Also case-level: this entry is not less faithful because a sibling
+    // document is still in the queue.
+    caseOnlyIncomplete = true;
     findings.push("Not every uploaded document has completed processing.");
+    scoped.push({ scope: "CASE", type: "DOCUMENTS_STILL_PROCESSING", blocking: true, detail: "Not every uploaded document has completed processing." });
   }
 
   // ── 2. Unresolved disagreement between extraction passes ──────────────────
@@ -247,6 +313,16 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
       sawConflict = true;
       ownConflict[index] = true;
       findings.push(`The source contradicts the extracted ${e.contradictedFields.join(" and ")} for the entry shown as ${label}; a reviewer must set it from the record.`);
+      for (const field of e.contradictedFields) {
+        scoped.push({
+          scope: "ENTRY",
+          type: field === "date" ? "CONTRADICTED_DATE" : "CONTRADICTED_PROVIDER",
+          blocking: true,
+          encounterIndex: index,
+          field,
+          detail: `The source contradicts the extracted ${field} for this entry; a reviewer must set it from the record.`,
+        });
+      }
     }
 
     // Disputes about THIS entry that no adjudicator could settle.
@@ -254,6 +330,7 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
       sawConflict = true;
       ownConflict[index] = true;
       findings.push(`${e.unresolvedDisputes} extraction disagreement(s) about the entry for ${label} remain unresolved.`);
+      scoped.push({ scope: "ENTRY", type: "UNRESOLVED_DISPUTE", blocking: true, encounterIndex: index, detail: `${e.unresolvedDisputes} extraction disagreement(s) about this entry remain unresolved.` });
     }
 
     if (!e.claims.length) {
@@ -367,6 +444,10 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
       result: input.pages.length === 0 ? "FAILED" : "EXTRACTION_INCOMPLETE",
       findings: [...findings, "No encounters were extracted from the available source pages."],
       perEncounter: [],
+      scoped: [
+        ...scoped,
+        { scope: "DOCUMENT", type: "SECTION_NOT_PROCESSED", blocking: true, detail: "No encounters were extracted from the available source pages." },
+      ],
     };
   }
 
@@ -375,7 +456,7 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
   const grade = (failure: boolean, conflict: boolean, incomplete: boolean, review: boolean): AuditResult =>
     failure ? "FAILED" : conflict ? "SOURCE_CONFLICT" : incomplete ? "EXTRACTION_INCOMPLETE" : review ? "NEEDS_HUMAN_REVIEW" : "PASS";
 
-  const result = grade(sawFailure, sawConflict, sawIncomplete || docOnlyIncomplete, sawReviewNeeded);
+  const result = grade(sawFailure, sawConflict, sawIncomplete || docOnlyIncomplete || caseOnlyIncomplete, sawReviewNeeded);
 
   // Each entry: what the DOCUMENT's own state implies for it, plus what the
   // entry itself raised. A neighbour's unresolved dispute is not this entry's
@@ -384,7 +465,7 @@ export function auditFactualRecord(input: AuditInput): AuditOutcome {
     grade(docFailure || ownFailure[i], docConflict || ownConflict[i], docIncomplete, docReview || ownReview[i]),
   );
 
-  return { result, findings, perEncounter };
+  return { result, findings, perEncounter, scoped };
 }
 
 /** Split synthesized prose into sentences for claim mapping. */

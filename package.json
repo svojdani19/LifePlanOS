@@ -22,6 +22,8 @@
     "records:rebuild": "tsx scripts/rebuild-records.ts",
     "records:corroborate": "tsx scripts/corroborate-records.ts",
     "records:reextract": "tsx scripts/reextract-case.ts",
+    "records:reaudit": "tsx scripts/reaudit-case.ts",
+    "records:burden": "tsx scripts/review-burden.ts",
     "reasoning:backfill": "tsx scripts/backfill-reasoning.ts",
     "ocr:redo": "tsx scripts/ocr-redo.ts",
     "retention:enforce": "tsx scripts/enforce-retention.ts",

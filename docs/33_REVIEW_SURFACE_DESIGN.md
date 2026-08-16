@@ -217,3 +217,25 @@ general lesson: measure the population before designing a policy for it.
 
 Each change lands with a claim + refutation in `src/lib/safeguards/claims.ts`,
 so the label it puts in front of a physician is testable.
+
+---
+
+## Implementation status (2026-08-17)
+
+Measured on REF-2026-0005 with `npm run records:burden`, counting distinct
+findings by identity and canonical notes from persisted segments.
+
+| | before | after |
+| --- | --- | --- |
+| active extraction rows | 548 | 548 |
+| canonical notes (review decisions) | 548 | **229** |
+| notes needing attention | 221 | **171** |
+| clean notes awaiting attestation | 8 | **58** |
+| distinct case / document / page blockers | not countable | 2 / 4 / 9 |
+| rows at PASS | 8 | 142 |
+
+`RecordFinding` is now the source of truth for review presentation and
+metrics; `ExtractedEncounter.auditFindings` is retained for compatibility and
+is no longer authoritative. `npm run records:reaudit` applies corrected
+deterministic rules with no model calls, preserving human status, verification
+hashes and any conflict whose dispute state predates persistence.

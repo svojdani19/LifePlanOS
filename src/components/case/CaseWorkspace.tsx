@@ -50,6 +50,53 @@ import { pageRange } from "@/lib/documents/meta";
 import { recordEncounters, narrativeFor } from "@/lib/documents/recordSummary";
 import { structuredConfidence } from "@/lib/engine/citationQuality";
 import { PROVENANCE_UPGRADE_STALE_REASON } from "@/lib/records/provenanceUpgrade";
+
+/** Plain-language names for what a finding is, so the chip is self-explaining. */
+const FINDING_LABEL: Record<string, string> = {
+  CONTRADICTED_DATE: "Adjudicated contradiction — date",
+  CONTRADICTED_PROVIDER: "Adjudicated contradiction — provider",
+  UNRESOLVED_DISPUTE: "Critic disagreement, unresolved",
+  UNSUPPORTED_CLAIM: "Claim not supported by its citation",
+  NOT_CORROBORATED: "Blind second reading disagreed",
+  UNDATED_CLINICAL: "No supportable service date",
+  DATE_ARTIFACT_REJECTED: "Date came from a signature, print or form artifact",
+  DATE_AMBIGUOUS: "Date too ambiguous to assert",
+  PROVIDER_ROLE_REJECTED: "Named person is not the treating clinician",
+  MISSING_ENCOUNTER: "Document completeness — an encounter was not extracted",
+  UNCLEAR_NOTE_BOUNDARY: "Note boundary could not be determined",
+  SECTION_NOT_PROCESSED: "Document completeness — a section was not processed",
+  PAGE_UNREADABLE: "Page problem — unreadable",
+  PAGE_LOW_CONFIDENCE: "Page problem — low-confidence OCR",
+  PAGE_TRUNCATED: "Page problem — truncated",
+  SOURCE_CLIPPED: "Document completeness — source clipped",
+  STALE_REVIEW: "Reviewed content whose source changed",
+  GENERATION_LOSS: "Prior result not reproduced",
+};
+/** Headline for the reason panel: what KIND of problem this is. */
+const GUIDANCE_TITLE: Record<string, string> = {
+  CONTRADICTED_FIELD: "The source contradicts a recorded value",
+  UNRESOLVED_DISPUTE: "Two passes disagreed, and the source did not settle it",
+  NOT_CORROBORATED: "A blind second reading did not reproduce this",
+  UNDATED: "No supportable service date",
+  STALE: "Reviewed earlier, and the source changed since",
+  GENERATION_LOSS: "The current extraction did not reproduce this",
+  DOCUMENT_INCOMPLETE: "This record is sound; its document is incomplete",
+  INTEGRITY_FAILURE: "Nothing here can be checked against the source",
+  LEGACY_CONFLICT: "Flagged by an earlier run that did not record its reason",
+  LOW_CONFIDENCE_OCR: "Read from a page the scanner struggled with",
+  CARRIED_FORWARD: "Wording repeated from an earlier note",
+  REVIEW_FLAG: "An automated check wants a human's eye",
+  CLEAN: "Ready for your attestation",
+};
+const FINDING_SOURCE_LABEL: Record<string, string> = {
+  DETERMINISTIC_VALIDATOR: "deterministic check",
+  EXTRACTION_CRITIC: "critic pass",
+  ADJUDICATOR: "adjudicator",
+  CORROBORATION: "blind second reading",
+  OCR: "OCR",
+  PAGE_LEDGER: "page ledger",
+  HUMAN_REVIEW: "human review",
+};
 import { buildRecommendationDossier, type DossierCondition, type DossierChronoEvent, type DossierCase, type EvidenceItem, type RecommendationDossier } from "@/lib/engine/medicalNecessity";
 import { buildReasoningAssessment, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningAssessment, type ReasoningItem } from "@/lib/engine/clinicalReasoning";
 import { filterSortCare, type CareSortKey } from "@/lib/uiFilters";
@@ -4205,9 +4252,43 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
   const [draftSummary, setDraftSummary] = useState("");
   const [regenNotice, setRegenNotice] = useState<string | null>(null);
   const [groupError, setGroupError] = useState<string | null>(null);
+  /** Rows whose full claim list the reviewer has opened. */
+  const [expandedClaims, setExpandedClaims] = useState<Set<string>>(new Set());
   if (!doc) return null;
   const ex = doc.extraction ?? {};
   const encounters: AnyRec[] = doc.encounters ?? [];
+  // The REVIEW UNIT is the canonical note the records builder persisted. Rows
+  // are the fragments it was assembled from — kept as evidence beneath each
+  // note, and still individually correctable, but no longer one decision
+  // each. A document with no projection (legacy data) falls back to rows, so
+  // nothing becomes unreviewable.
+  const notes: AnyRec[] = (doc.notes as AnyRec[] | undefined)?.length
+    ? (doc.notes as AnyRec[])
+    : encounters.map((e) => ({
+        id: `row:${e.id}`,
+        rowIds: [e.id],
+        rows: [e],
+        encounterDate: e.encounterDate,
+        dateStatus: e.dateStatus,
+        provider: e.provider,
+        providerCredentials: e.providerCredentials,
+        facility: e.facility,
+        encounterType: e.encounterType,
+        claims: e.claims ?? [],
+        claimCount: (e.claims ?? []).length,
+        contentHashes: [{ rowId: e.id, contentHash: e.contentHash }],
+        status: e.status,
+        auditResult: e.auditResult ?? null,
+        findings: e.findings ?? [],
+        copies: e.copies ?? [],
+        reviewedWith: e.reviewedWith ?? null,
+        corroboration: e.corroboration ?? null,
+        needsAttention: false,
+        awaitingAttestation: true,
+        substanceClass: e.substanceClass,
+        substanceReason: e.substanceReason,
+        analysisClass: e.analysisClass,
+      }));
   const statusChip = (st: string) =>
     st === "COMPLETE" ? ["AI extraction complete", "bg-emerald-50 text-emerald-700"]
     : st === "EXTRACTION_FAILED" ? ["Extraction failed — human review required", "bg-red-50 text-red-700"]
@@ -4239,6 +4320,49 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
   // sent with the hash of the content displayed, so a row that changed since
   // it was shown blocks the whole decision instead of being signed unseen.
   // Corrections never group: a correction is about one row's exact content.
+  /**
+   * A structural correction (record type, classification, date) describes the
+   * NOTE, so it is applied to every row the note consolidates — otherwise a
+   * three-fragment note would end up half corrected. Each row keeps its own
+   * audited PATCH; corrections remain entry-specific by construction.
+   */
+  async function patchNote(note: AnyRec, body: AnyRec) {
+    const rowIds: string[] = note.rowIds ?? [note.id];
+    setBusy(note.id);
+    for (const rowId of rowIds) {
+      await fetch(`/api/cases/${caseId}/records/encounters/${rowId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }).catch(() => null);
+    }
+    setBusy(null);
+    onChanged();
+  }
+
+  /**
+   * One attestation for one canonical note: every underlying row, decided
+   * together by the server, with the hash each was displayed as.
+   */
+  async function reviewNote(note: AnyRec, action: "verify" | "review" | "reject") {
+    const hashes: { rowId: string; contentHash: string }[] = note.contentHashes ?? [];
+    if (!hashes.length) return;
+    setBusy(note.id);
+    const res = await fetch(`/api/cases/${caseId}/records/encounters/group`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action,
+        canonicalNoteId: note.id,
+        rows: hashes.map((h) => ({ id: h.rowId, expectedContentHash: h.contentHash })),
+      }),
+    }).catch(() => null);
+    const out = (await res?.json().catch(() => ({}))) as { error?: string };
+    setBusy(null);
+    setGroupError(res && res.ok ? null : (out?.error ?? "The decision could not be applied; nothing was changed."));
+    onChanged();
+  }
+
   async function reviewWithCopies(e: AnyRec, action: "verify" | "review" | "reject") {
     const pending = (e.copies ?? []).filter((c: AnyRec) => !["VERIFIED", "REVIEWED", "HUMAN_EDITED"].includes(c.status));
     if (!pending.length) {
@@ -4310,6 +4434,9 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
         // Grouping is presentation only: every row stays reachable and
         // reviewable, and nothing about their storage or gating changes.
         const bucketOf = (e: AnyRec): "attention" | "corroborated" | "ready" | "copies" | "paperwork" | "resolved" => {
+          // A note carrying an open finding is an exception, whatever else is
+          // true of it — consolidation may never hide a problem.
+          if (e.needsAttention) return "attention";
           if (["VERIFIED", "REVIEWED", "HUMAN_EDITED"].includes(e.status)) return "resolved";
           // Stale and lost rows demand a decision wherever they are filed.
           if (e.status === "STALE" || e.status === "GENERATION_LOSS") return "attention";
@@ -4333,7 +4460,7 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
           return "attention";
         };
         const groups = { attention: [] as AnyRec[], corroborated: [] as AnyRec[], ready: [] as AnyRec[], copies: [] as AnyRec[], paperwork: [] as AnyRec[], resolved: [] as AnyRec[] };
-        for (const e of encounters) groups[bucketOf(e)].push(e);
+        for (const n of notes) groups[bucketOf(n)].push(n);
 
         const renderEncounter = (e: AnyRec) => {
         // Corroboration refines the chip, never the status: attestation is
@@ -4358,7 +4485,7 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
                   type="date"
                   className="input w-auto py-0 text-[11px]"
                   aria-label="Assign a date from the source record"
-                  onChange={(ev) => ev.target.value && act(e.id, "PATCH", { encounterDate: ev.target.value })}
+                  onChange={(ev) => ev.target.value && patchNote(e, { encounterDate: ev.target.value })}
                 />
               )}
               {/* The document's KIND, so a reviewer can see at a glance that a
@@ -4385,6 +4512,32 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
             {e.substanceClass && e.substanceClass !== "CLINICAL" && e.substanceReason && (
               <p className="mt-0.5 text-[11px] text-ink-500">{e.substanceReason}</p>
             )}
+            {/* Why this record is here and what to do about it. A card that
+                says only "needs review" makes the reviewer guess, and the
+                guess is usually to click a button the server will refuse. */}
+            {e.guidance && e.needsAttention && (
+              <div className={cn("mt-1.5 rounded border px-2 py-1.5 text-[11px]", e.guidance.canAttest ? "border-amber-200 bg-amber-50 text-amber-900" : "border-red-200 bg-red-50 text-red-900")}>
+                <p className="font-semibold">{GUIDANCE_TITLE[e.guidance.kind] ?? "Needs review"}</p>
+                <p className="mt-0.5">{e.guidance.why}</p>
+                {(e.guidance.steps ?? []).length > 0 && (
+                  <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                    {(e.guidance.steps as string[]).map((step: string, i: number) => (
+                      <li key={i}>{step}</li>
+                    ))}
+                  </ul>
+                )}
+                {e.pageStart && (
+                  <a
+                    href={`/api/cases/${caseId}/documents/${e.sourceDocumentId}/view`}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mt-1 inline-block font-medium underline"
+                  >
+                    Open the source at p. {e.pageStart}{e.pageEnd && e.pageEnd !== e.pageStart ? `–${e.pageEnd}` : ""}
+                  </a>
+                )}
+              </div>
+            )}
             {canVerify && (
               <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
                 {/* The KIND governs everything downstream — what the row may
@@ -4394,7 +4547,7 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
                 <select
                   className="input w-auto py-0 text-[11px]"
                   value={e.analysisClass ?? "UNKNOWN"}
-                  onChange={(ev) => act(e.id, "PATCH", { analysisClass: ev.target.value })}
+                  onChange={(ev) => patchNote(e, { analysisClass: ev.target.value })}
                   title="Changing the record type re-runs the pipeline for this case."
                 >
                   {RECORD_KIND_OPTIONS.map(([value, label]) => (
@@ -4408,7 +4561,7 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
                 <select
                   className="input w-auto py-0 text-[11px]"
                   value={e.substanceClass ?? "CLINICAL"}
-                  onChange={(ev) => act(e.id, "PATCH", { substanceClass: ev.target.value })}
+                  onChange={(ev) => patchNote(e, { substanceClass: ev.target.value })}
                 >
                   <option value="CLINICAL">Clinical — on chronology</option>
                   <option value="ANCILLARY">Ancillary — records only</option>
@@ -4426,16 +4579,98 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
               <p className="mt-1 text-xs text-ink-800">{e.factualSummary}</p>
             )}
             {e.synthesis && <p className="mt-1 text-[11px] italic text-ink-500">System-generated synthesis (from validated facts only): {e.synthesis}</p>}
-            {(e.claims ?? []).slice(0, 4).map((c: AnyRec, i: number) => (
-              <p key={i} className="mt-1 text-[11px] text-ink-500">
-                <span className="font-medium text-ink-600">{c.field}: </span>“{c.excerpt}”{c.page != null ? ` (p. ${c.page})` : " (page unknown)"}
-                {c.warning ? <span className="text-amber-700"> — {c.warning}</span> : null}
-              </p>
-            ))}
+            {/* The extraction fragments this record was assembled from —
+                evidence and citations, not separate decisions. A reviewer can
+                open them to see exactly what one signature covers, and can
+                still correct any single fragment. */}
+            {(e.rows?.length ?? 0) > 1 && (
+              <details className="mt-1.5">
+                <summary className="cursor-pointer select-none text-[11px] font-medium text-ink-600">
+                  Assembled from {e.rows.length} extracted fragments — show sources
+                </summary>
+                <div className="mt-1 space-y-1 border-l-2 border-ink-100 pl-2">
+                  {(e.rows as AnyRec[]).map((r: AnyRec) => (
+                    <div key={r.id} className="text-[11px] text-ink-600">
+                      <span className="font-medium">
+                        {r.page ? `p. ${r.page}${r.pageEnd && r.pageEnd !== r.page ? `–${r.pageEnd}` : ""}` : "page unknown"}
+                      </span>
+                      <span className="text-ink-400"> · {r.claims?.length ?? 0} claim{(r.claims?.length ?? 0) === 1 ? "" : "s"} · {r.status}</span>
+                      <p className="text-ink-700">{r.factualSummary}</p>
+                      {canVerify && (
+                        <button
+                          className="mt-0.5 text-[11px] font-medium text-brand-700 hover:underline"
+                          onClick={() => { setEditingEnc(r.id); setDraftSummary(r.factualSummary); }}
+                        >
+                          Correct this fragment
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+            {/* Everything a signature covers must be inspectable before it is
+                given. The old ceiling showed four claims of a page that can
+                carry thirty, so a reviewer attested to content the card never
+                displayed. Concise by default, complete on request. */}
+            {(() => {
+              const claims: AnyRec[] = e.claims ?? [];
+              const open = expandedClaims.has(e.id);
+              const shown = open ? claims : claims.slice(0, 4);
+              return (
+                <>
+                  {shown.map((c: AnyRec, i: number) => (
+                    <p key={i} className="mt-1 text-[11px] text-ink-500">
+                      <span className="font-medium text-ink-600">{c.field}: </span>“{c.excerpt}”{c.page != null ? ` (p. ${c.page})` : " (page unknown)"}
+                      {c.warning ? <span className="text-amber-700"> — {c.warning}</span> : null}
+                    </p>
+                  ))}
+                  {claims.length > 4 && (
+                    <button
+                      type="button"
+                      className="mt-1 text-[11px] font-medium text-brand-700 hover:underline"
+                      aria-expanded={open}
+                      onClick={() =>
+                        setExpandedClaims((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(e.id)) next.delete(e.id);
+                          else next.add(e.id);
+                          return next;
+                        })
+                      }
+                    >
+                      {open ? "Show fewer claims" : `Show all ${claims.length} claims`}
+                    </button>
+                  )}
+                  {!open && claims.length > 4 && (
+                    <p className="mt-0.5 text-[11px] text-ink-400">{claims.length} claims in total; all are covered by a verification.</p>
+                  )}
+                </>
+              );
+            })()}
             {(e.warnings ?? []).map((w: string, i: number) => (
               <p key={`w${i}`} className="mt-0.5 text-[11px] text-amber-700">{w}</p>
             ))}
             {e.staleReason && <p className="mt-0.5 text-[11px] text-red-700">{e.staleReason}</p>}
+            {/* Why this entry is in Attention Required — named, scoped and
+                sourced, so a reviewer never has to rediscover it. Only this
+                entry's own findings appear; a neighbour's problem is not
+                shown here. */}
+            {(e.findings ?? []).length > 0 && (
+              <ul className="mt-1 space-y-1">
+                {(e.findings as AnyRec[]).map((f: AnyRec) => (
+                  <li key={f.id} className={cn("rounded border px-2 py-1 text-[11px]", f.blocking ? "border-red-200 bg-red-50 text-red-900" : "border-amber-200 bg-amber-50 text-amber-900")}>
+                    <span className="font-semibold">{FINDING_LABEL[f.type] ?? f.type.replace(/_/g, " ").toLowerCase()}</span>
+                    <span className="text-ink-500"> · {FINDING_SOURCE_LABEL[f.source] ?? f.source.replace(/_/g, " ").toLowerCase()}</span>
+                    {f.field ? <span className="text-ink-500"> · {f.field}</span> : null}
+                    {f.pageStart ? <span className="text-ink-500"> · p. {f.pageStart}{f.pageEnd && f.pageEnd !== f.pageStart ? `–${f.pageEnd}` : ""}</span> : null}
+                    <p className="mt-0.5">{f.detail}</p>
+                    {f.excerpt ? <p className="mt-0.5 italic text-ink-600">“{f.excerpt}”</p> : null}
+                    {f.status !== "OPEN" && <p className="mt-0.5 text-ink-500">Status: {String(f.status).toLowerCase()}</p>}
+                  </li>
+                ))}
+              </ul>
+            )}
             {/* An independent re-read that could NOT reproduce some facts is a
                 finding for the reviewer, named by field. */}
             {e.corroboration?.result === "NOT_CORROBORATED" && (
@@ -4460,9 +4695,23 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
             )}
             {canVerify && (
               <div className="mt-1.5 flex gap-1.5">
-                {e.status !== "VERIFIED" && <button className="btn-outline px-2 py-0.5 text-[11px]" disabled={busy === e.id} onClick={() => reviewWithCopies(e, "verify")}>Verify</button>}
-                <button className="btn-outline px-2 py-0.5 text-[11px]" onClick={() => { setEditingEnc(e.id); setDraftSummary(e.factualSummary); }}>Correct</button>
-                <button className="btn-outline px-2 py-0.5 text-[11px] text-red-700" disabled={busy === e.id} onClick={() => reviewWithCopies(e, "reject")}>Reject</button>
+                {e.status !== "VERIFIED" && (
+                  <button
+                    className="btn-outline px-2 py-0.5 text-[11px] disabled:cursor-not-allowed disabled:opacity-50"
+                    disabled={busy === e.id || e.guidance?.canAttest === false}
+                    title={e.guidance?.canAttest === false ? "Correct or reject the exception above first — verification would be refused." : undefined}
+                    onClick={() => reviewNote(e, "verify")}
+                  >
+                    Verify{(e.rowIds?.length ?? 1) > 1 ? ` record (${e.rowIds.length} extracts)` : ""}
+                  </button>
+                )}
+                <button
+                  className="btn-outline px-2 py-0.5 text-[11px]"
+                  onClick={() => { setEditingEnc(e.rows?.[0]?.id ?? e.id); setDraftSummary(e.rows?.[0]?.factualSummary ?? e.factualSummary ?? ""); }}
+                >
+                  Correct
+                </button>
+                <button className="btn-outline px-2 py-0.5 text-[11px] text-red-700" disabled={busy === e.id} onClick={() => reviewNote(e, "reject")}>Reject</button>
               </div>
             )}
           </div>
@@ -4483,11 +4732,14 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
           <>
             {groups.attention.length > 0 && (encounters.length > groups.attention.length) && (
               <p className="mt-2 text-[11px] font-medium text-ink-600">
-                Needs review ({groups.attention.length} of {encounters.length})
+                Needs review ({groups.attention.length} of {notes.length} record{notes.length === 1 ? "" : "s"})
+                {notes.length !== encounters.length && (
+                  <span className="ml-1 font-normal text-ink-400">· assembled from {encounters.length} extracted fragments</span>
+                )}
               </p>
             )}
             {groups.attention.map(renderEncounter)}
-            {groups.attention.length === 0 && encounters.length > 0 && (
+            {groups.attention.length === 0 && notes.length > 0 && (
               <p className="mt-2 text-[11px] text-emerald-700">Nothing here needs attention right now.</p>
             )}
             {foldedGroup("corroborated", "Machine-corroborated — a blind second reading reproduced every fact; pending human review", groups.corroborated, "bg-violet-50 text-violet-700")}

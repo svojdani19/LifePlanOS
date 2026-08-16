@@ -1,0 +1,298 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// Why is this record in Attention Required, and what should be done about it?
+//
+// A card that says "needs review" and nothing else is a dead end. On the
+// reference case every one of 180 flagged records showed exactly that: no
+// reason, no next step, and a Verify button the server would refuse. The
+// reviewer's only route forward was to guess.
+//
+// So every flagged record states, in plain language:
+//   • WHY it is flagged, from the strongest evidence actually recorded;
+//   • WHAT to do about it, as concrete steps;
+//   • whether it can be attested at all, so no one clicks into a refusal.
+//
+// The reasons are derived from persisted evidence, never invented. When the
+// evidence for a conflict was not recorded — rows graded before dispute state
+// had columns — that is said outright rather than dressed up: an honest
+// "we cannot show you why, here is how to find out" beats a confident
+// sentence nobody can check.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface GuidanceInput {
+  status: string;
+  auditResult: string | null;
+  dateStatus: string;
+  /** Null on rows graded before dispute state was persisted. */
+  auditVersion?: string | null;
+  unresolvedDisputes?: number | null;
+  contradictedFields?: string[] | null;
+  staleReason?: string | null;
+  corroboration?: { result?: string; unreproducedFields?: string[] } | null;
+  findings?: { type: string; detail: string; blocking: boolean; field?: string | null; status: string }[];
+  /**
+   * Warnings the extractor recorded against individual claims. These are the
+   * evidence behind most NEEDS_HUMAN_REVIEW grades, and they name the field and
+   * page — so the card can say what to look at instead of "something".
+   */
+  claimWarnings?: { field?: string | null; page?: number | null; warning?: string | null }[];
+}
+
+export interface ReviewGuidance {
+  /** One sentence: why this is here. */
+  why: string;
+  /** What the reviewer can do, most direct first. */
+  steps: string[];
+  /**
+   * False when a blocking exception must be corrected or dispositioned first.
+   * The button is disabled with this reason rather than failing on click.
+   */
+  canAttest: boolean;
+  /** Short label for the reason, for grouping and telemetry. */
+  kind:
+    | "UNDATED"
+    | "STALE"
+    | "GENERATION_LOSS"
+    | "CONTRADICTED_FIELD"
+    | "UNRESOLVED_DISPUTE"
+    | "NOT_CORROBORATED"
+    | "DOCUMENT_INCOMPLETE"
+    | "INTEGRITY_FAILURE"
+    | "LEGACY_CONFLICT"
+    | "LOW_CONFIDENCE_OCR"
+    | "CARRIED_FORWARD"
+    | "REVIEW_FLAG"
+    | "CLEAN";
+}
+
+/**
+ * Field keys are written for code — `objectiveFindings`, `pastMedicalHistory`.
+ * A reviewer is reading a sentence, so say them the way they would be said.
+ */
+const humanField = (field: string): string =>
+  field
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[_-]+/g, " ")
+    .trim()
+    .toLowerCase();
+
+const fieldPhrase = (fields: readonly string[]): string => {
+  const named = fields.map(humanField);
+  if (named.length === 1) return `the ${named[0]}`;
+  return `the ${named.slice(0, -1).join(", ")} and ${named[named.length - 1]}`;
+};
+
+/**
+ * "the assessment and plan (pp. 12, 14)" — what to look at, and where. The
+ * verb has to agree with it, so the count comes back too.
+ */
+const warnedPhrase = (warned: NonNullable<GuidanceInput["claimWarnings"]>): { subject: string; plural: boolean } => {
+  const fields = [...new Set(warned.map((w) => w.field).filter((f): f is string => !!f))];
+  const pages = [...new Set(warned.map((w) => w.page).filter((p): p is number => typeof p === "number"))].sort((a, b) => a - b);
+  const where = pages.length ? ` (p${pages.length > 1 ? "p" : ""}. ${pages.join(", ")})` : "";
+  return { subject: `${fields.length ? fieldPhrase(fields) : "some content"}${where}`, plural: fields.length > 1 };
+};
+
+/**
+ * Derive the reviewer-facing reason and next steps for one canonical note.
+ *
+ * Ordered by what a reviewer should deal with first: a contradiction the
+ * adjudicator confirmed outranks a generic conflict, which outranks a
+ * document-level completeness problem this record did not cause.
+ */
+export function guidanceFor(input: GuidanceInput): ReviewGuidance {
+  const openFindings = (input.findings ?? []).filter((f) => f.status === "OPEN" || f.status === "CONFIRMED");
+  const blocking = openFindings.filter((f) => f.blocking);
+
+  // 1. A field the source actively contradicts — the most specific thing there is.
+  const contradicted = input.contradictedFields?.length
+    ? input.contradictedFields
+    : blocking.filter((f) => f.type.startsWith("CONTRADICTED_")).map((f) => f.field ?? f.type.replace("CONTRADICTED_", "").toLowerCase());
+  if (contradicted?.length) {
+    return {
+      kind: "CONTRADICTED_FIELD",
+      why: `An independent check read the source and found it contradicts ${fieldPhrase(contradicted)} recorded here. Nothing was changed automatically, because the correct value was never established.`,
+      steps: [
+        `Open the cited page and read ${fieldPhrase(contradicted)} in the source.`,
+        `Use Correct to set ${fieldPhrase(contradicted)} from what the record actually says.`,
+        "If this entry does not belong to the case at all, use Reject.",
+      ],
+      canAttest: false,
+    };
+  }
+
+  // 2. Stale human work: someone reviewed this, then the source changed.
+  if (input.status === "STALE") {
+    return {
+      kind: "STALE",
+      why: input.staleReason?.trim() || "This entry was reviewed, and its source content changed afterwards, so the earlier review no longer covers what the record now says.",
+      steps: [
+        "Compare this entry with the fresh draft shown beside it.",
+        "Verify it again if it is still correct, or Dismiss the stale copy to keep the fresh draft.",
+      ],
+      canAttest: true,
+    };
+  }
+
+  if (input.status === "GENERATION_LOSS") {
+    return {
+      kind: "GENERATION_LOSS",
+      why: "An earlier extraction produced this entry and the current one did not reproduce it, so no current reading of the source supports it.",
+      steps: [
+        "Check the cited page: if the content is really there, Verify to keep it.",
+        "If the source does not support it, Reject — it will leave the records and the chronology.",
+      ],
+      canAttest: true,
+    };
+  }
+
+  // 3. A blind second reading disagreed about specific facts.
+  if (input.corroboration?.result === "NOT_CORROBORATED") {
+    const fields = input.corroboration.unreproducedFields ?? [];
+    return {
+      kind: "NOT_CORROBORATED",
+      why: `A second reading of the source, taken without sight of this extraction, did not reproduce ${fields.length ? fieldPhrase(fields) : "every fact recorded here"}.`,
+      steps: [
+        "Check the named fields against the cited page.",
+        "Correct anything the source does not support, then Verify.",
+      ],
+      canAttest: true,
+    };
+  }
+
+  // 4. A disagreement that was recorded but never settled.
+  const disputes = input.unresolvedDisputes ?? 0;
+  if (disputes > 0) {
+    return {
+      kind: "UNRESOLVED_DISPUTE",
+      why: `A second pass disagreed with ${disputes} extracted fact${disputes === 1 ? "" : "s"} here, and reading the source did not settle the disagreement either way.`,
+      steps: [
+        "Open the cited page and decide which reading the source supports.",
+        "Correct the entry if the extraction is wrong; Verify if it is right.",
+      ],
+      canAttest: false,
+    };
+  }
+
+  // 5. No supportable date.
+  if (input.dateStatus === "UNKNOWN") {
+    return {
+      kind: "UNDATED",
+      why: "No date in the source could be supported for this entry, so it is held off the dated chronology rather than being placed on a guessed date.",
+      steps: [
+        "Read the service date from the source page and set it in the date field on this card.",
+        "If this material carries no service date at all — a fee schedule, a letter — reclassify it so it is not expected to have one.",
+      ],
+      canAttest: true,
+    };
+  }
+
+  // 6. A conflict whose evidence predates the columns that would record it.
+  if (input.auditResult === "SOURCE_CONFLICT" && !input.auditVersion) {
+    return {
+      kind: "LEGACY_CONFLICT",
+      why: "An earlier extraction graded this entry a source conflict, but that run did not record what the disagreement was, so it cannot be shown to you here.",
+      steps: [
+        "Check the entry against its cited page — that is the fastest resolution.",
+        "Verify it if the source supports it, or Correct it if not.",
+        "Re-extracting this document will reproduce the disagreement with its reasons, or clear it.",
+      ],
+      canAttest: true,
+    };
+  }
+
+  // 7. Document-level incompleteness this entry did not cause.
+  if (input.auditResult === "EXTRACTION_INCOMPLETE") {
+    return {
+      kind: "DOCUMENT_INCOMPLETE",
+      why: "This entry is sound in itself; the DOCUMENT it came from is incomplete — part of it was not read, or a dated note produced no entry.",
+      steps: [
+        "Nothing needs correcting on this card.",
+        "The document-level problem is listed with the document above and blocks a final export until it is resolved.",
+      ],
+      canAttest: true,
+    };
+  }
+
+  if (input.auditResult === "FAILED") {
+    return {
+      kind: "INTEGRITY_FAILURE",
+      why: "This entry failed an integrity check — it carries no citable claim, or a claim with no supporting excerpt, so there is nothing to verify against the source.",
+      steps: ["Check the cited page.", "Correct the entry so every statement has support, or Reject it."],
+      canAttest: false,
+    };
+  }
+
+  if (blocking.length) {
+    return {
+      kind: "REVIEW_FLAG",
+      why: blocking[0].detail,
+      steps: ["Resolve the finding shown below, then verify."],
+      canAttest: false,
+    };
+  }
+
+  if (openFindings.length || input.auditResult === "NEEDS_HUMAN_REVIEW") {
+    // A finding recorded against this entry already says what is wrong; use its
+    // own words rather than a category.
+    if (openFindings.length) {
+      return {
+        kind: "REVIEW_FLAG",
+        why: openFindings[0].detail,
+        steps: ["Check the entry against its cited page.", "Verify if it is right; Correct or Reject if not."],
+        canAttest: true,
+      };
+    }
+
+    // Otherwise the reason is on the claims themselves. These two warnings are
+    // what the extractor raises, and between them they account for nearly every
+    // review flag on the reference case — so name the field and the page rather
+    // than telling the reviewer it is "commonly" one thing or another.
+    const warned = (input.claimWarnings ?? []).filter((w) => w.warning);
+    const lowOcr = warned.filter((w) => /low-confidence OCR/i.test(w.warning!));
+    if (lowOcr.length) {
+      const { subject, plural } = warnedPhrase(lowOcr);
+      return {
+        kind: "LOW_CONFIDENCE_OCR",
+        why: `${subject} ${plural ? "were" : "was"} read from a page whose text recognition scored low confidence, so the characters themselves may not be what the page says.`,
+        steps: [
+          "Open the cited page and read the named field directly off the source.",
+          "Correct anything the page does not support, then Verify.",
+        ],
+        canAttest: true,
+      };
+    }
+
+    const copied = warned.filter((w) => /carried forward/i.test(w.warning!));
+    if (copied.length) {
+      const { subject, plural } = warnedPhrase(copied);
+      return {
+        kind: "CARRIED_FORWARD",
+        why: `${subject} ${plural ? "repeat" : "repeats"} wording that already appeared in an earlier note in this record. The text is genuinely in the source, but copied-forward history is not evidence the finding was observed again at this visit.`,
+        steps: [
+          "Open the cited page and check whether this was assessed at this visit or brought forward from a previous one.",
+          "If it was only carried forward, Correct the entry so it states what happened here.",
+          "If the entry faithfully reflects the note as written, Verify it as it stands.",
+        ],
+        canAttest: true,
+      };
+    }
+
+    return {
+      kind: "REVIEW_FLAG",
+      why: "An automated check flagged this entry for a human's eye. The check that fired was recorded against the document rather than against this entry, so it cannot be named on this card.",
+      steps: [
+        "Check the entry against its cited page — that resolves it either way.",
+        "Verify if the source supports it; Correct or Reject if not.",
+        "The document's own findings are listed with the document above.",
+      ],
+      canAttest: true,
+    };
+  }
+
+  return {
+    kind: "CLEAN",
+    why: "Automated checks found nothing wrong with this record. It still needs a person to confirm it.",
+    steps: ["Read the record against its cited pages.", "Verify to attest it."],
+    canAttest: true,
+  };
+}

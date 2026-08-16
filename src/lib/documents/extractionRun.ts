@@ -49,6 +49,7 @@ import { auditFactualRecord, type AuditEncounter } from "@/lib/llm/factualAudit"
 import { encounterContentHash } from "@/lib/records/verifiedContent";
 import { classifyEncounterSubstance } from "@/lib/records/encounterSubstance";
 import { corroborateRows } from "@/lib/records/corroboration";
+import { AUDIT_VERSION } from "@/lib/records/reaudit";
 import { LlmConfigError } from "@/lib/llm";
 
 /**
@@ -587,6 +588,8 @@ export async function processDocumentExtraction(
     criticOmissions,
     unclearBoundaries,
     allDocumentsProcessed: facts.allDocumentsProcessed,
+    // This document's own completeness, which DOES bear on its entries.
+    thisDocumentIncomplete: paused,
   });
 
   // ── Persist with review lineage ────────────────────────────────────────────
@@ -677,6 +680,11 @@ export async function processDocumentExtraction(
             // belongs to a different entry.
             status: (audit.perEncounter[encIndex] ?? audit.result) === "PASS" ? "AI_AUDIT_PASSED" : "AI_DRAFT",
             auditResult: audit.perEncounter[encIndex] ?? audit.result,
+            auditVersion: AUDIT_VERSION,
+            // Persisted so a later deterministic re-audit sees the same
+            // disagreement this run saw, instead of clearing it silently.
+            unresolvedDisputes: e.unresolvedDisputes ?? 0,
+            contradictedFields: (e.contradictedFields ?? []) as never,
             auditFindings: audit.findings.slice(0, 20) as never,
             auditedAt: new Date(),
             sourceFingerprint,

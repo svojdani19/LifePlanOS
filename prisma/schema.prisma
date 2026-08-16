@@ -1810,6 +1810,76 @@ model Notification {
 // produced it, over which exact source bytes (fingerprint), and how it ended.
 // Failed or unreliable runs are recorded — never silently replaced by
 // template prose. PHI-bearing prompts/responses are NEVER stored here.
+/// A finding about the RECORD, scoped to the thing it is actually about.
+///
+/// Replaces the unstructured `ExtractedEncounter.auditFindings` array as the
+/// source of truth for review presentation and metrics. That array stored the
+/// whole document's findings on every row, so one document-level problem
+/// appeared on hundreds of entries and a metric counting its text reported a
+/// handful of real issues as hundreds. A finding here names its own target and
+/// is counted by identity.
+///
+/// Additive: legacy auditFindings is retained for compatibility and is no
+/// longer authoritative.
+model RecordFinding {
+  id     String @id @default(uuid())
+  // Tenancy carried as scalars, matching SourcePage: these audit tables are
+  // written by pipeline code that already holds the ids, and adding relations
+  // would put back-references on Firm and Case for no query benefit.
+  firmId String
+  caseId String
+
+  /// CASE | DOCUMENT | PAGE | NOTE | ENTRY | CLAIM
+  scope    String
+  type     String
+  severity String @default("WARNING") // INFO | WARNING | BLOCKING
+  blocking Boolean @default(false)
+  /// DETERMINISTIC_VALIDATOR | EXTRACTION_CRITIC | ADJUDICATOR | CORROBORATION | OCR | PAGE_LEDGER | HUMAN_REVIEW
+  source   String
+
+  // ── Target: only the fields the scope actually names are populated ────────
+  sourceDocumentId String?
+  pageStart        Int?
+  pageEnd          Int?
+  /// Stable identity of the canonical note (document id + its sorted row ids).
+  canonicalNoteId  String?
+  encounterId      String?
+  /// Index of the claim within its encounter, when the finding is about one.
+  claimIndex       Int?
+  /// Field the finding concerns (date, provider, laterality…), when applicable.
+  field            String?
+
+  /// PHI-safe explanation for a reviewer.
+  detail  String
+  /// Verbatim supporting source text, when quoting the source is the evidence.
+  excerpt String?
+
+  // ── Provenance ───────────────────────────────────────────────────────────
+  sourceFingerprint String?
+  promptVersion     String?
+  model             String?
+  /// Comparator/adjudicator/audit version that produced this finding.
+  producerVersion   String?
+
+  /// Stable dedup key: the same problem re-derived must not become a new row.
+  fingerprint String
+
+  status           String    @default("OPEN") // OPEN | CONFIRMED | DISMISSED | RESOLVED
+  dispositionReason String?
+  reviewedById     String?
+  reviewedAt       DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([caseId, fingerprint])
+  @@index([caseId, status])
+  @@index([caseId, scope, status])
+  @@index([sourceDocumentId, status])
+  @@index([encounterId])
+  @@index([canonicalNoteId])
+}
+
 model RecordExtraction {
   id               String    @id @default(uuid())
   firmId           String
@@ -1937,8 +2007,20 @@ model ExtractedEncounter {
   // Adversarial audit outcome for this encounter's draft:
   // PASS | NEEDS_HUMAN_REVIEW | EXTRACTION_INCOMPLETE | SOURCE_CONFLICT | FAILED
   auditResult      String?
-  auditFindings    Json? // string[] — PHI-safe reasons the audit raised
+  auditFindings    Json? // string[] — LEGACY, retained for compatibility only.
+  // Scoped findings in RecordFinding are authoritative for review and metrics;
+  // this array copied the whole document's findings onto every row.
   auditedAt        DateTime?
+  /// Deterministic audit version that produced auditResult, so a re-audit can
+  /// find rows graded by rules that have since been corrected.
+  auditVersion     String?
+  /// Disputes about THIS entry that no adjudicator could settle. Persisted so
+  /// a deterministic re-audit reproduces the same verdict: without it a
+  /// re-audit cannot see the conflict and would silently clear it.
+  unresolvedDisputes Int @default(0)
+  /// Entry fields adjudication confirmed the source contradicts (date,
+  /// provider). Persisted for the same reason; never auto-corrected.
+  contradictedFields Json?
   // Machine corroboration: an INDEPENDENT blind re-read of the row's source
   // span reproduced (or failed to reproduce) its facts. A quality tier, never
   // a verification — corroboration cannot set VERIFIED or satisfy the human

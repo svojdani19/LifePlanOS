@@ -69,6 +69,23 @@ const DISPUTING_TYPES = new Set<string>([
   "RECOMMENDATION_AS_TREATMENT",
 ]);
 
+/**
+ * Identity of a criticism: what it is about, not how it was phrased.
+ *
+ * A critic asked twice about overlapping ranges reports the same missed
+ * encounter twice; without this each restatement became its own review
+ * obligation.
+ */
+export function criticIssueFingerprint(chunk: { sourceDocumentId: string; pageStart?: number | null }, issue: CriticIssue): string {
+  return [
+    chunk.sourceDocumentId,
+    issue.type,
+    issue.encounterIndex ?? "",
+    issue.claimIndex ?? "",
+    norm(issue.excerpt ?? "").slice(0, 120),
+  ].join("|");
+}
+
 export function isDisputing(issue: CriticIssue): boolean {
   return DISPUTING_TYPES.has(issue.type);
 }
@@ -159,19 +176,29 @@ export async function runCritic(
   const haystack = norm(chunk.text);
   const issues: CriticIssue[] = [];
   const rejected: string[] = [];
+  // Omissions used to be exempt from grounding, on the reasoning that there is
+  // nothing extracted to quote. But an omission asserts that the SOURCE
+  // contains an encounter — a claim about the document, quotable from the
+  // document — and exempting it meant an unsupported model assertion could
+  // create real review obligations and block a case. Every issue is now
+  // grounded in text that exists.
+  const seenFingerprints = new Set<string>();
   for (const issue of parsed.issues) {
-    // An omission claim needs no excerpt (there is nothing extracted to quote),
-    // but every criticism OF a claim must be grounded in the source.
-    if (issue.type !== "MISSING_ENCOUNTER" && issue.type !== "UNCLEAR_SOURCE_BOUNDARY") {
-      if (!issue.excerpt || !haystack.includes(norm(issue.excerpt))) {
-        rejected.push(`critic issue rejected [${issue.type}]: supporting excerpt not found in the source`);
-        continue;
-      }
+    if (!issue.excerpt || !haystack.includes(norm(issue.excerpt))) {
+      rejected.push(`critic issue rejected [${issue.type}]: supporting excerpt not found in the source`);
+      continue;
     }
     if (issue.encounterIndex != null && issue.encounterIndex >= encounters.length) {
       rejected.push(`critic issue rejected [${issue.type}]: references an encounter that does not exist`);
       continue;
     }
+    // One missed event is one finding however often the critic restates it.
+    const fingerprint = criticIssueFingerprint(chunk, issue);
+    if (seenFingerprints.has(fingerprint)) {
+      rejected.push(`critic issue rejected [${issue.type}]: duplicates another finding for the same source text`);
+      continue;
+    }
+    seenFingerprints.add(fingerprint);
     issues.push(issue);
   }
   return { issues, rejected, ran: true };

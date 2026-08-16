@@ -13,6 +13,7 @@
 
 import { prisma } from "@/lib/db";
 import { encounterContentHash } from "@/lib/records/verifiedContent";
+import { projectNotes, type ReviewableNote } from "@/lib/records/noteProjection";
 import { CURRENT_OUTPUT_WHERE, REVIEW_BLOCKING_STATES, REVIEW_VISIBLE_WHERE } from "@/lib/records/encounterLifecycle";
 import { requiresDate } from "@/lib/documents/analysisClass";
 import { detectVerificationDrift } from "@/lib/records/verifiedContent";
@@ -56,6 +57,20 @@ export interface StructuredEncounter {
   reviewedAt: string | null;
   verifiedAt: string | null;
   staleReason: string | null;
+  /** The entry's own audit result; a note presents the worst of its rows'. */
+  auditResult: string | null;
+  /** Disputes about this entry no adjudicator settled — why it is conflicted. */
+  unresolvedDisputes?: number | null;
+  /** Fields adjudication confirmed the source contradicts. */
+  contradictedFields?: string[] | null;
+  /** Null on rows graded before dispute state was persisted (legacy). */
+  auditVersion?: string | null;
+  /** Findings targeted at THIS entry or its claims — never a neighbour's. */
+  findings?: {
+    id: string; scope: string; type: string; severity: string; blocking: boolean; source: string;
+    detail: string; excerpt?: string | null; field?: string | null;
+    pageStart?: number | null; pageEnd?: number | null; claimIndex?: number | null; status: string;
+  }[];
   /**
    * Cross-document copies of this record: review-visible rows from OTHER
    * documents that the canonical build folded into the same entry. The
@@ -98,6 +113,14 @@ export interface StructuredDocument {
     createdAt: string | null;
   };
   encounters: StructuredEncounter[];
+  /**
+   * The document's CANONICAL NOTES — the review unit.
+   *
+   * `encounters` above are the extraction rows the notes were assembled from;
+   * they remain available as evidence and for per-row correction, but a
+   * reviewer decides one note at a time.
+   */
+  notes: ReviewableNote[];
 }
 
 /**
@@ -154,6 +177,7 @@ export function toStructuredEncounter(e: {
   ocrConfidence: number | null; warnings: unknown; status: string; substanceClass?: string | null; substanceReason?: string | null;
   analysisClass?: string | null; attributionName?: string | null; attributionRole?: string | null;
   reviewedAt: Date | null; verifiedAt: Date | null; staleReason: string | null; corroboration?: unknown;
+  auditResult?: string | null; unresolvedDisputes?: number | null; contradictedFields?: unknown; auditVersion?: string | null;
 }): StructuredEncounter {
   return {
     id: e.id,
@@ -181,6 +205,10 @@ export function toStructuredEncounter(e: {
     reviewedAt: e.reviewedAt?.toISOString() ?? null,
     verifiedAt: e.verifiedAt?.toISOString() ?? null,
     staleReason: e.staleReason,
+    auditResult: e.auditResult ?? null,
+    unresolvedDisputes: e.unresolvedDisputes ?? 0,
+    contradictedFields: Array.isArray(e.contradictedFields) ? (e.contradictedFields as string[]) : [],
+    auditVersion: e.auditVersion ?? null,
     contentHash: encounterContentHash({
       dateStatus: e.dateStatus,
       encounterDate: e.encounterDate,
@@ -298,6 +326,37 @@ export async function getStructuredRecord(caseId: string, firmId: string, option
   // review linkage.
   if (options.scope !== "output") linkCopies(documents, encById);
 
+  const findingsByDoc = new Map<string, unknown[]>();
+  // Scoped findings, attached to the thing each one names. A DOCUMENT or PAGE
+  // finding is deliberately NOT attached to entries: it belongs to the
+  // document, and copying it down is the defect this replaces.
+  if (options.scope !== "output") {
+    // Optional-chained: a caller with a narrower Prisma surface (tests, older
+    // mocks) simply gets no findings rather than a crash. `.catch` cannot
+    // help here — the throw would happen before a promise exists.
+    const found = await prisma.recordFinding
+      ?.findMany({
+        where: { caseId, firmId, status: { in: ["OPEN", "CONFIRMED"] } },
+        select: {
+          id: true, scope: true, type: true, severity: true, blocking: true, source: true,
+          detail: true, excerpt: true, field: true, pageStart: true, pageEnd: true,
+          claimIndex: true, status: true, encounterId: true,
+        },
+      })
+      .catch(() => [] as { encounterId: string | null }[]);
+    for (const f of (found ?? []) as { encounterId: string | null; sourceDocumentId?: string | null; scope?: string }[]) {
+      // Note- and entry-scoped findings travel to the note projection; a
+      // DOCUMENT or PAGE finding stays at its own scope and is shown once.
+      if (f.sourceDocumentId && (f.scope === "NOTE" || f.scope === "ENTRY" || f.scope === "CLAIM")) {
+        findingsByDoc.set(f.sourceDocumentId, [...(findingsByDoc.get(f.sourceDocumentId) ?? []), f]);
+      }
+      if (!f.encounterId) continue;
+      const target = encById.get(f.encounterId);
+      if (!target) continue;
+      target.findings = [...(target.findings ?? []), f as never];
+    }
+  }
+
   const limitations: string[] = [];
   let failedDocs = 0;
   let pendingOcr = 0;
@@ -336,6 +395,9 @@ export async function getStructuredRecord(caseId: string, firmId: string, option
         createdAt: run?.createdAt.toISOString() ?? null,
       },
       encounters: encByDoc.get(d.id) ?? [],
+      // Built from the same persisted segments the records builder wrote, so
+      // the review unit is exactly what the chronology and reports cite.
+      notes: projectNotes(d.id, d.segments, encByDoc.get(d.id) ?? [], (findingsByDoc.get(d.id) ?? []) as never),
     };
   });
   // State the two facts separately. Lumping them together overstates the
@@ -441,6 +503,22 @@ export async function factualReviewState(caseId: string, firmId: string): Promis
   // document only: an earlier run's gaps are not this record's gaps.
   const underExtracted = coverageGapBlocker(runs);
   if (underExtracted) blockers.push(underExtracted);
+
+  // Structured findings, counted ONCE each by identity. A document or page
+  // problem blocks the case exactly once, however many entries sit near it.
+  const openFindings = await prisma.recordFinding
+    ?.findMany({
+      where: { caseId, firmId, blocking: true, status: { in: ["OPEN", "CONFIRMED"] } },
+      select: { fingerprint: true, scope: true, type: true },
+    })
+    .catch(() => [] as { fingerprint: string; scope: string; type: string }[]);
+  const distinctBlocking = new Map<string, { scope: string; type: string }>();
+  for (const f of openFindings ?? []) distinctBlocking.set(f.fingerprint, { scope: f.scope, type: f.type });
+  const byScope = new Map<string, number>();
+  for (const f of distinctBlocking.values()) byScope.set(f.scope, (byScope.get(f.scope) ?? 0) + 1);
+  for (const [scope, n] of [...byScope].sort()) {
+    blockers.push(`${n} unresolved ${scope.toLowerCase()}-level finding(s) must be corrected or dispositioned before a final export.`);
+  }
 
   // Audit outcomes: anything other than PASS is, by definition, not a complete
   // draft — so it cannot become a final export.

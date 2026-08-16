@@ -20,6 +20,7 @@ const enc = (over: Partial<StructuredEncounter>): StructuredEncounter => ({
   id: `e${++seq}`,
   sourceDocumentId: "doc-1",
   contentHash: "0".repeat(64),
+  auditResult: "PASS",
   dateStatus: "DOCUMENTED",
   encounterDate: "2025-03-14",
   encounterDateEnd: null,
@@ -55,6 +56,8 @@ const doc = (encounters: StructuredEncounter[], over: Partial<StructuredDocument
   serviceDateEnd: null,
   ocrConfidence: 0.97,
   flags: null,
+  // Report builders read encounters, not the review projection.
+  notes: [],
   extraction: { status: "COMPLETE", error: null, warnings: [], truncated: false, model: null, promptVersion: null, createdAt: null },
   encounters,
   ...over,

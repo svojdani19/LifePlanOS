@@ -91,12 +91,45 @@ describe("critic findings must be grounded in the source", () => {
     expect(out.issues).toHaveLength(0);
   });
 
-  it("an omission needs no excerpt — there is nothing extracted to quote", async () => {
-    const payload = JSON.stringify({
+  it("an omission MUST quote the source that supposedly contains it", async () => {
+    // Omissions were exempt from grounding, on the reasoning that there is
+    // nothing extracted to quote. But an omission asserts something about the
+    // SOURCE — quotable from the source — and the exemption let an unsupported
+    // model assertion create review obligations and block a case.
+    const ungrounded = JSON.stringify({
       issues: [{ type: "MISSING_ENCOUNTER", encounterIndex: null, claimIndex: null, excerpt: null, detail: "An imaging study on the same page was not extracted." }],
     });
-    const out = await runCritic(chunkOf(SOURCE), encounters, { provider: provider([payload]) });
+    const out = await runCritic(chunkOf(SOURCE), encounters, { provider: provider([ungrounded]) });
+    expect(out.issues).toHaveLength(0);
+    expect(out.rejected.join(" ")).toMatch(/supporting excerpt not found/);
+  });
+
+  it("an omission quoting real source text is admitted", async () => {
+    const grounded = JSON.stringify({
+      issues: [
+        {
+          type: "MISSING_ENCOUNTER",
+          encounterIndex: null,
+          claimIndex: null,
+          excerpt: "X-ray lumbar spine: no acute fracture.",
+          detail: "The imaging study on this page was not extracted.",
+        },
+      ],
+    });
+    const out = await runCritic(chunkOf(SOURCE), encounters, { provider: provider([grounded]) });
     expect(out.issues).toHaveLength(1);
+  });
+
+  it("the same missed event reported twice is one finding", async () => {
+    const twice = JSON.stringify({
+      issues: [
+        { type: "MISSING_ENCOUNTER", encounterIndex: null, claimIndex: null, excerpt: "X-ray lumbar spine: no acute fracture.", detail: "Imaging not extracted." },
+        { type: "MISSING_ENCOUNTER", encounterIndex: null, claimIndex: null, excerpt: "X-ray lumbar spine: no acute fracture.", detail: "The x-ray was omitted." },
+      ],
+    });
+    const out = await runCritic(chunkOf(SOURCE), encounters, { provider: provider([twice]) });
+    expect(out.issues).toHaveLength(1);
+    expect(out.rejected.join(" ")).toMatch(/duplicates another finding/);
   });
 
   it("a critic failure degrades to no findings rather than losing the extraction", async () => {
