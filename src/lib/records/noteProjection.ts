@@ -70,6 +70,8 @@ export interface ReviewableNote {
   /** True when the source documents an explicitly open-ended range. */
   openEndedRange: boolean;
   provider: string | null;
+  /** Every distinct provider across the note's fragments, in order. */
+  providers: string[];
   providerCredentials: string | null;
   facility: string | null;
   encounterType: string | null;
@@ -94,7 +96,12 @@ export interface ReviewableNote {
   copies: NonNullable<StructuredEncounter["copies"]>;
   /** Set when THIS note is itself a copy reviewed elsewhere. */
   reviewedWith?: { filename: string } | null;
+  /** Aggregated worst-first across the note's fragments — never the first one. */
   corroboration?: StructuredEncounter["corroboration"];
+  /** Fields the note's own fragments disagree about ("date", "provider"). */
+  fragmentDisagreement: string[];
+  /** The subset of those that makes the record unsound rather than merely broad. */
+  materialDisagreement: string[];
   /**
    * Why this record is where it is, and what to do about it. Present on every
    * note — a card that says only "needs review" leaves a reviewer guessing.
@@ -104,6 +111,92 @@ export interface ReviewableNote {
   needsAttention: boolean;
   /** Clean, and awaiting one human attestation. */
   awaitingAttestation: boolean;
+}
+
+/**
+ * Aggregate a note's corroboration from its fragments, worst-first.
+ *
+ * Three rules, and the first draft of this had none of them — it took the
+ * first fragment carrying any verdict, so a corroborated opening fragment
+ * could present a note whose second fragment an independent reading had
+ * refused to reproduce.
+ *
+ *   • one refusal refuses the note;
+ *   • a fragment with no verdict is NOT evidence of agreement, so a note is
+ *     corroborated only when EVERY fragment was actually re-read and agreed;
+ *   • the reproduced/total counts are summed across fragments, which is the
+ *     only arithmetic that means anything at note level, and the unreproduced
+ *     field names are unioned.
+ */
+export function aggregateCorroboration(
+  rows: readonly StructuredEncounter[],
+): NonNullable<StructuredEncounter["corroboration"]> | null {
+  const verdicts = rows.map((r) => r.corroboration ?? null);
+  if (verdicts.every((v) => !v)) return null;
+
+  const present = verdicts.filter((v): v is NonNullable<StructuredEncounter["corroboration"]> => !!v);
+  const reproduced = present.reduce((n, v) => n + (v.reproduced ?? 0), 0);
+  const total = present.reduce((n, v) => n + (v.total ?? 0), 0);
+  const unreproducedFields = [...new Set(present.flatMap((v) => v.unreproducedFields ?? []))];
+
+  const anyRefused = present.some((v) => v.result === "NOT_CORROBORATED");
+  const everyFragmentRead = verdicts.every((v) => !!v);
+  const everyFragmentAgreed = present.every((v) => v.result === "CORROBORATED");
+
+  return {
+    // Partial coverage is not corroboration. A note nobody finished re-reading
+    // may not wear the badge of one that was reproduced in full.
+    result: !anyRefused && everyFragmentRead && everyFragmentAgreed ? "CORROBORATED" : "NOT_CORROBORATED",
+    reproduced,
+    total,
+    unreproducedFields,
+  };
+}
+
+/**
+ * Do the fragments of one note disagree about who or when?
+ *
+ * Reported so the note stops silently taking the first populated value. Not
+ * every disagreement is a defect, though, and the distinction matters:
+ *
+ *   • DATE is material. A note sits at one point on the chronology, so
+ *     fragments dated differently cannot all be that point.
+ *
+ *   • PROVIDER often is not. A therapy course, a billing ledger and a
+ *     multi-visit packet legitimately name several rendering providers — on
+ *     the reference case, 27 notes did, some with ten. Treating those as
+ *     defects would manufacture review work out of correct segmentation. They
+ *     are reported and DISPLAYED in full instead, which fixes the actual
+ *     problem: a single value being presented as if it were the whole truth.
+ */
+export function fragmentDisagreement(rows: readonly StructuredEncounter[]): string[] {
+  const fields: string[] = [];
+  const distinct = <T>(values: readonly (T | null | undefined)[]) => new Set(values.filter((v): v is T => v != null && v !== ""));
+  if (distinct(rows.map((r) => r.encounterDate)).size > 1) fields.push("date");
+  if (distinctProviders(rows).length > 1) fields.push("provider");
+  return fields;
+}
+
+/** Fields whose disagreement makes the record itself unsound. */
+export const MATERIAL_DISAGREEMENT_FIELDS: readonly string[] = ["date"];
+
+/**
+ * Every distinct provider named across a note's fragments, in the order they
+ * appear. Compared case- and punctuation-insensitively, so "A. Rivera, MD" and
+ * "A Rivera MD" are one person written twice rather than two people.
+ */
+export function distinctProviders(rows: readonly StructuredEncounter[]): string[] {
+  const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const r of rows) {
+    if (!r.provider) continue;
+    const key = norm(r.provider);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(r.provider);
+  }
+  return out;
 }
 
 const worst = <T extends string>(values: readonly (T | null)[], rank: Record<string, number>, fallback: T): T => {
@@ -181,6 +274,17 @@ export function projectNotes(
       "PASS",
     );
     const pages = noteRows.flatMap((r) => [r.page, r.pageEnd]).filter((p): p is number => typeof p === "number");
+    const corroboration = aggregateCorroboration(noteRows);
+    const disagreement = fragmentDisagreement(noteRows);
+    const providers = distinctProviders(noteRows);
+    // Only a material disagreement becomes a review obligation; the rest is
+    // shown, not asked about.
+    const material = disagreement.filter((f) => MATERIAL_DISAGREEMENT_FIELDS.includes(f));
+    // A note whose fragments disagree about the date is not a dated note; the
+    // "worst" reading is that its date is not established.
+    const noteDateStatus = noteRows.some((r) => r.dateStatus === "UNKNOWN") || material.includes("date")
+      ? "UNKNOWN"
+      : (dated?.dateStatus ?? "UNKNOWN");
 
     const guidance = guidanceFor({
       status,
@@ -189,14 +293,15 @@ export function projectNotes(
       // flag are computed from the same facts. Reading the date off the first
       // dated fragment alone made 27 records display "ready to attest" inside
       // an amber needs-review panel.
-      dateStatus: noteRows.some((r) => r.dateStatus === "UNKNOWN") ? "UNKNOWN" : (dated?.dateStatus ?? "UNKNOWN"),
+      dateStatus: noteDateStatus,
       auditVersion: noteRows.find((r) => (r as { auditVersion?: string | null }).auditVersion)?.auditVersion ?? null,
       // Worst case across the note's rows: one disputed fragment disputes the
       // record, and one contradicted field contradicts it.
       unresolvedDisputes: noteRows.reduce((n, r) => n + ((r as { unresolvedDisputes?: number | null }).unresolvedDisputes ?? 0), 0),
       contradictedFields: [...new Set(noteRows.flatMap((r) => (r as { contradictedFields?: string[] | null }).contradictedFields ?? []))],
       staleReason: noteRows.find((r) => r.staleReason)?.staleReason ?? null,
-      corroboration: noteRows.find((r) => r.corroboration)?.corroboration as never,
+      fragmentDisagreement: material,
+      corroboration: corroboration as never,
       findings: openFindings as never,
       // The extractor's own per-claim warnings, carrying the field and page.
       // They are the evidence behind a review flag; without them the card can
@@ -219,9 +324,12 @@ export function projectNotes(
       rows: noteRows,
       encounterDate: dated?.encounterDate ?? null,
       encounterDateEnd: dated?.encounterDateEnd ?? null,
-      dateStatus: dated?.dateStatus ?? "UNKNOWN",
+      dateStatus: noteDateStatus,
       openEndedRange: Boolean(dated?.encounterDate && !dated?.encounterDateEnd && (dated as { openEndedRange?: boolean }).openEndedRange),
       provider: noteRows.find((r) => r.provider)?.provider ?? null,
+      // Every provider the note names, so a multi-clinician record is not
+      // presented as though one person delivered all of it.
+      providers,
       providerCredentials: noteRows.find((r) => r.providerCredentials)?.providerCredentials ?? null,
       facility: noteRows.find((r) => r.facility)?.facility ?? null,
       encounterType: noteRows.find((r) => r.encounterType)?.encounterType ?? null,
@@ -241,7 +349,9 @@ export function projectNotes(
       findings: noteFindings,
       copies: noteRows.flatMap((r) => r.copies ?? []),
       reviewedWith: noteRows.find((r) => r.reviewedWith)?.reviewedWith ?? null,
-      corroboration: noteRows.find((r) => r.corroboration)?.corroboration ?? null,
+      corroboration,
+      fragmentDisagreement: disagreement,
+      materialDisagreement: material,
       guidance,
       needsAttention,
       // Clean means: nothing open, and every row is still a machine draft

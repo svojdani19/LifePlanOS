@@ -1,7 +1,7 @@
 // The canonical note is the review unit — and consolidation must never hide a
 // problem. Synthetic data only.
 import { describe, expect, it } from "vitest";
-import { projectNotes, type NoteFinding } from "@/lib/records/noteProjection";
+import { aggregateCorroboration, fragmentDisagreement, projectNotes, type NoteFinding } from "@/lib/records/noteProjection";
 import type { StructuredEncounter } from "@/lib/records/structuredRecord";
 
 const enc = (id: string, over: Partial<StructuredEncounter> = {}): StructuredEncounter =>
@@ -145,5 +145,115 @@ describe("the flag and the explanation cannot disagree", () => {
     const failed = projectNotes("doc-1", [{ rowIds: ["a"] }], [enc("a", { auditResult: "FAILED" })], [])[0];
     expect(failed.needsAttention).toBe(true);
     expect(failed.guidance.canAttest).toBe(false);
+  });
+});
+
+describe("a note is only as corroborated as its weakest fragment", () => {
+  const corrob = (result: "CORROBORATED" | "NOT_CORROBORATED", reproduced: number, total: number, unreproducedFields: string[] = []) =>
+    ({ result, reproduced, total, unreproducedFields }) as NonNullable<StructuredEncounter["corroboration"]>;
+
+  it("refuses the whole note when any fragment was not reproduced", () => {
+    // The failure this replaces: the first fragment's verdict was taken for
+    // the note, so a corroborated opening could carry a refused remainder.
+    const rows = [enc("a", { corroboration: corrob("CORROBORATED", 4, 4) }), enc("b", { corroboration: corrob("NOT_CORROBORATED", 1, 3, ["laterality"]) })];
+    expect(aggregateCorroboration(rows)!.result).toBe("NOT_CORROBORATED");
+  });
+
+  it("does not call a note corroborated when a fragment was never re-read", () => {
+    // Absence of a verdict is not agreement.
+    const rows = [enc("a", { corroboration: corrob("CORROBORATED", 4, 4) }), enc("b")];
+    expect(aggregateCorroboration(rows)!.result).toBe("NOT_CORROBORATED");
+  });
+
+  it("corroborates only when every fragment was read and every one agreed", () => {
+    const rows = [enc("a", { corroboration: corrob("CORROBORATED", 4, 4) }), enc("b", { corroboration: corrob("CORROBORATED", 2, 2) })];
+    const agg = aggregateCorroboration(rows)!;
+    expect(agg.result).toBe("CORROBORATED");
+    // Counts sum across fragments — the only arithmetic meaningful at note level.
+    expect(agg.reproduced).toBe(6);
+    expect(agg.total).toBe(6);
+  });
+
+  it("unions the unreproduced field names and drops duplicates", () => {
+    const rows = [
+      enc("a", { corroboration: corrob("NOT_CORROBORATED", 1, 2, ["date", "laterality"]) }),
+      enc("b", { corroboration: corrob("NOT_CORROBORATED", 0, 2, ["laterality", "provider"]) }),
+    ];
+    expect([...(aggregateCorroboration(rows)!.unreproducedFields ?? [])].sort()).toEqual(["date", "laterality", "provider"]);
+  });
+
+  it("reports nothing at all when no fragment was ever re-read", () => {
+    expect(aggregateCorroboration([enc("a"), enc("b")])).toBeNull();
+  });
+
+  it("puts the aggregate on the note, not the first fragment's verdict", () => {
+    const rows = [enc("a", { corroboration: corrob("CORROBORATED", 4, 4) }), enc("b", { corroboration: corrob("NOT_CORROBORATED", 0, 2, ["date"]) })];
+    const [note] = projectNotes("doc-1", [{ rowIds: ["a", "b"] }], rows, []);
+    expect(note.corroboration!.result).toBe("NOT_CORROBORATED");
+    expect(note.needsAttention).toBe(true);
+  });
+});
+
+describe("fragments of one note must agree about who and when", () => {
+  it("reports a date disagreement rather than picking the first value", () => {
+    const rows = [enc("a"), enc("b", { encounterDate: "2025-09-02" })];
+    expect(fragmentDisagreement(rows)).toContain("date");
+  });
+
+  it("reports a provider disagreement", () => {
+    const rows = [enc("a"), enc("b", { provider: "T. Okafor, DO" })];
+    expect(fragmentDisagreement(rows)).toContain("provider");
+  });
+
+  it("does not call the same name written two ways a disagreement", () => {
+    const rows = [enc("a"), enc("b", { provider: "A Rivera MD" })];
+    expect(fragmentDisagreement(rows)).toEqual([]);
+  });
+
+  it("ignores a fragment that simply has no value", () => {
+    const rows = [enc("a"), enc("b", { provider: null, encounterDate: null, dateStatus: "DOCUMENTED" })];
+    expect(fragmentDisagreement(rows)).toEqual([]);
+  });
+
+  it("makes a note whose fragments are dated differently an exception that explains itself", () => {
+    const rows = [enc("a"), enc("b", { encounterDate: "2025-09-02" })];
+    const [note] = projectNotes("doc-1", [{ rowIds: ["a", "b"] }], rows, []);
+    expect(note.needsAttention).toBe(true);
+    expect(note.guidance.kind).toBe("FRAGMENT_DISAGREEMENT");
+    expect(note.guidance.canAttest).toBe(false);
+    expect(note.guidance.why).toMatch(/disagree about the date/);
+  });
+
+  it("does NOT turn several providers into a review obligation", () => {
+    // A therapy course, a billing ledger and a multi-visit packet name several
+    // rendering providers by design. On the reference case 27 notes did — all
+    // correctly segmented. Flagging them would manufacture review work.
+    const rows = [enc("a"), enc("b", { provider: "T. Okafor, DO" })];
+    const [note] = projectNotes("doc-1", [{ rowIds: ["a", "b"] }], rows, []);
+    expect(note.needsAttention).toBe(false);
+    expect(note.guidance.kind).toBe("CLEAN");
+  });
+
+  it("shows every provider instead of asserting the first one", () => {
+    const rows = [enc("a"), enc("b", { provider: "T. Okafor, DO" })];
+    const [note] = projectNotes("doc-1", [{ rowIds: ["a", "b"] }], rows, []);
+    expect(note.providers).toEqual(["A. Rivera, MD", "T. Okafor, DO"]);
+    expect(note.fragmentDisagreement).toContain("provider");
+    // …but it is reported, not asked about.
+    expect(note.materialDisagreement).toEqual([]);
+  });
+
+  it("treats a note whose fragments disagree about the date as undated", () => {
+    const rows = [enc("a"), enc("b", { encounterDate: "2025-09-02" })];
+    const [note] = projectNotes("doc-1", [{ rowIds: ["a", "b"] }], rows, []);
+    expect(note.dateStatus).toBe("UNKNOWN");
+  });
+
+  it("leaves an agreeing note clean", () => {
+    const rows = [enc("a"), enc("b")];
+    const [note] = projectNotes("doc-1", [{ rowIds: ["a", "b"] }], rows, []);
+    expect(note.fragmentDisagreement).toEqual([]);
+    expect(note.providers).toEqual(["A. Rivera, MD"]);
+    expect(note.guidance.kind).toBe("CLEAN");
   });
 });

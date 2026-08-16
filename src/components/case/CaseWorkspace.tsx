@@ -78,6 +78,7 @@ const FINDING_LABEL: Record<string, string> = {
 /** Headline for the reason panel: what KIND of problem this is. */
 const GUIDANCE_TITLE: Record<string, string> = {
   CONTRADICTED_FIELD: "The source contradicts a recorded value",
+  FRAGMENT_DISAGREEMENT: "The extracts in this record disagree with each other",
   UNRESOLVED_DISPUTE: "Two passes disagreed, and the source did not settle it",
   NOT_CORROBORATED: "A blind second reading did not reproduce this",
   UNDATED: "No supportable service date",
@@ -4517,7 +4518,15 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
                 <span className="rounded-full bg-sky-50 px-2 py-0.5 font-medium text-sky-700">{KIND_LABEL[e.analysisClass] ?? e.analysisClass}</span>
               )}
               {e.provider ? (
-                <span className="text-ink-600">{e.provider}{e.providerCredentials ? `, ${e.providerCredentials}` : ""}</span>
+                // Every provider the record names. A therapy course or a
+                // multi-visit packet genuinely has several, and showing the
+                // first one made the note assert something narrower than the
+                // record supports.
+                <span className="text-ink-600">
+                  {((e.providers as string[] | undefined)?.length ?? 0) > 1
+                    ? `${(e.providers as string[]).slice(0, 3).join(" · ")}${(e.providers as string[]).length > 3 ? ` · +${(e.providers as string[]).length - 3} more` : ""}`
+                    : `${e.provider}${e.providerCredentials ? `, ${e.providerCredentials}` : ""}`}
+                </span>
               ) : (
                 /* A deponent, surgeon, radiologist, expert or officer is an
                    AUTHOR, not the patient's provider, and is labelled by role. */

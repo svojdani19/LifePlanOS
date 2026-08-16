@@ -27,6 +27,8 @@ export interface GuidanceInput {
   unresolvedDisputes?: number | null;
   contradictedFields?: string[] | null;
   staleReason?: string | null;
+  /** Fields this note's own fragments disagree about. */
+  fragmentDisagreement?: string[] | null;
   corroboration?: { result?: string; unreproducedFields?: string[] } | null;
   findings?: { type: string; detail: string; blocking: boolean; field?: string | null; status: string }[];
   /**
@@ -53,6 +55,7 @@ export interface ReviewGuidance {
     | "STALE"
     | "GENERATION_LOSS"
     | "CONTRADICTED_FIELD"
+    | "FRAGMENT_DISAGREEMENT"
     | "UNRESOLVED_DISPUTE"
     | "NOT_CORROBORATED"
     | "DOCUMENT_INCOMPLETE"
@@ -120,7 +123,23 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
     };
   }
 
-  // 2. Stale human work: someone reviewed this, then the source changed.
+  // 2. The note's own fragments disagree with each other. Taking the first
+  //    populated value would pick a winner silently; say so instead.
+  const disagreement = input.fragmentDisagreement ?? [];
+  if (disagreement.length) {
+    return {
+      kind: "FRAGMENT_DISAGREEMENT",
+      why: `The extracts that make up this record disagree about ${fieldPhrase(disagreement)}. They were assembled as one note, so one of them describes something else — or the note spans more than one encounter.`,
+      steps: [
+        `Open the cited pages and read ${fieldPhrase(disagreement)} on each.`,
+        `Use Correct to set ${fieldPhrase(disagreement)} for the whole record once you know which reading is right.`,
+        "If two different encounters were merged, Reject this record and re-extract the document.",
+      ],
+      canAttest: false,
+    };
+  }
+
+  // 3. Stale human work: someone reviewed this, then the source changed.
   if (input.status === "STALE") {
     return {
       kind: "STALE",
