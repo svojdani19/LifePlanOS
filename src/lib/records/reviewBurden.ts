@@ -130,6 +130,26 @@ export function canonicalNoteId(documentId: string, rowIds: readonly string[]): 
 }
 
 /**
+ * Read a canonical note id back into the document and rows it names.
+ *
+ * The server resolves membership from this, so it parses defensively: a
+ * malformed id yields nothing rather than a partial match a caller could
+ * steer. Row ids are uuids and the separator is the FIRST colon, so a
+ * document id containing one would still split correctly.
+ */
+export function parseCanonicalNoteId(noteId: string): { documentId: string | null; rowIds: string[] } {
+  const at = noteId.indexOf(":");
+  if (at <= 0 || at === noteId.length - 1) return { documentId: null, rowIds: [] };
+  const documentId = noteId.slice(0, at);
+  const rowIds = noteId
+    .slice(at + 1)
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  return rowIds.length ? { documentId, rowIds } : { documentId: null, rowIds: [] };
+}
+
+/**
  * Measure the review burden of a case at correct grain.
  *
  * `rows` must already be scoped to CURRENT rows (the caller applies the
