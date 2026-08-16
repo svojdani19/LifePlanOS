@@ -58,6 +58,11 @@ const REFUTED = [
   { id: "factual-audit" },
   { id: "provenance-upgrade" },
   { id: "patient-attribution" },
+  { id: "canonical-note-review" },
+  { id: "finding-disposition" },
+  { id: "note-wide-correction" },
+  { id: "finding-lifecycle" },
+  { id: "export-gate-visible-findings" },
 ];
 
 // ── machine-corroboration ────────────────────────────────────────────────────
@@ -422,5 +427,160 @@ describe("refuting: 'this verdict was graded by these rules'", () => {
       version: "2026-08-15.discriminant-gate.2",
       behaviour: "0010100011010",
     });
+  });
+});
+
+
+// ── the safeguards added after the reachability gap was found ────────────────
+//
+// Each refutation drives the REAL implementation with input that would let the
+// claim slip if the mechanism were lax. Reachability — whether any of this is
+// wired to a rendered action — is proved separately in reachability.test.ts;
+// these ask the older question: given that it runs, does it withhold its
+// blessing when it should?
+
+describe("refuting: 'one decision covers exactly one canonical note'", () => {
+  it("does not treat a note id as a list of rows the caller may choose", async () => {
+    const { parseCanonicalNoteId } = await import("@/lib/records/reviewBurden");
+    // A malformed identifier must yield nothing to match against, not a
+    // partial parse a caller could steer toward rows of its choosing.
+    expect(parseCanonicalNoteId("doc-1")).toEqual({ documentId: null, rowIds: [] });
+    expect(parseCanonicalNoteId("doc-1:")).toEqual({ documentId: null, rowIds: [] });
+    expect(parseCanonicalNoteId(":a,b")).toEqual({ documentId: null, rowIds: [] });
+  });
+
+  it("checks the row's own integrity state, not only the finding table", async () => {
+    const src = await import("node:fs/promises").then((fs) =>
+      fs.readFile("src/app/api/cases/[caseId]/records/encounters/group/route.ts", "utf8"),
+    );
+    // Findings were not being written by normal extraction, so a gate that
+    // consulted only that table was a gate over an empty room.
+    for (const token of ["row.auditResult", "unresolvedDisputes", "contradictedFields"]) {
+      expect(src.includes(token), token).toBe(true);
+    }
+    // …and every one of those checks sits behind the non-reject branch.
+    expect(src.indexOf('input.action !== "reject"')).toBeLessThan(src.indexOf("row.auditResult"));
+  });
+});
+
+describe("refuting: 'a reviewer answered this finding'", () => {
+  it("binds a dismissal to the source it was given over", async () => {
+    const { dispositionOutlivedItsSource } = await import("@/lib/records/recordFindings");
+    // Same content: the answer still covers it.
+    expect(dispositionOutlivedItsSource({ fingerprint: "f", status: "DISMISSED", dispositionSourceFingerprint: "sha-1" }, "sha-1")).toBe(false);
+    // Changed content: it does not, and must not be carried forward.
+    expect(dispositionOutlivedItsSource({ fingerprint: "f", status: "DISMISSED", dispositionSourceFingerprint: "sha-1" }, "sha-2")).toBe(true);
+    // No recorded fingerprint is not evidence of change.
+    expect(dispositionOutlivedItsSource({ fingerprint: "f", status: "DISMISSED", dispositionSourceFingerprint: null }, "sha-2")).toBe(false);
+  });
+
+  it("will not let a blocker be closed without a reason", async () => {
+    const src = await import("node:fs/promises").then((fs) => fs.readFile("src/app/api/cases/[caseId]/records/findings/route.ts", "utf8"));
+    expect(src).toMatch(/Closing a blocking finding requires a reason/);
+    // Confirming is exempt: it leaves the blocker standing.
+    expect(src).toMatch(/input\.action !== "confirm"/);
+  });
+});
+
+describe("refuting: 'the correction was applied to the whole note'", () => {
+  it("refuses a correction that is not note-wide in the first place", async () => {
+    const src = await import("node:fs/promises").then((fs) =>
+      fs.readFile("src/app/api/cases/[caseId]/records/encounters/group/correct/route.ts", "utf8"),
+    );
+    // A factual summary describes ONE fragment; applying it note-wide would
+    // copy one page's prose over its neighbours.
+    expect(src).toMatch(/NOTE_WIDE_FIELDS/);
+    expect(src).toMatch(/Summary and claim corrections belong on the individual entry/);
+  });
+
+  it("aborts the whole note when one fragment moved under it", async () => {
+    const src = await import("node:fs/promises").then((fs) =>
+      fs.readFile("src/app/api/cases/[caseId]/records/encounters/group/correct/route.ts", "utf8"),
+    );
+    expect(src).toMatch(/ConcurrentChange/);
+    // Validation strictly before any write.
+    expect(src.indexOf("problems.length")).toBeLessThan(src.indexOf("$transaction"));
+  });
+});
+
+describe("refuting: 'the audit closed a finding it proved was gone'", () => {
+  it("will not close a human CONFIRMED, whatever the caller asks for", async () => {
+    const { writeFindings } = await import("@/lib/records/recordFindings");
+    const rows = [{ fingerprint: "stale-fp", caseId: "case-1", sourceDocumentId: "doc-1", source: "DETERMINISTIC_VALIDATOR", status: "CONFIRMED" }];
+    const store = {
+      recordFinding: {
+        findMany: async () => [],
+        upsert: async () => ({}),
+        updateMany: async ({ where }: { where: Record<string, unknown> }) => {
+          // The service must ask for OPEN only; a CONFIRMED row is unreachable.
+          const hit = rows.filter((r) => r.status === where.status);
+          for (const r of hit) r.status = "RESOLVED";
+          return { count: hit.length };
+        },
+      },
+    };
+    const out = await writeFindings(store, [], {
+      caseId: "case-1",
+      sources: ["DETERMINISTIC_VALIDATOR", "HUMAN_REVIEW"],
+      evaluatedDocumentIds: ["doc-1"],
+      evaluatedWholeCase: true,
+    });
+    expect(out.resolved).toBe(0);
+    expect(rows[0].status).toBe("CONFIRMED");
+  });
+
+  it("will not reach outside the scope it evaluated", async () => {
+    const { writeFindings } = await import("@/lib/records/recordFindings");
+    let asked: Record<string, unknown> | null = null;
+    const store = {
+      recordFinding: {
+        findMany: async () => [],
+        upsert: async () => ({}),
+        updateMany: async ({ where }: { where: Record<string, unknown> }) => {
+          asked = where;
+          return { count: 0 };
+        },
+      },
+    };
+    await writeFindings(store, [], {
+      caseId: "case-1",
+      sources: ["DETERMINISTIC_VALIDATOR"],
+      evaluatedDocumentIds: ["doc-1"],
+      evaluatedWholeCase: false,
+    });
+    // Documents it read, and — because it did not read the whole case —
+    // nothing at case scope.
+    const clauses = (asked!.OR ?? []) as Record<string, unknown>[];
+    expect(clauses).toHaveLength(1);
+    expect(clauses[0]).toEqual({ sourceDocumentId: { in: ["doc-1"] } });
+  });
+});
+
+describe("refuting: 'nothing blocks an export invisibly'", () => {
+  it("routes every finding to a scope rather than dropping the ones it cannot place", async () => {
+    const { routeScopedFindings } = await import("@/lib/records/structuredRecord");
+    const unplaceable = {
+      id: "f", scope: "PAGE", type: "PAGE_UNREADABLE", severity: "BLOCKING", blocking: true,
+      source: "PAGE_LEDGER", detail: "unreadable", status: "OPEN", sourceDocumentId: null,
+    };
+    const routed = routeScopedFindings([unplaceable], new Map());
+    // Surfaced at case scope rather than silently discarded: an invisible
+    // finding still blocks the export.
+    expect(routed.caseFindings).toHaveLength(1);
+  });
+
+  it("selects every target column its own routing reads", async () => {
+    const src = await import("node:fs/promises").then((fs) => fs.readFile("src/lib/records/structuredRecord.ts", "utf8"));
+    // The original defect: routing on two columns the query did not select,
+    // so the map was empty on every request and note findings never appeared.
+    // Anchored on the query itself: `routeScopedFindings` is DEFINED earlier
+    // in the file than it is called, so slicing to the first mention would
+    // read backwards and pass on an empty string.
+    const at = src.indexOf("prisma.recordFinding\n      ?.findMany");
+    expect(at, "the findings query is where it is expected").toBeGreaterThan(-1);
+    const select = src.slice(at, at + 1200);
+    for (const column of ["sourceDocumentId: true", "canonicalNoteId: true", "fingerprint: true", "sourceFingerprint: true"]) {
+      expect(select.includes(column), column).toBe(true);
+    }
   });
 });

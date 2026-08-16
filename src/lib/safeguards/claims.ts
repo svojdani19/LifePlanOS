@@ -37,6 +37,49 @@
 export const ATTESTATION_WORDS = ["verified", "attested", "certified", "approved", "confirmed", "signed off"];
 export const INDEPENDENCE_WORDS = ["independent", "independently", "second opinion", "cross-checked"];
 
+/**
+ * What it takes for a claim to be SATISFIED rather than merely implemented.
+ *
+ * The registry's first version tested behaviour: given this input, does the
+ * mechanism withhold its blessing? That caught labels outrunning logic, and
+ * missed the next failure entirely — `reviewWithCopies` was correct code, it
+ * passed its refutation, and nothing called it. The card kept promising that
+ * one review covered every copy while the wired path submitted one document's
+ * rows. A guarantee implemented in unreachable code is not a guarantee.
+ *
+ * So a claim is satisfied only when all five hold:
+ *
+ *   1. the user-facing surface makes the claim;
+ *   2. a rendered action invokes the implementing path;
+ *   3. the request carries the protected data the claim depends on;
+ *   4. the server enforces the invariant independently of the client;
+ *   5. persistence and the final gate reflect the result.
+ *
+ * A server-only invariant (nothing is claimed on screen) registers with no
+ * `surface` or `rendered` — but its enforcing module must still be reachable
+ * from real code, which is checked the same way.
+ */
+export interface ReachabilityContract {
+  /** 1. Where the claim is made, and the words that make it. */
+  surface?: { file: string; claimText: string[] };
+  /** 2. The function that implements it, and the rendered actions calling it. */
+  rendered?: { entryPoint: string; invokedBy: string[] };
+  /** 3. Protected data the request must carry — hashes, ids, fingerprints. */
+  carries?: string[];
+  /** 4. The server module, and what it must be seen to enforce itself. */
+  server: { file: string; enforces: string[] };
+  /** 5. Where the result is persisted or gated on. */
+  persists?: { file: string; contains: string[] };
+  /**
+   * Exported symbols that must be referenced from non-test code. This is the
+   * dead-implementation check: a symbol nothing outside its own file and its
+   * tests uses is not wired to anything.
+   */
+  reachableSymbols?: { file: string; symbols: string[] }[];
+  /** Text that must NOT appear anywhere — a retired unreachable path. */
+  forbidden?: { file: string; text: string[] }[];
+}
+
 export interface SafeguardClaim {
   id: string;
   /** Where the mechanism lives, so a reader can go and check. */
@@ -57,6 +100,8 @@ export interface SafeguardClaim {
    * maintain this, not asserted by the test.
    */
   consequenceIfOverclaimed: string;
+  /** How this claim is proved reachable, end to end. */
+  reachability?: ReachabilityContract;
 }
 
 export const SAFEGUARD_CLAIMS: SafeguardClaim[] = [
@@ -105,6 +150,157 @@ export const SAFEGUARD_CLAIMS: SafeguardClaim[] = [
     assertsAttestation: true, // this one DOES record a human's decision
     consequenceIfOverclaimed:
       "A reviewer could believe every production's copy was signed while some remained unreviewed, or content that changed after display could carry their signature.",
+    reachability: {
+      surface: { file: "src/components/case/CaseWorkspace.tsx", claimText: ["One decision here", "This record also appears in"] },
+      rendered: { entryPoint: "async function reviewNote", invokedBy: ['reviewNote(e, "verify")', 'reviewNote(e, "reject")'] },
+      // Every member's hash, and the note identity the server resolves from.
+      carries: ["encounters/group", "note.contentHashes", "canonicalNoteId: note.id"],
+      server: {
+        file: "src/app/api/cases/[caseId]/records/encounters/group/route.ts",
+        // Exact membership, displayed content, and all-or-none.
+        enforces: ["parseCanonicalNoteId", "not a member of this note", "did not display", "$transaction", "encounterContentHash"],
+      },
+      // The copies are members of the note, so the payload carries them.
+      reachableSymbols: [{ file: "src/lib/records/noteProjection.ts", symbols: ["projectNotes"] }],
+      forbidden: [{ file: "src/components/case/CaseWorkspace.tsx", text: ["reviewWithCopies"] }],
+    },
+  },
+  {
+    id: "canonical-note-review",
+    module: "src/app/api/cases/[caseId]/records/encounters/group/route.ts",
+    labels: ["Verify record", "Reject"],
+    asserts:
+      "One decision covers exactly the rows of one canonical note, as those rows stand now, and the server refuses it over an unresolved exception rather than relying on a disabled button.",
+    doesNotAssert: ["that the record is clinically correct", "that the document it came from is complete"],
+    assertsAttestation: true,
+    consequenceIfOverclaimed:
+      "A signature could cover unrelated rows, half a record, or an entry whose date the source contradicts.",
+    reachability: {
+      surface: { file: "src/components/case/CaseWorkspace.tsx", claimText: ["Verify"] },
+      rendered: { entryPoint: "async function reviewNote", invokedBy: ['reviewNote(e, "verify")'] },
+      carries: ["canonicalNoteId: note.id", "expectedContentHash"],
+      server: {
+        file: "src/app/api/cases/[caseId]/records/encounters/group/route.ts",
+        enforces: [
+          // Membership from the note id, not from the request.
+          "parseCanonicalNoteId",
+          // Exact set: no extras, no gaps.
+          "not exactly the rows of this canonical note",
+          // Orphan rows are a note of ONE.
+          "claimedRowIds.length === 1",
+          // The row's own integrity state, checked here.
+          "row.auditResult",
+          "unresolvedDisputes",
+          "contradictedFields",
+          "unresolved finding must be dispositioned first",
+        ],
+      },
+      reachableSymbols: [{ file: "src/lib/records/reviewBurden.ts", symbols: ["parseCanonicalNoteId", "canonicalNoteId"] }],
+    },
+  },
+  {
+    id: "finding-disposition",
+    module: "src/app/api/cases/[caseId]/records/findings/route.ts",
+    labels: ["This is real", "Resolved", "Not a problem", "Blocks final export"],
+    asserts:
+      "A reviewer's answer to a finding is recorded against that exact finding and the exact source state it was displayed over, with the actor, the prior and new status, and a reason when a blocker is closed.",
+    doesNotAssert: [
+      "that closing a finding fixes the underlying record",
+      "that a dismissal still applies after the source changes",
+      "that the machine may answer a finding on a human's behalf",
+    ],
+    assertsAttestation: true,
+    consequenceIfOverclaimed:
+      "A blocker could be closed over content the reviewer never saw, or a dismissal could silently carry across a source change into content nobody has read.",
+    reachability: {
+      surface: { file: "src/components/case/FindingList.tsx", claimText: ["Blocks final export", "This is real"] },
+      rendered: { entryPoint: "async function disposition", invokedBy: ['disposition(f, "confirm")', 'disposition(f, "resolve")', 'disposition(f, "dismiss")'] },
+      carries: ["records/findings", "expectedFingerprint", "expectedSourceFingerprint"],
+      server: {
+        file: "src/app/api/cases/[caseId]/records/findings/route.ts",
+        enforces: [
+          "requireCanonicalPermission",
+          "changed since it was displayed",
+          "the source content changed since this finding was displayed",
+          "Closing a blocking finding requires a reason",
+          "dispositionSourceFingerprint",
+          "$transaction",
+        ],
+      },
+      reachableSymbols: [{ file: "src/components/case/FindingList.tsx", symbols: ["FindingList", "FoldedFindings"] }],
+    },
+  },
+  {
+    id: "note-wide-correction",
+    module: "src/app/api/cases/[caseId]/records/encounters/group/correct/route.ts",
+    labels: ["Changing the type or date re-runs the chronology and care plan"],
+    asserts:
+      "A structural correction is applied to every fragment of the canonical note in one transaction, or to none of them, with one audit event and one downstream rebuild.",
+    doesNotAssert: ["that a summary or claim correction applies note-wide", "that the correction was verified"],
+    consequenceIfOverclaimed:
+      "A date correction could land on two of three fragments and report success, leaving a record that disagrees with itself on the chronology.",
+    reachability: {
+      surface: { file: "src/components/case/CaseWorkspace.tsx", claimText: ["Changing the type or date re-runs the chronology"] },
+      rendered: {
+        entryPoint: "async function patchNote",
+        invokedBy: ["patchNote(e, { encounterDate:", "patchNote(e, { analysisClass:", "patchNote(e, { substanceClass:"],
+      },
+      carries: ["encounters/group/correct", "canonicalNoteId: note.id", "expectedContentHash"],
+      server: {
+        file: "src/app/api/cases/[caseId]/records/encounters/group/correct/route.ts",
+        enforces: ["parseCanonicalNoteId", "not exactly the rows of this canonical note", "$transaction", "records.note_correct", "ConcurrentChange"],
+      },
+    },
+  },
+  {
+    id: "finding-lifecycle",
+    module: "src/lib/records/recordFindings.ts",
+    labels: ["no longer produced by the current deterministic audit"],
+    asserts:
+      "An automated pass closes only findings that are still OPEN, machine-produced, and inside the scope it actually evaluated; a human's CONFIRMED, DISMISSED or RESOLVED answer is never closed by a machine.",
+    doesNotAssert: [
+      "that a finding it could not reproduce is gone",
+      "that a dismissal covers content the source has changed since",
+      "that a partial pass may answer a case-level question",
+    ],
+    consequenceIfOverclaimed:
+      "Re-auditing one document could clear a missing-encounter blocker belonging to a document nobody looked at, and sweep a physician's confirmation away with it.",
+    reachability: {
+      // Server-only: nothing on screen claims this, but it must be wired.
+      server: {
+        file: "src/lib/records/recordFindings.ts",
+        enforces: ["MACHINE_SOURCES", 'status: "OPEN"', "evaluatedDocumentIds", "evaluatedWholeCase", "dispositionOutlivedItsSource", "dispositionHistory"],
+      },
+      reachableSymbols: [{ file: "src/lib/records/recordFindings.ts", symbols: ["writeFindings"] }],
+    },
+  },
+  {
+    id: "export-gate-visible-findings",
+    module: "src/lib/records/structuredRecord.ts",
+    labels: ["must be corrected or dispositioned before a final export"],
+    asserts:
+      "Every unresolved blocking finding is both counted once by identity in the final-export gate AND returned to the review surface at the scope it names, so nothing blocks an export invisibly.",
+    doesNotAssert: ["that a visible finding has been answered", "that an answered finding was fixed"],
+    consequenceIfOverclaimed:
+      "A case could be blocked from export by findings that no screen showed and no action could close.",
+    reachability: {
+      surface: { file: "src/components/case/CaseWorkspace.tsx", claimText: ["Case-level findings", "Findings about this document"] },
+      server: {
+        file: "src/lib/records/structuredRecord.ts",
+        enforces: [
+          // Routed to a scope, never dropped.
+          "routeScopedFindings",
+          // Every target column the routing reads is actually selected.
+          "canonicalNoteId: true",
+          "sourceDocumentId: true",
+          // Counted once each in the gate.
+          "distinctBlocking",
+          "must be corrected or dispositioned before a final export",
+        ],
+      },
+      persists: { file: "src/lib/documents/extractionRun.ts", contains: ["writeFindings", "audit.scoped"] },
+      reachableSymbols: [{ file: "src/lib/records/structuredRecord.ts", symbols: ["routeScopedFindings"] }],
+    },
   },
   {
     id: "factual-audit",
