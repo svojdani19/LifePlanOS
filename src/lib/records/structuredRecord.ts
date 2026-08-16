@@ -121,6 +121,38 @@ export interface StructuredDocument {
    * reviewer decides one note at a time.
    */
   notes: ReviewableNote[];
+  /** Findings about the DOCUMENT itself. Shown once, here. */
+  findings: RecordFindingView[];
+  /** Findings about individual PAGES of this document. Shown once, folded. */
+  pageFindings: RecordFindingView[];
+}
+
+/**
+ * A finding as the review surface needs it.
+ *
+ * `fingerprint` and `sourceFingerprint` travel to the client because a
+ * disposition must name the exact finding and the exact source state the
+ * reviewer was shown — the same protection a content hash gives a note.
+ */
+export interface RecordFindingView {
+  id: string;
+  scope: string;
+  type: string;
+  severity: string;
+  blocking: boolean;
+  source: string;
+  detail: string;
+  excerpt?: string | null;
+  field?: string | null;
+  pageStart?: number | null;
+  pageEnd?: number | null;
+  claimIndex?: number | null;
+  status: string;
+  encounterId?: string | null;
+  sourceDocumentId?: string | null;
+  canonicalNoteId?: string | null;
+  fingerprint?: string | null;
+  sourceFingerprint?: string | null;
 }
 
 /**
@@ -138,6 +170,12 @@ function isMedicalTimelineKind(analysisClass: string | null | undefined): boolea
 
 export interface StructuredRecord {
   documents: StructuredDocument[];
+  /**
+   * Findings about the CASE as a whole — no document owns them, so without
+   * this they were computed, persisted, allowed to block a final export, and
+   * shown to nobody.
+   */
+  caseFindings: RecordFindingView[];
   /** Encounters with no reliable date — visible, never silently on the timeline. */
   undated: StructuredEncounter[];
   /** Case-level processing limitations to disclose in reviews and reports. */
@@ -169,6 +207,71 @@ export interface StructuredRecord {
 }
 
 const toIso = (d: Date | null) => (d ? d.toISOString().slice(0, 10) : null);
+
+export interface RoutedFindings {
+  /** NOTE/ENTRY/CLAIM findings, keyed by the document whose notes show them. */
+  findingsByDoc: Map<string, RecordFindingView[]>;
+  documentFindings: Map<string, RecordFindingView[]>;
+  pageFindings: Map<string, RecordFindingView[]>;
+  caseFindings: RecordFindingView[];
+}
+
+const emptyRouting = (): RoutedFindings => ({
+  findingsByDoc: new Map(),
+  documentFindings: new Map(),
+  pageFindings: new Map(),
+  caseFindings: [],
+});
+
+/**
+ * Send each finding to the ONE place it belongs.
+ *
+ * Two rules, and they pull against each other, which is why this is one
+ * function rather than a condition scattered through the builder:
+ *
+ *   • A document or page finding must NOT be attached to entries. Copying it
+ *     down onto every note is the defect the scoped model exists to remove.
+ *   • Nothing may be dropped. A finding nobody can see still blocks a final
+ *     export, so anything that cannot be placed more precisely falls back to
+ *     case scope, where it is at least visible.
+ */
+export function routeScopedFindings(
+  findings: readonly RecordFindingView[],
+  encById: ReadonlyMap<string, { sourceDocumentId: string; findings?: unknown[] }>,
+): RoutedFindings {
+  const out = emptyRouting();
+  const push = (map: Map<string, RecordFindingView[]>, key: string, f: RecordFindingView) =>
+    map.set(key, [...(map.get(key) ?? []), f]);
+
+  for (const f of findings) {
+    switch (f.scope) {
+      case "CASE":
+        out.caseFindings.push(f);
+        break;
+      case "DOCUMENT":
+        if (f.sourceDocumentId) push(out.documentFindings, f.sourceDocumentId, f);
+        else out.caseFindings.push(f);
+        break;
+      case "PAGE":
+        if (f.sourceDocumentId) push(out.pageFindings, f.sourceDocumentId, f);
+        else out.caseFindings.push(f);
+        break;
+      default: {
+        // NOTE / ENTRY / CLAIM travel to the note projection, which matches
+        // them by canonical note id or by the entry they name.
+        const owningDoc = f.sourceDocumentId ?? (f.encounterId ? encById.get(f.encounterId)?.sourceDocumentId : null);
+        if (owningDoc) push(out.findingsByDoc, owningDoc, f);
+        else out.caseFindings.push(f);
+        if (f.encounterId) {
+          const target = encById.get(f.encounterId);
+          if (target) target.findings = [...(target.findings ?? []), f];
+        }
+        break;
+      }
+    }
+  }
+  return out;
+}
 
 export function toStructuredEncounter(e: {
   id: string; sourceDocumentId: string; dateStatus: string; encounterDate: Date | null; encounterDateEnd: Date | null;
@@ -326,10 +429,12 @@ export async function getStructuredRecord(caseId: string, firmId: string, option
   // review linkage.
   if (options.scope !== "output") linkCopies(documents, encById);
 
-  const findingsByDoc = new Map<string, unknown[]>();
-  // Scoped findings, attached to the thing each one names. A DOCUMENT or PAGE
-  // finding is deliberately NOT attached to entries: it belongs to the
-  // document, and copying it down is the defect this replaces.
+  // ── Scoped findings, each routed to the ONE thing it names ────────────────
+  // A DOCUMENT or PAGE finding is deliberately not attached to entries: it
+  // belongs to the document, and copying it down onto every note is the exact
+  // defect this whole model replaces. Equally, none of them may be dropped:
+  // an unseen finding still blocks a final export.
+  let routed = emptyRouting();
   if (options.scope !== "output") {
     // Optional-chained: a caller with a narrower Prisma surface (tests, older
     // mocks) simply gets no findings rather than a crash. `.catch` cannot
@@ -337,25 +442,21 @@ export async function getStructuredRecord(caseId: string, firmId: string, option
     const found = await prisma.recordFinding
       ?.findMany({
         where: { caseId, firmId, status: { in: ["OPEN", "CONFIRMED"] } },
+        // Every field the routing below reads. `sourceDocumentId` and
+        // `canonicalNoteId` were missing, so the routing map was silently
+        // empty on every request and note findings never reached a card.
         select: {
           id: true, scope: true, type: true, severity: true, blocking: true, source: true,
           detail: true, excerpt: true, field: true, pageStart: true, pageEnd: true,
           claimIndex: true, status: true, encounterId: true,
+          sourceDocumentId: true, canonicalNoteId: true, fingerprint: true, sourceFingerprint: true,
         },
+        orderBy: [{ blocking: "desc" }, { pageStart: "asc" }, { createdAt: "asc" }],
       })
-      .catch(() => [] as { encounterId: string | null }[]);
-    for (const f of (found ?? []) as { encounterId: string | null; sourceDocumentId?: string | null; scope?: string }[]) {
-      // Note- and entry-scoped findings travel to the note projection; a
-      // DOCUMENT or PAGE finding stays at its own scope and is shown once.
-      if (f.sourceDocumentId && (f.scope === "NOTE" || f.scope === "ENTRY" || f.scope === "CLAIM")) {
-        findingsByDoc.set(f.sourceDocumentId, [...(findingsByDoc.get(f.sourceDocumentId) ?? []), f]);
-      }
-      if (!f.encounterId) continue;
-      const target = encById.get(f.encounterId);
-      if (!target) continue;
-      target.findings = [...(target.findings ?? []), f as never];
-    }
+      .catch(() => [] as RecordFindingView[]);
+    routed = routeScopedFindings((found ?? []) as RecordFindingView[], encById);
   }
+  const { findingsByDoc, documentFindings, pageFindings, caseFindings } = routed;
 
   const limitations: string[] = [];
   let failedDocs = 0;
@@ -398,6 +499,9 @@ export async function getStructuredRecord(caseId: string, firmId: string, option
       // Built from the same persisted segments the records builder wrote, so
       // the review unit is exactly what the chronology and reports cite.
       notes: projectNotes(d.id, d.segments, encByDoc.get(d.id) ?? [], (findingsByDoc.get(d.id) ?? []) as never),
+      // Shown ONCE, with the document — never copied onto its notes.
+      findings: documentFindings.get(d.id) ?? [],
+      pageFindings: pageFindings.get(d.id) ?? [],
     };
   });
   // State the two facts separately. Lumping them together overstates the
@@ -419,6 +523,7 @@ export async function getStructuredRecord(caseId: string, firmId: string, option
   const countBy = (s: string) => all.filter((e) => e.status === s).length;
   return {
     documents: docs,
+    caseFindings,
     undated,
     limitations: [...new Set(limitations)],
     counts: {

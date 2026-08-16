@@ -50,6 +50,9 @@ import { pageRange } from "@/lib/documents/meta";
 import { recordEncounters, narrativeFor } from "@/lib/documents/recordSummary";
 import { structuredConfidence } from "@/lib/engine/citationQuality";
 import { PROVENANCE_UPGRADE_STALE_REASON } from "@/lib/records/provenanceUpgrade";
+// Aliased: this file already has a `FindingList` for the case's legal
+// findings, which are a different concept from record-audit findings.
+import { FindingList as RecordFindingList, FoldedFindings } from "@/components/case/FindingList";
 
 /** Plain-language names for what a finding is, so the chip is self-explaining. */
 const FINDING_LABEL: Record<string, string> = {
@@ -842,6 +845,21 @@ function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, cal
           <span className="text-xs text-ink-500">
             {canEdit ? "Each record is auto-labeled by type. Click a record's type icon to reassign it." : "Each record is auto-labeled by type and processed into the case pipeline."}
           </span>
+        </div>
+      )}
+
+      {/* Case-level findings: nobody's document owns them, so without this row
+          they were persisted, allowed to block a final export, and shown to
+          nobody. Once, here — never copied onto notes. */}
+      {!!extractions?.caseFindings?.length && (
+        <div className="card border-red-200 bg-red-50/40 p-3">
+          <p className="mb-1.5 text-xs font-semibold text-red-900">Case-level findings</p>
+          <RecordFindingList
+            caseId={data.id}
+            findings={extractions.caseFindings as AnyRec[] as never}
+            canDisposition={!!extractions?.canVerify && canVerify !== false}
+            onChanged={loadExtractions}
+          />
         </div>
       )}
 
@@ -4412,6 +4430,23 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
         {ex.truncated && <span className="text-[11px] text-amber-700">Partially processed — document exceeds the processing bound</span>}
       </div>
       {ex.error && <p className="mt-1 text-[11px] text-red-700">{ex.error}</p>}
+      {/* This document's own findings, and its pages' — once, folded, where a
+          reviewer can answer them. Not copied onto its notes: a document's
+          incompleteness is not a defect in any entry it did produce. */}
+      <FoldedFindings
+        caseId={caseId}
+        title="Findings about this document"
+        findings={(ex.findings ?? []) as never}
+        canDisposition={canVerify}
+        onChanged={onChanged}
+      />
+      <FoldedFindings
+        caseId={caseId}
+        title="Findings about individual pages"
+        findings={(ex.pageFindings ?? []) as never}
+        canDisposition={canVerify}
+        onChanged={onChanged}
+      />
       {groupError && (
         <div className="mt-2 flex items-start gap-2 rounded border border-red-200 bg-red-50 p-2 text-[11px] text-red-800">
           <span className="font-medium">Nothing was changed.</span>

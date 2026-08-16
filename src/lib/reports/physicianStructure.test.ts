@@ -58,6 +58,8 @@ const doc = (encounters: StructuredEncounter[], over: Partial<StructuredDocument
   flags: null,
   // Report builders read encounters, not the review projection.
   notes: [],
+  findings: [],
+  pageFindings: [],
   extraction: { status: "COMPLETE", error: null, warnings: [], truncated: false, model: null, promptVersion: null, createdAt: null },
   encounters,
   ...over,
@@ -65,6 +67,7 @@ const doc = (encounters: StructuredEncounter[], over: Partial<StructuredDocument
 
 const record = (encounters: StructuredEncounter[]): StructuredRecord => ({
   documents: [doc(encounters)],
+  caseFindings: [],
   undated: [],
   limitations: [],
   counts: { encounters: encounters.length, verified: 0, reviewed: 0, humanEdited: 0, aiDraft: encounters.length, aiAuditPassed: 0, machineCorroborated: 0, pendingHumanReview: encounters.length, stale: 0, generationLoss: 0, undatedClinical: 0, undatedNonClinical: 0, failedDocs: 0, pendingOcr: 0 },

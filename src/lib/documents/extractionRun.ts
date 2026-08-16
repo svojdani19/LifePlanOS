@@ -50,6 +50,7 @@ import { encounterContentHash } from "@/lib/records/verifiedContent";
 import { classifyEncounterSubstance } from "@/lib/records/encounterSubstance";
 import { corroborateRows } from "@/lib/records/corroboration";
 import { AUDIT_VERSION } from "@/lib/records/reaudit";
+import { writeFindings, type FindingDraft } from "@/lib/records/recordFindings";
 import { LlmConfigError } from "@/lib/llm";
 
 /**
@@ -627,10 +628,27 @@ export async function processDocumentExtraction(
 
   const created: string[] = [];
   const createdDates = new Set<string>();
+  /**
+   * Encounter index → the persisted row that entry actually lives on.
+   *
+   * An entry-scoped finding has to name a row a reviewer can open. Index
+   * alignment is not enough: an encounter covered by preserved human work, or
+   * already written by an earlier instalment of a resumed run, creates no new
+   * row — so those indices resolve to the EXISTING row instead.
+   */
+  const rowIdByEncounterIndex = new Map<number, string>();
+  const rowIdByKey = new Map<string, string>();
+  for (const p of prior) {
+    rowIdByKey.set(encounterKey({ encounterDate: p.encounterDate, provider: p.provider, page: p.page }), p.id);
+  }
   for (const [encIndex, e] of encounters.entries()) {
     // A current (non-stale) human row already covers this encounter — do not
     // create a duplicate AI candidate beside preserved human work.
     const key = encounterKey({ encounterDate: e.encounterDate, provider: e.provider, page: e.page });
+    if (humanKeys.has(key) || sameRunKeys.has(key)) {
+      const existing = rowIdByKey.get(key);
+      if (existing) rowIdByEncounterIndex.set(encIndex, existing);
+    }
     if (humanKeys.has(key)) continue;
     // An earlier instalment of this same (resumed) run already wrote it.
     if (sameRunKeys.has(key)) continue;
@@ -702,6 +720,7 @@ export async function processDocumentExtraction(
     );
 
     created.push(row.id);
+    rowIdByEncounterIndex.set(encIndex, row.id);
     // The dates this generation actually produced, collected as the rows are
     // written. Asking the database back for rows we just created was an extra
     // round-trip whose only purpose was to learn what this loop already knew.
@@ -754,6 +773,70 @@ export async function processDocumentExtraction(
         }),
       );
     }
+  }
+
+  // ── Scoped findings ───────────────────────────────────────────────────────
+  // Every conclusion the audit reached, persisted at the scope it names.
+  //
+  // These were computed on every run and written nowhere: `audit.scoped`
+  // existed only in memory, so the review surface and the export gate read an
+  // empty table unless someone ran the manual re-audit script by hand. The
+  // legacy flat `auditFindings` array is still written above for backward
+  // compatibility, and is no longer what review or metrics read.
+  try {
+    const drafts: FindingDraft[] = [];
+    let unmappable = 0;
+    for (const f of audit.scoped) {
+      const rowId = f.encounterIndex != null ? rowIdByEncounterIndex.get(f.encounterIndex) : undefined;
+      // An entry-scoped finding with no reachable row would be invisible and
+      // undismissable. Counted, never invented onto a neighbouring row.
+      if (f.encounterIndex != null && !rowId) {
+        unmappable++;
+        continue;
+      }
+      drafts.push({
+        firmId: doc.firmId,
+        caseId: doc.caseId,
+        scope: f.scope,
+        type: f.type,
+        blocking: f.blocking,
+        severity: f.blocking ? "BLOCKING" : "WARNING",
+        source: "DETERMINISTIC_VALIDATOR",
+        // A CASE-scope finding names no document; everything narrower does.
+        sourceDocumentId: f.scope === "CASE" ? null : doc.id,
+        pageStart: f.pageStart ?? null,
+        pageEnd: f.pageEnd ?? null,
+        encounterId: rowId ?? null,
+        claimIndex: f.claimIndex ?? null,
+        field: f.field ?? null,
+        detail: f.detail,
+        sourceFingerprint,
+        promptVersion: PROMPT_VERSION,
+        model: prov.model,
+        producerVersion: AUDIT_VERSION,
+      });
+    }
+    if (unmappable) {
+      warnings.push(`${unmappable} entry-level finding(s) could not be attached to a persisted row and were not recorded.`);
+    }
+    const outcome = await writeFindings(prisma as never, drafts, {
+      caseId: doc.caseId,
+      sources: ["DETERMINISTIC_VALIDATOR"],
+      // This run authoritatively re-read THIS document only.
+      evaluatedDocumentIds: [doc.id],
+      // …and `caseProcessingFacts` above read every document's state, so the
+      // case-scope question ("has everything finished processing?") was
+      // genuinely evaluated when the answer is yes.
+      evaluatedWholeCase: facts.allDocumentsProcessed,
+    });
+    if (outcome.reopened) {
+      warnings.push(`${outcome.reopened} previously dismissed finding(s) reopened because the source content changed.`);
+    }
+  } catch (error) {
+    // Findings are the review surface, not the extraction. Losing them must
+    // not lose the run — but it must be visible, because a case with no
+    // findings looks clean.
+    warnings.push(`Scoped findings could not be persisted (${String(error).slice(0, 100)}); the review surface for this document is incomplete.`);
   }
 
   // ── Machine corroboration ─────────────────────────────────────────────────
