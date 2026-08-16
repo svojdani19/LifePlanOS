@@ -43,6 +43,24 @@ export interface ReauditRow {
   contradictedFields?: string[] | null;
 }
 
+/**
+ * The state of a document's LATEST extraction run.
+ *
+ * The distinction that matters: only COMPLETE means this pass can see the
+ * document's real inputs. Every other state means the persisted rows are a
+ * partial or absent picture, so the pass may raise a blocker about the
+ * document but may not resolve one.
+ */
+export type ReauditRunState =
+  | "COMPLETE"
+  | "EXTRACTION_FAILED"
+  | "BLOCKED_OCR"
+  | "ABANDONED"
+  | "PENDING"
+  | "RUNNING"
+  | "PAUSED"
+  | "NOT_RUN";
+
 export interface ReauditDocument {
   id: string;
   firmId: string;
@@ -50,7 +68,9 @@ export interface ReauditDocument {
   segments: unknown;
   rows: ReauditRow[];
   pages: { pageNumber: number; status: string; ocrConfidence: number | null }[];
-  /** Latest COMPLETE run for this document. */
+  /** Status of the LATEST run — not of some historical one. */
+  runState: ReauditRunState;
+  /** Facts from that latest run. */
   run: { coverageGaps?: number | null; failedSections?: number | null; truncated?: boolean | null } | null;
 }
 
@@ -58,15 +78,39 @@ export interface ReauditPlan {
   /** Per row: the result the current rules give it. */
   results: { id: string; before: string | null; after: string; statusBefore: string; statusAfter: string }[];
   findings: FindingDraft[];
+  /**
+   * Documents whose latest state this pass authoritatively evaluated — the
+   * ONLY documents whose stale findings it may supersede. A document whose
+   * latest run did not complete is deliberately absent: the pass could not
+   * reproduce its blockers, and "could not see it" is not "it is gone".
+   */
+  evaluatedDocumentIds: string[];
+  /** True only when every document in the case was authoritatively evaluated. */
+  evaluatedWholeCase: boolean;
   /** Aggregate, PHI-free. */
   summary: {
     rows: number;
+    documents: number;
+    documentsEvaluated: number;
+    documentsSkipped: number;
+    emptyDocuments: number;
     changedResult: number;
     changedStatus: number;
     humanRowsUntouched: number;
     findingsDerived: number;
   };
 }
+
+/** What an unfinished document's latest run means for the reviewer. */
+const RUN_STATE_FINDING: Record<Exclude<ReauditRunState, "COMPLETE">, { type: string; detail: string }> = {
+  EXTRACTION_FAILED: { type: "DOCUMENT_EXTRACTION_FAILED", detail: "This document's extraction failed; its content is not represented in the record." },
+  BLOCKED_OCR: { type: "DOCUMENT_EXTRACTION_FAILED", detail: "This document could not be read by OCR, so its extraction never ran; its content is not represented." },
+  ABANDONED: { type: "DOCUMENT_EXTRACTION_FAILED", detail: "This document's extraction run was abandoned before finishing; its content is not fully represented." },
+  PENDING: { type: "DOCUMENT_NOT_PROCESSED", detail: "This document is queued for extraction and has not been processed yet." },
+  RUNNING: { type: "DOCUMENT_NOT_PROCESSED", detail: "This document's extraction is still running; its content is not yet fully represented." },
+  PAUSED: { type: "DOCUMENT_NOT_PROCESSED", detail: "This document's extraction paused part-way; the remainder has not been read." },
+  NOT_RUN: { type: "DOCUMENT_NOT_PROCESSED", detail: "This document has never been extracted; none of its content is represented in the record." },
+};
 
 const claimsOf = (row: ReauditRow) =>
   Array.isArray(row.claims)
@@ -86,12 +130,38 @@ export function planReaudit(
 ): ReauditPlan {
   const results: ReauditPlan["results"] = [];
   const findings: FindingDraft[] = [];
+  const evaluatedDocumentIds: string[] = [];
   let changedResult = 0;
   let changedStatus = 0;
   let humanRowsUntouched = 0;
+  let emptyDocuments = 0;
 
   for (const doc of documents) {
-    if (!doc.rows.length) continue;
+    // A document with no active rows is NOT skipped. "Nothing extracted" is
+    // one of the strongest signals there is — an unprocessed or empty-yield
+    // document is exactly the one most likely to own a completeness blocker,
+    // and skipping it while superseding case-wide is how such a blocker was
+    // silently cleared.
+    if (!doc.rows.length) emptyDocuments++;
+    // Only a completed latest run gives this pass the document's real inputs.
+    const authoritative = doc.runState === "COMPLETE";
+    if (authoritative) evaluatedDocumentIds.push(doc.id);
+    else {
+      const shape = RUN_STATE_FINDING[doc.runState as Exclude<ReauditRunState, "COMPLETE">];
+      findings.push({
+        firmId: doc.firmId,
+        caseId: doc.caseId,
+        scope: "DOCUMENT",
+        type: shape.type,
+        blocking: true,
+        severity: "BLOCKING",
+        source: "DETERMINISTIC_VALIDATOR",
+        sourceDocumentId: doc.id,
+        detail: shape.detail,
+        producerVersion: AUDIT_VERSION,
+      });
+    }
+
     const auditEncounters: AuditEncounter[] = doc.rows.map((r, i) => ({
       id: String(i),
       sourceDocumentId: doc.id,
@@ -125,6 +195,9 @@ export function planReaudit(
       truncatedSource: doc.run?.truncated ?? false,
       unresolvedDisputes: 0,
       allDocumentsProcessed: caseFacts.allDocumentsProcessed,
+      // A document whose latest run did not complete is incomplete in its own
+      // right, and its own entries inherit that.
+      thisDocumentIncomplete: !authoritative,
     });
 
     // Row ids by their position in the persisted segment, so a NOTE-scoped
@@ -185,8 +258,14 @@ export function planReaudit(
   return {
     results,
     findings,
+    evaluatedDocumentIds,
+    evaluatedWholeCase: documents.length > 0 && evaluatedDocumentIds.length === documents.length,
     summary: {
       rows: results.length,
+      documents: documents.length,
+      documentsEvaluated: evaluatedDocumentIds.length,
+      documentsSkipped: documents.length - evaluatedDocumentIds.length,
+      emptyDocuments,
       changedResult,
       changedStatus,
       humanRowsUntouched,

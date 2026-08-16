@@ -42,6 +42,7 @@ const doc = (rows: ReauditRow[], over: Partial<ReauditDocument> = {}): ReauditDo
   segments: [{ rowIds: rows.map((r) => r.id) }],
   rows,
   pages: [{ pageNumber: 1, status: "READABLE", ocrConfidence: 0.98 }],
+  runState: "COMPLETE",
   run: { coverageGaps: 0, failedSections: 0, truncated: false },
   ...over,
 });
@@ -152,4 +153,46 @@ describe("legacy rows whose dispute state was never persisted", () => {
     const plan = planReaudit([doc([known])], clean);
     expect(plan.results[0].after).toBe("PASS");
   });
-})
+});
+
+describe("a re-audit is only authoritative where it could actually look", () => {
+  it("audits a document with no active rows instead of skipping it", () => {
+    // The skip was the dangerous part: a document that extracted nothing is
+    // the one most likely to own a completeness blocker, and it was passed
+    // over while its findings were superseded anyway.
+    const empty = doc([], { segments: [] });
+    const plan = planReaudit([empty], clean);
+    expect(plan.summary.emptyDocuments).toBe(1);
+    expect(plan.findings.some((f) => f.scope === "DOCUMENT" && f.blocking)).toBe(true);
+  });
+
+  it("excludes a document whose latest run did not complete from the supersession scope", () => {
+    const paused = doc([row("a")], { runState: "PAUSED" });
+    const plan = planReaudit([paused], clean);
+    expect(plan.evaluatedDocumentIds).toEqual([]);
+    expect(plan.evaluatedWholeCase).toBe(false);
+    // …and says why, rather than staying silent about it.
+    expect(plan.findings.some((f) => f.type === "DOCUMENT_NOT_PROCESSED" && f.blocking)).toBe(true);
+  });
+
+  it("names each unfinished run state as its own blocker", () => {
+    const states = ["EXTRACTION_FAILED", "BLOCKED_OCR", "ABANDONED", "PENDING", "RUNNING", "PAUSED", "NOT_RUN"] as const;
+    for (const runState of states) {
+      const plan = planReaudit([doc([row("a")], { runState })], clean);
+      expect(plan.findings.some((f) => f.scope === "DOCUMENT" && f.blocking), runState).toBe(true);
+      expect(plan.evaluatedDocumentIds, runState).toEqual([]);
+    }
+  });
+
+  it("is authoritative for the whole case only when every document completed", () => {
+    const a = doc([row("a")], { id: "doc-a", segments: [{ rowIds: ["a"] }] });
+    const b = doc([row("b", { sourceDocumentId: "doc-b" })], { id: "doc-b", segments: [{ rowIds: ["b"] }], runState: "PAUSED" });
+    expect(planReaudit([a, b], clean).evaluatedWholeCase).toBe(false);
+    expect(planReaudit([a], clean).evaluatedWholeCase).toBe(true);
+  });
+
+  it("treats an unfinished document's own entries as incomplete, not as sound", () => {
+    const plan = planReaudit([doc([row("a")], { runState: "PAUSED" })], clean);
+    expect(plan.results[0].after).toBe("EXTRACTION_INCOMPLETE");
+  });
+});

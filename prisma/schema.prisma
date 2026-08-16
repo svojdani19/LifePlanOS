@@ -1868,6 +1868,15 @@ model RecordFinding {
   dispositionReason String?
   reviewedById     String?
   reviewedAt       DateTime?
+  /// The source fingerprint the reviewer was looking at when they dispositioned
+  /// this finding. A dismissal covers the content it was given over — when the
+  /// source changes underneath it, the disposition no longer applies and the
+  /// finding reopens rather than silently carrying forward.
+  dispositionSourceFingerprint String?
+  /// PHI-free lineage of prior dispositions: [{ status, reason, byId, at,
+  /// sourceFingerprint }]. A superseded or reopened disposition is retained
+  /// here — a human decision is never deleted, only moved into history.
+  dispositionHistory Json?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1906,6 +1915,11 @@ model RecordExtraction {
   // completion gate can see it without every row of the document having to
   // carry it as its own defect.
   coverageGaps     Int      @default(0)
+  // Sections/chunks of this document that could not be processed after
+  // retries. Persisted because a deterministic re-audit must be able to SEE
+  // this blocker; while it was only ever a local variable, a re-audit read
+  // zero and could resolve a section-not-processed finding it never evaluated.
+  failedSections   Int      @default(0)
   disputedCount    Int      @default(0) // claims the critic contested
   adjudicatedCount Int      @default(0) // disputes an adjudicator resolved
   pagesTotal       Int      @default(0)

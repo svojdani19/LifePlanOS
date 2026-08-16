@@ -792,6 +792,9 @@ export async function processDocumentExtraction(
     chunksTotal: chunks.length,
     chunksDone: endIndex,
     coverageGaps: coverageGaps.length,
+    // Persisted so a later deterministic re-audit can SEE this blocker rather
+    // than reading zero and resolving a section it never evaluated.
+    failedSections: failedSections.length,
     candidateCount,
     acceptedCount: encounters.reduce((s, e) => s + e.claims.length, 0),
     rejectedCount: rejects.length,

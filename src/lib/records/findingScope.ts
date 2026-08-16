@@ -63,6 +63,8 @@ export const FINDING_TYPES = [
   "PAGE_TRUNCATED",
   "SOURCE_CLIPPED",
   "DOCUMENT_EXTRACTION_FAILED",
+  /** The latest run is queued, running, paused, or never started. */
+  "DOCUMENT_NOT_PROCESSED",
   // Case level.
   "DOCUMENTS_STILL_PROCESSING",
 ] as const;

@@ -12,8 +12,19 @@
 //   finding. Nothing is copied sideways onto neighbours, which is the whole
 //   defect this replaces.
 //
-// A human disposition (dismiss/resolve) is never overwritten by a re-audit: a
-// re-derived finding that a reviewer already answered stays answered.
+// A human disposition (dismiss/resolve/confirm) is never overwritten by a
+// re-audit, and never automatically resolved by one. Two rules make that real:
+//
+//   AUTHORITY — a pass may only supersede findings inside the scope it
+//   actually evaluated, and only ones still OPEN and machine-produced. The
+//   first version superseded case-wide whenever ANY subset of documents was
+//   re-audited, and swept CONFIRMED — a human saying "yes, this is real" —
+//   into RESOLVED along with it.
+//
+//   COVERAGE — a dismissal covers the content it was given over. Its source
+//   fingerprint is recorded, and when the source changes underneath it the
+//   finding REOPENS instead of carrying forward as though the human had seen
+//   the new content. The prior disposition is kept as history, never deleted.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { createHash } from "node:crypto";
@@ -80,6 +91,76 @@ export interface FindingStore {
   };
 }
 
+/**
+ * Sources a machine pass may supersede. HUMAN_REVIEW findings are raised by a
+ * person and are never swept by an automated derivation, whatever a caller
+ * passes in.
+ */
+const MACHINE_SOURCES: ReadonlySet<string> = new Set([
+  "DETERMINISTIC_VALIDATOR",
+  "EXTRACTION_CRITIC",
+  "ADJUDICATOR",
+  "CORROBORATION",
+  "OCR",
+  "PAGE_LEDGER",
+]);
+
+/** Human dispositions, which bind to the source content they were given over. */
+const HUMAN_DISPOSITIONS: ReadonlySet<string> = new Set(["DISMISSED", "RESOLVED"]);
+
+/**
+ * The slice of findings a derivation is authoritative for.
+ *
+ * `evaluatedDocumentIds` are the documents whose LATEST state this pass
+ * actually read. Case-scope findings name no document, so they may only be
+ * superseded by a pass that evaluated the whole case — otherwise re-auditing
+ * one document would clear "not every document has finished processing".
+ */
+export interface SupersedeScope {
+  caseId: string;
+  sources: readonly FindingSource[];
+  evaluatedDocumentIds: readonly string[];
+  evaluatedWholeCase: boolean;
+}
+
+interface ExistingFinding {
+  fingerprint: string;
+  status: string;
+  dispositionReason?: string | null;
+  reviewedById?: string | null;
+  reviewedAt?: Date | null;
+  dispositionSourceFingerprint?: string | null;
+  dispositionHistory?: unknown;
+}
+
+/** PHI-free record of a disposition that no longer applies. */
+interface DispositionHistoryEntry {
+  status: string;
+  reason: string | null;
+  byId: string | null;
+  at: string | null;
+  sourceFingerprint: string | null;
+  supersededBecause: string;
+}
+
+const historyOf = (existing: ExistingFinding): DispositionHistoryEntry[] =>
+  Array.isArray(existing.dispositionHistory) ? (existing.dispositionHistory as DispositionHistoryEntry[]) : [];
+
+/**
+ * Does a re-derivation invalidate the human answer already on this finding?
+ *
+ * Only when the answer was given over DIFFERENT source content. A dismissal
+ * recorded against fingerprint A says nothing about fingerprint B, and
+ * carrying it forward would hide a problem in content nobody has looked at.
+ * A finding whose disposition predates fingerprint recording is left alone —
+ * absent evidence is not evidence of change.
+ */
+export function dispositionOutlivedItsSource(existing: ExistingFinding, redrivedFingerprint: string | null | undefined): boolean {
+  if (!HUMAN_DISPOSITIONS.has(existing.status)) return false;
+  if (!existing.dispositionSourceFingerprint || !redrivedFingerprint) return false;
+  return existing.dispositionSourceFingerprint !== redrivedFingerprint;
+}
+
 export interface PersistedFinding extends FindingDraft {
   id: string;
   fingerprint: string;
@@ -92,20 +173,36 @@ export interface PersistedFinding extends FindingDraft {
 /**
  * Write a set of findings for a scope that was just re-derived.
  *
- * `supersedeWithin` names the slice of findings this derivation is
- * authoritative for — typically one document's deterministic findings. Any
- * OPEN finding in that slice which the new derivation did NOT produce is
- * RESOLVED: the problem is gone, and leaving it open would block a case over
- * something already fixed. Findings a human dispositioned are left alone.
+ * `supersedeWithin` names the slice this derivation is authoritative for. Any
+ * still-OPEN machine finding in that slice which the new derivation did not
+ * produce is RESOLVED: the problem is gone, and leaving it open would block a
+ * case over something already fixed. Anything a human touched — CONFIRMED,
+ * DISMISSED, RESOLVED — is left exactly as it is.
  */
 export async function writeFindings(
   db: FindingStore,
   drafts: readonly FindingDraft[],
-  supersedeWithin?: { caseId: string; sourceDocumentId?: string | null; sources: readonly FindingSource[] },
-): Promise<{ written: number; resolved: number; fingerprints: string[] }> {
+  supersedeWithin?: SupersedeScope,
+): Promise<{ written: number; resolved: number; reopened: number; fingerprints: string[] }> {
   const fingerprints: string[] = [];
-  for (const draft of drafts) {
-    const fingerprint = findingFingerprint(draft);
+  const drafted = drafts.map((draft) => ({ draft, fingerprint: findingFingerprint(draft) }));
+
+  // Read the current state of everything about to be written, in one query, so
+  // the upsert can decide whether a human answer still covers this content.
+  const existingByFingerprint = new Map<string, ExistingFinding>();
+  if (drafted.length) {
+    const rows = (await db.recordFinding.findMany({
+      where: { caseId: drafted[0].draft.caseId, fingerprint: { in: drafted.map((d) => d.fingerprint) } },
+      select: {
+        fingerprint: true, status: true, dispositionReason: true, reviewedById: true,
+        reviewedAt: true, dispositionSourceFingerprint: true, dispositionHistory: true,
+      },
+    }).catch(() => [])) as ExistingFinding[];
+    for (const r of rows ?? []) existingByFingerprint.set(r.fingerprint, r);
+  }
+
+  let reopened = 0;
+  for (const { draft, fingerprint } of drafted) {
     fingerprints.push(fingerprint);
     const data = {
       firmId: draft.firmId,
@@ -130,10 +227,18 @@ export async function writeFindings(
       producerVersion: draft.producerVersion ?? null,
       fingerprint,
     };
+    const existing = existingByFingerprint.get(fingerprint);
+    // A dismissal given over different source content does not cover this
+    // content. Reopen, and keep the human's answer as history rather than
+    // discarding it.
+    const reopen = existing ? dispositionOutlivedItsSource(existing, draft.sourceFingerprint) : false;
+    if (reopen) reopened++;
+
     await db.recordFinding.upsert({
       where: { caseId_fingerprint: { caseId: draft.caseId, fingerprint } },
-      // A re-derivation refreshes the explanation and provenance but NEVER the
-      // status: a finding a reviewer dismissed stays dismissed.
+      // A re-derivation refreshes the explanation and provenance. It changes
+      // the status in exactly one case: the source moved out from under a
+      // human disposition.
       update: {
         detail: data.detail,
         excerpt: data.excerpt,
@@ -141,6 +246,26 @@ export async function writeFindings(
         blocking: data.blocking,
         producerVersion: data.producerVersion,
         sourceFingerprint: data.sourceFingerprint,
+        ...(reopen && existing
+          ? {
+              status: "OPEN",
+              dispositionReason: null,
+              reviewedById: null,
+              reviewedAt: null,
+              dispositionSourceFingerprint: null,
+              dispositionHistory: [
+                ...historyOf(existing),
+                {
+                  status: existing.status,
+                  reason: existing.dispositionReason ?? null,
+                  byId: existing.reviewedById ?? null,
+                  at: existing.reviewedAt ? new Date(existing.reviewedAt).toISOString() : null,
+                  sourceFingerprint: existing.dispositionSourceFingerprint ?? null,
+                  supersededBecause: "source content changed after this disposition was recorded",
+                } satisfies DispositionHistoryEntry,
+              ],
+            }
+          : {}),
       },
       create: data,
     });
@@ -148,20 +273,31 @@ export async function writeFindings(
 
   let resolved = 0;
   if (supersedeWithin) {
-    const gone = await db.recordFinding.updateMany({
-      where: {
-        caseId: supersedeWithin.caseId,
-        ...(supersedeWithin.sourceDocumentId ? { sourceDocumentId: supersedeWithin.sourceDocumentId } : {}),
-        source: { in: [...supersedeWithin.sources] },
-        status: { in: ["OPEN", "CONFIRMED"] },
-        fingerprint: { notIn: fingerprints.length ? fingerprints : ["__none__"] },
-      },
-      data: { status: "RESOLVED", dispositionReason: "no longer produced by the current deterministic audit" },
-    });
-    resolved = gone.count;
+    const machineSources = supersedeWithin.sources.filter((s) => MACHINE_SOURCES.has(s));
+    // Scope: the documents this pass actually read, plus — only for a pass
+    // that read the whole case — the findings that name no document at all.
+    const targets: Record<string, unknown>[] = [];
+    if (supersedeWithin.evaluatedDocumentIds.length) targets.push({ sourceDocumentId: { in: [...supersedeWithin.evaluatedDocumentIds] } });
+    if (supersedeWithin.evaluatedWholeCase) targets.push({ sourceDocumentId: null });
+
+    if (machineSources.length && targets.length) {
+      const gone = await db.recordFinding.updateMany({
+        where: {
+          caseId: supersedeWithin.caseId,
+          source: { in: machineSources },
+          // OPEN only. CONFIRMED is a person saying the problem is real, and a
+          // machine pass may not answer that on their behalf.
+          status: "OPEN",
+          fingerprint: { notIn: fingerprints.length ? fingerprints : ["__none__"] },
+          OR: targets,
+        },
+        data: { status: "RESOLVED", dispositionReason: "no longer produced by the current deterministic audit" },
+      });
+      resolved = gone.count;
+    }
   }
 
-  return { written: drafts.length, resolved, fingerprints };
+  return { written: drafts.length, resolved, reopened, fingerprints };
 }
 
 /** Open findings for a case, already deduplicated by identity. */
