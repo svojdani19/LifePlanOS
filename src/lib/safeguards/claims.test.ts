@@ -285,10 +285,23 @@ describe("refuting: 'one review covers every copy'", () => {
 
   it("does not fan out per-copy requests from the browser", async () => {
     const ui = await import("node:fs/promises").then((fs) => fs.readFile("src/components/case/CaseWorkspace.tsx", "utf8"));
-    const fn = ui.slice(ui.indexOf("async function reviewWithCopies"), ui.indexOf("async function reviewWithCopies") + 2000);
+    // The claim belongs to the path the buttons actually call. This assertion
+    // used to name a helper nothing invoked, so it went on passing while the
+    // guarantee was unreachable — which is why it is anchored to reviewNote
+    // and paired with the reachability checks in crossDocumentCopies.test.ts.
+    const at = ui.indexOf("async function reviewNote");
+    expect(at, "reviewNote is the wired review path").toBeGreaterThan(-1);
+    const fn = ui.slice(at, at + 1200);
     expect(fn).toMatch(/encounters\/group/);
+    // One request for the whole note, carrying every member's hash.
+    expect(fn).toMatch(/note\.contentHashes/);
     // No swallowed per-copy failures.
     expect(fn).not.toMatch(/\.catch\(\(\) => \{\}\)/);
+  });
+
+  it("has no unreachable implementation of the claim left in the file", async () => {
+    const ui = await import("node:fs/promises").then((fs) => fs.readFile("src/components/case/CaseWorkspace.tsx", "utf8"));
+    expect(ui).not.toContain("reviewWithCopies");
   });
 });
 

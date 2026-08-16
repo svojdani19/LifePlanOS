@@ -4361,6 +4361,11 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
   /**
    * One attestation for one canonical note: every underlying row, decided
    * together by the server, with the hash each was displayed as.
+   *
+   * `contentHashes` covers cross-document copies too, because the note's
+   * membership does. The previous cross-document path lived in a function
+   * nothing called, so the card's promise that "one review covers every copy"
+   * was true of code that never ran.
    */
   async function reviewNote(note: AnyRec, action: "verify" | "review" | "reject") {
     const hashes: { rowId: string; contentHash: string }[] = note.contentHashes ?? [];
@@ -4378,32 +4383,6 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
     const out = (await res?.json().catch(() => ({}))) as { error?: string };
     setBusy(null);
     setGroupError(res && res.ok ? null : (out?.error ?? "The decision could not be applied; nothing was changed."));
-    onChanged();
-  }
-
-  async function reviewWithCopies(e: AnyRec, action: "verify" | "review" | "reject") {
-    const pending = (e.copies ?? []).filter((c: AnyRec) => !["VERIFIED", "REVIEWED", "HUMAN_EDITED"].includes(c.status));
-    if (!pending.length) {
-      await act(e.id, "POST", { action, expectedContentHash: e.contentHash });
-      return;
-    }
-    setBusy(e.id);
-    const res = await fetch(`/api/cases/${caseId}/records/encounters/group`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        action,
-        rows: [
-          { id: e.id, expectedContentHash: e.contentHash },
-          ...pending.map((c: AnyRec) => ({ id: c.id, expectedContentHash: c.contentHash })),
-        ],
-      }),
-    }).catch(() => null);
-    const out = (await res?.json().catch(() => ({}))) as { error?: string; problems?: { id: string; reason: string }[] };
-    setBusy(null);
-    // A refused group changed nothing; say so rather than leaving the reviewer
-    // believing copies were covered.
-    setGroupError(res && res.ok ? null : (out?.error ?? "The group decision could not be applied; nothing was changed."));
     onChanged();
   }
 
@@ -4714,17 +4693,48 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
                 Not reproduced: {(e.corroboration.unreproducedFields ?? []).join(", ") || "(fields unavailable)"} — check these against the source before verifying.
               </p>
             )}
-            {/* What one decision on this card signs, stated before the click. */}
-            {(e.copies ?? []).length > 0 && (
-              <div className="mt-1 rounded border border-sky-100 bg-sky-50/60 p-1.5 text-[11px] text-sky-900">
-                <p className="font-medium">This record also appears in {e.copies.length === 1 ? "another production" : `${e.copies.length} other productions`} — one review covers every copy:</p>
-                {e.copies.map((c: AnyRec) => (
-                  <p key={c.id} className="mt-0.5 text-sky-800">
-                    {c.filename}{c.page != null ? `, p. ${c.page}` : ""} — “{c.summary}”
-                  </p>
-                ))}
-              </div>
-            )}
+            {/* What one decision on this card signs, stated before the click.
+                The claim is made ONLY about members whose hashes this card
+                actually submits — `crossDocumentMembers` is derived from the
+                note's own membership, so the sentence and the request cannot
+                drift apart. */}
+            {(() => {
+              const signed = new Set(((e.crossDocumentMembers ?? []) as AnyRec[]).map((m: AnyRec) => m.id as string));
+              const covered = ((e.copies ?? []) as AnyRec[]).filter((c: AnyRec) => signed.has(c.id as string));
+              const notCovered = ((e.copies ?? []) as AnyRec[]).filter((c: AnyRec) => !signed.has(c.id as string));
+              return (
+                <>
+                  {covered.length > 0 && (
+                    <div className="mt-1 rounded border border-sky-100 bg-sky-50/60 p-1.5 text-[11px] text-sky-900">
+                      <p className="font-medium">
+                        This record also appears in {covered.length === 1 ? "another production" : `${covered.length} other productions`}. One decision here
+                        covers {covered.length === 1 ? "that copy" : "those copies"} — all of them, or none:
+                      </p>
+                      {covered.map((c: AnyRec) => (
+                        <p key={c.id as string} className="mt-0.5 text-sky-800">
+                          {c.filename as string}{c.page != null ? `, p. ${c.page}` : ""} — &ldquo;{c.summary as string}&rdquo;
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                  {/* A copy this decision does NOT sign is said so plainly,
+                      rather than being folded into a coverage claim. */}
+                  {notCovered.length > 0 && (
+                    <div className="mt-1 rounded border border-ink-100 bg-ink-50 p-1.5 text-[11px] text-ink-700">
+                      <p className="font-medium">
+                        {notCovered.length === 1 ? "A similar record appears" : `${notCovered.length} similar records appear`} in another production and
+                        {notCovered.length === 1 ? " is" : " are"} reviewed separately:
+                      </p>
+                      {notCovered.map((c: AnyRec) => (
+                        <p key={c.id as string} className="mt-0.5">
+                          {c.filename as string}{c.page != null ? `, p. ${c.page}` : ""}
+                        </p>
+                      ))}
+                    </div>
+                  )}
+                </>
+              );
+            })()}
             {e.reviewedWith && !["VERIFIED", "REVIEWED", "HUMAN_EDITED"].includes(e.status) && (
               <p className="mt-1 text-[11px] text-sky-700">Copy of a record reviewed under {e.reviewedWith.filename}; the decision there covers this row. It remains individually reviewable below.</p>
             )}

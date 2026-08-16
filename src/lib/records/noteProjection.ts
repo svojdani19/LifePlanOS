@@ -80,6 +80,11 @@ export interface ReviewableNote {
   claimCount: number;
   /** Content hash per row, submitted with a review so nothing is signed unseen. */
   contentHashes: { rowId: string; contentHash: string }[];
+  /**
+   * Members of this note that live in a DIFFERENT document — the same record
+   * produced twice. They are part of the decision, not a footnote to it.
+   */
+  crossDocumentMembers: { id: string; sourceDocumentId: string; page: number | null; status: string; contentHash: string }[];
   /** The WORST status and audit result among the note's rows. */
   status: string;
   auditResult: string | null;
@@ -126,15 +131,27 @@ export function projectNotes(
   segments: unknown,
   rows: readonly StructuredEncounter[],
   findings: readonly NoteFinding[],
+  /**
+   * Every current row in the CASE, so a segment that spans documents resolves
+   * all of its members.
+   *
+   * A production often contains the same operative note twice. The records
+   * builder records that by putting both rows in one segment on the primary
+   * document — but this projection only ever saw its own document's rows, so
+   * the copy silently fell out of the note while the card kept promising that
+   * one review covered every copy.
+   */
+  caseRows?: ReadonlyMap<string, StructuredEncounter>,
 ): ReviewableNote[] {
   const byId = new Map(rows.map((r) => [r.id, r]));
+  const resolve = (id: string): StructuredEncounter | undefined => byId.get(id) ?? caseRows?.get(id);
   const claimed = new Set<string>();
   const groups: string[][] = [];
 
   const segs = Array.isArray(segments) ? (segments as { rowIds?: unknown }[]) : [];
   for (const seg of segs) {
     const ids = Array.isArray(seg?.rowIds) ? (seg.rowIds as unknown[]).filter((x): x is string => typeof x === "string") : [];
-    const live = ids.filter((id) => byId.has(id) && !claimed.has(id));
+    const live = ids.filter((id) => !!resolve(id) && !claimed.has(id));
     if (!live.length) continue;
     for (const id of live) claimed.add(id);
     groups.push(live);
@@ -148,7 +165,7 @@ export function projectNotes(
   }
 
   return groups.map((rowIds) => {
-    const noteRows = rowIds.map((id) => byId.get(id)!).filter(Boolean);
+    const noteRows = rowIds.map((id) => resolve(id)!).filter(Boolean);
     const id = canonicalNoteId(documentId, rowIds);
     const noteFindings = [
       ...findings.filter((f) => f.scope === "NOTE" && (f as { canonicalNoteId?: string }).canonicalNoteId === id),
@@ -212,7 +229,13 @@ export function projectNotes(
       pageEnd: pages.length ? Math.max(...pages) : null,
       claims: noteRows.flatMap((r) => r.claims),
       claimCount: noteRows.reduce((n, r) => n + r.claims.length, 0),
+      // One hash per member, copies included — a decision that claims to cover
+      // every copy has to carry every copy's displayed content.
       contentHashes: noteRows.map((r) => ({ rowId: r.id, contentHash: r.contentHash })),
+      /** Members drawn from another production, for display before deciding. */
+      crossDocumentMembers: noteRows
+        .filter((r) => r.sourceDocumentId !== documentId)
+        .map((r) => ({ id: r.id, sourceDocumentId: r.sourceDocumentId, page: r.page, status: r.status, contentHash: r.contentHash })),
       status,
       auditResult,
       findings: noteFindings,

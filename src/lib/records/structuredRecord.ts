@@ -498,7 +498,9 @@ export async function getStructuredRecord(caseId: string, firmId: string, option
       encounters: encByDoc.get(d.id) ?? [],
       // Built from the same persisted segments the records builder wrote, so
       // the review unit is exactly what the chronology and reports cite.
-      notes: projectNotes(d.id, d.segments, encByDoc.get(d.id) ?? [], (findingsByDoc.get(d.id) ?? []) as never),
+      // `encById` is passed so a segment spanning documents resolves ALL of
+      // its members: a cross-document copy is part of the note, not a label.
+      notes: projectNotes(d.id, d.segments, encByDoc.get(d.id) ?? [], (findingsByDoc.get(d.id) ?? []) as never, encById),
       // Shown ONCE, with the document — never copied onto its notes.
       findings: documentFindings.get(d.id) ?? [],
       pageFindings: pageFindings.get(d.id) ?? [],
