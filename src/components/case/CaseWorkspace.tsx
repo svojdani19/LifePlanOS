@@ -2102,10 +2102,18 @@ function FutureCarePanel({ data, canEdit, attorneyView = false, call, focusId, f
           <div className="space-y-2">
       {g.items.map((it: AnyRec) => (
         <div key={it.id} id={`fc-${it.id}`} className={cn("card scroll-mt-24 transition-shadow", compact ? "p-2.5" : "p-4", focusId === it.id && "ring-2 ring-brand-400 ring-offset-2")}>
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className={cn("font-semibold text-ink-900", compact && "text-sm")}>{it.service}</span>
+          <div className="flex flex-wrap items-start justify-between gap-x-4 gap-y-2">
+            <div className="min-w-0 flex-1">
+              {/* The service name gets its own line. Sharing a wrapping flex
+                  row with the badges meant a long name — "Functional
+                  restoration program (3-day evaluation + 160 hours)" — took
+                  the line, one badge fitted beside it and the rest broke
+                  away, splitting the badge group across two rows at a
+                  different point for every item. */}
+              <h4 className={cn("break-words font-semibold text-ink-900", compact ? "text-sm" : "text-base")}>{it.service}</h4>
+              {/* The badges wrap as one group, so they break together or not
+                  at all. */}
+              <div className="mt-1 flex flex-wrap items-center gap-1.5">
                 <Badge tone={PROB_TONE[it.probability]}>{it.probability.toLowerCase()}</Badge>
                 {!compact && <Badge tone={VULN_TONE[it.defenseVulnerability]} title="How exposed this item is to defense challenge, from the engine's weakening-evidence analysis">defense vulnerability: {it.defenseVulnerability.toLowerCase()}</Badge>}
                 {(it.origin === "PLANNER_ADDED" || it.origin === "PHYSICIAN_ADDED") && <Badge tone="brand" title="This item was added manually, not generated from the care templates">{it.origin === "PHYSICIAN_ADDED" ? "physician-added" : "manually added"}</Badge>}
@@ -2120,7 +2128,7 @@ function FutureCarePanel({ data, canEdit, attorneyView = false, call, focusId, f
                 </p>
               )}
             </div>
-            <div className="flex items-center gap-4">
+            <div className="flex shrink-0 items-center gap-4">
               {!attorneyView && (
                 <div className="text-right">
                   <div className="num-metric text-sm text-brand-800">{formatMoney(it.presentValue)}</div>
