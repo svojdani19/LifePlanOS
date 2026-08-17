@@ -56,6 +56,31 @@ export function paraphraseSummary(
 // in behind src/lib/llm without changing callers.
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Everything a reviewer must be told about what this line is missing, or how
+ * it was adjusted, in one string.
+ *
+ * It exists as a function because it used to be two assignments to the same
+ * key in one object literal — the learned-prior disclosure was computed on
+ * every item and silently discarded by the key that followed it. A value with
+ * one writer cannot be overwritten by accident.
+ */
+export function composeMissingSupport(input: {
+  needsPhysicianConfirmation: boolean;
+  priorCaution: string | null;
+  priorProvenance: string | null;
+}): string | null {
+  return (
+    [
+      input.needsPhysicianConfirmation ? "Physician confirmation of medical necessity required." : null,
+      input.priorCaution,
+      input.priorProvenance,
+    ]
+      .filter(Boolean)
+      .join(" ") || null
+  );
+}
+
 export function assumptionsFor(c: Case): CaseAssumptions {
   let life = c.lifeExpectancyYears ?? undefined;
   if (life === undefined) {
@@ -409,10 +434,23 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
     const priced = livePricing
       ? await resolveUnitCost({ category: t.category, cpt: t.cptCode ?? null, zip: c.zipCode, percentile: 80 })
       : null;
+    // ── Learned priors are applied BEFORE the money is computed ─────────────
+    // They used to be applied inside the create() payload, several keys after
+    // project() had already run on the template's own numbers. A line could
+    // therefore be stored saying 6 visits a year with a lifetime cost computed
+    // at 4 — the frequency a reviewer reads and the figure they rely on came
+    // from different inputs.
+    const tag = originOf.get(t.service.trim().toLowerCase());
+    const scopedPriors = priorsByScope.get(scopeKeyOf(tag?.conditionKey ?? null, t.service)) ?? [];
+    const adj = applyPriors(t, scopedPriors);
+    const frequencyPerYear = adj.frequencyPerYear ?? t.frequencyPerYear;
+    const durationYears = adj.durationYears ?? t.durationYears;
+    const priorNote = priorProvenanceNote(adj.applied);
+
     const p = project(
       priced?.live
-        ? { category: t.category, unitCost: priced.unit, unitIsVenueFinal: true, frequencyPerYear: t.frequencyPerYear, durationYears: t.durationYears, isLifetime: !!t.isLifetime }
-        : { category: t.category, unitCost: t.unitCost, frequencyPerYear: t.frequencyPerYear, durationYears: t.durationYears, isLifetime: !!t.isLifetime },
+        ? { category: t.category, unitCost: priced.unit, unitIsVenueFinal: true, frequencyPerYear, durationYears, isLifetime: !!t.isLifetime }
+        : { category: t.category, unitCost: t.unitCost, frequencyPerYear, durationYears, isLifetime: !!t.isLifetime },
       a,
     );
     totalLifetime += p.lifetimeCost;
@@ -434,8 +472,8 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
         cptCode: t.cptCode ?? p.cptCode,
         probability: t.probability,
         confidence: t.confidence,
-        frequencyPerYear: t.frequencyPerYear,
-        durationYears: t.durationYears ?? null,
+        frequencyPerYear,
+        durationYears: durationYears ?? null,
         isLifetime: !!t.isLifetime,
         unitCost: p.unitCost,
         annualCost: p.annualCost,
@@ -451,22 +489,18 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
         // planner did. Persisted with the line so the report can say so and a
         // reviewer can challenge the right thing.
         inputProvenance: (provenanceOf.get(t.service.trim().toLowerCase()) ?? ALL_ASSUMED) as never,
-        ...(() => {
-          const tag = originOf.get(t.service.trim().toLowerCase());
-          const scoped = priorsByScope.get(scopeKeyOf(tag?.conditionKey ?? null, t.service)) ?? [];
-          const adj = applyPriors(t, scoped);
-          const note = priorProvenanceNote(adj.applied);
-          return {
-            ...(adj.frequencyPerYear !== undefined ? { frequencyPerYear: adj.frequencyPerYear } : {}),
-            ...(adj.durationYears !== undefined ? { durationYears: adj.durationYears } : {}),
-            ...(note || adj.cautionNote ? { missingSupport: [adj.cautionNote, note].filter(Boolean).join(" ") } : {}),
-          };
-        })(),
         evidenceStrength: t.evidenceStrength,
         literatureSupport: t.literatureSupport,
         lowerCostAlternative: t.lowerCostAlternative,
         defenseVulnerability: t.defenseVulnerability,
-        missingSupport: t.probability === "SPECULATIVE" || t.confidence < 60 ? "Physician confirmation of medical necessity required." : null,
+        // ONE value, composed from every source that has something to say.
+        // Two assignments in this literal meant the learned-prior disclosure
+        // was computed on every item and overwritten before it was stored.
+        missingSupport: composeMissingSupport({
+          needsPhysicianConfirmation: t.probability === "SPECULATIVE" || t.confidence < 60,
+          priorCaution: adj.cautionNote ?? null,
+          priorProvenance: priorNote ?? null,
+        }),
         plaintiffValue: t.probability === "PROBABLE" ? "Well-supported; core plan item." : "Supports comprehensive future care.",
         physicianSummary: paraphraseSummary(t),
         ...(lineage ? { lineageId: lineage.lineageId, version: lineage.version + 1 } : {}),

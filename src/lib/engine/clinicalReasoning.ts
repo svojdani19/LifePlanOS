@@ -1,5 +1,6 @@
 import { buildRecommendationDossier, type DossierItem, type DossierCondition, type DossierChronoEvent, type DossierCase, type DossierInterview } from "@/lib/engine/medicalNecessity";
 import { mapRecommendationToCondition, validateCode, validatePricing, classifyRecommendation, hasPatientRecordSupport, bodyRegion, anatomyCompatible, type RecInput, type CondInput } from "@/lib/engine/integrity";
+import { resolveRecommendationCondition } from "@/lib/engine/recommendationCondition";
 import { citationCompatible } from "@/lib/engine/citationQuality";
 import { specialtyLens } from "@/lib/engine/specialtyReasoning";
 import { lintAssessmentNarratives } from "@/lib/engine/narrativeSanity";
@@ -29,7 +30,7 @@ export type DurationClass = "ONE_TIME" | "SHORT_TERM" | "FIXED_COURSE" | "EPISOD
 // A future-care row carries staged/conditional metadata beyond the dossier's view.
 export type ReasoningItem = DossierItem & { contingencyOnly?: boolean | null; replacesService?: string | null };
 
-export type ConflictType = "DUPLICATE" | "REPLACED_BY" | "REPLACES" | "ALTERNATIVE_BOTH_INCLUDED" | "OVERLAP";
+export type ConflictType = "DUPLICATE" | "REPLACED_BY" | "REPLACES" | "ALTERNATIVE_BOTH_INCLUDED" | "OVERLAP" | "CONDITION_MAPPING";
 export interface ConflictFlag { type: ConflictType; otherService: string; note: string }
 
 // ── CRE v1 structured sub-objects ────────────────────────────────────────────
@@ -301,9 +302,17 @@ function classifyBucket(items: Bucketed[], category: EvidenceCategory, objective
 }
 
 // ── CRE v1 §5 — necessity extensions ─────────────────────────────────────────
-function leastIntensiveOf(item: ReasoningItem, priorTreatmentCount: number, pathway: string): string {
+function leastIntensiveOf(item: ReasoningItem, priorTreatmentCount: number, pathway: string, documentedNonResolution = false): string {
   if (item.lowerCostAlternative) return `A lower-intensity option (${lc(item.lowerCostAlternative)}) is documented as the alternative; ${lc(item.service)} is recommended because the documented clinical basis supports it, and only one of the two belongs in totals.`;
-  if (/surgical|revision/.test(pathway)) return priorTreatmentCount > 0 ? "Lower-intensity care is documented and has not resolved the impairment; escalation along the treatment continuum is the clinically expected next step rather than a first resort." : "Surgical care is proposed without documented exhaustion of conservative care — the record should establish why lower-intensity options are not adequate.";
+  if (/surgical|revision/.test(pathway)) {
+    // Prior treatment EXISTING is not prior treatment FAILING. The record has
+    // to say the impairment persisted, the course was completed, or the
+    // options were exhausted — otherwise this asserted non-resolution from a
+    // count of treatments.
+    if (documentedNonResolution) return "Lower-intensity care is documented and the record states the impairment persisted; escalation along the treatment continuum is the clinically expected next step rather than a first resort.";
+    if (priorTreatmentCount > 0) return "Lower-intensity care is documented, but the record does not state whether it resolved the impairment. Escalation to surgical care needs that response documented before it can be called the expected next step.";
+    return "Surgical care is proposed without documented exhaustion of conservative care — the record should establish why lower-intensity options are not adequate.";
+  }
   if (/conservative/.test(pathway)) return "This is itself the lower-intensity option on the treatment continuum — preferable to interventional or surgical escalation while it maintains function.";
   return "No treatment would leave the documented impairment unaddressed; this recommendation is the least-intensive documented means of addressing it.";
 }
@@ -662,20 +671,8 @@ export function buildReasoningAssessment(
 ): ReasoningAssessment {
   const rec = item as unknown as RecInput;
   const mapping = mapRecommendationToCondition(rec, conditions);
-  // Region-neutral services (DME, medications, general therapy) don't name an
-  // anatomy, so the region mapper finds no condition — but the generator (and
-  // the planner curating the plan) persisted the condition the item actually
-  // serves. Honor that link as the fallback so evidence relevance is judged
-  // against the item's real clinical problem instead of "general".
-  const persistedConditionId = (item as { conditionId?: string | null }).conditionId ?? null;
-  const mapped = conditions.find((c) => c.id === mapping.conditionId) ?? null;
-  const persisted = conditions.find((c) => c.id === persistedConditionId) ?? null;
-  // Prefer the persisted link whenever the service+mapped pair carries no
-  // anatomy but the persisted condition does — a TENS unit serving a lumbar
-  // disc injury is spine care, not "general" care.
-  const mappedRegion = bodyRegion(`${(item as { service: string }).service} ${mapped?.name ?? ""}`);
-  const usePersisted = persisted != null && mappedRegion === "general" && bodyRegion(persisted.name) !== "general";
-  const condition = (usePersisted ? persisted : (mapped ?? persisted)) as DossierCondition | null;
+  const resolved = resolveRecommendationCondition(item, conditions);
+  const condition = resolved.condition;
   const dossier = buildRecommendationDossier(item, condition, chronology, kase, interviews);
   const code = validateCode(rec);
   const pricing = validatePricing(rec);
@@ -709,10 +706,28 @@ export function buildReasoningAssessment(
 
   // §10 frequency support.
   const physicianApproved = item.physicianStatus === "APPROVED" || item.physicianStatus === "MODIFIED";
-  const frequencySupported = se.priorTreatment.length > 0 || se.guidelines.length > 0 || physicianApproved;
+  // ── §11 frequency — a CADENCE must be documented, not merely treatment ────
+  // This read "any prior treatment OR any guideline OR approval". Existence of
+  // treatment says a patient was treated; it says nothing about how often
+  // future care is needed, and a guideline silent on cadence cannot establish
+  // one. Both were letting an assumed frequency present as grounded.
+  const statesCadence = (text: string): boolean =>
+    /\b(?:\d+\s*(?:×|x|times)?\s*(?:per|a|each)\s*(?:day|week|month|year)|weekly|twice weekly|thrice weekly|biweekly|fortnightly|monthly|quarterly|annually|yearly|every\s+\d+\s+(?:day|week|month|year)s?|q\d+ ?(?:h|d|w|m)\b)/i.test(text);
+  const cadenceFromTreatment = se.priorTreatment.filter((e) => statesCadence(e.text));
+  const cadenceFromGuideline = se.guidelines.filter((g) => statesCadence(`${g.text} ${g.source ?? ""}`));
+  const frequencySupported = cadenceFromTreatment.length > 0 || cadenceFromGuideline.length > 0 || physicianApproved;
+
+  // Did the record actually state a RESPONSE — persistence, failure, or a
+  // completed/exhausted course? Nothing downstream may say conservative care
+  // "has not resolved the impairment" without one of these.
+  // Examination is included deliberately: a deficit still present on exam is
+  // the most direct statement that earlier care did not resolve it.
+  const documentedNonResolution = [...se.priorTreatment, ...se.examination, ...se.functionalLimitations, ...se.physicianDocumentation].some((e) =>
+    /\b(?:failed|no (?:significant |lasting |meaningful )?(?:relief|improvement|benefit|change)|did not (?:improve|resolve|help)|unresponsive|refractory|persistent(?:ly)? (?:pain|symptoms|deficit)|symptoms persist(?:ed)?|exhausted|maximum medical improvement|plateaued?|recurr(?:ed|ence))\b/i.test(e.text),
+  );
   const freqN = item.frequencyPerYear ?? 1;
   const frequencyRationale = frequencySupported
-    ? `The ${freqN}×/yr frequency is grounded in ${[se.priorTreatment.length ? "the documented treatment cadence" : "", se.guidelines.length ? "cited clinical guidance" : "", physicianApproved ? "physician review" : ""].filter(Boolean).join(", ")}.`
+    ? `The ${freqN}×/yr frequency is grounded in ${[cadenceFromTreatment.length ? "a cadence stated in the treatment record" : "", cadenceFromGuideline.length ? "a cadence stated in the cited guidance" : "", physicianApproved ? "physician review" : ""].filter(Boolean).join(", ")}.`
     : `The ${freqN}×/yr frequency is an assumption not yet grounded in a documented cadence, guideline, or physician review; it is pending review and should not enter finalized totals until supported.`;
 
   // §11 duration — ONE deterministic duration-support verdict. Replaces the old
@@ -906,12 +921,21 @@ export function buildReasoningAssessment(
     treatingRecordSupportSummary: sum(se.physicianDocumentation),
     medicalNecessityRationale: dossier.medicalNecessity,
     noTreatmentRisk: `Without ${lc(item.service)}, ${lens.concern} would go unaddressed for ${kase.subject}.`,
-    leastIntensiveRationale: leastIntensiveOf(item, se.priorTreatment.length, pathwayOf(item)),
+    leastIntensiveRationale: leastIntensiveOf(item, se.priorTreatment.length, pathwayOf(item), documentedNonResolution),
     timingRationale: timingOf(item),
     probabilityClassification,
     clinicalPathwayStage: staged ? "contingent / staged" : classify.includedInTotal ? "active plan" : "proposed",
     clinicalPathway: pathwayOf(item),
-    conflictFlags: setContext.conflicts,
+    conflictFlags: resolved.conflict
+      ? [
+          ...setContext.conflicts,
+          {
+            type: "CONDITION_MAPPING" as ConflictType,
+            otherService: resolved.conflict.otherName,
+            note: `This item is stored against "${resolved.conflict.persistedName}" but its service maps to "${resolved.conflict.mappedName}". The evidence below is drawn from ${resolved.condition?.name ?? "neither"}; confirm which diagnosis this item serves.`,
+          },
+        ]
+      : setContext.conflicts,
     alternativesConsidered: alternativesFor(item),
     inclusionRationale,
     frequencyRationale,

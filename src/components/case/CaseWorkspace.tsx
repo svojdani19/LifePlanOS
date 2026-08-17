@@ -51,6 +51,7 @@ import { recordEncounters, narrativeFor } from "@/lib/documents/recordSummary";
 import { structuredConfidence } from "@/lib/engine/citationQuality";
 import { PROVENANCE_UPGRADE_STALE_REASON } from "@/lib/records/provenanceUpgrade";
 import { presentClaims, labelForField } from "@/lib/records/claimPresentation";
+import { resolveRecommendationCondition } from "@/lib/engine/recommendationCondition";
 // Aliased: this file already has a `FindingList` for the case's legal
 // findings, which are a different concept from record-audit findings.
 import { FindingList as RecordFindingList, FoldedFindings } from "@/components/case/FindingList";
@@ -1886,6 +1887,9 @@ function RecommendationDossierView({ dossier, assessment, highlight, condensed =
       <DossierSection label="Supporting clinical evidence" focusRef={target === "evidence"} highlighted={target === "evidence"}>
         <div className="grid gap-2 md:grid-cols-2">
           <EvidenceBucket label="Supporting diagnoses" items={se.diagnoses} />
+          {/* Named as history, never as support — it argues the condition
+              pre-dates the incident. */}
+          <EvidenceBucket label="Recorded as prior history" items={se.priorHistory} />
           <EvidenceBucket label="Objective findings" items={se.objectiveFindings} />
           <EvidenceBucket label="Imaging" items={se.imaging} />
           <EvidenceBucket label="Examination findings" items={se.examination} />
@@ -1930,7 +1934,10 @@ function RecommendationDossierView({ dossier, assessment, highlight, condensed =
   );
 }
 function caseInputs(it: AnyRec, data: AnyRec) {
-  const cond = (data.conditions ?? []).find((c: AnyRec) => c.id === it.conditionId) ?? null;
+  // The SAME resolution the reasoning engine uses. Reading `it.conditionId`
+  // here while the assessment beside it remapped the item meant one panel
+  // could argue about one diagnosis and cite findings from another.
+  const cond = resolveRecommendationCondition(it as never, (data.conditions ?? []) as never).condition as AnyRec | null;
   const poss = data.sex === "FEMALE" ? "her" : data.sex === "MALE" ? "his" : "the patient's";
   const kase: DossierCase = { subject: data.clientName || "the patient", pronounPoss: poss, lifeExpectancyYears: data.lifeExpectancyYears ?? 40, adult: true };
   const provName = new Map((data.treatingProviders ?? []).map((p: AnyRec) => [p.id, `${p.name}${p.credentials ? `, ${p.credentials}` : ""}`]));

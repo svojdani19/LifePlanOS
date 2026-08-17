@@ -132,6 +132,13 @@ export interface RecommendationDossier {
   functionalLink: FunctionalLink | null;
   supportingEvidence: {
     diagnoses: EvidenceItem[];
+    /**
+     * The condition recorded as PRE-EXISTING history. Kept apart from support
+     * on purpose: it bears on apportionment and argues the condition pre-dates
+     * the incident, so filing it under objective findings would read as
+     * backing the opposite conclusion.
+     */
+    priorHistory: EvidenceItem[];
     objectiveFindings: EvidenceItem[];
     imaging: EvidenceItem[];
     examination: EvidenceItem[];
@@ -218,8 +225,10 @@ function isCleanFinding(text: string): boolean {
   return s.length >= 8 && !METADATA_LINE.test(s);
 }
 
-function evidenceSourcesOf(cond: DossierCondition | null): { filename?: string; page?: number | null; quote?: string }[] {
-  return cond && Array.isArray(cond.evidenceSources) ? (cond.evidenceSources as { filename?: string; page?: number | null; quote?: string }[]) : [];
+function evidenceSourcesOf(cond: DossierCondition | null): { filename?: string; page?: number | null; quote?: string; field?: string }[] {
+  // `field` is the extraction field the quote came from, written by
+  // conditionEvidence.ts. It is what makes the grading below possible.
+  return cond && Array.isArray(cond.evidenceSources) ? (cond.evidenceSources as { filename?: string; page?: number | null; quote?: string; field?: string }[]) : [];
 }
 function guidelinesOf(cond: DossierCondition | null): { title?: string; year?: string; quote?: string; duration?: unknown; relevance?: { evidenceLevel?: number; evidenceLabel?: string; whyRelevant?: string; limitations?: string | null } }[] {
   const soc = cond?.socAnalysis as { guidelines?: unknown[] } | null;
@@ -261,6 +270,12 @@ export function buildRecommendationDossier(
 
   // ── Organized, source-traceable supporting evidence ────────────────────────
   const objectiveFindings: EvidenceItem[] = [];
+  /** Recorded diagnostic statements — a clinician saying the condition IS. */
+  const diagnosisEvidence: EvidenceItem[] = [];
+  /** Recorded as pre-existing history: relevant, and not the same as support. */
+  const historyEvidence: EvidenceItem[] = [];
+  /** Absences noted while grading the causation evidence. */
+  const evidenceGapNotes: string[] = [];
   const imaging: EvidenceItem[] = [];
   const examination: EvidenceItem[] = [];
   const functionalLimitations: EvidenceItem[] = [];
@@ -286,8 +301,29 @@ export function buildRecommendationDossier(
     return true;
   };
 
-  if (condition?.objectiveEvidence && regionOk(condition.objectiveEvidence)) objectiveFindings.push({ text: condition.objectiveEvidence, source: "causation analysis" });
-  for (const s of sources) if (s.quote && regionOk(s.quote)) objectiveFindings.push({ text: `“${s.quote}”`, source: `${s.filename ?? "record"}${s.page ? `, p. ${s.page}` : ""}` });
+  // ── The causation evidence keeps the TYPE it was graded as ────────────────
+  // `conditionEvidence.ts` grades every located quote DIAGNOSIS / OBJECTIVE /
+  // HISTORY / REPORTED — a clinical judgement in its own right, since a
+  // diagnosis recorded in past medical history argues the condition PRE-DATES
+  // the incident. All of it used to be pushed into "Objective findings"
+  // regardless, so a clinician's assessment and a statement that no objective
+  // finding exists were filed as objective findings side by side.
+  if (condition?.objectiveEvidence && regionOk(condition.objectiveEvidence)) {
+    const stated = condition.objectiveEvidence;
+    // The statement of an ABSENCE is not a finding. It belongs where a
+    // reviewer looks for what is missing, not where they look for support.
+    if (/^no (?:objective|supporting) finding/i.test(stated)) evidenceGapNotes.push(stated);
+    else if (/— (?:assessment|diagnosis),/.test(stated)) diagnosisEvidence.push({ text: stated, source: "causation analysis" });
+    else objectiveFindings.push({ text: stated, source: "causation analysis" });
+  }
+  for (const s of sources) {
+    if (!s.quote || !regionOk(s.quote)) continue;
+    const src = `${s.filename ?? "record"}${s.page ? `, p. ${s.page}` : ""}`;
+    // A causation source graded as a diagnostic statement stays one.
+    if (s.field === "assessment" || s.field === "diagnosis") diagnosisEvidence.push({ text: `“${s.quote}”`, source: src });
+    else if (s.field === "pastMedicalHistory") historyEvidence.push({ text: `“${s.quote}”`, source: src });
+    else objectiveFindings.push({ text: `“${s.quote}”`, source: src });
+  }
   for (const e of pertinent) {
     const src = `${mdY(e.eventDate)}${e.provider ? ` · ${e.provider}` : ""}${e.sourcePage ? ` (p. ${e.sourcePage})` : ""}`;
     if (e.imagingFindings && isCleanFinding(e.imagingFindings) && regionOk(e.imagingFindings)) imaging.push({ text: cleanClause(e.imagingFindings, 180), source: src });
@@ -319,7 +355,13 @@ export function buildRecommendationDossier(
   const guidelineEvidence: GuidelineEvidenceItem[] = guidelines
     .filter((g) => g.title && regionOk(`${g.title} ${g.quote ?? ""}`))
     .map((g) => ({ text: `${g.quote ? `“${g.quote}” — ` : ""}${g.title}${g.year ? ` (${g.year})` : ""}`, source: g.relevance?.evidenceLabel ?? "clinical guideline", duration: deriveGuidelineDurationClaim(g) }));
-  const diagnoses: EvidenceItem[] = condition ? [{ text: `${condition.name}${condition.relatedness ? ` — ${condition.relatedness.replace(/_/g, " ").toLowerCase()}` : ""}`, source: condition.reasoning ? "causation analysis" : null }] : [];
+  // The diagnosis bucket carries the condition itself AND the recorded
+  // diagnostic statements that establish it — which is what a reader of
+  // "Supporting diagnoses" is looking for.
+  const diagnoses: EvidenceItem[] = [
+    ...(condition ? [{ text: `${condition.name}${condition.relatedness ? ` — ${condition.relatedness.replace(/_/g, " ").toLowerCase()}` : ""}`, source: condition.reasoning ? "causation analysis" : null }] : []),
+    ...diagnosisEvidence,
+  ];
 
   // Lifetime-duration support (Lifetime-Honesty sprint): the deterministic
   // verdict every duration statement below renders FROM. `isLifetime` is the
@@ -431,7 +473,7 @@ export function buildRecommendationDossier(
   if (!literature.length && !guidelineEvidence.length) contradictoryEvidence.push("No published literature specific to this recommendation was located, so the frequency/duration rest on clinical judgment and the treating record.");
 
   // ── Unknowns (never imply certainty) ───────────────────────────────────────
-  const unknowns: string[] = [];
+  const unknowns: string[] = [...evidenceGapNotes];
   if (condition?.missingInfo) unknowns.push(period(condition.missingInfo));
   if (item.missingSupport) unknowns.push(period(item.missingSupport));
   if (item.isLifetime && !guidelineEvidence.length) unknowns.push("The natural history and long-term course of this condition are not fully established in the literature; the lifetime projection is a reasoned estimate.");
@@ -478,7 +520,7 @@ export function buildRecommendationDossier(
     probability,
     potentialChallenges,
     functionalLink,
-    supportingEvidence: { diagnoses, objectiveFindings, imaging, examination, functionalLimitations, physicianDocumentation, priorTreatment, guidelines: guidelineEvidence },
+    supportingEvidence: { diagnoses, priorHistory: historyEvidence, objectiveFindings, imaging, examination, functionalLimitations, physicianDocumentation, priorTreatment, guidelines: guidelineEvidence },
     literature,
     contradictoryEvidence,
     unknowns,
