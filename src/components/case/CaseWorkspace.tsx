@@ -109,7 +109,6 @@ import { Icd10Search } from "@/components/Icd10Search";
 import { PreExistingConditionsModal } from "@/components/PreExistingConditionsModal";
 import { parseConditions, serializeConditions, findConditionsInRecords } from "@/lib/intake/preExisting";
 import { suggestDiagnoses } from "@/lib/intake/diagnosisSuggest";
-import { confidenceBand } from "@/lib/engine/confidence";
 import { BookOpenCheck } from "lucide-react";
 import { MEDICAL_SPECIALTIES } from "@/lib/intake/specialties";
 import { attorneyItemsNeeded } from "@/lib/attorneyItems";
@@ -442,7 +441,7 @@ export function CaseWorkspace({
         {tab === "overview" && <IntakePanel data={data} canEdit={can("case.edit") || attorneyView} call={call} />}
         {tab === "records" && <RecordsPanel data={data} canEdit={can("records.upload")} canUpload={attorneyView} canVerify={canVerifyRecords} call={call} busy={busy} />}
         {tab === "chronology" && <ChronologyPanel data={data} canEdit={can("chronology.edit")} canVerify={canVerifyRecords} call={call} />}
-        {tab === "causation" && <CausationPanel data={data} hideConfidence={attorneyView} />}
+        {tab === "causation" && <CausationPanel data={data} />}
         {/* Roster management stays behind case.edit (matching the server);
             physician reviewers may RECORD interview/provider findings — the
             action the interviews route actually authorizes for them. */}
@@ -1443,7 +1442,16 @@ function ChronologyPanel({ data, canEdit, canVerify = false, call }: { data: Any
 
 // ── Causation ────────────────────────────────────────────────────────────────
 const REL_TONE: Record<string, "green" | "amber" | "neutral" | "red"> = { RELATED: "green", AGGRAVATION: "amber", PREEXISTING_UNRELATED: "neutral", SUBSEQUENT_UNRELATED: "neutral", UNCLEAR: "red" };
-function CausationPanel({ data, hideConfidence = false }: { data: AnyRec; hideConfidence?: boolean }) {
+// The confidence BAR and PERCENTAGE are deliberately absent.
+//
+// A causation opinion is a physician's judgement, and dressing it in a
+// progress bar and a two-digit number implied a precision the underlying
+// model does not have — "78%" reads as a measurement, not an inference, and
+// nobody could say what would move it to 79. The relatedness badge, the
+// reasoning, the objective evidence and the cited sources are what a reader
+// should weigh; "MD confirmed" is the only status that means anything here,
+// because it is the one a person actually asserted.
+function CausationPanel({ data }: { data: AnyRec }) {
   if (data.conditions.length === 0) return <Empty>Run the AI pipeline to build the causation & apportionment map.</Empty>;
   return (
     <div className="grid gap-4 md:grid-cols-2">
@@ -1455,18 +1463,7 @@ function CausationPanel({ data, hideConfidence = false }: { data: AnyRec; hideCo
               <h3 className="font-semibold text-ink-900">{c.name}</h3>
               <Badge tone={REL_TONE[c.relatedness]}>{c.relatedness.replace(/_/g, " ").toLowerCase()}</Badge>
             </div>
-            {hideConfidence ? (
-              c.physicianConfirmed && <div className="mt-2"><Badge tone="green">MD confirmed</Badge></div>
-            ) : (
-              <>
-                <div className="mt-2 flex items-center gap-2 text-xs text-ink-500">
-                  <span>Confidence</span>
-                  <div className="h-1.5 w-24 overflow-hidden rounded-full bg-ink-100"><div className="h-full bg-brand-500" style={{ width: `${c.confidence}%` }} /></div>
-                  <span className="font-medium text-ink-700">{confidenceBand(c.confidence)} · {c.confidence}%</span>
-                  {c.physicianConfirmed && <Badge tone="green">MD confirmed</Badge>}
-                </div>
-              </>
-            )}
+            {c.physicianConfirmed && <div className="mt-2"><Badge tone="green">MD confirmed</Badge></div>}
             <p className="mt-3 text-sm text-ink-700">{c.reasoning}</p>
             {c.objectiveEvidence && <p className="mt-2 text-xs text-ink-500"><span className="font-medium">Objective evidence:</span> {c.objectiveEvidence}</p>}
             {/* Links to the actual evidence: source record + page of the content. */}
