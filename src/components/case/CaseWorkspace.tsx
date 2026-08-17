@@ -1885,7 +1885,90 @@ function moneyRange(v: number): string {
   return `${formatMoney(k(v * 0.7))} – ${formatMoney(k(v * 1.1))}`;
 }
 
-function RecommendationDossierView({ dossier, assessment, highlight, condensed = false }: { dossier: RecommendationDossier; assessment?: ReasoningAssessment; highlight?: string | null; condensed?: boolean }) {
+/**
+ * Paste a DOI, a PMID or a title, say which claim it answers, and the server
+ * resolves it against Europe PMC / Crossref before storing anything. A
+ * reference that cannot be looked up is refused rather than printed — the same
+ * rule the automated literature pass lives by.
+ */
+function AddCitation({ onAdd }: { onAdd: (input: { reference: string; claim: string; stance: string; note?: string }) => Promise<string | null> }) {
+  const [reference, setReference] = useState("");
+  const [claim, setClaim] = useState("NECESSITY");
+  const [stance, setStance] = useState("SUPPORTS");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit() {
+    if (!reference.trim()) return;
+    setBusy(true);
+    setError(await onAdd({ reference: reference.trim(), claim, stance, note: note.trim() || undefined }));
+    setBusy(false);
+    setReference("");
+    setNote("");
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <input
+          className="input h-7 min-w-[16rem] flex-1 text-[11px]"
+          placeholder="DOI, PMID, or article title"
+          value={reference}
+          onChange={(e) => setReference(e.target.value)}
+          aria-label="DOI, PMID, or article title"
+        />
+        <select className="input h-7 w-auto py-0 text-[11px]" value={claim} onChange={(e) => setClaim(e.target.value)} aria-label="Which claim this supports">
+          {Object.entries(CLAIM_LABEL).map(([value, label]) => (
+            <option key={value} value={value}>{label}</option>
+          ))}
+        </select>
+        <select className="input h-7 w-auto py-0 text-[11px]" value={stance} onChange={(e) => setStance(e.target.value)} aria-label="Supports or argues against">
+          <option value="SUPPORTS">supports</option>
+          <option value="OPPOSES">argues against</option>
+        </select>
+        <button type="button" className="btn h-7 px-2 text-[11px]" disabled={busy || !reference.trim()} onClick={submit}>
+          {busy ? "Resolving…" : "Attach"}
+        </button>
+      </div>
+      <input
+        className="input h-7 w-full text-[11px]"
+        placeholder="Why it applies to this patient (optional — quoted as your words)"
+        value={note}
+        onChange={(e) => setNote(e.target.value)}
+        aria-label="Why this citation applies"
+      />
+      {error && <p className="text-[11px] text-red-700">{error}</p>}
+    </div>
+  );
+}
+
+/** What each claim is called on screen. */
+const CLAIM_LABEL: Record<string, string> = {
+  NECESSITY: "medical necessity",
+  FREQUENCY: "frequency",
+  DURATION: "duration",
+  FUNCTIONAL_NEED: "functional need",
+  PRIOR_TREATMENT: "prior treatment",
+  COST: "cost",
+};
+
+function RecommendationDossierView({
+  dossier,
+  assessment,
+  highlight,
+  condensed = false,
+  physicianEvidence = [],
+  onAddEvidence,
+}: {
+  dossier: RecommendationDossier;
+  assessment?: ReasoningAssessment;
+  highlight?: string | null;
+  condensed?: boolean;
+  physicianEvidence?: AnyRec[];
+  /** Present only when the viewer may attach evidence. */
+  onAddEvidence?: (input: { reference: string; claim: string; stance: string; note?: string }) => Promise<string | null>;
+}) {
   const se = dossier.supportingEvidence;
   const target = highlight ? HIGHLIGHT_SECTION[highlight] : undefined;
   return (
@@ -1937,6 +2020,34 @@ function RecommendationDossierView({ dossier, assessment, highlight, condensed =
         </div>
       </DossierSection>
 
+      {/* The physician's own citation. The endpoint exists to be used from
+          here — a capture path with no control is a feature nobody has. */}
+      {onAddEvidence && (
+        <DossierSection label="Add a citation">
+          <AddCitation onAdd={onAddEvidence} />
+        </DossierSection>
+      )}
+      {physicianEvidence.length > 0 && (
+        <DossierSection label="Physician-selected evidence">
+          <ul className="space-y-2">
+            {physicianEvidence.map((e: AnyRec) => (
+              <li key={e.id as string} className={cn("border-l-2 pl-2", e.stance === "OPPOSES" ? "border-amber-300" : "border-brand-300")}>
+                <p className="text-ink-800">
+                  <span className="font-medium">{e.citationTitle as string}</span>
+                  {e.citationYear ? ` (${e.citationYear})` : ""}
+                  {e.citationJournal ? <span className="text-ink-400"> · {e.citationJournal as string}</span> : null}
+                </p>
+                <p className="mt-0.5 text-xs text-ink-600">&ldquo;{e.quote as string}&rdquo;</p>
+                <p className="mt-0.5 text-[11px] text-ink-400">
+                  Added by the reviewing physician · {CLAIM_LABEL[e.claim as string] ?? (e.claim as string)}
+                  {e.stance === "OPPOSES" ? " · argues against" : ""}
+                  {e.citationDoi ? ` · doi:${e.citationDoi}` : e.citationPmid ? ` · PMID ${e.citationPmid}` : ""}
+                </p>
+              </li>
+            ))}
+          </ul>
+        </DossierSection>
+      )}
       <DossierSection label="Supporting literature" focusRef={target === "literature"} highlighted={target === "literature"}>
         {dossier.literature.length ? (
           <ol className="space-y-2">
@@ -2190,7 +2301,24 @@ function FutureCarePanel({ data, canEdit, attorneyView = false, call, focusId, f
           </div>
           {openIds.has(it.id) && (
             <div className="mt-3 border-t border-ink-100 pt-3">
-              <RecommendationDossierView dossier={dossierForItem(it, data)} assessment={assessmentForItem(it, data)} highlight={focusId === it.id ? focusCat : null} condensed={attorneyView} />
+              <RecommendationDossierView
+                dossier={dossierForItem(it, data)}
+                assessment={assessmentForItem(it, data)}
+                highlight={focusId === it.id ? focusCat : null}
+                condensed={attorneyView}
+                physicianEvidence={((data.physicianEvidence ?? []) as AnyRec[]).filter((e) => e.futureCareItemId === it.id)}
+                onAddEvidence={
+                  canEdit
+                    ? async (input) => {
+                        // `call` refreshes the route on success and surfaces
+                        // the server's own message on failure, so the resolver's
+                        // refusal reaches the physician verbatim.
+                        const out = await call(`/api/cases/${data.id}/future-care/${it.id}/evidence`, "POST", input, "evidence");
+                        return out ? null : "The citation was not attached.";
+                      }
+                    : undefined
+                }
+              />
               {!attorneyView && (
                 <div data-focus-target={focusId === it.id && focusCat && /cpt|pricing|duplicate_cost/.test(focusCat) ? "" : undefined} className={cn("mt-3 border-t border-ink-100 pt-2 text-sm text-ink-600", focusId === it.id && focusCat && /cpt|pricing|duplicate_cost/.test(focusCat) && "rounded-md bg-amber-50 p-2 ring-2 ring-amber-400")}>
                   <span className="text-xs font-medium text-ink-500">Cost basis: </span>{formatMoney(it.unitCost)}/unit · {it.pricingSource} · range {formatMoney(it.lowCost)}–{formatMoney(it.highCost)}

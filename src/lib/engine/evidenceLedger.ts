@@ -265,7 +265,53 @@ export interface CandidateSource {
  * for this service produces no rows at all, which is the point: it used to be
  * displayed anyway.
  */
+/**
+ * The most evidence worth persisting for one claim about one recommendation.
+ *
+ * Persisting every candidate produced 17,208 rows on the reference case — up
+ * to 384 for a single item — because the candidate pool is the whole pertinent
+ * chronology and each entry can answer three claims. That is a cross-join, not
+ * a ledger: nobody reads 384 rows, and storing them implies a precision the
+ * selection does not have.
+ *
+ * The cap is on what is KEPT, ranked strongest-first, and what it drops is
+ * reported rather than silently discarded.
+ */
+export const MAX_ROWS_PER_CLAIM = 12;
+
+export interface LedgerBuild {
+  rows: LedgerRow[];
+  /** How many qualifying rows the cap excluded, per claim. Never silent. */
+  dropped: number;
+}
+
 export function buildLedgerForItem(
+  item: { id: string; service: string; category?: string | null; conditionId?: string | null },
+  candidates: readonly CandidateSource[],
+): LedgerRow[] {
+  return buildLedgerWithCap(item, candidates).rows;
+}
+
+/** As above, reporting what the cap excluded. */
+export function buildLedgerWithCap(
+  item: { id: string; service: string; category?: string | null; conditionId?: string | null },
+  candidates: readonly CandidateSource[],
+): LedgerBuild {
+  const all = buildAllRows(item, candidates);
+  const byClaim = new Map<EvidenceClaim, LedgerRow[]>();
+  for (const r of all) byClaim.set(r.claim, [...(byClaim.get(r.claim) ?? []), r]);
+
+  const rows: LedgerRow[] = [];
+  let dropped = 0;
+  for (const [, group] of byClaim) {
+    const ranked = rankForDisplay(group);
+    rows.push(...ranked.slice(0, MAX_ROWS_PER_CLAIM));
+    dropped += Math.max(0, ranked.length - MAX_ROWS_PER_CLAIM);
+  }
+  return { rows, dropped };
+}
+
+function buildAllRows(
   item: { id: string; service: string; category?: string | null; conditionId?: string | null },
   candidates: readonly CandidateSource[],
 ): LedgerRow[] {

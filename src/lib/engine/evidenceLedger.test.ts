@@ -14,7 +14,9 @@
 import { describe, expect, it } from "vitest";
 import {
   buildLedgerForItem,
+  buildLedgerWithCap,
   claimsSupportedBy,
+  MAX_ROWS_PER_CLAIM,
   rankForDisplay,
   serviceKindOf,
   supportsClaim,
@@ -172,5 +174,44 @@ describe("what a reviewer is shown first", () => {
     const before = input.map((r) => r.stance);
     rankForDisplay(input);
     expect(input.map((r) => r.stance)).toEqual(before);
+  });
+});
+
+describe("the ledger is capped, and says what it dropped", () => {
+  const many = (n: number): CandidateSource[] =>
+    Array.from({ length: n }, (_, i) => src({ strength: "OBJECTIVE", quote: `Examination finding number ${i}` }));
+
+  it("keeps at most twelve rows per claim", () => {
+    // Persisting every candidate produced 17,208 rows on the reference case,
+    // up to 384 for one item. Nobody reads 384 rows, and storing them implies
+    // a precision the selection does not have.
+    const built = buildLedgerWithCap(PT, many(60));
+    const perClaim = built.rows.reduce((m: Record<string, number>, r) => ((m[r.claim] = (m[r.claim] ?? 0) + 1), m), {});
+    expect(Object.values(perClaim).every((n) => n <= MAX_ROWS_PER_CLAIM)).toBe(true);
+  });
+
+  it("reports the count it excluded rather than truncating silently", () => {
+    const built = buildLedgerWithCap(PT, many(60));
+    expect(built.dropped).toBeGreaterThan(0);
+  });
+
+  it("drops nothing when there is nothing to drop", () => {
+    expect(buildLedgerWithCap(PT, many(3)).dropped).toBe(0);
+  });
+
+  it("keeps the STRONGEST rows, not the first ones it happened to see", () => {
+    const weak = many(MAX_ROWS_PER_CLAIM + 5);
+    const strong = src({ strength: "DIAGNOSIS", quote: "Assessment: lumbar radiculopathy" });
+    // The strong one arrives last and must still survive the cap.
+    const built = buildLedgerWithCap(PT, [...weak, strong]);
+    const necessity = built.rows.filter((r) => r.claim === "NECESSITY");
+    expect(necessity.some((r) => r.strength === "DIAGNOSIS")).toBe(true);
+  });
+
+  it("keeps opposing evidence over supporting evidence when the cap bites", () => {
+    const supporting = many(MAX_ROWS_PER_CLAIM + 5);
+    const against = src({ strength: "OBJECTIVE", quote: "Imaging shows no structural abnormality", opposes: true });
+    const built = buildLedgerWithCap(PT, [...supporting, against]);
+    expect(built.rows.some((r) => r.stance === "OPPOSES")).toBe(true);
   });
 });

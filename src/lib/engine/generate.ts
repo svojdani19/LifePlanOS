@@ -15,6 +15,9 @@ import {
 } from "@/lib/engine/careGrounding";
 import { ALL_ASSUMED, sealProvenance, projectionNote, type ProjectionInputs } from "@/lib/engine/projectionProvenance";
 import { locateConditionEvidence } from "@/lib/engine/evidence";
+import { buildRecommendationDossier } from "@/lib/engine/medicalNecessity";
+import { persistMachineLedger } from "@/lib/engine/persistLedger";
+import { resolveRecommendationCondition } from "@/lib/engine/recommendationCondition";
 import { locateConditionEvidenceInClaims, stateObjectiveEvidence } from "@/lib/engine/conditionEvidence";
 import { CURRENT_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
 import { generateStandardOfCare } from "@/lib/engine/standardOfCare";
@@ -229,7 +232,19 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
         ...data,
         objectiveEvidence,
         missingInfo,
-        evidenceSources: sources.length ? (sources as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
+        // Claim-backed sources FIRST, and they carry `field` — the extraction
+        // field the quote came from, which is what lets everything downstream
+        // grade it DIAGNOSIS / OBJECTIVE / HISTORY instead of assuming
+        // objective. Persisting only the text locator's output threw that
+        // grading away at the first step, so the ledger it fed contained
+        // nothing but OBJECTIVE rows.
+        evidenceSources:
+          claimEvidence.length || sources.length
+            ? ([
+                ...claimEvidence.map((e) => ({ documentId: e.documentId, filename: e.filename, page: e.page, quote: e.quote, field: e.field })),
+                ...sources.map((s) => ({ documentId: s.documentId, filename: s.filename, page: s.page, quote: s.quote })),
+              ] as unknown as Prisma.InputJsonValue)
+            : Prisma.DbNull,
       },
     });
     conditions.push(cond);
@@ -509,6 +524,46 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
     if (lineage) {
       await prisma.futureCareItem.update({ where: { id: lineage.priorId }, data: { supersededById: created.id } });
     }
+  }
+
+  // ── Evidence ledger ────────────────────────────────────────────────────────
+  // Which sources support WHICH claim about WHICH recommendation, persisted
+  // once from the same builder the panel and the report call — so the three
+  // read one selection instead of recomputing it three times and disagreeing.
+  // Physician-entered citations are preserved; only derived rows are replaced.
+  try {
+    const [ledgerItems, ledgerConditions, ledgerEvents, ledgerInterviews] = await Promise.all([
+      prisma.futureCareItem.findMany({ where: { caseId, supersededAt: null } }),
+      prisma.condition.findMany({ where: { caseId } }),
+      prisma.chronologyEvent.findMany({ where: { caseId } }),
+      prisma.interviewFinding.findMany({ where: { caseId } }).catch(() => []),
+    ]);
+    const ledgerCase = {
+      subject: c.clientName || "the patient",
+      pronounPoss: c.sex === "FEMALE" ? "her" : c.sex === "MALE" ? "his" : "the patient's",
+      lifeExpectancyYears: c.lifeExpectancyYears ?? 40,
+      adult: true,
+    };
+    let dropped = 0;
+    const rows = ledgerItems.flatMap((it) => {
+      const cond = resolveRecommendationCondition(it as never, ledgerConditions as never).condition;
+      const d = buildRecommendationDossier(it as never, cond, ledgerEvents as never, ledgerCase, ledgerInterviews as never);
+      dropped += d.ledgerDropped;
+      return d.ledger;
+    });
+    const outcome = await persistMachineLedger(prisma as never, { caseId, firmId: c.firmId }, rows);
+    // What the cap excluded is stated. A silent truncation reads as "this is
+    // all the evidence there was", which is a different claim.
+    console.info(
+      `[ledger] case ${caseId}: ${outcome.written} derived row(s) kept` +
+        (dropped ? `, ${dropped} beyond the per-claim cap not stored` : "") +
+        (outcome.physicianRowsPreserved ? `; ${outcome.physicianRowsPreserved} physician citation(s) preserved` : ""),
+    );
+  } catch (error) {
+    // The ledger is a record OF the plan, not the plan. Losing it must not
+    // fail a generation — but it must be visible, because an empty ledger
+    // looks like a plan with no evidence behind it.
+    console.error(`[ledger] case ${caseId}: evidence ledger not persisted — ${String(error).slice(0, 200)}`);
   }
 
   // Disclose what the record standard kept OUT of the draft. Suppression is

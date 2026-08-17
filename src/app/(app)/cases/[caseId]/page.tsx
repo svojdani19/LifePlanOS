@@ -74,6 +74,16 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
     },
   });
   if (!c) notFound();
+  // Physician-entered citations, which are NOT derivable and so must travel
+  // with the case. The machine-derived ledger deliberately does not: the panel
+  // rebuilds it from the same builder, and sending both would create two
+  // sources of truth for one thing.
+  const physicianEvidence = await prisma.recommendationEvidence
+    .findMany({
+      where: { caseId: c.id, firmId: c.firmId, addedById: { not: null } },
+      orderBy: { addedAt: "asc" },
+    })
+    .catch(() => []);
 
   // Significance is computed at display time against the case's CURRENT
   // conditions and care items — never stored on the row, where it would
@@ -123,7 +133,7 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
         <ArrowLeft className="h-4 w-4" /> All Cases
       </Link>
       <CaseWorkspace
-        data={JSON.parse(JSON.stringify(c))}
+        data={JSON.parse(JSON.stringify({ ...c, physicianEvidence }))}
         assumptions={assumptions}
         totals={{ totalLifetime, totalPresentValue }}
         permissions={caseAccess.platformAdminReadOnly ? [] : attorneyView ? ROLE_PERMISSIONS.ATTORNEY_REVIEWER : effectivePermissions}

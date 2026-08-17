@@ -1821,6 +1821,79 @@ model Notification {
 ///
 /// Additive: legacy auditFindings is retained for compatibility and is no
 /// longer authoritative.
+/// One piece of evidence, tied to ONE recommendation and ONE claim about it.
+///
+/// Evidence used to be selected per DIAGNOSIS — `eventPertains()` matched a
+/// chronology event by body region or by any word of the diagnosis name — so
+/// five services for one lumbar diagnosis drew the same pool, and findings
+/// that established the condition were displayed as though they established
+/// the necessity of each intervention.
+///
+/// Two kinds of row live here and they are governed differently:
+///
+///   MACHINE rows are derived. They are rebuilt from scratch on every plan
+///   generation, because they are a function of the records and the rules.
+///
+///   PHYSICIAN rows are a clinician's own citation, entered by hand. They
+///   survive regeneration untouched — a person's contribution is never
+///   discarded by a machine pass, which is the same rule the record findings
+///   and the chronology already live by.
+model RecommendationEvidence {
+  id     String @id @default(uuid())
+  firmId String
+  caseId String
+
+  /// The recommendation this evidence was selected FOR.
+  futureCareItemId String
+  /// The condition the item was resolved against when this row was built.
+  conditionId      String?
+
+  /// NECESSITY | FREQUENCY | DURATION | FUNCTIONAL_NEED | PRIOR_TREATMENT | COST
+  claim    String
+  /// SUPPORTS | OPPOSES | CONTEXT — opposition is not the same as absence.
+  stance   String
+  /// DIAGNOSIS | OBJECTIVE | HISTORY | REPORTED | GUIDELINE | LITERATURE
+  strength String
+
+  // ── Where it came from ───────────────────────────────────────────────────
+  /// RECORD_CLAIM | CHRONOLOGY_EVENT | GUIDELINE | LITERATURE | INTERVIEW | PHYSICIAN
+  sourceKind        String
+  sourceDocumentId  String?
+  encounterId       String?
+  chronologyEventId String?
+  page              Int?
+  /// The extraction field the quote came from, when it came from one.
+  field             String?
+  /// Verbatim supporting text. Never a paraphrase.
+  quote             String
+  /// The date the underlying record carries, for pre/post-incident reasoning.
+  recordedOn        DateTime?
+
+  // ── A physician-entered citation ─────────────────────────────────────────
+  citationTitle   String?
+  citationJournal String?
+  citationYear    String?
+  citationDoi     String?
+  citationPmid    String?
+  citationUrl     String?
+
+  /// Source bytes this row was derived from — a change makes it stale.
+  sourceFingerprint String?
+  /// Builder version, so a rebuilt ledger is distinguishable from an old one.
+  producerVersion   String?
+
+  /// Set when a physician supplied this row. Its presence is what protects it
+  /// from being deleted by the next generation.
+  addedById String?
+  addedAt   DateTime?
+
+  createdAt DateTime @default(now())
+
+  @@index([caseId, futureCareItemId])
+  @@index([futureCareItemId, claim])
+  @@index([caseId, addedById])
+}
+
 model RecordFinding {
   id     String @id @default(uuid())
   // Tenancy carried as scalars, matching SourcePage: these audit tables are

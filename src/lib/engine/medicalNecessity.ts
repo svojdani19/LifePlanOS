@@ -18,7 +18,14 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { bodyRegion, anatomyCompatible } from "./integrity";
-import { serviceKindOf, supportsClaim } from "./evidenceLedger";
+import {
+  buildLedgerWithCap,
+  serviceKindOf,
+  supportsClaim,
+  type CandidateSource,
+  type LedgerRow,
+  type LedgerStrength,
+} from "./evidenceLedger";
 import { citationCompatible, evidenceTier, selectPrimary, structuredConfidence, type ConfidenceLevel } from "./citationQuality";
 import { specialtyLens } from "./specialtyReasoning";
 import { assessLifetimeSupport, deriveGuidelineDurationClaim, type GuidelineDurationClaim, type LifetimeSupportResult } from "./lifetimeSupport";
@@ -164,6 +171,15 @@ export interface RecommendationDossier {
     priorTreatment: EvidenceItem[];
     guidelines: GuidelineEvidenceItem[];
   };
+  /**
+   * Every source this dossier considered, tied to the CLAIM it can establish
+   * for THIS service. The buckets above are how it is displayed; this is what
+   * it is. Persisted at generation so the report, the panel and the audit
+   * trail read one selection instead of three recomputations.
+   */
+  ledger: LedgerRow[];
+  /** Qualifying rows the per-claim cap excluded. Reported, never silent. */
+  ledgerDropped: number;
   literature: DossierLiterature[];
   contradictoryEvidence: string[];
   unknowns: string[];
@@ -330,6 +346,11 @@ export function buildRecommendationDossier(
   // consumer calls, so the panel, the report, validation and the reasoning
   // engine cannot disagree about what supports what.
   const serviceKind = serviceKindOf(item);
+  // Every source the dossier considers, in the ledger's own vocabulary. The
+  // buckets below are the DISPLAY of this; the ledger is the record of it, and
+  // both come from one pass so they cannot describe different evidence.
+  const candidates: CandidateSource[] = [];
+  const consider = (c: CandidateSource) => candidates.push(c);
   const functionalGate = {
     objective: supportsClaim(serviceKind, "FUNCTIONAL_NEED", "OBJECTIVE"),
     reported: supportsClaim(serviceKind, "FUNCTIONAL_NEED", "REPORTED"),
@@ -368,23 +389,44 @@ export function buildRecommendationDossier(
     if (!s.quote || !regionOk(s.quote)) continue;
     const src = `${s.filename ?? "record"}${s.page ? `, p. ${s.page}` : ""}`;
     // A causation source graded as a diagnostic statement stays one.
-    if (s.field === "assessment" || s.field === "diagnosis") diagnosisEvidence.push({ text: `“${s.quote}”`, source: src });
-    else if (s.field === "pastMedicalHistory") historyEvidence.push({ text: `“${s.quote}”`, source: src });
+    const strength: LedgerStrength =
+      s.field === "assessment" || s.field === "diagnosis" ? "DIAGNOSIS" : s.field === "pastMedicalHistory" ? "HISTORY" : "OBJECTIVE";
+    consider({ strength, sourceKind: "RECORD_CLAIM", quote: s.quote, sourceDocumentId: s.filename ?? null, page: s.page ?? null, field: s.field ?? null });
+    if (strength === "DIAGNOSIS") diagnosisEvidence.push({ text: `“${s.quote}”`, source: src });
+    else if (strength === "HISTORY") historyEvidence.push({ text: `“${s.quote}”`, source: src });
     else objectiveFindings.push({ text: `“${s.quote}”`, source: src });
   }
   for (const e of pertinent) {
     const src = `${mdY(e.eventDate)}${e.provider ? ` · ${e.provider}` : ""}${e.sourcePage ? ` (p. ${e.sourcePage})` : ""}`;
-    if (e.imagingFindings && isCleanFinding(e.imagingFindings) && regionOk(e.imagingFindings)) imaging.push({ text: cleanClause(e.imagingFindings, 180), source: src });
-    if (e.objectiveFindings && isCleanFinding(e.objectiveFindings) && regionOk(e.objectiveFindings)) examination.push({ text: cleanClause(e.objectiveFindings, 180), source: src });
+    const on = e.eventDate ? new Date(e.eventDate) : null;
+    if (e.imagingFindings && isCleanFinding(e.imagingFindings) && regionOk(e.imagingFindings)) {
+      imaging.push({ text: cleanClause(e.imagingFindings, 180), source: src });
+      consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.imagingFindings, 180), page: e.sourcePage ?? null, recordedOn: on });
+    }
+    if (e.objectiveFindings && isCleanFinding(e.objectiveFindings) && regionOk(e.objectiveFindings)) {
+      examination.push({ text: cleanClause(e.objectiveFindings, 180), source: src });
+      consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.objectiveFindings, 180), page: e.sourcePage ?? null, recordedOn: on });
+    }
     // A documented functional deficit is evidence for services that ADDRESS
     // function. It is not, by itself, evidence that an imaging study or an
     // injection is indicated — and it used to be shown under both.
     if (functionalGate.objective) {
-      if (e.functionalStatus && isCleanFinding(e.functionalStatus)) functionalLimitations.push({ text: cleanClause(e.functionalStatus, 160), source: src });
-      if (e.restrictions && isCleanFinding(e.restrictions)) functionalLimitations.push({ text: cleanClause(e.restrictions, 160), source: src });
+      if (e.functionalStatus && isCleanFinding(e.functionalStatus)) {
+        functionalLimitations.push({ text: cleanClause(e.functionalStatus, 160), source: src });
+        consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.functionalStatus, 160), page: e.sourcePage ?? null, recordedOn: on });
+      }
+      if (e.restrictions && isCleanFinding(e.restrictions)) {
+        functionalLimitations.push({ text: cleanClause(e.restrictions, 160), source: src });
+        consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.restrictions, 160), page: e.sourcePage ?? null, recordedOn: on });
+      }
     }
-    if (e.procedure && isCleanFinding(e.procedure) && regionOk(e.procedure)) priorTreatment.push({ text: cleanClause(e.procedure, 160), source: src });
-    else if (e.treatment && isCleanFinding(e.treatment) && regionOk(e.treatment)) priorTreatment.push({ text: cleanClause(e.treatment, 160), source: src });
+    if (e.procedure && isCleanFinding(e.procedure) && regionOk(e.procedure)) {
+      priorTreatment.push({ text: cleanClause(e.procedure, 160), source: src });
+      consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.procedure, 160), page: e.sourcePage ?? null, recordedOn: on });
+    } else if (e.treatment && isCleanFinding(e.treatment) && regionOk(e.treatment)) {
+      priorTreatment.push({ text: cleanClause(e.treatment, 160), source: src });
+      consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.treatment, 160), page: e.sourcePage ?? null, recordedOn: on });
+    }
   }
   if (item.physicianStatus === "APPROVED" || item.physicianStatus === "MODIFIED") {
     physicianDocumentation.push({ text: `Reviewing physician ${item.physicianStatus === "MODIFIED" ? "approved with modification" : "approved"} this recommendation${item.physicianNote ? `: “${item.physicianNote}”` : "."}`, source: "physician review" });
@@ -396,6 +438,7 @@ export function buildRecommendationDossier(
   // A patient's own account is real evidence of a functional deficit, and it
   // is not evidence that surgery is indicated. The gate is the difference.
   if (functionalGate.reported) {
+    for (const iv of patientReports) consider({ strength: "REPORTED", sourceKind: "INTERVIEW", quote: cleanClause(iv.text, 150) });
     for (const iv of patientReports) functionalLimitations.push({ text: `Patient reports ${lc(cleanClause(iv.text, 150))}${iv.quote ? ` — “${iv.quote}”` : ""}`, source: iv.category ? `patient interview · ${iv.category}` : "patient interview" });
   }
   for (const iv of providerOpinions) physicianDocumentation.push({ text: `${iv.providerName ? `${iv.providerName}` : "Treating provider"}: ${cleanClause(iv.text, 160)}${iv.quote ? ` — “${iv.quote}”` : ""}`, source: "provider interview" });
@@ -415,6 +458,8 @@ export function buildRecommendationDossier(
   // The diagnosis bucket carries the condition itself AND the recorded
   // diagnostic statements that establish it — which is what a reader of
   // "Supporting diagnoses" is looking for.
+  for (const g of guidelineEvidence) consider({ strength: "GUIDELINE", sourceKind: "GUIDELINE", quote: g.text });
+
   const diagnoses: EvidenceItem[] = [
     ...(condition ? [{ text: `${condition.name}${condition.relatedness ? ` — ${condition.relatedness.replace(/_/g, " ").toLowerCase()}` : ""}`, source: condition.reasoning ? "causation analysis" : null }] : []),
     ...diagnosisEvidence,
@@ -578,6 +623,10 @@ export function buildRecommendationDossier(
     probability,
     potentialChallenges,
     functionalLink,
+    ...(() => {
+      const built = buildLedgerWithCap({ id: item.id ?? "", service: item.service, category: item.category, conditionId: condition?.id ?? null }, candidates);
+      return { ledger: built.rows, ledgerDropped: built.dropped };
+    })(),
     supportingEvidence: { diagnoses, priorHistory: historyEvidence, objectiveFindings, imaging, examination, functionalLimitations, physicianDocumentation, priorTreatment, guidelines: guidelineEvidence },
     literature,
     contradictoryEvidence,

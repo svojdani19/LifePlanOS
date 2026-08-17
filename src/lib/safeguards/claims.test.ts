@@ -63,6 +63,7 @@ const REFUTED = [
   { id: "note-wide-correction" },
   { id: "finding-lifecycle" },
   { id: "export-gate-visible-findings" },
+  { id: "item-evidence-ledger" },
 ];
 
 // ── machine-corroboration ────────────────────────────────────────────────────
@@ -582,5 +583,44 @@ describe("refuting: 'nothing blocks an export invisibly'", () => {
     for (const column of ["sourceDocumentId: true", "canonicalNoteId: true", "fingerprint: true", "sourceFingerprint: true"]) {
       expect(select.includes(column), column).toBe(true);
     }
+  });
+});
+
+
+describe("refuting: 'this evidence supports this recommendation'", () => {
+  it("will not let a source establish a claim its kind cannot carry", async () => {
+    const { supportsClaim } = await import("@/lib/engine/evidenceLedger");
+    // An imaging study proves a finding and says nothing about cadence.
+    expect(supportsClaim("MEDICATION", "FREQUENCY", "OBJECTIVE")).toBe(false);
+    expect(supportsClaim("SURGERY", "NECESSITY", "REPORTED")).toBe(false);
+    // …and the things it CAN carry still pass, or the gate is just a wall.
+    expect(supportsClaim("MEDICATION", "FREQUENCY", "GUIDELINE")).toBe(true);
+    expect(supportsClaim("SURGERY", "FUNCTIONAL_NEED", "REPORTED")).toBe(true);
+  });
+
+  it("does not truncate the ledger silently", async () => {
+    const { buildLedgerWithCap, MAX_ROWS_PER_CLAIM } = await import("@/lib/engine/evidenceLedger");
+    const many = Array.from({ length: MAX_ROWS_PER_CLAIM + 9 }, (_, i) => ({
+      strength: "OBJECTIVE" as const,
+      sourceKind: "CHRONOLOGY_EVENT" as const,
+      quote: `finding ${i}`,
+    }));
+    const built = buildLedgerWithCap({ id: "i", service: "Physical therapy", category: "PHYSICAL_THERAPY" }, many);
+    expect(built.dropped).toBeGreaterThan(0);
+  });
+
+  it("refuses to store a citation that cannot be resolved", async () => {
+    const src = await import("node:fs/promises").then((fs) =>
+      fs.readFile("src/app/api/cases/[caseId]/future-care/[itemId]/evidence/route.ts", "utf8"),
+    );
+    // Resolution happens BEFORE any write.
+    expect(src.indexOf("could not be resolved")).toBeLessThan(src.indexOf("$transaction"));
+    expect(src).toMatch(/findCandidates/);
+  });
+
+  it("never deletes a physician's citation on regeneration", async () => {
+    const src = await import("node:fs/promises").then((fs) => fs.readFile("src/lib/engine/persistLedger.ts", "utf8"));
+    // The clause that makes the rebuild safe.
+    expect(src).toMatch(/addedById: null/);
   });
 });

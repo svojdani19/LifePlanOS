@@ -303,6 +303,35 @@ export const SAFEGUARD_CLAIMS: SafeguardClaim[] = [
     },
   },
   {
+    id: "item-evidence-ledger",
+    module: "src/lib/engine/evidenceLedger.ts",
+    labels: ["Supporting clinical evidence", "Physician-selected evidence", "Add a citation"],
+    asserts:
+      "Each finding shown under a recommendation passed both an anatomy check and a service-compatibility check for the claim it is offered against, and a physician-entered citation resolved to a real, retrievable article.",
+    doesNotAssert: [
+      "that every source considered is shown — the per-claim cap is disclosed",
+      "that a frequency or duration is established when no cadence-bearing source exists",
+      "that a patient's report establishes the necessity of surgery, imaging or an injection",
+      "that an absence of supporting evidence is evidence against",
+    ],
+    consequenceIfOverclaimed:
+      "Five services of one diagnosis would each appear supported by findings that establish only the condition, and an unresolvable reference could be printed as a citation.",
+    reachability: {
+      surface: { file: "src/components/case/CaseWorkspace.tsx", claimText: ["Physician-selected evidence", "Add a citation"] },
+      rendered: { entryPoint: "function AddCitation", invokedBy: ["<AddCitation onAdd={onAddEvidence} />"] },
+      carries: ["DOI, PMID, or article title", "onAdd("],
+      server: {
+        file: "src/app/api/cases/[caseId]/future-care/[itemId]/evidence/route.ts",
+        enforces: ["requireCanonicalPermission", "findCandidates", "could not be resolved", "addedById", "auditLog"],
+      },
+      persists: { file: "src/lib/engine/persistLedger.ts", contains: ["addedById: null", "physicianRowsPreserved"] },
+      reachableSymbols: [
+        { file: "src/lib/engine/evidenceLedger.ts", symbols: ["supportsClaim", "buildLedgerWithCap"] },
+        { file: "src/lib/engine/persistLedger.ts", symbols: ["persistMachineLedger"] },
+      ],
+    },
+  },
+  {
     id: "factual-audit",
     module: "src/lib/llm/factualAudit.ts",
     labels: ["AI draft — audit passed, pending review"],
