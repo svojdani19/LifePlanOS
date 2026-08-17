@@ -18,6 +18,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { bodyRegion, anatomyCompatible } from "./integrity";
+import { serviceKindOf, supportsClaim } from "./evidenceLedger";
 import { citationCompatible, evidenceTier, selectPrimary, structuredConfidence, type ConfidenceLevel } from "./citationQuality";
 import { specialtyLens } from "./specialtyReasoning";
 import { assessLifetimeSupport, deriveGuidelineDurationClaim, type GuidelineDurationClaim, type LifetimeSupportResult } from "./lifetimeSupport";
@@ -41,6 +42,12 @@ export interface DossierItem {
   pricingSource?: string | null;
   physicianStatus?: string;
   physicianNote?: string | null;
+  /**
+   * TEMPLATE_* | RECORD_RECOMMENDED | PHYSICIAN_ADDED | PLANNER_ADDED — what
+   * put this line in the plan. Governs whether the narrative may assert a
+   * patient-specific need or must describe a candidate for review.
+   */
+  origin?: string | null;
   lowerCostAlternative?: string | null;
   missingSupport?: string | null;
   literatureSupport?: string | null;
@@ -111,7 +118,17 @@ export interface DossierLiterature {
   whySelected: string;
 }
 export interface ProbabilityAssessment {
+  /**
+   * INTERNAL THRESHOLDING ONLY — never rendered, never exported.
+   *
+   * It is a sum of weights for broad factors (any prior treatment, any
+   * guideline, physician involvement) with no calibration against outcomes,
+   * so a two-digit figure would read as a measurement of something nobody
+   * measured. `classification` is the honest form of the same judgement.
+   */
   percentage: number;
+  /** The band a reader sees: what the record supports, in words. */
+  classification: "more likely than not" | "reasonable possibility";
   statement: string;
   factors: { label: string; present: boolean; detail: string }[];
 }
@@ -235,6 +252,25 @@ function guidelinesOf(cond: DossierCondition | null): { title?: string; year?: s
   return (soc?.guidelines ?? []) as never[];
 }
 
+/**
+ * Is this recommendation grounded in THIS patient's record, or is it template
+ * scaffolding awaiting one?
+ *
+ * `origin` is written by the generator: RECORD_RECOMMENDED means a treating
+ * provider actually recommended it in the file. Physician- and planner-added
+ * items are a person's own judgement and count as grounded. Everything else
+ * is a care template — reviewable, projectable, and not yet a statement about
+ * this patient. A legacy row with no recorded origin is treated as grounded:
+ * the conservative reading keeps existing plans reading as they did.
+ */
+export function isRecordGrounded(item: { origin?: string | null; physicianStatus?: string | null }): boolean {
+  const origin = item.origin ?? null;
+  if (origin == null) return true;
+  if (origin === "PHYSICIAN_ADDED" || origin === "PLANNER_ADDED" || origin === "RECORD_RECOMMENDED") return true;
+  // A physician who approved a template item has adopted it as their own.
+  return item.physicianStatus === "APPROVED" || item.physicianStatus === "MODIFIED";
+}
+
 // Whether a chronology event pertains to this recommendation's diagnosis/region.
 function eventPertains(e: DossierChronoEvent, region: string, dxName: string): boolean {
   const hay = `${e.summary ?? ""} ${e.diagnosis ?? ""} ${e.treatment ?? ""} ${e.procedure ?? ""} ${e.imagingFindings ?? ""} ${e.objectiveFindings ?? ""} ${e.functionalStatus ?? ""} ${e.restrictions ?? ""}`.toLowerCase();
@@ -287,6 +323,18 @@ export function buildRecommendationDossier(
   // is what prevents an L1 burst-fracture finding from "anchoring" a knee
   // diagnosis just because both mention "fracture". Functional status is
   // whole-person and stays ungated.
+  // ── SERVICE-COMPATIBILITY GATE ────────────────────────────────────────────
+  // The anatomy gate below asks "is this the right body part". This asks the
+  // question that was missing: does a finding of this KIND bear on a service
+  // of this KIND? Both must pass. Applied here, inside the one builder every
+  // consumer calls, so the panel, the report, validation and the reasoning
+  // engine cannot disagree about what supports what.
+  const serviceKind = serviceKindOf(item);
+  const functionalGate = {
+    objective: supportsClaim(serviceKind, "FUNCTIONAL_NEED", "OBJECTIVE"),
+    reported: supportsClaim(serviceKind, "FUNCTIONAL_NEED", "REPORTED"),
+  };
+
   const dxRegion = bodyRegion(`${item.service} ${dxName}`);
   const dxAnatomy = `${item.service} ${dxName}`;
   const regionOk = (text: string): boolean => {
@@ -328,8 +376,13 @@ export function buildRecommendationDossier(
     const src = `${mdY(e.eventDate)}${e.provider ? ` · ${e.provider}` : ""}${e.sourcePage ? ` (p. ${e.sourcePage})` : ""}`;
     if (e.imagingFindings && isCleanFinding(e.imagingFindings) && regionOk(e.imagingFindings)) imaging.push({ text: cleanClause(e.imagingFindings, 180), source: src });
     if (e.objectiveFindings && isCleanFinding(e.objectiveFindings) && regionOk(e.objectiveFindings)) examination.push({ text: cleanClause(e.objectiveFindings, 180), source: src });
-    if (e.functionalStatus && isCleanFinding(e.functionalStatus)) functionalLimitations.push({ text: cleanClause(e.functionalStatus, 160), source: src });
-    if (e.restrictions && isCleanFinding(e.restrictions)) functionalLimitations.push({ text: cleanClause(e.restrictions, 160), source: src });
+    // A documented functional deficit is evidence for services that ADDRESS
+    // function. It is not, by itself, evidence that an imaging study or an
+    // injection is indicated — and it used to be shown under both.
+    if (functionalGate.objective) {
+      if (e.functionalStatus && isCleanFinding(e.functionalStatus)) functionalLimitations.push({ text: cleanClause(e.functionalStatus, 160), source: src });
+      if (e.restrictions && isCleanFinding(e.restrictions)) functionalLimitations.push({ text: cleanClause(e.restrictions, 160), source: src });
+    }
     if (e.procedure && isCleanFinding(e.procedure) && regionOk(e.procedure)) priorTreatment.push({ text: cleanClause(e.procedure, 160), source: src });
     else if (e.treatment && isCleanFinding(e.treatment) && regionOk(e.treatment)) priorTreatment.push({ text: cleanClause(e.treatment, 160), source: src });
   }
@@ -340,7 +393,11 @@ export function buildRecommendationDossier(
   }
   // Interview findings (EPIC-011): patient complaints → functional limitations;
   // treating-provider opinions → physician documentation. Verbatim, user-entered.
-  for (const iv of patientReports) functionalLimitations.push({ text: `Patient reports ${lc(cleanClause(iv.text, 150))}${iv.quote ? ` — “${iv.quote}”` : ""}`, source: iv.category ? `patient interview · ${iv.category}` : "patient interview" });
+  // A patient's own account is real evidence of a functional deficit, and it
+  // is not evidence that surgery is indicated. The gate is the difference.
+  if (functionalGate.reported) {
+    for (const iv of patientReports) functionalLimitations.push({ text: `Patient reports ${lc(cleanClause(iv.text, 150))}${iv.quote ? ` — “${iv.quote}”` : ""}`, source: iv.category ? `patient interview · ${iv.category}` : "patient interview" });
+  }
   for (const iv of providerOpinions) physicianDocumentation.push({ text: `${iv.providerName ? `${iv.providerName}` : "Treating provider"}: ${cleanClause(iv.text, 160)}${iv.quote ? ` — “${iv.quote}”` : ""}`, source: "provider interview" });
   // Guidelines pass through the SAME anatomy stack as record evidence and
   // literature: coarse region, spinal level, laterality, and within-joint
@@ -449,6 +506,7 @@ export function buildRecommendationDossier(
   const areIs = /s$/.test(item.service) ? "are" : "is";
   const probability: ProbabilityAssessment = {
     percentage,
+    classification: percentage >= 51 ? "more likely than not" : "reasonable possibility",
     // Qualitative medical-probability statement — no arbitrary percentage in the
     // report (§12); the numeric `percentage` remains only for internal thresholding.
     statement:
@@ -592,11 +650,19 @@ function buildNecessityNarrative(
   // Lifetime-Honesty: a lifetime need is only STATED as a lifetime need when
   // independent evidence supports the duration; otherwise the remaining-
   // lifetime horizon is disclosed as a projection assumption — never asserted.
-  const need = item.isLifetime
-    ? durationSupport.clinicallySupported
-      ? `${S} will require ${lc(sv)} on a recurring basis, projected over ${kase.pronounPoss} remaining life expectancy on the strength of the documented condition evidence`
-      : `a remaining-lifetime scenario for ${lc(sv)} is projected for ${S} as a planning assumption, with the clinical duration pending support`
-    : `${S} will require ${lc(sv)} over a defined course`;
+  // A TEMPLATE item is scaffolding until the record backs it. Saying the
+  // patient "will require" it asserts a patient-specific need that nothing in
+  // this case has yet established — the same over-claim as a confidence
+  // percentage, in prose. Record-derived and physician-added items keep the
+  // assertive voice, because something in the file actually says it.
+  const patientSpecific = isRecordGrounded(item);
+  const need = !patientSpecific
+    ? `${lc(sv)} is a candidate for clinical review for ${S}, pending record support specific to ${kase.pronounPoss} presentation`
+    : item.isLifetime
+      ? durationSupport.clinicallySupported
+        ? `${S} will require ${lc(sv)} on a recurring basis, projected over ${kase.pronounPoss} remaining life expectancy on the strength of the documented condition evidence`
+        : `a remaining-lifetime scenario for ${lc(sv)} is projected for ${S} as a planning assumption, with the clinical duration pending support`
+      : `${S} will require ${lc(sv)} over a defined course`;
   parts.push(variant(sv + "need", [
     `${cap(lc(sv))} ${areIs} reasonable and necessary to ${lens.goal}, with ${lens.concern} the forward concern; on that basis ${need}.`,
     `The clinical objective is ${lens.goal}: ${lc(sv)} ${areIs} reasonable and necessary to that end, managing ${lens.concern}. ${cap(need)}.`,

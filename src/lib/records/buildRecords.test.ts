@@ -41,6 +41,15 @@ const row = (over: Partial<MergeableRow> = {}): MergeableRow => ({
 });
 
 /** Build without composing prose: these tests are about structure and dates. */
+// These tests build real multi-page documents — 30KB of synthetic narrative
+// through the full segmenter, dater and writer — and six of them legitimately
+// take 1.7–3.1 seconds. Against vitest's 5s default that left under two
+// seconds of headroom, so under parallel load the file failed at random on a
+// different test each run. The work is genuine; the timeout was the wrong
+// size for it. Raised for THIS file only, so a real hang anywhere else still
+// fails fast.
+vi.setConfig({ testTimeout: 30_000 });
+
 const build = (text: string, rows: MergeableRow[], pageCount = 12, write = false) =>
   buildRecords({
     caseId: CASE,

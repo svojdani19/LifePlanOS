@@ -1726,7 +1726,10 @@ function StandardOfCarePanel({ data, canEdit, call }: { data: AnyRec; canEdit: b
 // One-line rationale for the item's probability rating, woven from its own
 // evidence/confidence fields (deterministic — mirrors the report's language).
 function probabilityReasoning(it: AnyRec): string {
-  const conf = it.confidence != null ? ` (confidence ${it.confidence}%)` : "";
+  // The band, not the number. `confidence` is an uncalibrated internal score;
+  // printing it as a percentage in report language gave a two-digit figure the
+  // authority of a measurement.
+  const conf = it.confidence != null ? ` (${it.confidence >= 75 ? "high" : it.confidence >= 60 ? "moderate" : "low"} confidence)` : "";
   const basis = /case-specific|physician confirmation|confirmation required/i.test(it.evidenceStrength || "")
     ? "the clinical picture and standard-of-care practice"
     : (it.evidenceStrength || "standard-of-care guidance").toLowerCase();
@@ -1816,13 +1819,34 @@ function DossierSection({
   );
 }
 
+/**
+ * Which four findings a physician sees used to be decided by array order —
+ * whatever the extractor happened to emit first — and the rest were dropped
+ * with no indication they existed. Cited findings come first now, most recent
+ * within that, and the remainder is disclosed and reachable rather than
+ * silently truncated.
+ */
+function rankEvidence(items: readonly EvidenceItem[]): EvidenceItem[] {
+  // A date at the head of the source line ("05/29/2023 · Paul English (p. 1)").
+  const dateOf = (e: EvidenceItem): number => {
+    const m = /(\d{1,2})\/(\d{1,2})\/(\d{4})/.exec(e.source ?? "");
+    return m ? new Date(`${m[3]}-${m[1].padStart(2, "0")}-${m[2].padStart(2, "0")}`).getTime() : 0;
+  };
+  // A finding that cites a page can be checked; one that cannot, cannot.
+  const cited = (e: EvidenceItem): number => (/p\.\s*\d+/.test(e.source ?? "") ? 0 : 1);
+  return [...items].sort((a, b) => cited(a) - cited(b) || dateOf(b) - dateOf(a));
+}
+
 function EvidenceBucket({ label, items }: { label: string; items: EvidenceItem[] }) {
+  const [showAll, setShowAll] = useState(false);
   if (!items.length) return null;
+  const ranked = rankEvidence(items);
+  const shown = showAll ? ranked : ranked.slice(0, 4);
   return (
     <div className="rounded-md border border-ink-100 bg-ink-50/50 p-2">
       <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">{label}</p>
       <ul className="mt-1.5 space-y-1.5">
-        {items.slice(0, 4).map((e, i) => (
+        {shown.map((e, i) => (
           // The citation on its own line: inline and parenthesised, it ran
           // into the next finding and the two became one paragraph.
           <li key={i} className="border-l-2 border-ink-200 pl-2 text-[13px] leading-snug text-ink-800">
@@ -1831,6 +1855,16 @@ function EvidenceBucket({ label, items }: { label: string; items: EvidenceItem[]
           </li>
         ))}
       </ul>
+      {ranked.length > 4 && (
+        <button
+          type="button"
+          className="mt-1.5 text-[11px] font-medium text-brand-700 hover:underline"
+          aria-expanded={showAll}
+          onClick={() => setShowAll((v) => !v)}
+        >
+          {showAll ? "Show the strongest four" : `Show all ${ranked.length} — ${ranked.length - 4} more not displayed`}
+        </button>
+      )}
     </div>
   );
 }
@@ -1873,9 +1907,12 @@ function RecommendationDossierView({ dossier, assessment, highlight, condensed =
 
       <DossierSection label="Probability and confidence">
         <div className="flex flex-wrap items-center gap-2">
-          {/* The numeric probability stays clinical-team-only; the condensed
-              (attorney) view keeps the qualitative statement below. */}
-          {!condensed && <Badge tone={dossier.probability.percentage >= 51 ? "green" : "amber"}>{dossier.probability.percentage}%</Badge>}
+          {/* No percentage. "74%" reads as a measurement, and it was produced
+              by adding weights for broad factors — any prior treatment, any
+              guideline, physician involvement — against no calibration set.
+              The qualitative band is the honest form of the same judgement,
+              and the sentence beneath already says it in words. */}
+          <Badge tone={dossier.probability.percentage >= 51 ? "green" : "amber"}>{dossier.probability.classification}</Badge>
           <Badge tone={CONF_TONE_D[dossier.confidence.level]}>{dossier.confidence.level.toLowerCase()} confidence</Badge>
         </div>
         <p className="mt-1.5 text-ink-700">{dossier.probability.statement}</p>
