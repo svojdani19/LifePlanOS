@@ -40,6 +40,17 @@ export interface GuidanceInput {
 }
 
 export interface ReviewGuidance {
+  /**
+   * ONE imperative sentence: what this record needs from the reviewer.
+   *
+   * The card used to lead with evidence — an eight-fragment note opened with
+   * four raw extraction claims and a "Show all 318 claims" link, so the first
+   * thing a physician read was an account number and some garbled OCR. The
+   * question they are actually answering is "what do you need from me", and
+   * this is the answer. `why` and `steps` remain, one level down, for when
+   * the short answer is not enough.
+   */
+  requirement: string;
   /** One sentence: why this is here. */
   why: string;
   /** What the reviewer can do, most direct first. */
@@ -153,6 +164,7 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
   if (contradicted?.length) {
     return {
       kind: "CONTRADICTED_FIELD",
+      requirement: `Correct ${fieldPhrase(contradicted)} to match the source, or reject this record.`,
       why: `An independent check read the source and found it contradicts ${fieldPhrase(contradicted)} recorded here. Nothing was changed automatically, because the correct value was never established.`,
       steps: [
         `Open the cited page and read ${fieldPhrase(contradicted)} in the source.`,
@@ -169,6 +181,7 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
   if (disagreement.length) {
     return {
       kind: "FRAGMENT_DISAGREEMENT",
+      requirement: `Decide which ${fieldPhrase(disagreement)} the record supports, then correct it.`,
       why: `The extracts that make up this record disagree about ${fieldPhrase(disagreement)}. They were assembled as one note, so one of them describes something else — or the note spans more than one encounter.`,
       steps: [
         `Open the cited pages and read ${fieldPhrase(disagreement)} on each.`,
@@ -183,6 +196,7 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
   if (input.status === "STALE") {
     return {
       kind: "STALE",
+      requirement: "Re-confirm this record, or dismiss the stale copy.",
       why: input.staleReason?.trim() || "This entry was reviewed, and its source content changed afterwards, so the earlier review no longer covers what the record now says.",
       steps: [
         "Compare this entry with the fresh draft shown beside it.",
@@ -195,6 +209,7 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
   if (input.status === "GENERATION_LOSS") {
     return {
       kind: "GENERATION_LOSS",
+      requirement: "Confirm this record is in the source, or reject it.",
       why: "An earlier extraction produced this entry and the current one did not reproduce it, so no current reading of the source supports it.",
       steps: [
         "Check the cited page: if the content is really there, Verify to keep it.",
@@ -209,6 +224,7 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
     const fields = input.corroboration.unreproducedFields ?? [];
     return {
       kind: "NOT_CORROBORATED",
+      requirement: "Check the named fields against the source, then confirm.",
       why: `A second reading of the source, taken without sight of this extraction, did not reproduce ${fields.length ? fieldPhrase(fields) : "every fact recorded here"}.`,
       steps: [
         "Check the named fields against the cited page.",
@@ -223,6 +239,7 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
   if (disputes > 0) {
     return {
       kind: "UNRESOLVED_DISPUTE",
+      requirement: "Decide which reading the source supports, then correct or confirm.",
       why: `A second pass disagreed with ${disputes} extracted fact${disputes === 1 ? "" : "s"} here, and reading the source did not settle the disagreement either way.`,
       steps: [
         "Open the cited page and decide which reading the source supports.",
@@ -236,6 +253,7 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
   if (input.dateStatus === "UNKNOWN") {
     return {
       kind: "UNDATED",
+      requirement: "Set the service date from the source, or reclassify this as material that carries none.",
       why: "No date in the source could be supported for this entry, so it is held off the dated chronology rather than being placed on a guessed date.",
       steps: [
         "Read the service date from the source page and set it in the date field on this card.",
@@ -249,6 +267,7 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
   if (input.auditResult === "SOURCE_CONFLICT" && !input.auditVersion) {
     return {
       kind: "LEGACY_CONFLICT",
+      requirement: "Check this record against its cited page, then confirm.",
       why: "An earlier extraction graded this entry a source conflict, but that run did not record what the disagreement was, so it cannot be shown to you here.",
       steps: [
         "Check the entry against its cited page — that is the fastest resolution.",
@@ -263,6 +282,7 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
   if (input.auditResult === "EXTRACTION_INCOMPLETE") {
     return {
       kind: "DOCUMENT_INCOMPLETE",
+      requirement: "Nothing on this record. Read it and confirm.",
       why: "This entry is sound in itself; the DOCUMENT it came from is incomplete — part of it was not read, or a dated note produced no entry.",
       steps: [
         "Nothing needs correcting on this card.",
@@ -275,6 +295,7 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
   if (input.auditResult === "FAILED") {
     return {
       kind: "INTEGRITY_FAILURE",
+      requirement: "Correct this record so every statement has support, or reject it.",
       why: "This entry failed an integrity check — it carries no citable claim, or a claim with no supporting excerpt, so there is nothing to verify against the source.",
       steps: ["Check the cited page.", "Correct the entry so every statement has support, or Reject it."],
       canAttest: false,
@@ -284,6 +305,7 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
   if (blocking.length) {
     return {
       kind: "REVIEW_FLAG",
+      requirement: "Check this record against its cited page, then confirm.",
       why: blocking[0].detail,
       steps: ["Resolve the finding shown below, then verify."],
       canAttest: false,
@@ -296,6 +318,7 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
     if (openFindings.length) {
       return {
         kind: "REVIEW_FLAG",
+      requirement: "Check this record against its cited page, then confirm.",
         why: openFindings[0].detail,
         steps: ["Check the entry against its cited page.", "Verify if it is right; Correct or Reject if not."],
         canAttest: true,
@@ -312,6 +335,7 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
       const { subject, plural } = warnedPhrase(lowOcr);
       return {
         kind: "LOW_CONFIDENCE_OCR",
+      requirement: "Check the named field against the page, then confirm.",
         why: `${subject} ${plural ? "were" : "was"} read from a page whose text recognition scored low confidence, so the characters themselves may not be what the page says.`,
         steps: [
           "Open the cited page and read the named field directly off the source.",
@@ -326,6 +350,7 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
       const { subject, plural } = warnedPhrase(copied);
       return {
         kind: "CARRIED_FORWARD",
+      requirement: "Check whether this was assessed at this visit, then confirm or correct.",
         why: `${subject} ${plural ? "repeat" : "repeats"} wording that already appeared in an earlier note in this record. The text is genuinely in the source, but copied-forward history is not evidence the finding was observed again at this visit.`,
         steps: [
           "Open the cited page and check whether this was assessed at this visit or brought forward from a previous one.",
@@ -338,6 +363,7 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
 
     return {
       kind: "REVIEW_FLAG",
+      requirement: "Check this record against its cited page, then confirm.",
       why: "An automated check flagged this entry for a human's eye. The check that fired was recorded against the document rather than against this entry, so it cannot be named on this card.",
       steps: [
         "Check the entry against its cited page — that resolves it either way.",
@@ -350,6 +376,7 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
 
   return {
     kind: "CLEAN",
+    requirement: "Read this record against its cited pages and confirm it.",
     why: "Automated checks found nothing wrong with this record. It still needs a person to confirm it.",
     steps: ["Read the record against its cited pages.", "Verify to attest it."],
     canAttest: true,

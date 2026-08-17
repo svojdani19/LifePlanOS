@@ -141,3 +141,47 @@ describe("the reason matches the evidence", () => {
     expect(g.canAttest).toBe(true);
   });
 });
+
+describe("every record states what it needs, in one sentence", () => {
+  it("gives every state a short imperative requirement", () => {
+    const states: GuidanceInput[] = [
+      base(),
+      base({ dateStatus: "UNKNOWN" }),
+      base({ status: "STALE" }),
+      base({ status: "GENERATION_LOSS" }),
+      base({ auditResult: "SOURCE_CONFLICT", unresolvedDisputes: 2 }),
+      base({ auditResult: "SOURCE_CONFLICT", auditVersion: null }),
+      base({ auditResult: "EXTRACTION_INCOMPLETE" }),
+      base({ auditResult: "FAILED" }),
+      base({ auditResult: "NEEDS_HUMAN_REVIEW" }),
+      base({ contradictedFields: ["date"] }),
+      base({ fragmentDisagreement: ["date"] }),
+      base({ corroboration: { result: "NOT_CORROBORATED", unreproducedFields: ["billedAmount"] } }),
+    ];
+    for (const s of states) {
+      const g = guidanceFor(s);
+      // Short enough to read at a glance, long enough to be an instruction.
+      expect(g.requirement.length, JSON.stringify(s)).toBeGreaterThan(15);
+      expect(g.requirement.length, JSON.stringify(s)).toBeLessThan(110);
+      expect(g.requirement.endsWith("."), g.requirement).toBe(true);
+      // An imperative, not a description of the problem.
+      expect(g.requirement, g.kind).toMatch(/^(Correct|Decide|Check|Set|Confirm|Re-confirm|Read|Nothing)/);
+    }
+  });
+
+  it("asks for the date when the date is what is missing", () => {
+    expect(guidanceFor(base({ dateStatus: "UNKNOWN" })).requirement).toMatch(/^Set the service date/);
+  });
+
+  it("names the field to correct when the source contradicts one", () => {
+    expect(guidanceFor(base({ contradictedFields: ["provider"] })).requirement).toMatch(/Correct the provider/);
+  });
+
+  it("asks for nothing on a record whose only problem is its document", () => {
+    expect(guidanceFor(base({ auditResult: "EXTRACTION_INCOMPLETE" })).requirement).toMatch(/^Nothing on this record/);
+  });
+
+  it("asks a clean record only to be read and confirmed", () => {
+    expect(guidanceFor(base()).requirement).toMatch(/^Read this record/);
+  });
+});

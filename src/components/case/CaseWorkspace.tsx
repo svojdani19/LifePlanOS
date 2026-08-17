@@ -50,6 +50,7 @@ import { pageRange } from "@/lib/documents/meta";
 import { recordEncounters, narrativeFor } from "@/lib/documents/recordSummary";
 import { structuredConfidence } from "@/lib/engine/citationQuality";
 import { PROVENANCE_UPGRADE_STALE_REASON } from "@/lib/records/provenanceUpgrade";
+import { presentClaims, labelForField } from "@/lib/records/claimPresentation";
 // Aliased: this file already has a `FindingList` for the case's legal
 // findings, which are a different concept from record-audit findings.
 import { FindingList as RecordFindingList, FoldedFindings } from "@/components/case/FindingList";
@@ -4272,7 +4273,6 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
   const [regenNotice, setRegenNotice] = useState<string | null>(null);
   const [groupError, setGroupError] = useState<string | null>(null);
   /** Rows whose full claim list the reviewer has opened. */
-  const [expandedClaims, setExpandedClaims] = useState<Set<string>>(new Set());
   if (!doc) return null;
   const ex = doc.extraction ?? {};
   const encounters: AnyRec[] = doc.encounters ?? [];
@@ -4550,31 +4550,74 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
             {/* Shown for an exception AND for a caution: a caution is the
                 thing the reviewer must read before signing, so hiding it
                 would leave them signing blind. */}
-            {e.guidance && e.attention !== "CLEAN" && (
-              <div className={cn("mt-1.5 rounded border px-2 py-1.5 text-[11px]", e.guidance.canAttest ? "border-amber-200 bg-amber-50 text-amber-900" : "border-red-200 bg-red-50 text-red-900")}>
-                <p className="font-semibold">{GUIDANCE_TITLE[e.guidance.kind] ?? "Needs review"}</p>
-                <p className="mt-0.5">{e.guidance.why}</p>
-                {(e.guidance.steps ?? []).length > 0 && (
-                  <ul className="mt-1 list-disc space-y-0.5 pl-4">
-                    {(e.guidance.steps as string[]).map((step: string, i: number) => (
-                      <li key={i}>{step}</li>
-                    ))}
-                  </ul>
+            {e.guidance && (
+              <div
+                className={cn(
+                  "mt-1.5 rounded border px-2 py-1.5 text-[11px]",
+                  e.attention === "CLEAN"
+                    ? "border-ink-100 bg-ink-50/60 text-ink-700"
+                    : e.guidance.canAttest
+                      ? "border-amber-200 bg-amber-50 text-amber-900"
+                      : "border-red-200 bg-red-50 text-red-900",
                 )}
-                {e.pageStart && (
-                  <a
-                    href={`/api/cases/${caseId}/documents/${e.sourceDocumentId}/view`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="mt-1 inline-block font-medium underline"
-                  >
-                    Open the source at p. {e.pageStart}{e.pageEnd && e.pageEnd !== e.pageStart ? `–${e.pageEnd}` : ""}
-                  </a>
-                )}
+              >
+                {/* THE ASK, first and in one sentence. Everything else on this
+                    card is evidence for it — and evidence was what the card
+                    used to open with. */}
+                <p>
+                  <span className="font-semibold">What this needs: </span>
+                  {e.guidance.requirement}
+                </p>
+                <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+                  {e.pageStart && (
+                    <a
+                      href={`/api/cases/${caseId}/documents/${e.sourceDocumentId}/view`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="font-medium underline"
+                    >
+                      Open the source at p. {e.pageStart}{e.pageEnd && e.pageEnd !== e.pageStart ? `–${e.pageEnd}` : ""}
+                    </a>
+                  )}
+                  {/* The long explanation is one click away, not in the way. */}
+                  {e.attention !== "CLEAN" && (
+                    <details className="w-full">
+                      <summary className="cursor-pointer select-none font-medium underline">Why is this flagged?</summary>
+                      <p className="mt-1">{e.guidance.why}</p>
+                      {(e.guidance.steps ?? []).length > 0 && (
+                        <ul className="mt-1 list-disc space-y-0.5 pl-4">
+                          {(e.guidance.steps as string[]).map((step: string, i: number) => (
+                            <li key={i}>{step}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </details>
+                  )}
+                </div>
               </div>
             )}
+            {/* WHAT THE RECORD SAYS — the assertion being attested. It sat
+                below the reclassification controls, so the reviewer met two
+                dropdowns before the sentence they were signing. */}
+            {editingEnc === e.id ? (
+              <div className="mt-1.5 flex gap-2">
+                <textarea className="input w-full py-1 text-xs" rows={2} value={draftSummary} onChange={(ev) => setDraftSummary(ev.target.value)} />
+                <button className="btn-primary px-2 py-0.5 text-[11px]" disabled={busy === e.id} onClick={() => act(e.id, "PATCH", { factualSummary: draftSummary })}>Save</button>
+                <button className="btn-ghost px-2 py-0.5 text-[11px]" onClick={() => setEditingEnc(null)}>Cancel</button>
+              </div>
+            ) : (
+              <p className="mt-1 text-xs text-ink-800">{e.factualSummary}</p>
+            )}
+            {e.synthesis && <p className="mt-1 text-[11px] italic text-ink-500">System-generated synthesis (from validated facts only): {e.synthesis}</p>}
             {canVerify && (
-              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
+              /* Reclassifying is a CORRECTION, not part of reading the record,
+                 so it no longer sits between the reviewer and the summary.
+                 Open when the record type is still unknown — that IS the ask. */
+              <details className="mt-1" open={(e.analysisClass ?? "UNKNOWN") === "UNKNOWN"}>
+                <summary className="cursor-pointer select-none text-[11px] font-medium text-ink-600">
+                  Change record type or classification
+                </summary>
+                <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px]">
                 {/* The KIND governs everything downstream — what the row may
                     assert, whether it needs a date, and whether it reaches the
                     medical chronology. A misfiled document is corrected here. */}
@@ -4602,18 +4645,9 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
                   <option value="ANCILLARY">Ancillary — records only</option>
                   <option value="ADMINISTRATIVE">Administrative — records only</option>
                 </select>
-              </div>
+                </div>
+              </details>
             )}
-            {editingEnc === e.id ? (
-              <div className="mt-1.5 flex gap-2">
-                <textarea className="input w-full py-1 text-xs" rows={2} value={draftSummary} onChange={(ev) => setDraftSummary(ev.target.value)} />
-                <button className="btn-primary px-2 py-0.5 text-[11px]" disabled={busy === e.id} onClick={() => act(e.id, "PATCH", { factualSummary: draftSummary })}>Save</button>
-                <button className="btn-ghost px-2 py-0.5 text-[11px]" onClick={() => setEditingEnc(null)}>Cancel</button>
-              </div>
-            ) : (
-              <p className="mt-1 text-xs text-ink-800">{e.factualSummary}</p>
-            )}
-            {e.synthesis && <p className="mt-1 text-[11px] italic text-ink-500">System-generated synthesis (from validated facts only): {e.synthesis}</p>}
             {/* The extraction fragments this record was assembled from —
                 evidence and citations, not separate decisions. A reviewer can
                 open them to see exactly what one signature covers, and can
@@ -4645,42 +4679,42 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
               </details>
             )}
             {/* Everything a signature covers must be inspectable before it is
-                given. The old ceiling showed four claims of a page that can
-                carry thirty, so a reviewer attested to content the card never
-                displayed. Concise by default, complete on request. */}
+                given — so nothing is hidden. But a record is not READ by
+                scrolling 318 raw quotes, and the first four used to be an
+                account number and some garbled OCR. Ordered clinically, folded
+                by default, with untyped page text kept separately. */}
             {(() => {
-              const claims: AnyRec[] = e.claims ?? [];
-              const open = expandedClaims.has(e.id);
-              const shown = open ? claims : claims.slice(0, 4);
+              const { clinical, raw } = presentClaims((e.claims ?? []) as AnyRec[]);
+              const total = clinical.length + raw.length;
+              if (!total) return null;
+              const quote = (c: AnyRec, i: number) => (
+                <p key={i} className="mt-1 text-[11px] text-ink-500">
+                  <span className="font-medium text-ink-600">{labelForField(c.field as string)}: </span>
+                  &ldquo;{c.excerpt}&rdquo;{c.page != null ? ` (p. ${c.page})` : " (page unknown)"}
+                  {c.warning ? <span className="text-amber-700"> — {c.warning}</span> : null}
+                </p>
+              );
               return (
-                <>
-                  {shown.map((c: AnyRec, i: number) => (
-                    <p key={i} className="mt-1 text-[11px] text-ink-500">
-                      <span className="font-medium text-ink-600">{c.field}: </span>“{c.excerpt}”{c.page != null ? ` (p. ${c.page})` : " (page unknown)"}
-                      {c.warning ? <span className="text-amber-700"> — {c.warning}</span> : null}
-                    </p>
-                  ))}
-                  {claims.length > 4 && (
-                    <button
-                      type="button"
-                      className="mt-1 text-[11px] font-medium text-brand-700 hover:underline"
-                      aria-expanded={open}
-                      onClick={() =>
-                        setExpandedClaims((prev) => {
-                          const next = new Set(prev);
-                          if (next.has(e.id)) next.delete(e.id);
-                          else next.add(e.id);
-                          return next;
-                        })
-                      }
-                    >
-                      {open ? "Show fewer claims" : `Show all ${claims.length} claims`}
-                    </button>
-                  )}
-                  {!open && claims.length > 4 && (
-                    <p className="mt-0.5 text-[11px] text-ink-400">{claims.length} claims in total; all are covered by a verification.</p>
-                  )}
-                </>
+                <details className="mt-1.5">
+                  <summary className="cursor-pointer select-none text-[11px] font-medium text-ink-600">
+                    Supporting quotes from the source ({total})
+                    {raw.length > 0 && <span className="font-normal text-ink-400"> · {clinical.length} clinical, {raw.length} page text</span>}
+                  </summary>
+                  <div className="border-l-2 border-ink-100 pl-2">
+                    {clinical.map(quote)}
+                    {raw.length > 0 && (
+                      <details className="mt-1">
+                        <summary className="cursor-pointer select-none text-[11px] text-ink-400">
+                          {raw.length} quote{raw.length === 1 ? "" : "s"} of untyped page text — headers, identifiers, OCR fragments
+                        </summary>
+                        {raw.map(quote)}
+                      </details>
+                    )}
+                  </div>
+                  {/* Said plainly: the signature covers all of it, including
+                      what is folded away. */}
+                  <p className="mt-1 text-[11px] text-ink-400">Verifying this record attests to all {total} of these.</p>
+                </details>
               );
             })()}
             {(e.warnings ?? []).map((w: string, i: number) => (
