@@ -15,6 +15,8 @@ import {
 } from "@/lib/engine/careGrounding";
 import { ALL_ASSUMED, sealProvenance, projectionNote, type ProjectionInputs } from "@/lib/engine/projectionProvenance";
 import { locateConditionEvidence } from "@/lib/engine/evidence";
+import { locateConditionEvidenceInClaims, stateObjectiveEvidence } from "@/lib/engine/conditionEvidence";
+import { CURRENT_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
 import { generateStandardOfCare } from "@/lib/engine/standardOfCare";
 import { mapRecommendationToCondition, type CondInput } from "@/lib/engine/integrity";
 import { planRegeneration } from "@/lib/engine/lifecycle";
@@ -151,6 +153,16 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
   const additionalDx = (Array.isArray(c.additionalDiagnoses) ? c.additionalDiagnoses : []) as { diagnosis?: string; icd10Code?: string }[];
   // Records once, for locating each condition's objective evidence (doc + page + quote).
   const caseDocs = await prisma.document.findMany({ where: { caseId }, select: { id: true, filename: true, type: true, extractedText: true, pageCount: true } });
+  // …and the VALIDATED extracted claims, which are the better source: typed,
+  // page-cited, and the very content a reviewer attests to on the Records
+  // page. The text locator greps raw document text and had discarded the one
+  // claim that justified "Chronic pain syndrome" as too generic a sentence,
+  // leaving "See medical records." standing in the evidence field.
+  const filenameFor = new Map(caseDocs.map((d) => [d.id, d.filename]));
+  const claimRows = await prisma.extractedEncounter.findMany({
+    where: { caseId, ...CURRENT_OUTPUT_WHERE },
+    select: { sourceDocumentId: true, encounterDate: true, claims: true },
+  });
   const conditions: { id: string }[] = [];
   const conditionNames: string[] = [];
   const seenNames = new Set<string>();
@@ -158,22 +170,40 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
     const key = data.name.trim().toLowerCase();
     if (!key || seenNames.has(key)) return;
     seenNames.add(key);
-    // Locate the actual evidence in the records: document, page, verbatim quote.
+    // Locate the actual evidence: the validated claims first, then the raw
+    // text locator for anything they missed.
+    const claimEvidence = locateConditionEvidenceInClaims(claimRows, filenameFor, data.name);
     const sources = locateConditionEvidence(caseDocs, data.name);
-    // A generic placeholder gives way to the strongest located quote.
-    const objectiveEvidence =
-      /^see medical records/i.test(data.objectiveEvidence) && sources[0]
+
+    // A placeholder is never evidence. Where the template carries one, it is
+    // replaced by a real finding — or by an explicit statement that no finding
+    // was located, which is a fact a physician needs and "see medical records"
+    // actively concealed.
+    const placeholder = /^see medical records/i.test(data.objectiveEvidence);
+    const stated = placeholder ? stateObjectiveEvidence(claimEvidence, data.name) : null;
+    const objectiveEvidence = stated
+      ? stated.objectiveEvidence
+      : placeholder && sources[0]
         ? `"${sources[0].quote}" (${sources[0].filename}${sources[0].page ? `, p. ${sources[0].page}` : ""})`
         : data.objectiveEvidence;
-    const supportingRecords = sources.length
-      ? sources.map((s) => `${s.filename}${s.page ? ` p. ${s.page}` : ""}`).join("; ")
-      : "Derived from ingested records (see chronology).";
+    // An unsupported condition asks for a physician rather than passing quietly.
+    const missingInfo = stated && !stated.supported ? stated.missingInfo : data.missingInfo;
+
+    // Cite the claim-backed records first; they carry the page and the field.
+    const citedRecords = [
+      ...claimEvidence.map((e) => `${e.filename}${e.page != null ? ` p. ${e.page}` : ""}`),
+      ...sources.map((s) => `${s.filename}${s.page ? ` p. ${s.page}` : ""}`),
+    ];
+    const supportingRecords = citedRecords.length
+      ? [...new Set(citedRecords)].join("; ")
+      : "No record in this case was located that asserts this condition.";
     const cond = await prisma.condition.create({
       data: {
         caseId,
         supportingRecords,
         ...data,
         objectiveEvidence,
+        missingInfo,
         evidenceSources: sources.length ? (sources as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
       },
     });
