@@ -1778,14 +1778,56 @@ function mostAgreeableReference(it: AnyRec): string {
 // separate Standard-of-Care view. Everything is synthesized by the shared pure
 // engine from the case data already loaded (no extra fetch).
 const CONF_TONE_D: Record<string, "green" | "amber" | "red" | "neutral"> = { High: "green", Moderate: "amber", Low: "red", Indeterminate: "neutral" };
+// ── Dossier layout ──────────────────────────────────────────────────────────
+// A recommendation dossier is eight or nine sections of dense clinical prose,
+// and it used to be a flat `space-y-3` stack of identical tiny grey labels.
+// Nothing marked where one section stopped and the next began, so the
+// necessity narrative, the probability, four columns of cited findings, the
+// literature and the challenges ran together into one grey wall.
+//
+// Two rules fix it, and both are about BOUNDARIES rather than decoration:
+// every section is separated by a rule and carries a heading of its own
+// weight, and every cited finding is a two-line unit — the finding, then its
+// citation beneath — so twelve of them read as twelve things.
+
+/** One titled section of the dossier, visibly separated from its neighbours. */
+function DossierSection({
+  label,
+  tone = "neutral",
+  focusRef,
+  highlighted,
+  children,
+}: {
+  label: string;
+  tone?: "neutral" | "warning";
+  focusRef?: boolean;
+  highlighted?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <section
+      data-focus-target={focusRef ? "" : undefined}
+      className={cn("border-t border-ink-100 pt-3", highlighted && "rounded-md bg-amber-50 p-2 ring-2 ring-amber-400")}
+    >
+      <h4 className={cn("text-[11px] font-semibold uppercase tracking-wider", tone === "warning" ? "text-amber-700" : "text-ink-400")}>{label}</h4>
+      <div className="mt-1.5">{children}</div>
+    </section>
+  );
+}
+
 function EvidenceBucket({ label, items }: { label: string; items: EvidenceItem[] }) {
   if (!items.length) return null;
   return (
-    <div>
-      <p className="text-xs font-medium text-ink-500">{label}</p>
-      <ul className="mt-0.5 space-y-0.5">
+    <div className="rounded-md border border-ink-100 bg-ink-50/50 p-2">
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">{label}</p>
+      <ul className="mt-1.5 space-y-1.5">
         {items.slice(0, 4).map((e, i) => (
-          <li key={i} className="text-ink-700">{e.text}{e.source ? <span className="text-ink-400"> ({e.source})</span> : null}</li>
+          // The citation on its own line: inline and parenthesised, it ran
+          // into the next finding and the two became one paragraph.
+          <li key={i} className="border-l-2 border-ink-200 pl-2 text-[13px] leading-snug text-ink-800">
+            {e.text}
+            {e.source ? <span className="mt-0.5 block text-[11px] text-ink-400">{e.source}</span> : null}
+          </li>
         ))}
       </ul>
     </div>
@@ -1812,9 +1854,9 @@ function RecommendationDossierView({ dossier, assessment, highlight, condensed =
   const se = dossier.supportingEvidence;
   const target = highlight ? HIGHLIGHT_SECTION[highlight] : undefined;
   return (
-    <div className="space-y-3 text-sm">
+    <div className="space-y-4 text-sm">
       {assessment && (
-        <div data-focus-target={target === "reasoning" ? "" : undefined} className={cn("rounded-lg border border-brand-100 bg-brand-50/60 p-2.5", target === "reasoning" && "ring-2 ring-amber-400")}>
+        <div data-focus-target={target === "reasoning" ? "" : undefined} className={cn("rounded-lg border border-brand-100 bg-brand-50/60 p-3", target === "reasoning" && "ring-2 ring-amber-400")}>
           <p className="text-xs font-semibold uppercase tracking-wide text-brand-700">Clinical reasoning</p>
           <p className="mt-0.5 leading-relaxed text-ink-800"><span className="font-medium">{PROBABILITY_LABEL[assessment.probabilityClassification]}.</span> {assessment.inclusionRationale}</p>
           <p className="mt-1 text-xs text-ink-600">Pathway: {assessment.clinicalPathway} · Evidence strength: {EVIDENCE_STRENGTH_LABEL[assessment.evidenceStrength]} · Confidence: {CONFIDENCE_LABEL[assessment.recommendationConfidence]}{assessment.frequencySupported ? "" : " · frequency unverified"}</p>
@@ -1824,29 +1866,25 @@ function RecommendationDossierView({ dossier, assessment, highlight, condensed =
           )}
         </div>
       )}
-      <div>
-        <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Medical necessity</p>
-        <p className="mt-1 leading-relaxed text-ink-800">{dossier.medicalNecessity}</p>
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        {/* The numeric probability stays clinical-team-only; the condensed
-            (attorney) view keeps the qualitative statement below. */}
-        {!condensed && (
-          <>
-            <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">Probability</span>
-            <Badge tone={dossier.probability.percentage >= 51 ? "green" : "amber"}>{dossier.probability.percentage}%</Badge>
-          </>
-        )}
-        <span className="text-xs font-semibold uppercase tracking-wide text-ink-500">Clinical confidence</span>
-        <Badge tone={CONF_TONE_D[dossier.confidence.level]}>{dossier.confidence.level.toLowerCase()}</Badge>
-      </div>
-      <p className="text-ink-700">{dossier.probability.statement}</p>
+      <DossierSection label="Medical necessity">
+        <p className="leading-relaxed text-ink-800">{dossier.medicalNecessity}</p>
+      </DossierSection>
+
+      <DossierSection label="Probability and confidence">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* The numeric probability stays clinical-team-only; the condensed
+              (attorney) view keeps the qualitative statement below. */}
+          {!condensed && <Badge tone={dossier.probability.percentage >= 51 ? "green" : "amber"}>{dossier.probability.percentage}%</Badge>}
+          <Badge tone={CONF_TONE_D[dossier.confidence.level]}>{dossier.confidence.level.toLowerCase()} confidence</Badge>
+        </div>
+        <p className="mt-1.5 text-ink-700">{dossier.probability.statement}</p>
+      </DossierSection>
+
       {/* Attorney-condensed view ends at the probability statement — the
           clinical evidence detail below is the clinical team's surface. */}
       {condensed ? null : (<>
-      <div data-focus-target={target === "evidence" ? "" : undefined} className={cn(target === "evidence" && HL)}>
-        <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Supporting clinical evidence</p>
-        <div className="mt-1 grid gap-2 md:grid-cols-2">
+      <DossierSection label="Supporting clinical evidence" focusRef={target === "evidence"} highlighted={target === "evidence"}>
+        <div className="grid gap-2 md:grid-cols-2">
           <EvidenceBucket label="Supporting diagnoses" items={se.diagnoses} />
           <EvidenceBucket label="Objective findings" items={se.objectiveFindings} />
           <EvidenceBucket label="Imaging" items={se.imaging} />
@@ -1856,30 +1894,37 @@ function RecommendationDossierView({ dossier, assessment, highlight, condensed =
           <EvidenceBucket label="Treating-physician documentation" items={se.physicianDocumentation} />
           <EvidenceBucket label="Clinical guidelines" items={se.guidelines} />
         </div>
-      </div>
-      <div data-focus-target={target === "literature" ? "" : undefined} className={cn(target === "literature" && HL)}>
-        <p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Supporting literature</p>
+      </DossierSection>
+
+      <DossierSection label="Supporting literature" focusRef={target === "literature"} highlighted={target === "literature"}>
         {dossier.literature.length ? (
-          <ol className="mt-1 space-y-1.5">
+          <ol className="space-y-2">
             {dossier.literature.map((l, i) => (
-              <li key={i} className="text-ink-700">
+              <li key={i} className="border-l-2 border-ink-200 pl-2 text-ink-700">
                 <span className="font-medium">{l.title}</span>{l.year ? ` (${l.year})` : ""} <span className="text-ink-400">· {l.studyType}</span>
-                <p className="text-xs text-ink-500">Supports {l.supports}. {l.applicability}.{l.limitations ? ` Limitation: ${l.limitations}.` : ""}</p>
+                <p className="mt-0.5 text-xs text-ink-500">Supports {l.supports}. {l.applicability}.{l.limitations ? ` Limitation: ${l.limitations}.` : ""}</p>
               </li>
             ))}
           </ol>
         ) : (
-          <p className="mt-1 text-ink-400">Direct published literature specific to this recommendation is limited; it rests on the applicable clinical guidance and the treating record.</p>
+          <p className="text-ink-400">Direct published literature specific to this recommendation is limited; it rests on the applicable clinical guidance and the treating record.</p>
         )}
-      </div>
+      </DossierSection>
+
       {dossier.contradictoryEvidence.length > 0 && (
-        <div><p className="text-xs font-semibold uppercase tracking-wide text-amber-700">Contradictory evidence</p><ul className="mt-0.5 space-y-0.5">{dossier.contradictoryEvidence.slice(0, 4).map((t, i) => <li key={i} className="text-amber-800">{t}</li>)}</ul></div>
+        <DossierSection label="Contradictory evidence" tone="warning">
+          <ul className="space-y-1">{dossier.contradictoryEvidence.slice(0, 4).map((t, i) => <li key={i} className="border-l-2 border-amber-300 pl-2 text-amber-800">{t}</li>)}</ul>
+        </DossierSection>
       )}
       {dossier.unknowns.length > 0 && (
-        <div><p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Unknowns</p><ul className="mt-0.5 space-y-0.5">{dossier.unknowns.slice(0, 4).map((t, i) => <li key={i} className="text-ink-700">{t}</li>)}</ul></div>
+        <DossierSection label="Unknowns">
+          <ul className="space-y-1">{dossier.unknowns.slice(0, 4).map((t, i) => <li key={i} className="border-l-2 border-ink-200 pl-2 text-ink-700">{t}</li>)}</ul>
+        </DossierSection>
       )}
-      <div><p className="text-xs font-semibold uppercase tracking-wide text-ink-500">Potential challenges</p><ul className="mt-0.5 space-y-0.5">{dossier.potentialChallenges.slice(0, 5).map((t, i) => <li key={i} className="text-ink-700">{t}</li>)}</ul></div>
-      <p className="text-xs text-ink-500">{dossier.confidence.explanation}</p>
+      <DossierSection label="Potential challenges">
+        <ul className="space-y-1">{dossier.potentialChallenges.slice(0, 5).map((t, i) => <li key={i} className="border-l-2 border-ink-200 pl-2 text-ink-700">{t}</li>)}</ul>
+      </DossierSection>
+      <p className="border-t border-ink-100 pt-2 text-xs italic text-ink-500">{dossier.confidence.explanation}</p>
       </>)}
     </div>
   );
