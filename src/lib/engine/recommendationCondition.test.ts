@@ -53,3 +53,33 @@ describe("one authoritative condition per recommendation", () => {
     expect(answers.size).toBe(1);
   });
 });
+
+describe("resolution does not depend on how the caller queried", () => {
+  // The case page reads conditions by confidence; the generator read them
+  // unordered. Equally-scoring candidates were settled by list position, so
+  // one recommendation resolved to a lumbar diagnosis in the panel and a
+  // cervical one in the persisted ledger — 56 of 59 items on the reference
+  // case reported as drifted because the two were arguing about different
+  // injuries.
+  const conds = [
+    { id: "c-lumbar", name: "Lumbar radiculopathy", confidence: 70 },
+    { id: "c-cervical", name: "Cervical radiculopathy", confidence: 70 },
+  ] as never[];
+
+  it("gives the same answer whichever order the conditions arrive in", () => {
+    const item = { service: "Pain management office visits", conditionId: null };
+    const a = resolveRecommendationCondition(item, conds);
+    const b = resolveRecommendationCondition(item, [...conds].reverse());
+    expect(b.condition?.id).toBe(a.condition?.id);
+  });
+
+  it("still prefers the higher-confidence diagnosis when they differ", () => {
+    const weighted = [
+      { id: "c-a", name: "Lumbar radiculopathy", confidence: 40 },
+      { id: "c-b", name: "Lumbar radiculopathy", confidence: 90 },
+    ] as never[];
+    const item = { service: "Pain management office visits", conditionId: null };
+    expect(resolveRecommendationCondition(item, weighted).condition?.id).toBe("c-b");
+    expect(resolveRecommendationCondition(item, [...weighted].reverse()).condition?.id).toBe("c-b");
+  });
+});

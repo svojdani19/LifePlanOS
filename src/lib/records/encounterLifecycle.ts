@@ -187,6 +187,15 @@ export const CHRONOLOGY_OUTPUT_WHERE = {
   reviewStatus: { notIn: ["STALE", "SUPERSEDED", "REJECTED"] as string[] },
 } as const;
 
+/** The same rule as a predicate, for rows already in hand.
+ *
+ *  The evidence ledger is built from output rows on the server and compared
+ *  against a rebuild in the browser, where the panel holds the broader REVIEW
+ *  set. Without one shared rule the comparison reported drift for every case
+ *  carrying a stale row — a true statement about two different questions. */
+export const isChronologyOutputRow = (e: { reviewStatus?: string | null }): boolean =>
+  !["STALE", "SUPERSEDED", "REJECTED"].includes(e.reviewStatus ?? "");
+
 /** Chronology rows the review experience shows: current plus stale-for-comparison. */
 export const CHRONOLOGY_REVIEW_WHERE = {
   reviewStatus: { notIn: ["SUPERSEDED", "REJECTED"] as string[] },

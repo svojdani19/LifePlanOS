@@ -400,13 +400,25 @@ const STRENGTH_RANK: Record<LedgerStrength, number> = {
 
 /**
  * Display order: what opposes first (a reviewer must not have to scroll for
- * it), then by how strong the source is, then most recent first.
+ * it), then by how strong the source is, then most recent first — and finally
+ * by the quote itself, which is what makes this a TOTAL order.
+ *
+ * That last tiebreak is not cosmetic. Ranking decides what the per-claim cap
+ * KEEPS, and undated chronology findings of one strength tie on every earlier
+ * key; `sort` is stable, so the survivors followed the order the database
+ * happened to return rows in. Two generations of the same unchanged case then
+ * stored different 12s, and the staleness comparison reported 56 of 59
+ * recommendations as drifted when nothing about the case had moved.
  */
-export function rankForDisplay<T extends { stance: EvidenceStance; strength: LedgerStrength; recordedOn?: Date | string | null }>(rows: readonly T[]): T[] {
+export function rankForDisplay<T extends { stance: EvidenceStance; strength: LedgerStrength; recordedOn?: Date | string | null; quote?: string }>(
+  rows: readonly T[],
+): T[] {
   return [...rows].sort((a, b) => {
     if (a.stance !== b.stance) return a.stance === "OPPOSES" ? -1 : b.stance === "OPPOSES" ? 1 : 0;
     if (a.strength !== b.strength) return STRENGTH_RANK[a.strength] - STRENGTH_RANK[b.strength];
-    return time(b.recordedOn) - time(a.recordedOn);
+    const byDate = time(b.recordedOn) - time(a.recordedOn);
+    if (byDate) return byDate;
+    return (a.quote ?? "").localeCompare(b.quote ?? "");
   });
 }
 

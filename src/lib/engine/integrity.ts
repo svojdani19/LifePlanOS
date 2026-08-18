@@ -247,7 +247,17 @@ export function mapRecommendationToCondition(rec: RecInput, conditions: CondInpu
     const first = pool[0] ?? null;
     return { conditionId: first?.id ?? null, condition: first, region, matched: true, reason: "Region-agnostic service; mapped to an injury-related diagnosis." };
   }
-  const hit = pool.find((c) => bodyRegion(c.name) === region);
+  // Coarse region first, then the FINER anatomy the codebase already knows how
+  // to check. `bodyRegion` answers "spine" for both a cervical and a lumbar
+  // diagnosis, so a lumbar epidural injection matched whichever spine
+  // condition the caller's query happened to list first — and the panel and
+  // the persisted ledger, querying differently, argued about different
+  // injuries. `anatomyCompatible` reads the level and the side, and gives the
+  // benefit of the doubt when neither is stated, so this narrows the match
+  // without refusing one.
+  const inRegion = pool.filter((c) => bodyRegion(c.name) === region);
+  const recAnatomy = `${rec.service} ${rec.specialty ?? ""}`;
+  const hit = inRegion.find((c) => anatomyCompatible(region, recAnatomy, c.name)) ?? inRegion[0];
   if (hit) return { conditionId: hit.id, condition: hit, region, matched: true, reason: `Mapped to ${hit.name} on ${region.replace(/_/g, "/")} region match.` };
   return { conditionId: null, condition: null, region, matched: false, reason: `No documented ${region.replace(/_/g, "/")} diagnosis supports this recommendation.` };
 }

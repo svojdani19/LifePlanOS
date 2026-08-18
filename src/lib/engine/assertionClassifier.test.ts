@@ -156,6 +156,19 @@ describe("a statement of preserved function is not a functional deficit", () => 
     expect(a.statesFunctionalDeficit).toBe(false);
   });
 
+  it("covers the several ways a record states preserved function", () => {
+    // All seen on the reference case, all filed as functional NEED because the
+    // field was called `functionalStatus`.
+    for (const q of [
+      "The patient was able to care for self",
+      "The patient was independent with activities of daily living",
+      "Ambulates independently without assistance",
+      "Returned to full duty without restriction",
+    ]) {
+      expect(classifyAssertion({ quote: q, field: "functionalStatus" }).statesFunctionalDeficit, q).toBe(false);
+    }
+  });
+
   it("keeps the deficit when the same sentence also states one", () => {
     const a = classifyAssertion({ quote: "Independent with self-care but unable to climb stairs", field: "functionalStatus" });
     expect(a.statesFunctionalDeficit).toBe(true);

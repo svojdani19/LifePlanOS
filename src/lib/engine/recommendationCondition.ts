@@ -42,12 +42,31 @@ interface ItemLike {
  * service text. Everywhere else the mapper wins.
  */
 export function resolveRecommendationCondition(item: ItemLike, conditions: readonly CondInput[]): ResolvedCondition {
-  const mapping = mapRecommendationToCondition(item as RecInput, [...conditions]);
-  const mapped = (conditions.find((c) => c.id === mapping.conditionId) ?? null) as DossierCondition | null;
-  const persisted = (conditions.find((c) => c.id === (item.conditionId ?? null)) ?? null) as DossierCondition | null;
+  // CANONICAL ORDER, before anything looks at the list.
+  //
+  // The mapper scores each candidate and keeps the best; equally-scoring
+  // candidates were settled by whichever came first, which meant by whichever
+  // ORDER the caller happened to query. The case page reads conditions by
+  // confidence, the generator read them unordered — so the same recommendation
+  // resolved to a lumbar diagnosis in one place and a cervical one in the
+  // other, and the panel's evidence and the persisted ledger were arguing
+  // about different injuries. Sorting here fixes it for every caller at once
+  // rather than asking twelve query sites to agree.
+  const ordered = [...conditions].sort((a, b) => {
+    const conf = (c: CondInput) => (typeof (c as { confidence?: number }).confidence === "number" ? (c as { confidence?: number }).confidence! : -1);
+    if (conf(a) !== conf(b)) return conf(b) - conf(a);
+    return a.id.localeCompare(b.id);
+  });
+  const mapping = mapRecommendationToCondition(item as RecInput, ordered);
+  const mapped = (ordered.find((c) => c.id === mapping.conditionId) ?? null) as DossierCondition | null;
+  const persisted = (ordered.find((c) => c.id === (item.conditionId ?? null)) ?? null) as DossierCondition | null;
 
-  const mappedRegion = bodyRegion(`${item.service} ${mapped?.name ?? ""}`);
-  const usePersisted = persisted != null && mappedRegion === "general" && bodyRegion(persisted.name) !== "general";
+  // Region-neutrality is a property of the SERVICE, and this asked about the
+  // service WITH the mapped condition's name appended — which is never neutral
+  // once a diagnosis is in the string. It happened to work while the mapper
+  // returned the caller's first condition, and stopped the moment the list was
+  // ordered canonically. `mapping.region` is the service's own region.
+  const usePersisted = persisted != null && mapping.region === "general" && bodyRegion(persisted.name) !== "general";
   const condition = usePersisted ? persisted : (mapped ?? persisted);
 
   // A disagreement is only real when BOTH sources named a diagnosis and they

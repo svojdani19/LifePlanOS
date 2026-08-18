@@ -240,3 +240,31 @@ describe("display ranking survives the wire", () => {
     expect(() => rankForDisplay(rows)).not.toThrow();
   });
 });
+
+describe("the ledger a case produces does not depend on row order", () => {
+  // 56 of 59 recommendations on the reference case reported as drifted after a
+  // regeneration that changed nothing: undated findings of one strength tie on
+  // every ranking key, `sort` is stable, and the cap therefore kept whichever
+  // twelve the database happened to return first.
+  const tied = (n: number): CandidateSource[] =>
+    Array.from({ length: n }, (_, i) => ({
+      strength: "OBJECTIVE" as const,
+      sourceKind: "CHRONOLOGY_EVENT" as const,
+      quote: `Examination ${i}: medial joint space narrowing with reduced range of motion`,
+    }));
+
+  it("keeps the same rows whichever order the candidates arrive in", () => {
+    const forwards = buildLedgerWithCap(PT, tied(40));
+    const backwards = buildLedgerWithCap(PT, [...tied(40)].reverse());
+    expect(backwards.rows.map((r) => r.quote).sort()).toEqual(forwards.rows.map((r) => r.quote).sort());
+  });
+
+  it("ranks identically-graded undated rows in a stable, total order", () => {
+    const rows = [
+      { stance: "SUPPORTS" as const, strength: "OBJECTIVE" as const, recordedOn: null, quote: "b" },
+      { stance: "SUPPORTS" as const, strength: "OBJECTIVE" as const, recordedOn: null, quote: "a" },
+    ];
+    expect(rankForDisplay(rows).map((r) => r.quote)).toEqual(["a", "b"]);
+    expect(rankForDisplay([...rows].reverse()).map((r) => r.quote)).toEqual(["a", "b"]);
+  });
+});

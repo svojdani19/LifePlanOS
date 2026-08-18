@@ -142,7 +142,7 @@ const FUNCTIONAL =
  * an explicit finding the other way, which must not be counted as support.
  */
 const PRESERVED_FUNCTION =
-  /\b(?:independent (?:with|in|for)\b|no (?:functional )?(?:limitations?|deficits?|restrictions?)\b|full range of motion|ambulates? (?:independently|without (?:difficulty|assistance))|no difficulty|unrestricted)/i;
+  /\b(?:independent(?:ly)?\b|no (?:functional )?(?:limitations?|deficits?|restrictions?)\b|full range of motion|ambulates? (?:independently|without (?:difficulty|assistance))|no difficulty|unrestricted|(?:able|abled) to (?:care for (?:self|himself|herself|themselves)|ambulate|walk|transfer|perform)|tolerat(?:es|ed) (?:activity|ambulation|therapy) well|(?:returned|return) to (?:full )?(?:work|duty|activity))/i;
 
 /** Care already delivered. */
 const PRIOR_TREATMENT =

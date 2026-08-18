@@ -537,7 +537,14 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
     const [ledgerItems, ledgerConditions, ledgerEvents, ledgerInterviews] = await Promise.all([
       prisma.futureCareItem.findMany({ where: { caseId, supersededAt: null } }),
       prisma.condition.findMany({ where: { caseId } }),
-      prisma.chronologyEvent.findMany({ where: { caseId } }),
+      // OUTPUT rows only, ordered.
+      //
+      // Two bugs in one line before this. The set was every chronology row for
+      // the case, including ones superseded or gone stale — so the ledger of
+      // record cited findings the report will never print. And the read was
+      // unordered, which let the per-claim cap keep a different twelve on each
+      // generation of an unchanged case.
+      prisma.chronologyEvent.findMany({ where: { caseId, ...CHRONOLOGY_OUTPUT_WHERE }, orderBy: [{ eventDate: "asc" }, { id: "asc" }] }),
       prisma.interviewFinding.findMany({ where: { caseId } }).catch(() => []),
     ]);
     const ledgerCase = {

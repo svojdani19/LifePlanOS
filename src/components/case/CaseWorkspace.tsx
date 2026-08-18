@@ -52,6 +52,7 @@ import { structuredConfidence } from "@/lib/engine/citationQuality";
 import { PROVENANCE_UPGRADE_STALE_REASON } from "@/lib/records/provenanceUpgrade";
 import { presentClaims, labelForField } from "@/lib/records/claimPresentation";
 import { resolveRecommendationCondition } from "@/lib/engine/recommendationCondition";
+import { isChronologyOutputRow } from "@/lib/records/encounterLifecycle";
 import { compareEvidenceSets, describeEvidenceSet, type EvidenceRowIdentity } from "@/lib/engine/evidenceSet";
 import { rankForDisplay } from "@/lib/engine/evidenceLedger";
 // Aliased: this file already has a `FindingList` for the case's legal
@@ -2052,6 +2053,7 @@ function RecommendationDossierView({
   condensed = false,
   physicianEvidence = [],
   recordedEvidence = [],
+  witnessLedger,
   onAddEvidence,
 }: {
   dossier: RecommendationDossier;
@@ -2061,6 +2063,8 @@ function RecommendationDossierView({
   physicianEvidence?: AnyRec[];
   /** The MACHINE ledger as it was recorded against this plan. The read model. */
   recordedEvidence?: AnyRec[];
+  /** The current derivation over OUTPUT rows — the comparison's witness. */
+  witnessLedger?: EvidenceRowIdentity[];
   /** Present only when the viewer may attach evidence. */
   onAddEvidence?: (input: { reference: string; claim: string; stance: string; note?: string }) => Promise<string | null>;
 }) {
@@ -2122,7 +2126,7 @@ function RecommendationDossierView({
           <AddCitation onAdd={onAddEvidence} />
         </DossierSection>
       )}
-      <RecordedEvidence rows={recordedEvidence} derived={dossier.ledger} />
+      <RecordedEvidence rows={recordedEvidence} derived={witnessLedger ?? dossier.ledger} />
 
       {/* "Expert-selected", not "Physician-selected": planners hold this
           permission too and do legitimate literature work. Each row names who
@@ -2197,6 +2201,21 @@ function caseInputs(it: AnyRec, data: AnyRec) {
 function dossierForItem(it: AnyRec, data: AnyRec): RecommendationDossier {
   const { cond, kase, interviews } = caseInputs(it, data);
   return buildRecommendationDossier(it as never, cond as DossierCondition | null, (data.chronologyEvents ?? []) as DossierChronoEvent[], kase, interviews as never);
+}
+
+/**
+ * The dossier the recorded ledger is COMPARED against.
+ *
+ * The workspace holds the review chronology — current rows plus stale ones,
+ * kept for comparison — while the ledger is built from output rows only. Given
+ * two different inputs the comparison faithfully reported drift on every case
+ * with a stale row, which is a true answer to a question nobody asked. Same
+ * rule, same answer.
+ */
+function witnessDossierForItem(it: AnyRec, data: AnyRec): RecommendationDossier {
+  const { cond, kase, interviews } = caseInputs(it, data);
+  const output = ((data.chronologyEvents ?? []) as AnyRec[]).filter(isChronologyOutputRow);
+  return buildRecommendationDossier(it as never, cond as DossierCondition | null, output as DossierChronoEvent[], kase, interviews as never);
 }
 // Clinical Reasoning Engine — the structured determination, computed client-side
 // from the same inputs (the pure engine has no server dependency).
@@ -2410,6 +2429,7 @@ function FutureCarePanel({ data, canEdit, canAddEvidence = false, attorneyView =
                 condensed={attorneyView}
                 physicianEvidence={((data.physicianEvidence ?? []) as AnyRec[]).filter((e) => e.futureCareItemId === it.id)}
                 recordedEvidence={((data.recordedEvidence ?? []) as AnyRec[]).filter((e) => e.futureCareItemId === it.id)}
+                witnessLedger={witnessDossierForItem(it, data).ledger as unknown as EvidenceRowIdentity[]}
                 onAddEvidence={
                   canAddEvidence
                     ? async (input) => {
