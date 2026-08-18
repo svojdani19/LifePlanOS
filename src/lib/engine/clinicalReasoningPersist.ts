@@ -124,6 +124,21 @@ export async function persistCaseReasoning(caseId: string, firmId: string, opts:
     prisma.interviewFinding.findMany({ where: { caseId } }),
     prisma.caseSnapshot.findFirst({ where: { caseId }, orderBy: { version: "desc" }, select: { version: true } }),
   ]);
+  // Hand-entered citations, per recommendation. They are material to the
+  // assessment — see `buildReasoningAssessment` — so a citation added after an
+  // approval must produce a new materialHash and a fresh review, not a cache
+  // hit on the version the physician signed.
+  const handEntered = new Map<string, { claim: string; stance: string; strength: string; sourceKind: string; quote: string }[]>();
+  for (const r of ((await prisma.recommendationEvidence?.findMany({ where: { caseId, addedById: { not: null } } }).catch(() => [])) ?? []) as {
+    futureCareItemId: string;
+    claim: string;
+    stance: string;
+    strength: string;
+    sourceKind: string;
+    quote: string;
+  }[]) {
+    handEntered.set(r.futureCareItemId, [...(handEntered.get(r.futureCareItemId) ?? []), r]);
+  }
   const adult = !kase?.dateOfBirth || (Date.now() - kase.dateOfBirth.getTime()) / (365.25 * 24 * 3600 * 1000) >= 18;
   const dossierCase: DossierCase = { subject: kase?.clientName ?? "the patient", pronounPoss: "the patient's", lifeExpectancyYears: kase?.lifeExpectancyYears ?? 40, adult };
   const conds = conditions as unknown as (CondInput & DossierCondition & { id: string })[];
@@ -144,7 +159,7 @@ export async function persistCaseReasoning(caseId: string, firmId: string, opts:
     seenRec.add(it.id);
     const lineage = { recommendationLineageId: (it as { lineageId?: string }).lineageId ?? null, recommendationVersion: (it as { version?: number }).version ?? null, caseVersion };
     try {
-      const a = buildReasoningAssessment(it as unknown as ReasoningItem, conds, chronology as unknown as DossierChronoEvent[], dossierCase, interviews as unknown as DossierInterview[], { conflicts: conflictFlags.get(it.id) ?? [], replacedByActive: replacedByActive.has(it.id) });
+      const a = buildReasoningAssessment(it as unknown as ReasoningItem, conds, chronology as unknown as DossierChronoEvent[], dossierCase, interviews as unknown as DossierInterview[], { conflicts: conflictFlags.get(it.id) ?? [], replacedByActive: replacedByActive.has(it.id) }, handEntered.get(it.id) ?? []);
       const prior = byRec.get(it.id);
       if (!prior) {
         await prisma.clinicalReasoningAssessment.create({ data: { ...toRow(a), ...lineage, caseId, firmId, recommendationId: it.id } });

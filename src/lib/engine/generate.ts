@@ -16,7 +16,7 @@ import {
 import { ALL_ASSUMED, sealProvenance, projectionNote, type ProjectionInputs } from "@/lib/engine/projectionProvenance";
 import { locateConditionEvidence } from "@/lib/engine/evidence";
 import { buildRecommendationDossier } from "@/lib/engine/medicalNecessity";
-import { persistMachineLedger } from "@/lib/engine/persistLedger";
+import { persistMachineLedger, relinkPhysicianEvidence, serviceKeyOf } from "@/lib/engine/persistLedger";
 import { resolveRecommendationCondition } from "@/lib/engine/recommendationCondition";
 import { locateConditionEvidenceInClaims, stateObjectiveEvidence } from "@/lib/engine/conditionEvidence";
 import { CURRENT_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
@@ -189,7 +189,7 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
   const filenameFor = new Map(caseDocs.map((d) => [d.id, d.filename]));
   const claimRows = await prisma.extractedEncounter.findMany({
     where: { caseId, ...CURRENT_OUTPUT_WHERE },
-    select: { sourceDocumentId: true, encounterDate: true, claims: true },
+    select: { id: true, sourceDocumentId: true, encounterDate: true, claims: true },
   });
   const conditions: { id: string }[] = [];
   const conditionNames: string[] = [];
@@ -241,8 +241,10 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
         evidenceSources:
           claimEvidence.length || sources.length
             ? ([
-                ...claimEvidence.map((e) => ({ documentId: e.documentId, filename: e.filename, page: e.page, quote: e.quote, field: e.field })),
-                ...sources.map((s) => ({ documentId: s.documentId, filename: s.filename, page: s.page, quote: s.quote })),
+                ...claimEvidence.map((e) => ({ documentId: e.documentId, encounterId: e.encounterId, filename: e.filename, page: e.page, quote: e.quote, field: e.field, verbatim: e.verbatim })),
+                // The raw text locator greps document text, so its quote IS
+                // the document's words.
+                ...sources.map((s) => ({ documentId: s.documentId, filename: s.filename, page: s.page, quote: s.quote, verbatim: true })),
               ] as unknown as Prisma.InputJsonValue)
             : Prisma.DbNull,
       },
@@ -551,6 +553,16 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
       dropped += d.ledgerDropped;
       return d.ledger;
     });
+    // Re-point physician citations BEFORE the rebuild is reported: 22 of 59
+    // items on the reference case are recreated with fresh ids each run, and a
+    // preserved row addressing a dead id is a contribution silently lost.
+    const relink = await relinkPhysicianEvidence(prisma as never, caseId, ledgerItems as never);
+    if (relink.relinked || relink.orphaned) {
+      console.info(
+        `[ledger] case ${caseId}: ${relink.relinked} physician citation(s) re-linked to their regenerated recommendation` +
+          (relink.orphaned ? `; ${relink.orphaned} now reference a recommendation no longer in the plan` : ""),
+      );
+    }
     const outcome = await persistMachineLedger(prisma as never, { caseId, firmId: c.firmId }, rows);
     // What the cap excluded is stated. A silent truncation reads as "this is
     // all the evidence there was", which is a different claim.

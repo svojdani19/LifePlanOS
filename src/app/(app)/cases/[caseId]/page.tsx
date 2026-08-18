@@ -74,22 +74,38 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
     },
   });
   if (!c) notFound();
-  // Physician-entered citations, which are NOT derivable and so must travel
-  // with the case. The machine-derived ledger deliberately does not: the panel
-  // rebuilds it from the same builder, and sending both would create two
-  // sources of truth for one thing.
+  // The recommendation evidence ledger, BOTH kinds.
+  //
+  // Physician-entered citations are not derivable and have always had to
+  // travel. The machine rows now travel too: they were being written and never
+  // read, so every consumer re-derived its own copy at display time and a plan
+  // could be printed over a different set of findings than the one it was
+  // approved on, silently. The panel shows the recorded set and compares it
+  // against what the case produces now.
   //
   // Optional-chained for the same reason `structuredRecord` optional-chains
   // its findings query: a running server holding a Prisma client generated
   // before this model existed has no `recommendationEvidence` at all, so
   // `.findMany` throws SYNCHRONOUSLY and `.catch` never gets a promise to
   // attach to. A stale client should cost the citations, not the whole page.
-  const physicianEvidence = await prisma.recommendationEvidence
+  // The SAME canonical grant the API enforces, computed once on the server.
+  // The control was previously drawn from the legacy role permission while the
+  // API required a canonical one, so a user could see a button the server
+  // would refuse — or hold the grant and never be offered it.
+  const canAddEvidence = !caseAccess.platformAdminReadOnly && canCanonicalPermission(ctx, "futurecare.edit", { caseId: c.id });
+
+  const evidenceRows = (await prisma.recommendationEvidence
     ?.findMany({
-      where: { caseId: c.id, firmId: c.firmId, addedById: { not: null } },
-      orderBy: { addedAt: "asc" },
+      where: { caseId: c.id, firmId: c.firmId },
+      orderBy: [{ addedAt: "asc" }, { id: "asc" }],
     })
-    .catch(() => []) ?? [];
+    .catch(() => [])) ?? [];
+  const physicianEvidence = evidenceRows.filter((e) => e.addedById != null);
+  // The MACHINE ledger, sent so the panel can DISPLAY what was recorded rather
+  // than only what it can re-derive in the browser. Both travel: the panel
+  // compares them and says so when they disagree, which is the whole point —
+  // a read model that can silently fall behind is worse than none.
+  const recordedEvidence = evidenceRows.filter((e) => e.addedById == null);
 
   // Significance is computed at display time against the case's CURRENT
   // conditions and care items — never stored on the row, where it would
@@ -139,7 +155,7 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
         <ArrowLeft className="h-4 w-4" /> All Cases
       </Link>
       <CaseWorkspace
-        data={JSON.parse(JSON.stringify({ ...c, physicianEvidence }))}
+        data={JSON.parse(JSON.stringify({ ...c, physicianEvidence, recordedEvidence }))}
         assumptions={assumptions}
         totals={{ totalLifetime, totalPresentValue }}
         permissions={caseAccess.platformAdminReadOnly ? [] : attorneyView ? ROLE_PERMISSIONS.ATTORNEY_REVIEWER : effectivePermissions}
@@ -153,6 +169,7 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
         attorneyView={attorneyView}
         assignedAttorneys={Array.from(new Set(assignedAttorneys))}
         canVerifyRecords={canVerifyRecords}
+        canAddEvidence={canAddEvidence}
         pendingResolution={pendingResolution}
       />
     </div>

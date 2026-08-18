@@ -26,7 +26,84 @@ export interface LedgerStore {
     deleteMany(args: unknown): Promise<{ count: number }>;
     createMany(args: unknown): Promise<{ count: number }>;
     findMany(args: unknown): Promise<unknown[]>;
+    update(args: unknown): Promise<unknown>;
   };
+}
+
+/** Normalised service name — the last-resort key for re-linking. */
+export const serviceKeyOf = (service: string): string => service.trim().toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+interface PhysicianRow {
+  id: string;
+  futureCareItemId: string;
+  lineageId: string | null;
+  serviceKey: string | null;
+}
+
+interface CurrentItem {
+  id: string;
+  service: string;
+  lineageId?: string | null;
+}
+
+export interface RelinkResult {
+  relinked: number;
+  /** Citations whose recommendation is no longer in the plan at all. */
+  orphaned: number;
+}
+
+/**
+ * Re-point a physician's citations at the recommendations they belong to.
+ *
+ * Preserving the ROW is not preserving the CONTRIBUTION. On the reference case
+ * 22 of 59 items are deleted and recreated with fresh ids on every generation,
+ * so a citation keyed to `futureCareItemId` alone survived the rebuild and then
+ * addressed a row that no longer existed: absent from the panel, and beyond the
+ * reach of the delete route, which scopes by that same id. Silent loss that
+ * looked like safety.
+ *
+ * Lineage first — it is the identity the plan versioning already maintains.
+ * Service name second, because a regenerated "Physical therapy" is the same
+ * recommendation to the physician who cited a paper about it. Anything still
+ * unmatched is left alone and REPORTED: the recommendation is genuinely gone,
+ * and that is a fact for a person to resolve, not for this function to tidy
+ * away by guessing.
+ */
+export async function relinkPhysicianEvidence(
+  db: LedgerStore,
+  caseId: string,
+  currentItems: readonly CurrentItem[],
+): Promise<RelinkResult> {
+  const rows = (await db.recommendationEvidence.findMany({
+    where: { caseId, addedById: { not: null } },
+    select: { id: true, futureCareItemId: true, lineageId: true, serviceKey: true },
+  })) as PhysicianRow[];
+  if (!rows.length) return { relinked: 0, orphaned: 0 };
+
+  const live = new Set(currentItems.map((i) => i.id));
+  const byLineage = new Map<string, CurrentItem>();
+  const byService = new Map<string, CurrentItem>();
+  for (const i of currentItems) {
+    if (i.lineageId) byLineage.set(i.lineageId, i);
+    byService.set(serviceKeyOf(i.service), i);
+  }
+
+  let relinked = 0;
+  let orphaned = 0;
+  for (const r of rows) {
+    if (live.has(r.futureCareItemId)) continue; // still pointing at a real item
+    const successor = (r.lineageId ? byLineage.get(r.lineageId) : undefined) ?? (r.serviceKey ? byService.get(r.serviceKey) : undefined);
+    if (!successor) {
+      orphaned++;
+      continue;
+    }
+    await db.recommendationEvidence.update({
+      where: { id: r.id },
+      data: { futureCareItemId: successor.id, lineageId: successor.lineageId ?? r.lineageId },
+    });
+    relinked++;
+  }
+  return { relinked, orphaned };
 }
 
 export interface PersistResult {
@@ -77,6 +154,7 @@ export async function persistMachineLedger(
       quote: r.quote,
       recordedOn: r.recordedOn,
       sourceFingerprint: r.sourceFingerprint,
+      verbatim: r.verbatim,
       producerVersion: r.producerVersion,
     })),
   });

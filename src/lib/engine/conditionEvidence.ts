@@ -68,6 +68,7 @@ export interface ClaimLike {
 }
 
 export interface EncounterLike {
+  id?: string;
   sourceDocumentId: string;
   encounterDate?: Date | string | null;
   claims?: unknown;
@@ -75,6 +76,8 @@ export interface EncounterLike {
 
 export interface ConditionEvidence {
   documentId: string;
+  /** The encounter the claim was extracted from, when the caller supplies it. */
+  encounterId: string | null;
   filename: string;
   page: number | null;
   quote: string;
@@ -83,6 +86,12 @@ export interface ConditionEvidence {
   strength: EvidenceStrength;
   /** When the record carrying it is dated, for pre/post-incident reasoning. */
   recordedOn: string | null;
+  /**
+   * True when the quote is the record's OWN words (a claim excerpt), false
+   * when it is the extraction's normalised value. Both are legitimate; only
+   * one may be presented in a report as what the chart says.
+   */
+  verbatim: boolean;
 }
 
 const trimQuote = (s: string) => {
@@ -147,12 +156,17 @@ export function locateConditionEvidenceInClaims(
 
       out.push({
         documentId: enc.sourceDocumentId,
+        encounterId: enc.id ?? null,
         filename: filenameFor.get(enc.sourceDocumentId) ?? "record on file",
         page: c.page ?? null,
         quote: trimQuote(c.excerpt || c.value || ""),
         field,
         strength,
         recordedOn: enc.encounterDate ? new Date(enc.encounterDate).toISOString().slice(0, 10) : null,
+        // `excerpt` is the record's own sentence; `value` is the extraction's
+        // normalisation of it. A report that quotes the second as the first
+        // attributes words to a clinician who did not write them.
+        verbatim: !!c.excerpt,
       });
     }
   }

@@ -64,6 +64,7 @@ const REFUTED = [
   { id: "finding-lifecycle" },
   { id: "export-gate-visible-findings" },
   { id: "item-evidence-ledger" },
+  { id: "recorded-evidence-read-model" },
 ];
 
 // ── machine-corroboration ────────────────────────────────────────────────────
@@ -603,7 +604,10 @@ describe("refuting: 'this evidence supports this recommendation'", () => {
     const many = Array.from({ length: MAX_ROWS_PER_CLAIM + 9 }, (_, i) => ({
       strength: "OBJECTIVE" as const,
       sourceKind: "CHRONOLOGY_EVENT" as const,
-      quote: `finding ${i}`,
+      // A quote that actually asserts something: since the semantic gate was
+      // added, a source that says nothing produces no rows and there is
+      // nothing for the cap to drop.
+      quote: `Examination ${i}: medial joint space narrowing with reduced range of motion`,
     }));
     const built = buildLedgerWithCap({ id: "i", service: "Physical therapy", category: "PHYSICAL_THERAPY" }, many);
     expect(built.dropped).toBeGreaterThan(0);
@@ -622,5 +626,55 @@ describe("refuting: 'this evidence supports this recommendation'", () => {
     const src = await import("node:fs/promises").then((fs) => fs.readFile("src/lib/engine/persistLedger.ts", "utf8"));
     // The clause that makes the rebuild safe.
     expect(src).toMatch(/addedById: null/);
+  });
+});
+
+
+// ── recorded-evidence-read-model ─────────────────────────────────────────────
+
+describe("refuting: 'what is cited is the evidence as recorded'", () => {
+  const row = (quote: string, over: Record<string, string> = {}) => ({
+    claim: "NECESSITY",
+    stance: "SUPPORTS",
+    strength: "OBJECTIVE",
+    sourceKind: "CHRONOLOGY_EVENT",
+    quote,
+    ...over,
+  });
+
+  it("does not call a set current when the record has moved under it", async () => {
+    const { compareEvidenceSets } = await import("@/lib/engine/evidenceSet");
+    const s = compareEvidenceSets([row("Medial joint space narrowing")], [row("Medial joint space narrowing"), row("Effusion on examination")]);
+    expect(s.state).toBe("STALE");
+  });
+
+  it("does not present a derivation as a record when nothing was persisted", async () => {
+    const { compareEvidenceSets, describeEvidenceSet } = await import("@/lib/engine/evidenceSet");
+    const s = compareEvidenceSets([], [row("Medial joint space narrowing")]);
+    expect(s.state).toBe("MISSING");
+    expect(describeEvidenceSet(s)).toMatch(/has not been filed against this plan/);
+  });
+
+  it("does not resolve a disagreement by preferring the newer set", async () => {
+    // The counts are reported and the RECORDED set is what is shown. Silently
+    // adopting the fresher derivation is exactly the failure being refuted.
+    const { compareEvidenceSets } = await import("@/lib/engine/evidenceSet");
+    const s = compareEvidenceSets([row("A")], [row("B"), row("C")]);
+    expect(s.persistedCount).toBe(1);
+    expect(s.derivedCount).toBe(2);
+    expect(s.removed).toBe(1);
+  });
+
+  it("does not stale a set merely because it was re-persisted", async () => {
+    const { compareEvidenceSets } = await import("@/lib/engine/evidenceSet");
+    expect(compareEvidenceSets([{ ...row("A"), id: "x" } as never], [row("A")]).state).toBe("CURRENT");
+  });
+
+  it("does not let an approval survive a change in the evidence", async () => {
+    // The read model is only half of it: if the evidence set were not material
+    // to the assessment, a physician's approval would carry onto findings they
+    // never saw and the panel's honest banner would be the only trace.
+    const { evidenceSetFingerprint } = await import("@/lib/engine/evidenceSet");
+    expect(evidenceSetFingerprint([row("A")])).not.toBe(evidenceSetFingerprint([row("A"), row("B")]));
   });
 });

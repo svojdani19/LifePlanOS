@@ -52,6 +52,8 @@ import { structuredConfidence } from "@/lib/engine/citationQuality";
 import { PROVENANCE_UPGRADE_STALE_REASON } from "@/lib/records/provenanceUpgrade";
 import { presentClaims, labelForField } from "@/lib/records/claimPresentation";
 import { resolveRecommendationCondition } from "@/lib/engine/recommendationCondition";
+import { compareEvidenceSets, describeEvidenceSet, type EvidenceRowIdentity } from "@/lib/engine/evidenceSet";
+import { rankForDisplay } from "@/lib/engine/evidenceLedger";
 // Aliased: this file already has a `FindingList` for the case's legal
 // findings, which are a different concept from record-audit findings.
 import { FindingList as RecordFindingList, FoldedFindings } from "@/components/case/FindingList";
@@ -162,6 +164,7 @@ export function CaseWorkspace({
   totals,
   permissions,
   canVerifyRecords = false,
+  canAddEvidence = false,
   precedents = [],
   physicians = [],
   attorneyView = false,
@@ -174,6 +177,9 @@ export function CaseWorkspace({
   permissions: Permission[];
   /** Server-computed canonical records.verify for THIS case (factual review). */
   canVerifyRecords?: boolean;
+  /** Canonical `futurecare.edit`, computed server-side — the SAME grant the
+   *  evidence endpoint enforces. */
+  canAddEvidence?: boolean;
   precedents?: AnyRec[];
   physicians?: AnyRec[];
   /** Attorney-facing view: dollar values are never rendered (data unchanged). */
@@ -448,7 +454,7 @@ export function CaseWorkspace({
             action the interviews route actually authorizes for them. */}
         {tab === "providers" && <TreatingProvidersPanel data={data} canEdit={can("case.edit")} canInterview={can("case.edit") || can("physician.review")} attorneyView={attorneyView} call={call} />}
         {tab === "evidence" && !attorneyView && <EvidencePanel data={data} />}
-        {tab === "futurecare" && <FutureCarePanel data={data} canEdit={can("futurecare.edit")} attorneyView={attorneyView} call={call} focusId={focusId} focusCat={focusCat} />}
+        {tab === "futurecare" && <FutureCarePanel data={data} canEdit={can("futurecare.edit")} canAddEvidence={canAddEvidence} attorneyView={attorneyView} call={call} focusId={focusId} focusCat={focusCat} />}
         {tab === "costs" && !attorneyView && <CostsPanel data={data} assumptions={assumptions} totals={totals} canEdit={can("case.edit")} canApprove={can("physician.review")} call={call} focusId={focusId} />}
         {tab === "reviews" && <ReviewsPanel points={data.reviewFindings} hasPlan={hasPlan} redactPricing={attorneyView} />}
         {tab === "physician" && <PhysicianPanel data={data} canReview={can("physician.review")} attorneyView={attorneyView} call={call} />}
@@ -1841,6 +1847,9 @@ function EvidenceBucket({ label, items }: { label: string; items: EvidenceItem[]
   const [showAll, setShowAll] = useState(false);
   if (!items.length) return null;
   const ranked = rankEvidence(items);
+  // Condition-level context sat inside these buckets unmarked, so a statement
+  // about the INJURY read as support for THIS service. Both belong here — a
+  // reader wants the diagnosis in view — but they are different claims.
   const shown = showAll ? ranked : ranked.slice(0, 4);
   return (
     <div className="rounded-md border border-ink-100 bg-ink-50/50 p-2">
@@ -1851,7 +1860,12 @@ function EvidenceBucket({ label, items }: { label: string; items: EvidenceItem[]
           // into the next finding and the two became one paragraph.
           <li key={i} className="border-l-2 border-ink-200 pl-2 text-[13px] leading-snug text-ink-800">
             {e.text}
-            {e.source ? <span className="mt-0.5 block text-[11px] text-ink-400">{e.source}</span> : null}
+            {e.source || e.scope === "CONDITION" ? (
+              <span className="mt-0.5 block text-[11px] text-ink-400">
+                {e.scope === "CONDITION" ? <span className="mr-1 rounded bg-ink-100 px-1 py-px text-[10px] font-medium uppercase tracking-wide text-ink-500">condition context</span> : null}
+                {e.source}
+              </span>
+            ) : null}
           </li>
         ))}
       </ul>
@@ -1868,6 +1882,75 @@ function EvidenceBucket({ label, items }: { label: string; items: EvidenceItem[]
     </div>
   );
 }
+/**
+ * The recorded evidence ledger — read from what was PERSISTED, not re-derived.
+ *
+ * Everything else on this panel is rebuilt in the browser from the case as it
+ * stands right now. That is fine for a summary and wrong for an evidentiary
+ * record: the ledger written when the plan was generated is what the physician
+ * approved and what the report cites, and until now nothing displayed it, so
+ * nobody could see when the two had parted company.
+ *
+ * The current derivation is still computed — as the WITNESS. When the two sets
+ * differ the recorded one is shown and the difference is stated. Reconciling
+ * them is a decision about the case, so it is offered to a person rather than
+ * taken silently by a render.
+ */
+function RecordedEvidence({ rows, derived }: { rows: AnyRec[]; derived?: EvidenceRowIdentity[] }) {
+  const [showAll, setShowAll] = useState(false);
+  const status = compareEvidenceSets(rows as unknown as EvidenceRowIdentity[], derived ?? []);
+  const notice = describeEvidenceSet(status);
+  // Nothing recorded and nothing derivable: this recommendation simply has no
+  // ledger, which the buckets above already convey. Do not add an empty box.
+  if (!rows.length && !(derived ?? []).length) return null;
+
+  const source = rows.length ? (rows as unknown as EvidenceRowIdentity[]) : (derived ?? []);
+  const byClaim = new Map<string, EvidenceRowIdentity[]>();
+  for (const r of source) byClaim.set(r.claim, [...(byClaim.get(r.claim) ?? []), r]);
+
+  return (
+    <DossierSection label="Recorded evidence, by claim" tone={status.state === "CURRENT" ? undefined : "warning"}>
+      {notice ? <p className="mb-2 text-[12px] leading-snug text-amber-800">{notice}</p> : null}
+      <div className="space-y-2">
+        {[...byClaim.entries()].map(([claim, group]) => {
+          const ranked = rankForDisplay(group as never) as unknown as AnyRec[];
+          const shown = showAll ? ranked : ranked.slice(0, 3);
+          return (
+            <div key={claim} className="rounded-md border border-ink-100 bg-white/60 p-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">
+                {CLAIM_LABEL[claim] ?? claim} <span className="font-normal normal-case text-ink-400">· {ranked.length} finding{ranked.length === 1 ? "" : "s"}</span>
+              </p>
+              <ul className="mt-1.5 space-y-1.5">
+                {shown.map((r, i) => (
+                  <li key={i} className={cn("border-l-2 pl-2 text-[13px] leading-snug text-ink-800", r.stance === "OPPOSES" ? "border-amber-400" : "border-ink-200")}>
+                    {r.stance === "OPPOSES" ? <span className="mr-1 rounded bg-amber-100 px-1 py-px text-[10px] font-medium uppercase tracking-wide text-amber-800">argues against</span> : null}
+                    {r.quote as string}
+                    <span className="mt-0.5 block text-[11px] text-ink-400">
+                      {/* Whose words these are. A chronology field is the
+                          extraction's prose about an encounter; only a claim
+                          excerpt is the clinician's own sentence. */}
+                      {r.verbatim ? "quoted from the record" : "summarised from the record"}
+                      {" · "}
+                      {String(r.strength).toLowerCase()}
+                      {r.recordedOn ? ` · ${new Date(r.recordedOn as string).toLocaleDateString()}` : ""}
+                      {r.page ? ` · p. ${r.page}` : ""}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          );
+        })}
+      </div>
+      {source.length > 3 && (
+        <button type="button" className="mt-1.5 text-[11px] font-medium text-brand-700 hover:underline" aria-expanded={showAll} onClick={() => setShowAll((v) => !v)}>
+          {showAll ? "Show the strongest three per claim" : "Show every recorded finding"}
+        </button>
+      )}
+    </DossierSection>
+  );
+}
+
 // Which dossier section a Case Assistant finding category points at, so the
 // deep-link can highlight the exact area that needs to be addressed.
 const HIGHLIGHT_SECTION: Record<string, "reasoning" | "evidence" | "literature"> = {
@@ -1943,6 +2026,15 @@ function AddCitation({ onAdd }: { onAdd: (input: { reference: string; claim: str
   );
 }
 
+/** Who chose a citation, in the words a reader needs. */
+const CONTRIBUTOR_LABEL: Record<string, string> = {
+  PHYSICIAN_REVIEWER: "the reviewing physician",
+  PLANNER: "the life care planner",
+  ADMIN: "a firm administrator",
+  PARALEGAL: "a paralegal",
+  ATTORNEY_REVIEWER: "the reviewing attorney",
+};
+
 /** What each claim is called on screen. */
 const CLAIM_LABEL: Record<string, string> = {
   NECESSITY: "medical necessity",
@@ -1959,6 +2051,7 @@ function RecommendationDossierView({
   highlight,
   condensed = false,
   physicianEvidence = [],
+  recordedEvidence = [],
   onAddEvidence,
 }: {
   dossier: RecommendationDossier;
@@ -1966,6 +2059,8 @@ function RecommendationDossierView({
   highlight?: string | null;
   condensed?: boolean;
   physicianEvidence?: AnyRec[];
+  /** The MACHINE ledger as it was recorded against this plan. The read model. */
+  recordedEvidence?: AnyRec[];
   /** Present only when the viewer may attach evidence. */
   onAddEvidence?: (input: { reference: string; claim: string; stance: string; note?: string }) => Promise<string | null>;
 }) {
@@ -2027,8 +2122,14 @@ function RecommendationDossierView({
           <AddCitation onAdd={onAddEvidence} />
         </DossierSection>
       )}
+      <RecordedEvidence rows={recordedEvidence} derived={dossier.ledger} />
+
+      {/* "Expert-selected", not "Physician-selected": planners hold this
+          permission too and do legitimate literature work. Each row names who
+          actually chose it, so the heading no longer asserts a credential the
+          row may not carry. */}
       {physicianEvidence.length > 0 && (
-        <DossierSection label="Physician-selected evidence">
+        <DossierSection label="Expert-selected evidence">
           <ul className="space-y-2">
             {physicianEvidence.map((e: AnyRec) => (
               <li key={e.id as string} className={cn("border-l-2 pl-2", e.stance === "OPPOSES" ? "border-amber-300" : "border-brand-300")}>
@@ -2039,7 +2140,8 @@ function RecommendationDossierView({
                 </p>
                 <p className="mt-0.5 text-xs text-ink-600">&ldquo;{e.quote as string}&rdquo;</p>
                 <p className="mt-0.5 text-[11px] text-ink-400">
-                  Added by the reviewing physician · {CLAIM_LABEL[e.claim as string] ?? (e.claim as string)}
+                  Selected by {CONTRIBUTOR_LABEL[e.addedByRole as string] ?? "a case contributor"}
+                  {e.addedByCredential ? `, ${e.addedByCredential}` : ""} · {CLAIM_LABEL[e.claim as string] ?? (e.claim as string)}
                   {e.stance === "OPPOSES" ? " · argues against" : ""}
                   {e.citationDoi ? ` · doi:${e.citationDoi}` : e.citationPmid ? ` · PMID ${e.citationPmid}` : ""}
                 </p>
@@ -2102,7 +2204,7 @@ function assessmentForItem(it: AnyRec, data: AnyRec): ReasoningAssessment {
   const { kase, interviews } = caseInputs(it, data);
   const items = (data.futureCareItems ?? []) as ReasoningItem[];
   const { flags, replacedByActive } = detectSetConflicts(items);
-  return buildReasoningAssessment(it as ReasoningItem, (data.conditions ?? []) as never, (data.chronologyEvents ?? []) as DossierChronoEvent[], kase, interviews as never, { conflicts: flags.get(it.id) ?? [], replacedByActive: replacedByActive.has(it.id) });
+  return buildReasoningAssessment(it as ReasoningItem, (data.conditions ?? []) as never, (data.chronologyEvents ?? []) as DossierChronoEvent[], kase, interviews as never, { conflicts: flags.get(it.id) ?? [], replacedByActive: replacedByActive.has(it.id) }, ((data.physicianEvidence ?? []) as AnyRec[]).filter((e) => e.futureCareItemId === it.id) as never);
 }
 
 
@@ -2175,7 +2277,7 @@ function AddCareItemForm({ data, call, onDone }: { data: AnyRec; call: any; onDo
   );
 }
 
-function FutureCarePanel({ data, canEdit, attorneyView = false, call, focusId, focusCat }: { data: AnyRec; canEdit: boolean; attorneyView?: boolean; call: any; focusId?: string | null; focusCat?: string | null }) {
+function FutureCarePanel({ data, canEdit, canAddEvidence = false, attorneyView = false, call, focusId, focusCat }: { data: AnyRec; canEdit: boolean; canAddEvidence?: boolean; attorneyView?: boolean; call: any; focusId?: string | null; focusCat?: string | null }) {
   const [openIds, setOpenIds] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<string>("All");
   // Review-at-scale controls (Phase 11): search, probability / MD-status
@@ -2307,8 +2409,9 @@ function FutureCarePanel({ data, canEdit, attorneyView = false, call, focusId, f
                 highlight={focusId === it.id ? focusCat : null}
                 condensed={attorneyView}
                 physicianEvidence={((data.physicianEvidence ?? []) as AnyRec[]).filter((e) => e.futureCareItemId === it.id)}
+                recordedEvidence={((data.recordedEvidence ?? []) as AnyRec[]).filter((e) => e.futureCareItemId === it.id)}
                 onAddEvidence={
-                  canEdit
+                  canAddEvidence
                     ? async (input) => {
                         // `call` refreshes the route on success and surfaces
                         // the server's own message on failure, so the resolver's

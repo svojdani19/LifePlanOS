@@ -58,3 +58,21 @@ CREATE INDEX IF NOT EXISTS "RecommendationEvidence_futureCareItemId_claim_idx"
   ON "RecommendationEvidence" ("futureCareItemId", "claim");
 CREATE INDEX IF NOT EXISTS "RecommendationEvidence_caseId_addedById_idx"
   ON "RecommendationEvidence" ("caseId", "addedById");
+
+-- Re-linking and attribution.
+--
+-- A citation keyed only to `futureCareItemId` is orphaned by regeneration: 22
+-- of 59 items on the reference case are recreated with fresh ids each run, so
+-- the row was preserved and then pointed at a dead item — invisible in the
+-- panel, unreachable by the delete route. Lineage (and the service name as a
+-- fallback) survives that.
+--
+-- The contributor columns exist because a bare user id cannot support the
+-- claim "Physician-selected evidence".
+ALTER TABLE "RecommendationEvidence" ADD COLUMN IF NOT EXISTS "lineageId"         TEXT;
+ALTER TABLE "RecommendationEvidence" ADD COLUMN IF NOT EXISTS "serviceKey"        TEXT;
+ALTER TABLE "RecommendationEvidence" ADD COLUMN IF NOT EXISTS "addedByRole"       TEXT;
+ALTER TABLE "RecommendationEvidence" ADD COLUMN IF NOT EXISTS "addedByCredential" TEXT;
+
+CREATE INDEX IF NOT EXISTS "RecommendationEvidence_caseId_lineageId_idx"
+  ON "RecommendationEvidence" ("caseId", "lineageId");

@@ -23,7 +23,9 @@
 // facts and were being shown as the same one.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export const EVIDENCE_LEDGER_VERSION = "2026-08-18.item-scoped";
+import { assertionSupportsClaim, classifyAssertion, type AssertionProfile } from "@/lib/engine/assertionClassifier";
+
+export const EVIDENCE_LEDGER_VERSION = "2026-08-18.semantic";
 
 /** What a piece of evidence is being offered to establish. */
 export type EvidenceClaim =
@@ -99,16 +101,24 @@ const KIND_BY_CATEGORY: Record<string, ServiceKind> = {
   SKILLED_NURSING: "ATTENDANT_CARE",
 };
 
-/** Service-name fallbacks for a row whose category says nothing useful. */
+/**
+ * Service-name fallbacks for a row whose category says nothing useful.
+ *
+ * Every noun here is written plural-tolerant. It matters more than it looks:
+ * "Injections 3 times per year" did not match `\binjection\b`, because the
+ * closing boundary fell between the "n" and the "s" — so a record stating an
+ * injection cadence classified as OTHER, and the service match that grounds a
+ * frequency claim silently failed.
+ */
 const KIND_BY_NAME: [RegExp, ServiceKind][] = [
-  [/\b(mri|ct\b|x-?ray|radiograph|ultrasound|imaging|scan)\b/i, "IMAGING"],
-  [/\b(fusion|arthroplasty|replacement|decompression|laminectomy|discectomy|surger|operative)\b/i, "SURGERY"],
-  [/\b(injection|epidural|block|ablation|rhizotomy|infusion)\b/i, "INJECTION"],
-  [/\b(therapy|rehabilitation|rehab|conditioning|restoration)\b/i, "THERAPY"],
-  [/\b(medication|drug|analgesic|opioid|gabapentin|pharmac)\b/i, "MEDICATION"],
-  [/\b(visit|consultation|evaluation|follow-?up|assessment)\b/i, "EVALUATION"],
-  [/\b(wheelchair|walker|brace|orthosis|prosthes|equipment|unit|supplies)\b/i, "EQUIPMENT"],
-  [/\b(attendant|caregiver|nursing|aide|home health)\b/i, "ATTENDANT_CARE"],
+  [/\b(mri|ct\b|x-?rays?|radiographs?|ultrasounds?|imaging|scans?)\b/i, "IMAGING"],
+  [/\b(fusions?|arthroplast(?:y|ies)|replacements?|decompressions?|laminectom(?:y|ies)|discectom(?:y|ies)|surger|operative)\b/i, "SURGERY"],
+  [/\b(injections?|epidurals?|blocks?|ablations?|rhizotom(?:y|ies)|infusions?)\b/i, "INJECTION"],
+  [/\b(therap(?:y|ies)|rehabilitation|rehab|conditioning|restoration)\b/i, "THERAPY"],
+  [/\b(medications?|drugs?|analgesics?|opioids?|gabapentin|pharmac)\b/i, "MEDICATION"],
+  [/\b(visits?|consultations?|evaluations?|follow-?ups?|assessments?)\b/i, "EVALUATION"],
+  [/\b(wheelchairs?|walkers?|braces?|orthoses|orthosis|prosthes|equipment|units?|supplies)\b/i, "EQUIPMENT"],
+  [/\b(attendant|caregivers?|nursing|aides?|home health)\b/i, "ATTENDANT_CARE"],
 ];
 
 export function serviceKindOf(item: { service: string; category?: string | null }): ServiceKind {
@@ -236,6 +246,12 @@ export interface LedgerRow {
   quote: string;
   recordedOn: Date | null;
   sourceFingerprint: string | null;
+  /**
+   * True when `quote` is the record's own words. Chronology narrative fields
+   * are the extraction's PROSE about an encounter, not an excerpt from it, and
+   * a report that presents the two identically misattributes the second.
+   */
+  verbatim: boolean;
   producerVersion: string;
 }
 
@@ -250,10 +266,18 @@ export interface CandidateSource {
   field?: string | null;
   recordedOn?: Date | null;
   sourceFingerprint?: string | null;
+  /** True when `quote` is verbatim from the record. Defaults to false. */
+  verbatim?: boolean;
   /** True when the source's own text argues AGAINST the recommendation. */
   opposes?: boolean;
   /** Set by the caller when the source failed the anatomy gate. */
   anatomyOk?: boolean;
+  /**
+   * Assertions the caller knows structurally — a parsed guideline duration
+   * claim, say. Overrides the text classifier, which is a reader of English
+   * and therefore the weaker witness.
+   */
+  asserts?: Partial<AssertionProfile>;
 }
 
 /**
@@ -325,7 +349,16 @@ function buildAllRows(
     if (c.anatomyOk === false) continue;
     if (!c.quote.trim()) continue;
 
+    // SEMANTIC GATE. `claimsSupportedBy` asks whether a source of this
+    // strength MAY establish a claim for this service. It cannot ask whether
+    // this source SAYS anything about it — so an MRI finding carried necessity,
+    // frequency and duration alike, and the reference case showed 698 rows
+    // under each of three claims: one pool of quotes, filed three times.
+    const asserted = classifyAssertion({ quote: c.quote, field: c.field, asserts: c.asserts });
     for (const claim of claimsSupportedBy(kind, c.strength)) {
+      // Right kind of source, and it actually speaks to this. Silence produces
+      // no row — not an OPPOSES row, and not a row implying support.
+      if (!assertionSupportsClaim(asserted, claim)) continue;
       // One row per (claim, source) — the same quote answering the same claim
       // twice is one piece of evidence.
       const key = `${claim}|${c.sourceKind}|${c.quote}`;
@@ -348,6 +381,7 @@ function buildAllRows(
         quote: c.quote,
         recordedOn: c.recordedOn ?? null,
         sourceFingerprint: c.sourceFingerprint ?? null,
+        verbatim: c.verbatim ?? false,
         producerVersion: EVIDENCE_LEDGER_VERSION,
       });
     }
@@ -368,10 +402,24 @@ const STRENGTH_RANK: Record<LedgerStrength, number> = {
  * Display order: what opposes first (a reviewer must not have to scroll for
  * it), then by how strong the source is, then most recent first.
  */
-export function rankForDisplay<T extends { stance: EvidenceStance; strength: LedgerStrength; recordedOn?: Date | null }>(rows: readonly T[]): T[] {
+export function rankForDisplay<T extends { stance: EvidenceStance; strength: LedgerStrength; recordedOn?: Date | string | null }>(rows: readonly T[]): T[] {
   return [...rows].sort((a, b) => {
     if (a.stance !== b.stance) return a.stance === "OPPOSES" ? -1 : b.stance === "OPPOSES" ? 1 : 0;
     if (a.strength !== b.strength) return STRENGTH_RANK[a.strength] - STRENGTH_RANK[b.strength];
-    return (b.recordedOn?.getTime() ?? 0) - (a.recordedOn?.getTime() ?? 0);
+    return time(b.recordedOn) - time(a.recordedOn);
   });
+}
+
+/**
+ * A date that may have crossed a serialization boundary.
+ *
+ * The persisted ledger reaches the panel as JSON, where a DateTime is a
+ * string — so calling `.getTime()` on it threw and took the whole case page
+ * down. Rows built in memory still carry real Dates, so this helper accepts
+ * both rather than requiring every caller to remember which it holds.
+ */
+function time(v: Date | string | null | undefined): number {
+  if (!v) return 0;
+  const t = v instanceof Date ? v.getTime() : new Date(v).getTime();
+  return Number.isNaN(t) ? 0 : t;
 }

@@ -47,7 +47,10 @@ describe("a service is only offered evidence that bears on it", () => {
   });
 
   it("does not let a patient's reported symptom establish that surgery is INDICATED", () => {
-    const reported = src({ strength: "REPORTED", quote: "Reports ongoing low back pain" });
+    // The quote states a DEFICIT, not just a symptom. Since the semantic gate
+    // was added, "ongoing low back pain" alone establishes nothing: pain is a
+    // symptom, and FUNCTIONAL_NEED asks what the patient cannot do.
+    const reported = src({ strength: "REPORTED", quote: "Reports ongoing low back pain and difficulty standing for more than ten minutes" });
     expect(buildLedgerForItem(SURG, [reported]).some((r) => r.claim === "NECESSITY")).toBe(false);
     // …while the same report IS evidence of a functional need — for therapy,
     // and for surgery too. Impaired function is a primary indication for an
@@ -179,7 +182,9 @@ describe("what a reviewer is shown first", () => {
 
 describe("the ledger is capped, and says what it dropped", () => {
   const many = (n: number): CandidateSource[] =>
-    Array.from({ length: n }, (_, i) => src({ strength: "OBJECTIVE", quote: `Examination finding number ${i}` }));
+    // Each quote must actually ASSERT something, or the semantic gate correctly
+    // produces no rows and there is nothing for the cap to act on.
+    Array.from({ length: n }, (_, i) => src({ strength: "OBJECTIVE", quote: `Examination ${i}: medial joint space narrowing with reduced range of motion` }));
 
   it("keeps at most twelve rows per claim", () => {
     // Persisting every candidate produced 17,208 rows on the reference case,
@@ -213,5 +218,25 @@ describe("the ledger is capped, and says what it dropped", () => {
     const against = src({ strength: "OBJECTIVE", quote: "Imaging shows no structural abnormality", opposes: true });
     const built = buildLedgerWithCap(PT, [...supporting, against]);
     expect(built.rows.some((r) => r.stance === "OPPOSES")).toBe(true);
+  });
+});
+
+describe("display ranking survives the wire", () => {
+  it("orders rows whose dates arrived as JSON strings", () => {
+    // The persisted ledger reaches the panel as JSON, where a DateTime is a
+    // string. Calling `.getTime()` on it threw and took the case page down.
+    const rows = [
+      { stance: "SUPPORTS" as const, strength: "OBJECTIVE" as const, recordedOn: "2024-01-05T00:00:00.000Z", tag: "old" },
+      { stance: "SUPPORTS" as const, strength: "OBJECTIVE" as const, recordedOn: "2025-06-01T00:00:00.000Z", tag: "new" },
+    ];
+    expect(rankForDisplay(rows).map((r) => r.tag)).toEqual(["new", "old"]);
+  });
+
+  it("does not throw on a null or unparseable date", () => {
+    const rows = [
+      { stance: "SUPPORTS" as const, strength: "OBJECTIVE" as const, recordedOn: null },
+      { stance: "SUPPORTS" as const, strength: "OBJECTIVE" as const, recordedOn: "not a date" },
+    ];
+    expect(() => rankForDisplay(rows)).not.toThrow();
   });
 });

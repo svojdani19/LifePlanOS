@@ -32,6 +32,11 @@ const db = vi.hoisted(() => {
         return { count: hit.length };
       },
     },
+    user: {
+      // The contributor snapshot: the row records the role and credential as
+      // they were when the citation was chosen, so the heading can follow it.
+      findFirst: async () => ({ role: "PHYSICIAN_REVIEWER", credentialSummary: "MD, orthopaedic surgery" }),
+    },
     auditLog: { create: async ({ data }: { data: Record<string, unknown> }) => { state.audits.push(data); return data; } },
     $transaction: async (work: (tx: unknown) => Promise<unknown>) => work(prisma),
   };
@@ -152,5 +157,43 @@ describe("removing a citation", () => {
     const res = await DELETE(new Request("http://localhost/api?evidenceId=derived", { method: "DELETE" }), params);
     expect(res.status).toBe(404);
     expect(db.state.evidence).toHaveLength(1);
+  });
+});
+
+
+describe("the control and the server are gated on ONE permission", () => {
+  it("requires the canonical futurecare.edit grant, the same key the button is drawn from", async () => {
+    // The route required `records.verify` while the UI drew the control from
+    // the legacy role permission `futurecare.edit` — two authorization systems,
+    // so the set of people who could SEE the control and the set who could USE
+    // it did not have to overlap.
+    const { requireCanonicalPermission } = await import("@/lib/tenant");
+    await POST(req({ reference: "10.1000/abc", claim: "NECESSITY" }), params);
+    expect(requireCanonicalPermission).toHaveBeenCalledWith(expect.anything(), "futurecare.edit", { caseId: "case-1" });
+  });
+
+  it("gates deletion on the same grant", async () => {
+    const { requireCanonicalPermission } = await import("@/lib/tenant");
+    vi.mocked(requireCanonicalPermission).mockClear();
+    await DELETE(new Request("http://localhost/api?evidenceId=ev-1"), params);
+    expect(requireCanonicalPermission).toHaveBeenCalledWith(expect.anything(), "futurecare.edit", { caseId: "case-1" });
+  });
+
+  it("records WHO chose the citation, by role and stated credential", async () => {
+    // A section headed "Physician-selected evidence" asserted something a bare
+    // user id could not support: planners hold this permission too.
+    await POST(req({ reference: "10.1000/abc", claim: "NECESSITY" }), params);
+    expect(db.state.evidence[0].addedByRole).toBe("PHYSICIAN_REVIEWER");
+    expect(db.state.evidence[0].addedByCredential).toBe("MD, orthopaedic surgery");
+    expect(db.state.audits[0].meta).toMatchObject({ contributorRole: "PHYSICIAN_REVIEWER" });
+  });
+
+  it("keeps the identity a citation needs to survive a regeneration", async () => {
+    // 22 of 59 items on the reference case are recreated with fresh ids each
+    // time the plan is generated.
+    db.state.items = [{ id: "item-1", caseId: "case-1", conditionId: "c-1", service: "Lumbar Epidural  Steroid Injection", lineageId: "lin-7", supersededAt: null }];
+    await POST(req({ reference: "10.1000/abc", claim: "NECESSITY" }), params);
+    expect(db.state.evidence[0].lineageId).toBe("lin-7");
+    expect(db.state.evidence[0].serviceKey).toBe("lumbar epidural steroid injection");
   });
 });

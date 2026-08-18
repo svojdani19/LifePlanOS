@@ -2,6 +2,8 @@ import { buildRecommendationDossier, type DossierItem, type DossierCondition, ty
 import { mapRecommendationToCondition, validateCode, validatePricing, classifyRecommendation, hasPatientRecordSupport, bodyRegion, anatomyCompatible, type RecInput, type CondInput } from "@/lib/engine/integrity";
 import { resolveRecommendationCondition } from "@/lib/engine/recommendationCondition";
 import { citationCompatible } from "@/lib/engine/citationQuality";
+import { serviceKindOf } from "@/lib/engine/evidenceLedger";
+import { evidenceSetFingerprint, type EvidenceRowIdentity } from "@/lib/engine/evidenceSet";
 import { specialtyLens } from "@/lib/engine/specialtyReasoning";
 import { lintAssessmentNarratives } from "@/lib/engine/narrativeSanity";
 import { assessLifetimeSupport, describeLifetimeBasis, type LifetimeSupportResult } from "@/lib/engine/lifetimeSupport";
@@ -668,6 +670,16 @@ export function buildReasoningAssessment(
   kase: DossierCase,
   interviews: DossierInterview[] = [],
   setContext: SetContext = { conflicts: [], replacedByActive: false },
+  /**
+   * Citations a person attached to THIS recommendation by hand.
+   *
+   * They are not derivable, so they are not in the dossier — and they are
+   * unambiguously material: a physician who approved a recommendation and then
+   * added the paper that answers it has changed what the recommendation rests
+   * on. Passed in by the callers that hold them (the panel, the report, the
+   * persistence pass); omitted, the assessment is exactly what it was.
+   */
+  handEnteredEvidence: readonly EvidenceRowIdentity[] = [],
 ): ReasoningAssessment {
   const rec = item as unknown as RecInput;
   const mapping = mapRecommendationToCondition(rec, conditions);
@@ -713,7 +725,18 @@ export function buildReasoningAssessment(
   // one. Both were letting an assumed frequency present as grounded.
   const statesCadence = (text: string): boolean =>
     /\b(?:\d+\s*(?:×|x|times)?\s*(?:per|a|each)\s*(?:day|week|month|year)|weekly|twice weekly|thrice weekly|biweekly|fortnightly|monthly|quarterly|annually|yearly|every\s+\d+\s+(?:day|week|month|year)s?|q\d+ ?(?:h|d|w|m)\b)/i.test(text);
-  const cadenceFromTreatment = se.priorTreatment.filter((e) => statesCadence(e.text));
+  // …and the stated cadence must belong to THIS service. A record reading
+  // "chiropractic three times weekly" states a cadence; it does not ground the
+  // frequency of an injection series, and matching on cadence alone let one
+  // service's documented rate justify another's assumed one. The comparison is
+  // by service KIND, the same coarse vocabulary the evidence ledger uses, and
+  // it fails closed: an entry whose kind cannot be identified is not a match.
+  const itemKind = serviceKindOf(item);
+  const namesThisService = (text: string): boolean => {
+    const kind = serviceKindOf({ service: text, category: null });
+    return kind !== "OTHER" && kind === itemKind;
+  };
+  const cadenceFromTreatment = se.priorTreatment.filter((e) => statesCadence(e.text) && namesThisService(e.text));
   const cadenceFromGuideline = se.guidelines.filter((g) => statesCadence(`${g.text} ${g.source ?? ""}`));
   const frequencySupported = cadenceFromTreatment.length > 0 || cadenceFromGuideline.length > 0 || physicianApproved;
 
@@ -895,10 +918,21 @@ export function buildReasoningAssessment(
   });
   const alternativeExplanations = deriveAlternativeExplanations(region, mapping.conditionId, conditions);
 
+  // ── What makes this assessment MATERIALLY a different assessment ──────────
   // Duration-support evidence (or an attributed professional duration
   // rationale) is MATERIAL: a change in it changes the fingerprint, supersedes
   // the assessment version, and invalidates prior approval per existing policy.
-  const materialHash = hashStr([item.service, item.category ?? "", mapping.conditionId ?? "", region, laterality, purposeFor(item.category, !!item.isLifetime), freqN, durationClass, durationSupport.fingerprint, probabilityClassification, inclusionInTotalsStatus, item.startTrigger ?? "", item.replacesService ?? "", item.physicianStatus ?? "", evidenceStrength, setContext.conflicts.map((c) => c.type + c.otherService).sort().join(",")].join("|"));
+  //
+  // So is THE EVIDENCE ITSELF, which this omitted. Every input below is a
+  // conclusion — the probability class, the strength band, the frequency —
+  // and two different sets of findings routinely produce the same conclusions.
+  // A physician therefore approved a recommendation on one body of evidence,
+  // a citation was added or a record was corrected away, and the approval
+  // carried over silently onto evidence they had never seen. The set's
+  // fingerprint closes that: change the evidence and the assessment is a new
+  // one, needing review again.
+  const evidenceFingerprint = evidenceSetFingerprint([...(dossier.ledger as unknown as EvidenceRowIdentity[]), ...handEnteredEvidence]);
+  const materialHash = hashStr([item.service, item.category ?? "", mapping.conditionId ?? "", region, laterality, purposeFor(item.category, !!item.isLifetime), freqN, durationClass, durationSupport.fingerprint, probabilityClassification, inclusionInTotalsStatus, item.startTrigger ?? "", item.replacesService ?? "", item.physicianStatus ?? "", evidenceStrength, evidenceFingerprint, setContext.conflicts.map((c) => c.type + c.otherService).sort().join(",")].join("|"));
 
   return {
     recommendationService: item.service,
@@ -917,7 +951,17 @@ export function buildReasoningAssessment(
     subjectiveEvidenceSummary: sum(subjectiveItems),
     functionalBasisSummary: dossier.functionalLink ? `${dossier.functionalLink.domain} — ${dossier.functionalLink.limitation}` : sum(se.functionalLimitations),
     priorTreatmentSummary: sum(se.priorTreatment),
-    treatmentResponseSummary: se.priorTreatment.length ? "Documented treatment has not resolved the impairment (residual deficit on the record)." : null,
+    // Non-resolution is a STATEMENT the record either makes or does not. This
+    // read `se.priorTreatment.length` — the existence of any prior treatment —
+    // and so asserted that treatment had failed whenever treatment had merely
+    // happened. `documentedNonResolution` above is the deterministic verdict
+    // that the record says so; the else branch reports what is actually known
+    // rather than filling the silence with the conclusion the plan needs.
+    treatmentResponseSummary: documentedNonResolution
+      ? "The record documents that prior treatment did not resolve the impairment (stated failure, persistence, or a residual deficit on examination)."
+      : se.priorTreatment.length
+        ? "Prior treatment is documented; the record does not state what it achieved. Response is not established here."
+        : null,
     treatingRecordSupportSummary: sum(se.physicianDocumentation),
     medicalNecessityRationale: dossier.medicalNecessity,
     noTreatmentRisk: `Without ${lc(item.service)}, ${lens.concern} would go unaddressed for ${kase.subject}.`,

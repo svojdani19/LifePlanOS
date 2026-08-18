@@ -428,7 +428,22 @@ describe("CRE v1 §7–§10 — findings for duration, gaps, and confidence", ()
     expect(durChanged.materialHash).not.toBe(base.materialHash);
     // And an immaterial rerun is stable (idempotent cache key).
     const rerun = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase);
+    // The EVIDENCE is material too. Every other input to the hash is a
+    // conclusion, and two different bodies of evidence routinely produce the
+    // same conclusions — so an approval could carry over onto findings the
+    // physician never saw.
+    const withExtraFinding = buildReasoningAssessment(
+      tka({ physicianStatus: "APPROVED" }),
+      [kneeStrong],
+      [...chronology, { eventDate: new Date("2025-06-02"), provider: "K. Adeyemi, MD", objectiveFindings: "Right knee effusion with medial joint line tenderness", sourcePage: 9 } as never],
+      kase,
+    );
+    const withCitation = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase, [], undefined, [
+      { claim: "NECESSITY", stance: "SUPPORTS", strength: "LITERATURE", sourceKind: "PHYSICIAN", quote: "Arthroplasty outcomes in end-stage osteoarthritis" },
+    ]);
     expect(rerun.materialHash).toBe(base.materialHash);
+    expect(withExtraFinding.materialHash, "a new finding is a new assessment").not.toBe(base.materialHash);
+    expect(withCitation.materialHash, "a hand-entered citation is a new assessment").not.toBe(base.materialHash);
   });
 
   it("#14 reassessment is deterministic — repeated runs yield identical findings (no duplicates)", () => {

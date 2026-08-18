@@ -62,16 +62,26 @@ describe("frequency needs a documented cadence, not a documented treatment", () 
     expect(a.frequencyRationale).toMatch(/assumption not yet grounded/);
   });
 
-  it("accepts a cadence the record actually states", () => {
-    const a = assess(item(), [event({ treatment: "Lumbar physical therapy twice weekly" })]);
+  it("accepts a cadence the record actually states FOR THIS SERVICE", () => {
+    const a = assess(item(), [event({ treatment: "Lumbar epidural steroid injections twice weekly" })]);
     expect(a.frequencySupported).toBe(true);
     expect(a.frequencyRationale).toMatch(/cadence stated in the treatment record/);
   });
 
   it("accepts a numeric cadence in any of the usual forms", () => {
-    for (const text of ["Injections 3 times per year", "Follow-up every 6 months", "Visits monthly", "Dosing q8h"]) {
-      expect(assess(item(), [event({ treatment: `Lumbar care: ${text}` })]).frequencySupported, text).toBe(true);
+    for (const text of ["3 times per year", "every 6 months", "monthly", "q8h"]) {
+      expect(assess(item(), [event({ treatment: `Lumbar epidural steroid injections ${text}` })]).frequencySupported, text).toBe(true);
     }
+  });
+
+  it("will not ground one service's frequency in another service's cadence", () => {
+    // "Chiropractic three times weekly" states a cadence. It is not a cadence
+    // for an epidural injection series, and matching on cadence alone let any
+    // documented rate justify any assumed one.
+    // Physical therapy classifies as THERAPY; the item is an INJECTION.
+    const a = assess(item(), [event({ treatment: "Lumbar physical therapy twice weekly" })]);
+    expect(a.frequencySupported).toBe(false);
+    expect(a.frequencyRationale).toMatch(/assumption not yet grounded/);
   });
 
   it("a guideline silent on cadence cannot establish one", () => {
@@ -84,6 +94,24 @@ describe("frequency needs a documented cadence, not a documented treatment", () 
 });
 
 describe("treatment happening is not treatment failing", () => {
+  it("does not summarise a treatment RESPONSE the record never stated", () => {
+    // This read the LENGTH of the prior-treatment list, so any documented care
+    // produced "treatment has not resolved the impairment" — a clinical
+    // conclusion manufactured from the fact that treatment occurred.
+    const a = assess(item(), [event({ treatment: "Lumbar epidural steroid injection performed" })]);
+    expect(a.treatmentResponseSummary).not.toMatch(/did not resolve/);
+    expect(a.treatmentResponseSummary).toMatch(/does not state what it achieved/);
+  });
+
+  it("says so plainly when the record does state it", () => {
+    const a = assess(item(), [event({ treatment: "Epidural steroid injection with no lasting relief" })]);
+    expect(a.treatmentResponseSummary).toMatch(/did not resolve the impairment/);
+  });
+
+  it("says nothing at all when there was no prior treatment", () => {
+    expect(assess(item(), [event({ objectiveFindings: "Positive straight leg raise" })]).treatmentResponseSummary).toBeNull();
+  });
+
   it("will not say conservative care failed to resolve the impairment from its existence alone", () => {
     const a = assess(item({ service: "Lumbar fusion surgery", category: "ORTHOPEDIC_SURGERY" }), [
       event({ treatment: "Lumbar physical therapy was performed" }),

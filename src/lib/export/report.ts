@@ -23,6 +23,7 @@ import { significanceOf } from "@/lib/engine/chronology";
 import { seriesCitation, seriesMembersOf } from "@/lib/records/seriesCitation";
 import { runIntegrityCheck, reviewLabel, evaluateCitation, functionalFinding, hasPatientRecordSupport, type RecInput, type CondInput, type PerItem, type IntegrityFinding } from "@/lib/engine/integrity";
 import { buildRecommendationDossier, type DossierCondition, type DossierChronoEvent, type DossierCase, type EvidenceItem } from "@/lib/engine/medicalNecessity";
+import { compareEvidenceSets, describeEvidenceSet, type EvidenceRowIdentity } from "@/lib/engine/evidenceSet";
 import { buildReasoningAssessment, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningItem, type ReasoningAssessment } from "@/lib/engine/clinicalReasoning";
 import { referencesFor, guidelineSourcesFor } from "@/lib/references/sources";
 import { parseBasis, basisNarrative } from "@/lib/engine/lifeExpectancy";
@@ -386,6 +387,24 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   // fallback only when no persisted row exists yet (e.g., pre-backfill cases);
   // the two are the same deterministic computation.
   const persistedAssessments = await prisma.clinicalReasoningAssessment.findMany({ where: { caseId, status: { not: "SUPERSEDED" } } });
+  // The evidence ledger AS RECORDED. The report used to re-derive every
+  // recommendation's evidence at export time, so a plan approved on one set of
+  // findings could print over another with nothing saying so. What is cited
+  // here is what was filed; where the record has since moved, the report says
+  // that too rather than quietly printing the newer version.
+  const ledgerRows = ((await prisma.recommendationEvidence?.findMany({ where: { caseId }, orderBy: [{ addedAt: "asc" }, { id: "asc" }] }).catch(() => [])) ?? []) as {
+    futureCareItemId: string;
+    addedById: string | null;
+    claim: string;
+    stance: string;
+    strength: string;
+    sourceKind: string;
+    quote: string;
+    page: number | null;
+    verbatim: boolean;
+  }[];
+  const recordedByItem = new Map<string, typeof ledgerRows>();
+  for (const r of ledgerRows) if (r.addedById == null) recordedByItem.set(r.futureCareItemId, [...(recordedByItem.get(r.futureCareItemId) ?? []), r]);
   const assessmentByRec = new Map(persistedAssessments.map((r) => [r.recommendationId, r]));
   const reasoningConds = c.conditions as unknown as (CondInput & DossierCondition & { id: string })[];
   const { flags: reasoningConflicts, replacedByActive: reasoningReplaced } = detectSetConflicts(items as unknown as ReasoningItem[]);
@@ -450,6 +469,25 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     ].filter(Boolean) as Paragraph[];
     out.push(...evBlock);
 
+    // The recorded ledger, and an honest statement when it has fallen behind.
+    const recorded = recordedByItem.get(it.id) ?? [];
+    const setStatus = compareEvidenceSets(recorded as unknown as EvidenceRowIdentity[], dossier.ledger as unknown as EvidenceRowIdentity[]);
+    if (recorded.length) {
+      const byClaim = new Map<string, typeof recorded>();
+      for (const r of recorded) byClaim.set(r.claim, [...(byClaim.get(r.claim) ?? []), r]);
+      const claimLines = [...byClaim.entries()].map(([claim, group]) => {
+        const opposing = group.filter((g) => g.stance === "OPPOSES").length;
+        // How many are the record's own words, as opposed to the extraction's
+        // account of an encounter. A reader weighing a citation is entitled to
+        // know which they are being shown.
+        const quoted = group.filter((g) => g.verbatim).length;
+        return `${claim.replace(/_/g, " ").toLowerCase()} — ${group.length} finding${group.length === 1 ? "" : "s"} (${quoted} quoted verbatim from the record, ${group.length - quoted} summarised)${opposing ? `, ${opposing} arguing against` : ""}`;
+      });
+      out.push(labeled("Evidence ledger of record", `${claimLines.join("; ")}.`));
+    }
+    const setNotice = describeEvidenceSet(setStatus);
+    if (setNotice) out.push(labeled("Evidence ledger status", setNotice));
+
     // Applicable treatment-guideline sources (ODG first, then specialty-apt) —
     // the basis on which medical necessity now/in future is assessed (§9).
     const guideBasis = guidelineSourcesFor(it.category as CareCategory, bodyRegion(`${it.service} ${dxName}`)).slice(0, 3).map((s) => s.label);
@@ -513,6 +551,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
           dossierCase,
           dossierInterviews as never,
           { conflicts: reasoningConflicts.get(it.id) ?? [], replacedByActive: reasoningReplaced.has(it.id) },
+          ledgerRows.filter((r) => r.futureCareItemId === it.id && r.addedById != null),
         );
     out.push(labeled(
       "Clinical reasoning",

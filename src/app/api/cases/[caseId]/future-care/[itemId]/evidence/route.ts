@@ -2,6 +2,7 @@ import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requireCanonicalPermission, requireCase } from "@/lib/tenant";
 import { findCandidates } from "@/lib/literature";
+import { serviceKeyOf } from "@/lib/engine/persistLedger";
 import { EVIDENCE_CLAIMS } from "@/lib/engine/evidenceLedger";
 import { ok, handleError } from "@/lib/api";
 
@@ -37,6 +38,23 @@ const bodySchema = z.object({
 
 type Params = { params: Promise<{ caseId: string; itemId: string }> };
 
+/**
+ * The contributor's role and stated credential at the moment of contribution.
+ *
+ * Snapshotted, not looked up later: a physician who leaves the firm, or whose
+ * role changes, must not retroactively alter what a plan says about who chose
+ * a citation.
+ */
+async function resolveContributor(userId: string, firmId: string): Promise<{ role: string; credential: string | null }> {
+  // Optional-chained: a client generated before `credentialSummary` existed
+  // throws SYNCHRONOUSLY on the call, so `.catch` never gets a promise. An
+  // unavailable lookup should cost the attribution, not the citation.
+  const user = await prisma.user
+    ?.findFirst({ where: { id: userId, firmId }, select: { role: true, credentialSummary: true } })
+    .catch(() => null);
+  return { role: user?.role ?? "UNKNOWN", credential: user?.credentialSummary ?? null };
+}
+
 const DOI = /\b10\.\d{4,9}\/[^\s"<>]+/i;
 const PMID = /^\s*(?:pmid:?\s*)?(\d{6,9})\s*$/i;
 
@@ -44,16 +62,27 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
   const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
-    // Attaching clinical evidence to a recommendation is a professional act,
-    // held to the same permission as attesting to a record.
-    requireCanonicalPermission(ctx, "records.verify", { caseId: params.caseId });
+    // The SAME canonical permission the control is gated on. It previously
+    // required `records.verify` while the button was drawn from the legacy
+    // role permission `futurecare.edit` — two different authorization systems,
+    // so the set of people who could see the control and the set who could use
+    // it did not have to overlap. `futurecare.edit` is the canonical key for
+    // authoring a recommendation, and attaching its evidence is that act.
+    requireCanonicalPermission(ctx, "futurecare.edit", { caseId: params.caseId });
     await requireCase(ctx, params.caseId);
     const input = bodySchema.parse(await req.json());
+
+    // Who is contributing, recorded as it was at the time. A section headed
+    // "Physician-selected evidence" asserted something a bare user id could
+    // not support: planners hold this permission too, and they do legitimate
+    // literature work. The row now carries the truth and the heading follows
+    // it, rather than the heading asserting something about the row.
+    const contributor = await resolveContributor(ctx.user.id, ctx.firm.id);
 
     // Tenant- and case-scoped by construction.
     const item = await prisma.futureCareItem.findFirst({
       where: { id: params.itemId, caseId: params.caseId, supersededAt: null },
-      select: { id: true, conditionId: true, service: true },
+      select: { id: true, conditionId: true, service: true, lineageId: true },
     });
     if (!item) return ok({ error: "That recommendation is not part of this case." }, 404);
 
@@ -83,6 +112,11 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
           firmId: ctx.firm.id,
           caseId: params.caseId,
           futureCareItemId: item.id,
+          // Identity that survives regeneration. Without these the citation is
+          // preserved by the rebuild and then addresses a recommendation that
+          // no longer exists.
+          lineageId: item.lineageId ?? null,
+          serviceKey: serviceKeyOf(item.service),
           conditionId: item.conditionId,
           claim: input.claim,
           stance: input.stance,
@@ -100,6 +134,10 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
           producerVersion: null,
           addedById: ctx.user.id,
           addedAt: new Date(),
+          // Who this was, at the time. A user id alone cannot support a
+          // section headed "Physician-selected evidence".
+          addedByRole: contributor.role,
+          addedByCredential: contributor.credential,
         },
       });
       await tx.auditLog.create({
@@ -116,6 +154,7 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
             doi: article.doi ?? null,
             pmid: article.pmid ?? null,
             source: article.source,
+            contributorRole: contributor.role,
           } as never,
         },
       });
@@ -142,7 +181,7 @@ export async function DELETE(req: Request, { params: paramsPromise }: Params) {
   const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
-    requireCanonicalPermission(ctx, "records.verify", { caseId: params.caseId });
+    requireCanonicalPermission(ctx, "futurecare.edit", { caseId: params.caseId });
     await requireCase(ctx, params.caseId);
     const { searchParams } = new URL(req.url);
     const id = searchParams.get("evidenceId");

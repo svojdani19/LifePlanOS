@@ -4,10 +4,10 @@
 //
 // Synthetic data only.
 import { describe, expect, it } from "vitest";
-import { persistMachineLedger, type LedgerStore } from "@/lib/engine/persistLedger";
+import { persistMachineLedger, relinkPhysicianEvidence, serviceKeyOf, type LedgerStore } from "@/lib/engine/persistLedger";
 import type { LedgerRow } from "@/lib/engine/evidenceLedger";
 
-interface Row { id: string; caseId: string; addedById: string | null; quote: string }
+interface Row { id: string; caseId: string; addedById: string | null; quote: string; futureCareItemId?: string; lineageId?: string | null; serviceKey?: string | null }
 
 function makeStore(seed: Row[] = []) {
   const rows = [...seed];
@@ -24,6 +24,11 @@ function makeStore(seed: Row[] = []) {
       createMany: async ({ data }: { data: Record<string, unknown>[] }) => {
         for (const [i, d] of data.entries()) rows.push({ id: `new-${i}`, caseId: d.caseId as string, addedById: null, quote: d.quote as string });
         return { count: data.length };
+      },
+      update: async ({ where, data }: { where: { id: string }; data: Record<string, unknown> }) => {
+        const hit = rows.find((r) => r.id === where.id);
+        if (hit) Object.assign(hit, data);
+        return hit ?? {};
       },
     },
   };
@@ -45,6 +50,7 @@ const row = (quote: string): LedgerRow => ({
   quote,
   recordedOn: null,
   sourceFingerprint: null,
+  verbatim: false,
   producerVersion: "test",
 });
 
@@ -91,5 +97,59 @@ describe("regeneration never discards a physician's citation", () => {
     const store = makeStore([{ id: "other", caseId: "case-2", addedById: null, quote: "other case" }]);
     await persistMachineLedger(store, SCOPE, [row("fresh")]);
     expect(store.rows.some((r) => r.id === "other")).toBe(true);
+  });
+});
+
+describe("a citation follows its recommendation across a rebuild", () => {
+  // Preserving the ROW is not preserving the CONTRIBUTION. On the reference
+  // case 22 of 59 items are deleted and recreated with fresh ids on every
+  // generation, so a citation keyed to `futureCareItemId` survived the writer
+  // and then addressed a row that no longer existed: absent from the panel,
+  // and unreachable by the delete route, which scopes by that same id.
+  const cited = (over: Partial<Row> = {}): Row => ({
+    id: "phys-1",
+    caseId: "case-1",
+    addedById: "u-1",
+    quote: "Arthroplasty outcomes in end-stage osteoarthritis",
+    futureCareItemId: "old-item",
+    lineageId: "lin-1",
+    serviceKey: "total knee arthroplasty",
+    ...over,
+  });
+
+  it("re-points it by lineage when the item id changed", async () => {
+    const store = makeStore([cited()]);
+    const out = await relinkPhysicianEvidence(store, "case-1", [{ id: "new-item", service: "Total knee arthroplasty", lineageId: "lin-1" }]);
+    expect(out.relinked).toBe(1);
+    expect(out.orphaned).toBe(0);
+    expect(store.rows[0].futureCareItemId).toBe("new-item");
+  });
+
+  it("falls back to the service name when no lineage carried over", async () => {
+    const store = makeStore([cited({ lineageId: null })]);
+    const out = await relinkPhysicianEvidence(store, "case-1", [{ id: "new-item", service: "Total Knee Arthroplasty", lineageId: null }]);
+    expect(out.relinked).toBe(1);
+    expect(store.rows[0].futureCareItemId).toBe("new-item");
+  });
+
+  it("leaves an unmatched citation alone and REPORTS it rather than guessing", async () => {
+    // The recommendation is genuinely gone. Attaching the citation to the
+    // nearest surviving item would silently re-purpose a clinician's work.
+    const store = makeStore([cited({ lineageId: "lin-9", serviceKey: "cervical fusion" })]);
+    const out = await relinkPhysicianEvidence(store, "case-1", [{ id: "new-item", service: "Physical therapy", lineageId: "lin-1" }]);
+    expect(out.relinked).toBe(0);
+    expect(out.orphaned).toBe(1);
+    expect(store.rows[0].futureCareItemId).toBe("old-item");
+  });
+
+  it("does not touch a citation whose item is still there", async () => {
+    const store = makeStore([cited({ futureCareItemId: "live-item" })]);
+    const out = await relinkPhysicianEvidence(store, "case-1", [{ id: "live-item", service: "Total knee arthroplasty", lineageId: "lin-1" }]);
+    expect(out.relinked).toBe(0);
+    expect(out.orphaned).toBe(0);
+  });
+
+  it("normalises service names the way the endpoint does", () => {
+    expect(serviceKeyOf("  Total-Knee   Arthroplasty ")).toBe(serviceKeyOf("total knee arthroplasty"));
   });
 });

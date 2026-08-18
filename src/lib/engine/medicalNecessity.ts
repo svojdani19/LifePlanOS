@@ -86,6 +86,8 @@ export interface DossierCondition {
   socAnalysis?: unknown; // { guidelines: [{ title, year, quote, relevance }] }
 }
 export interface DossierChronoEvent {
+  /** The chronology row's own id — the citation target for a ledger row. */
+  id?: string;
   eventDate: Date | string;
   provider?: string | null;
   procedure?: string | null;
@@ -97,6 +99,11 @@ export interface DossierChronoEvent {
   diagnosis?: string | null;
   summary?: string;
   sourcePage?: number | null;
+  /** Provenance back to the record. Carried into the ledger, not re-derived. */
+  sourceDocumentId?: string | null;
+  sourceFingerprint?: string | null;
+  /** The verbatim excerpt behind the event, when the extraction captured one. */
+  sourceQuote?: string | null;
 }
 export interface DossierCase {
   subject: string; // e.g. "Ms. Trice"
@@ -106,7 +113,21 @@ export interface DossierCase {
 }
 
 // ── Output ───────────────────────────────────────────────────────────────────
-export interface EvidenceItem { text: string; source?: string | null }
+export interface EvidenceItem {
+  text: string;
+  source?: string | null;
+  /**
+   * Whose support this is.
+   *
+   * "CONDITION" means the finding establishes something about the DIAGNOSIS —
+   * the causation analysis's objective evidence, the condition's own name. It
+   * was displayed under headings like "Supporting diagnoses" beside findings
+   * located for this recommendation, so context about the injury read as
+   * support for this particular service. They are different claims and the
+   * reader is now told which one they are looking at.
+   */
+  scope?: "ITEM" | "CONDITION";
+}
 /** A guideline evidence line: the rendered text plus, when the underlying
  *  source actually speaks to duration, its structured duration claim. */
 export interface GuidelineEvidenceItem extends EvidenceItem { duration?: GuidelineDurationClaim }
@@ -258,10 +279,22 @@ function isCleanFinding(text: string): boolean {
   return s.length >= 8 && !METADATA_LINE.test(s);
 }
 
-function evidenceSourcesOf(cond: DossierCondition | null): { filename?: string; page?: number | null; quote?: string; field?: string }[] {
+type EvidenceSourceEntry = {
+  documentId?: string;
+  encounterId?: string | null;
+  filename?: string;
+  page?: number | null;
+  quote?: string;
+  field?: string;
+  verbatim?: boolean;
+};
+function evidenceSourcesOf(cond: DossierCondition | null): EvidenceSourceEntry[] {
   // `field` is the extraction field the quote came from, written by
   // conditionEvidence.ts. It is what makes the grading below possible.
-  return cond && Array.isArray(cond.evidenceSources) ? (cond.evidenceSources as { filename?: string; page?: number | null; quote?: string; field?: string }[]) : [];
+  // `documentId` / `encounterId` are the real ids: a filename is a label, and
+  // it was being written into the ledger's `sourceDocumentId` column, so no
+  // citation could be resolved back to a document.
+  return cond && Array.isArray(cond.evidenceSources) ? (cond.evidenceSources as EvidenceSourceEntry[]) : [];
 }
 function guidelinesOf(cond: DossierCondition | null): { title?: string; year?: string; quote?: string; duration?: unknown; relevance?: { evidenceLevel?: number; evidenceLabel?: string; whyRelevant?: string; limitations?: string | null } }[] {
   const soc = cond?.socAnalysis as { guidelines?: unknown[] } | null;
@@ -382,8 +415,8 @@ export function buildRecommendationDossier(
     // The statement of an ABSENCE is not a finding. It belongs where a
     // reviewer looks for what is missing, not where they look for support.
     if (/^no (?:objective|supporting) finding/i.test(stated)) evidenceGapNotes.push(stated);
-    else if (/— (?:assessment|diagnosis),/.test(stated)) diagnosisEvidence.push({ text: stated, source: "causation analysis" });
-    else objectiveFindings.push({ text: stated, source: "causation analysis" });
+    else if (/— (?:assessment|diagnosis),/.test(stated)) diagnosisEvidence.push({ text: stated, source: "causation analysis", scope: "CONDITION" });
+    else objectiveFindings.push({ text: stated, source: "causation analysis", scope: "CONDITION" });
   }
   for (const s of sources) {
     if (!s.quote || !regionOk(s.quote)) continue;
@@ -391,7 +424,19 @@ export function buildRecommendationDossier(
     // A causation source graded as a diagnostic statement stays one.
     const strength: LedgerStrength =
       s.field === "assessment" || s.field === "diagnosis" ? "DIAGNOSIS" : s.field === "pastMedicalHistory" ? "HISTORY" : "OBJECTIVE";
-    consider({ strength, sourceKind: "RECORD_CLAIM", quote: s.quote, sourceDocumentId: s.filename ?? null, page: s.page ?? null, field: s.field ?? null });
+    consider({
+      strength,
+      sourceKind: "RECORD_CLAIM",
+      quote: s.quote,
+      // The DOCUMENT ID, not the filename. `sourceDocumentId` held a display
+      // label, so every persisted citation pointed at a string rather than a
+      // record, and nothing downstream could open the page it came from.
+      sourceDocumentId: s.documentId ?? null,
+      encounterId: s.encounterId ?? null,
+      page: s.page ?? null,
+      field: s.field ?? null,
+      verbatim: s.verbatim ?? false,
+    });
     if (strength === "DIAGNOSIS") diagnosisEvidence.push({ text: `“${s.quote}”`, source: src });
     else if (strength === "HISTORY") historyEvidence.push({ text: `“${s.quote}”`, source: src });
     else objectiveFindings.push({ text: `“${s.quote}”`, source: src });
@@ -399,13 +444,29 @@ export function buildRecommendationDossier(
   for (const e of pertinent) {
     const src = `${mdY(e.eventDate)}${e.provider ? ` · ${e.provider}` : ""}${e.sourcePage ? ` (p. ${e.sourcePage})` : ""}`;
     const on = e.eventDate ? new Date(e.eventDate) : null;
+    // Every chronology candidate carries the SAME provenance: which event,
+    // which document, and the fingerprint of the document's text when the
+    // event was written. Without it a persisted citation named a date and a
+    // provider and nothing a reader could open.
+    //
+    // `verbatim: false` throughout, and deliberately. These fields hold the
+    // extraction's prose ABOUT an encounter, not the chart's own sentence; the
+    // verbatim excerpt is `sourceQuote`, which is a different string.
+    const prov = {
+      chronologyEventId: e.id ?? null,
+      sourceDocumentId: e.sourceDocumentId ?? null,
+      sourceFingerprint: e.sourceFingerprint ?? null,
+      page: e.sourcePage ?? null,
+      recordedOn: on,
+      verbatim: false,
+    } as const;
     if (e.imagingFindings && isCleanFinding(e.imagingFindings) && regionOk(e.imagingFindings)) {
       imaging.push({ text: cleanClause(e.imagingFindings, 180), source: src });
-      consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.imagingFindings, 180), page: e.sourcePage ?? null, recordedOn: on });
+      consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.imagingFindings, 180), field: "imagingFindings", ...prov });
     }
     if (e.objectiveFindings && isCleanFinding(e.objectiveFindings) && regionOk(e.objectiveFindings)) {
       examination.push({ text: cleanClause(e.objectiveFindings, 180), source: src });
-      consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.objectiveFindings, 180), page: e.sourcePage ?? null, recordedOn: on });
+      consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.objectiveFindings, 180), field: "objectiveFindings", ...prov });
     }
     // A documented functional deficit is evidence for services that ADDRESS
     // function. It is not, by itself, evidence that an imaging study or an
@@ -413,19 +474,19 @@ export function buildRecommendationDossier(
     if (functionalGate.objective) {
       if (e.functionalStatus && isCleanFinding(e.functionalStatus)) {
         functionalLimitations.push({ text: cleanClause(e.functionalStatus, 160), source: src });
-        consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.functionalStatus, 160), page: e.sourcePage ?? null, recordedOn: on });
+        consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.functionalStatus, 160), field: "functionalStatus", ...prov });
       }
       if (e.restrictions && isCleanFinding(e.restrictions)) {
         functionalLimitations.push({ text: cleanClause(e.restrictions, 160), source: src });
-        consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.restrictions, 160), page: e.sourcePage ?? null, recordedOn: on });
+        consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.restrictions, 160), field: "restrictions", ...prov });
       }
     }
     if (e.procedure && isCleanFinding(e.procedure) && regionOk(e.procedure)) {
       priorTreatment.push({ text: cleanClause(e.procedure, 160), source: src });
-      consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.procedure, 160), page: e.sourcePage ?? null, recordedOn: on });
+      consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.procedure, 160), field: "procedure", ...prov });
     } else if (e.treatment && isCleanFinding(e.treatment) && regionOk(e.treatment)) {
       priorTreatment.push({ text: cleanClause(e.treatment, 160), source: src });
-      consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.treatment, 160), page: e.sourcePage ?? null, recordedOn: on });
+      consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.treatment, 160), field: "treatment", ...prov });
     }
   }
   if (item.physicianStatus === "APPROVED" || item.physicianStatus === "MODIFIED") {
@@ -438,7 +499,12 @@ export function buildRecommendationDossier(
   // A patient's own account is real evidence of a functional deficit, and it
   // is not evidence that surgery is indicated. The gate is the difference.
   if (functionalGate.reported) {
-    for (const iv of patientReports) consider({ strength: "REPORTED", sourceKind: "INTERVIEW", quote: cleanClause(iv.text, 150) });
+    // Admitted only through the functional gate, and recorded as a patient's
+    // account of what they cannot do — which is what makes it evidence of a
+    // deficit and not of pathology. The classifier's lexicon still adds
+    // anything else the sentence says.
+    for (const iv of patientReports)
+      consider({ strength: "REPORTED", sourceKind: "INTERVIEW", quote: cleanClause(iv.text, 150), asserts: { statesFunctionalDeficit: true } });
     for (const iv of patientReports) functionalLimitations.push({ text: `Patient reports ${lc(cleanClause(iv.text, 150))}${iv.quote ? ` — “${iv.quote}”` : ""}`, source: iv.category ? `patient interview · ${iv.category}` : "patient interview" });
   }
   for (const iv of providerOpinions) physicianDocumentation.push({ text: `${iv.providerName ? `${iv.providerName}` : "Treating provider"}: ${cleanClause(iv.text, 160)}${iv.quote ? ` — “${iv.quote}”` : ""}`, source: "provider interview" });
@@ -458,10 +524,22 @@ export function buildRecommendationDossier(
   // The diagnosis bucket carries the condition itself AND the recorded
   // diagnostic statements that establish it — which is what a reader of
   // "Supporting diagnoses" is looking for.
-  for (const g of guidelineEvidence) consider({ strength: "GUIDELINE", sourceKind: "GUIDELINE", quote: g.text });
+  // A guideline selected FOR this condition and this service speaks to whether
+  // the service is indicated — that is what makes it a guideline for it. Its
+  // duration claim is the parsed one, never the prose's appearance: a
+  // duration-silent guideline supports necessity and can never establish a
+  // lifetime. Frequency is left to the classifier, because most guidance is
+  // silent on cadence and inferring one from silence is the error above.
+  for (const g of guidelineEvidence)
+    consider({
+      strength: "GUIDELINE",
+      sourceKind: "GUIDELINE",
+      quote: g.text,
+      asserts: { supportsSpecificIntervention: true, statesDuration: g.duration?.supportsDuration ? true : undefined },
+    });
 
   const diagnoses: EvidenceItem[] = [
-    ...(condition ? [{ text: `${condition.name}${condition.relatedness ? ` — ${condition.relatedness.replace(/_/g, " ").toLowerCase()}` : ""}`, source: condition.reasoning ? "causation analysis" : null }] : []),
+    ...(condition ? [{ text: `${condition.name}${condition.relatedness ? ` — ${condition.relatedness.replace(/_/g, " ").toLowerCase()}` : ""}`, source: condition.reasoning ? "causation analysis" : null, scope: "CONDITION" as const }] : []),
     ...diagnosisEvidence,
   ];
 

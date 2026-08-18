@@ -305,29 +305,72 @@ export const SAFEGUARD_CLAIMS: SafeguardClaim[] = [
   {
     id: "item-evidence-ledger",
     module: "src/lib/engine/evidenceLedger.ts",
-    labels: ["Supporting clinical evidence", "Physician-selected evidence", "Add a citation"],
+    labels: ["Supporting clinical evidence", "Expert-selected evidence", "Add a citation"],
     asserts:
-      "Each finding shown under a recommendation passed both an anatomy check and a service-compatibility check for the claim it is offered against, and a physician-entered citation resolved to a real, retrievable article.",
+      "Each finding shown under a recommendation passed both an anatomy check and a service-compatibility check for the claim it is offered against; a hand-entered citation resolved to a real, retrievable article, and names the role and credential of whoever chose it.",
     doesNotAssert: [
       "that every source considered is shown — the per-claim cap is disclosed",
       "that a frequency or duration is established when no cadence-bearing source exists",
       "that a patient's report establishes the necessity of surgery, imaging or an injection",
       "that an absence of supporting evidence is evidence against",
+      "that a hand-entered citation was chosen by a physician — the row names the contributor's actual role",
     ],
     consequenceIfOverclaimed:
       "Five services of one diagnosis would each appear supported by findings that establish only the condition, and an unresolvable reference could be printed as a citation.",
     reachability: {
-      surface: { file: "src/components/case/CaseWorkspace.tsx", claimText: ["Physician-selected evidence", "Add a citation"] },
+      surface: { file: "src/components/case/CaseWorkspace.tsx", claimText: ["Expert-selected evidence", "Add a citation"] },
       rendered: { entryPoint: "function AddCitation", invokedBy: ["<AddCitation onAdd={onAddEvidence} />"] },
       carries: ["DOI, PMID, or article title", "onAdd("],
       server: {
         file: "src/app/api/cases/[caseId]/future-care/[itemId]/evidence/route.ts",
-        enforces: ["requireCanonicalPermission", "findCandidates", "could not be resolved", "addedById", "auditLog"],
+        // The SAME canonical key the control is gated on, and the contributor
+        // snapshot the heading depends on.
+        enforces: ['requireCanonicalPermission(ctx, "futurecare.edit"', "findCandidates", "could not be resolved", "addedByRole", "auditLog"],
       },
-      persists: { file: "src/lib/engine/persistLedger.ts", contains: ["addedById: null", "physicianRowsPreserved"] },
+      persists: { file: "src/lib/engine/persistLedger.ts", contains: ["addedById: null", "physicianRowsPreserved", "relinkPhysicianEvidence"] },
       reachableSymbols: [
         { file: "src/lib/engine/evidenceLedger.ts", symbols: ["supportsClaim", "buildLedgerWithCap"] },
-        { file: "src/lib/engine/persistLedger.ts", symbols: ["persistMachineLedger"] },
+        { file: "src/lib/engine/persistLedger.ts", symbols: ["persistMachineLedger", "relinkPhysicianEvidence"] },
+      ],
+    },
+  },
+  {
+    // A READ-MODEL claim. The reachability contract was built to catch code
+    // that is never CALLED; this is the mirror failure — data that is never
+    // READ. The ledger was written correctly on every generation and no
+    // consumer displayed it, so four independent re-derivations stood in for
+    // the record, and a plan could be printed over a different set of findings
+    // than the one it was approved on with nothing anywhere saying so.
+    //
+    // `reachableSymbols` therefore names the comparison, and `surface` names
+    // the words that promise it. A read model whose consumers do not read it
+    // fails this claim the same way an unreachable implementation does.
+    id: "recorded-evidence-read-model",
+    module: "src/lib/engine/evidenceSet.ts",
+    labels: ["Recorded evidence, by claim", "Evidence ledger of record", "Evidence ledger status"],
+    asserts:
+      "What is displayed and cited for a recommendation is the evidence ledger AS PERSISTED, and where the current record would produce a different set, the difference is stated with its counts rather than resolved silently.",
+    doesNotAssert: [
+      "that the recorded set is the correct one — which set is right is a question about the case",
+      "that a stale set has been reconciled; it is reported, not repaired",
+      "that hand-entered citations bear on staleness — they are not derived from anything",
+    ],
+    consequenceIfOverclaimed:
+      "A physician's approval would carry silently onto evidence they never saw, and a report would cite findings the plan was not built on.",
+    reachability: {
+      surface: { file: "src/components/case/CaseWorkspace.tsx", claimText: ["Recorded evidence, by claim"] },
+      rendered: { entryPoint: "function RecordedEvidence", invokedBy: ["<RecordedEvidence rows={recordedEvidence}"] },
+      // Checked inside RecordedEvidence's own body: the component must hold the
+      // persisted rows AND run the comparison, not merely receive them.
+      carries: ["compareEvidenceSets(", "describeEvidenceSet(", "rows.length ?"],
+      server: {
+        file: "src/app/(app)/cases/[caseId]/page.tsx",
+        enforces: ["recommendationEvidence", "addedById == null", "recordedEvidence"],
+      },
+      // The consumer that would otherwise print a re-derivation: the report.
+      persists: { file: "src/lib/export/report.ts", contains: ["recordedByItem", "Evidence ledger of record", "describeEvidenceSet"] },
+      reachableSymbols: [
+        { file: "src/lib/engine/evidenceSet.ts", symbols: ["compareEvidenceSets", "describeEvidenceSet", "evidenceSetFingerprint"] },
       ],
     },
   },

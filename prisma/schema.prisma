@@ -718,32 +718,32 @@ model ChronologyEvent {
   clinicalSignificance String?
 
   // Source citation back to the originating record.
-  sourceDocumentId String?
-  sourcePage       Int?
-  sourceQuote      String? // verbatim excerpt from the record supporting the event
-  dateInferred     Boolean @default(false) // true when no date appeared in the record
+  sourceDocumentId  String?
+  sourcePage        Int?
+  sourceQuote       String? // verbatim excerpt from the record supporting the event
+  dateInferred      Boolean   @default(false) // true when no date appeared in the record
   // Review lineage (source-grounded pipeline): human work is never destroyed
   // by a regeneration. AI drafts may be superseded; edited/reviewed/verified
   // rows persist and go STALE when their source document's bytes change.
-  reviewStatus     String  @default("AI_DRAFT") // AI_DRAFT | HUMAN_EDITED | REVIEWED | VERIFIED | STALE | SUPERSEDED
-  reviewedById     String?
-  reviewedAt       DateTime?
-  verifiedById     String?
-  verifiedAt       DateTime?
-  supersededById   String?
-  staleReason      String?
+  reviewStatus      String    @default("AI_DRAFT") // AI_DRAFT | HUMAN_EDITED | REVIEWED | VERIFIED | STALE | SUPERSEDED
+  reviewedById      String?
+  reviewedAt        DateTime?
+  verifiedById      String?
+  verifiedAt        DateTime?
+  supersededById    String?
+  staleReason       String?
   sourceFingerprint String? // sha256 of the source document text at generation
-  extractionId     String? // RecordExtraction run that produced this event
+  extractionId      String? // RecordExtraction run that produced this event
 
   relevanceScore Int         @default(50) // 0–100
   relatedness    Relatedness @default(UNCLEAR)
 
-  edited    Boolean  @default(false) // true once a human edits the AI output
+  edited        Boolean  @default(false) // true once a human edits the AI output
   // A treatment series' explicit membership: [{date, documentId, page}] per
   // underlying visit, so citations point at each member's own document and a
   // membership change is visible even when the range's end date is unchanged.
-  seriesMembers    Json?
-  createdAt DateTime @default(now())
+  seriesMembers Json?
+  createdAt     DateTime @default(now())
 
   @@index([caseId, eventDate])
 }
@@ -1550,27 +1550,27 @@ model ReportApproval {
 // ── Pilot hardening P4: vocational domain (all rows carry provenance) ────────
 
 model VocationalEntry {
-  id               String    @id @default(uuid())
-  firmId           String
-  caseId           String
-  kind             String // employment | education | certification | military | job_demand | earnings | absence | rtw_attempt | restriction | functional_capacity | transferable_skill | test_result | labor_market | scenario | conclusion
-  title            String
-  detail           Json // kind-specific structured payload
-  startDate        DateTime?
-  endDate          DateTime?
-  source           String // document/interview/expert citation — never invented
-  sourceDocumentId String?
-  enteredById      String
-  verification     String    @default("UNVERIFIED") // UNVERIFIED | VERIFIED | DISPUTED
+  id                 String    @id @default(uuid())
+  firmId             String
+  caseId             String
+  kind               String // employment | education | certification | military | job_demand | earnings | absence | rtw_attempt | restriction | functional_capacity | transferable_skill | test_result | labor_market | scenario | conclusion
+  title              String
+  detail             Json // kind-specific structured payload
+  startDate          DateTime?
+  endDate            DateTime?
+  source             String // document/interview/expert citation — never invented
+  sourceDocumentId   String?
+  enteredById        String
+  verification       String    @default("UNVERIFIED") // UNVERIFIED | VERIFIED | DISPUTED
   // Verification attribution — set only by an explicit, credential-gated
   // verification act; never carried across a material replacement.
   verifiedById       String?
   verifiedAt         DateTime?
   verifiedCredential String? // snapshot of the verifying expert's credential label
-  notes            String?
-  supersededById   String? // revision history via supersede-not-edit
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  notes              String?
+  supersededById     String? // revision history via supersede-not-edit
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
 
   @@index([caseId, kind])
   @@index([firmId])
@@ -1601,18 +1601,18 @@ model EconomicAssumption {
 }
 
 model EconomicScenario {
-  id         String    @id @default(uuid())
-  firmId     String
-  caseId     String
-  name       String // base | low | high | custom label
-  overrides  Json // {key: value} assumption overrides for this scenario
-  result     Json? // deterministic engine output {pastLoss, futureLoss, benefits, householdServices, medicalPV, total, inputsHash, engineVersion, medicalSource}
-  computedAt DateTime?
+  id             String    @id @default(uuid())
+  firmId         String
+  caseId         String
+  name           String // base | low | high | custom label
+  overrides      Json // {key: value} assumption overrides for this scenario
+  result         Json? // deterministic engine output {pastLoss, futureLoss, benefits, householdServices, medicalPV, total, inputsHash, engineVersion, medicalSource}
+  computedAt     DateTime?
   // Immutable calculation history: a recompute creates a NEW row and points
   // the prior current row of the same name at its successor. Never overwritten.
   supersededById String?
   computedById   String?
-  createdAt  DateTime  @default(now())
+  createdAt      DateTime  @default(now())
 
   @@index([caseId])
   @@index([firmId])
@@ -1843,8 +1843,18 @@ model RecommendationEvidence {
   firmId String
   caseId String
 
-  /// The recommendation this evidence was selected FOR.
+  /// The recommendation this evidence was selected FOR — the SPECIFIC version.
   futureCareItemId String
+  /// The recommendation's LINEAGE, which survives regeneration when its item
+  /// id does not. 22 of 59 items on the reference case are deleted and
+  /// recreated with fresh ids on every plan generation, so a physician
+  /// citation keyed only to futureCareItemId was preserved by the writer and
+  /// then pointed at a dead row — invisible in the panel, unreachable by the
+  /// delete route. Kept alive by lineage, and by the service name when no
+  /// lineage carried over.
+  lineageId        String?
+  /// Normalised service name: the last resort for re-linking after a rebuild.
+  serviceKey       String?
   /// The condition the item was resolved against when this row was built.
   conditionId      String?
 
@@ -1864,8 +1874,11 @@ model RecommendationEvidence {
   page              Int?
   /// The extraction field the quote came from, when it came from one.
   field             String?
-  /// Verbatim supporting text. Never a paraphrase.
+  /// The supporting text. `verbatim` says whether it is the record's own
+  /// words or the extraction's prose about the encounter — both are cited,
+  /// and only the first may be presented as what the chart says.
   quote             String
+  verbatim          Boolean   @default(false)
   /// The date the underlying record carries, for pre/post-incident reasoning.
   recordedOn        DateTime?
 
@@ -1882,16 +1895,23 @@ model RecommendationEvidence {
   /// Builder version, so a rebuilt ledger is distinguishable from an old one.
   producerVersion   String?
 
-  /// Set when a physician supplied this row. Its presence is what protects it
+  /// Set when a person supplied this row. Its presence is what protects it
   /// from being deleted by the next generation.
-  addedById String?
-  addedAt   DateTime?
+  addedById         String?
+  addedAt           DateTime?
+  /// The contributor's role at the moment of contribution, and their stated
+  /// credential. A bare user id cannot tell a later reader whether this was a
+  /// physician's selection or a planner's, which is exactly what a section
+  /// headed "Physician-selected evidence" asserts.
+  addedByRole       String?
+  addedByCredential String?
 
   createdAt DateTime @default(now())
 
   @@index([caseId, futureCareItemId])
   @@index([futureCareItemId, claim])
   @@index([caseId, addedById])
+  @@index([caseId, lineageId])
 }
 
 model RecordFinding {
@@ -1905,7 +1925,7 @@ model RecordFinding {
   /// CASE | DOCUMENT | PAGE | NOTE | ENTRY | CLAIM
   scope    String
   type     String
-  severity String @default("WARNING") // INFO | WARNING | BLOCKING
+  severity String  @default("WARNING") // INFO | WARNING | BLOCKING
   blocking Boolean @default(false)
   /// DETERMINISTIC_VALIDATOR | EXTRACTION_CRITIC | ADJUDICATOR | CORROBORATION | OCR | PAGE_LEDGER | HUMAN_REVIEW
   source   String
@@ -1937,10 +1957,10 @@ model RecordFinding {
   /// Stable dedup key: the same problem re-derived must not become a new row.
   fingerprint String
 
-  status           String    @default("OPEN") // OPEN | CONFIRMED | DISMISSED | RESOLVED
-  dispositionReason String?
-  reviewedById     String?
-  reviewedAt       DateTime?
+  status                       String    @default("OPEN") // OPEN | CONFIRMED | DISMISSED | RESOLVED
+  dispositionReason            String?
+  reviewedById                 String?
+  reviewedAt                   DateTime?
   /// The source fingerprint the reviewer was looking at when they dispositioned
   /// this finding. A dismissal covers the content it was given over — when the
   /// source changes underneath it, the disposition no longer applies and the
@@ -1949,7 +1969,7 @@ model RecordFinding {
   /// PHI-free lineage of prior dispositions: [{ status, reason, byId, at,
   /// sourceFingerprint }]. A superseded or reopened disposition is retained
   /// here — a human decision is never deleted, only moved into history.
-  dispositionHistory Json?
+  dispositionHistory           Json?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -1963,65 +1983,65 @@ model RecordFinding {
 }
 
 model RecordExtraction {
-  id               String    @id @default(uuid())
-  firmId           String
-  caseId           String
-  sourceDocumentId String
+  id                String   @id @default(uuid())
+  firmId            String
+  caseId            String
+  sourceDocumentId  String
   // PENDING | RUNNING | PAUSED | COMPLETE | EXTRACTION_FAILED | BLOCKED_OCR | ABANDONED
-  status           String    @default("PENDING")
-  provider         String? // llm provider name
-  model            String? // resolved model identifier
-  promptVersion    String?
-  schemaVersion    String?
+  status            String   @default("PENDING")
+  provider          String? // llm provider name
+  model             String? // resolved model identifier
+  promptVersion     String?
+  schemaVersion     String?
   sourceFingerprint String? // sha256 of the exact extracted text processed
-  truncated        Boolean   @default(false) // source exceeded processing bounds; disclosed
-  chunkCount       Int       @default(0)
-  candidateCount   Int       @default(0) // claims proposed by the model
-  acceptedCount    Int       @default(0) // claims that survived deterministic validation
-  rejectedCount    Int       @default(0)
-  warnings         Json? // string[] — OCR confidence, truncation, rejects (no PHI)
-  error            String? // actionable failure reason (no PHI)
+  truncated         Boolean  @default(false) // source exceeded processing bounds; disclosed
+  chunkCount        Int      @default(0)
+  candidateCount    Int      @default(0) // claims proposed by the model
+  acceptedCount     Int      @default(0) // claims that survived deterministic validation
+  rejectedCount     Int      @default(0)
+  warnings          Json? // string[] — OCR confidence, truncation, rejects (no PHI)
+  error             String? // actionable failure reason (no PHI)
   // Multi-pass provenance: what the critic and adjudicator contributed.
-  criticFindings   Json? // string[] — PHI-safe critic observations
+  criticFindings    Json? // string[] — PHI-safe critic observations
   // Dated note headers the deterministic segmenter found with no extracted
   // encounter: under-extraction of THIS document. Recorded so the case-level
   // completion gate can see it without every row of the document having to
   // carry it as its own defect.
-  coverageGaps     Int      @default(0)
+  coverageGaps      Int      @default(0)
   // Sections/chunks of this document that could not be processed after
   // retries. Persisted because a deterministic re-audit must be able to SEE
   // this blocker; while it was only ever a local variable, a re-audit read
   // zero and could resolve a section-not-processed finding it never evaluated.
-  failedSections   Int      @default(0)
-  disputedCount    Int      @default(0) // claims the critic contested
-  adjudicatedCount Int      @default(0) // disputes an adjudicator resolved
-  pagesTotal       Int      @default(0)
-  pagesReadable    Int      @default(0)
-  auditResult      String? // document-level audit outcome
-  createdById      String?
-  createdAt        DateTime  @default(now())
+  failedSections    Int      @default(0)
+  disputedCount     Int      @default(0) // claims the critic contested
+  adjudicatedCount  Int      @default(0) // disputes an adjudicator resolved
+  pagesTotal        Int      @default(0)
+  pagesReadable     Int      @default(0)
+  auditResult       String? // document-level audit outcome
+  createdById       String?
+  createdAt         DateTime @default(now())
 
   // ── Run lifecycle ─────────────────────────────────────────────────────────
   // A run row is created when work STARTS, so an interrupted run is visible as
   // an unfinished run rather than as no run at all.
-  startedAt    DateTime?
-  finishedAt   DateTime?
+  startedAt   DateTime?
+  finishedAt  DateTime?
   // Liveness for the run lock: a RUNNING row whose heartbeat has gone cold is
   // a crashed run and may be taken over, so a crash cannot block a document
   // forever.
-  heartbeatAt  DateTime?
-  durationMs   Int?
-  chunksTotal  Int       @default(0)
-  chunksDone   Int       @default(0)
+  heartbeatAt DateTime?
+  durationMs  Int?
+  chunksTotal Int       @default(0)
+  chunksDone  Int       @default(0)
   // PHI-free resume cursor: { nextChunkIndex } — chunk positions only, never
   // record content.
-  resumeState  Json?
+  resumeState Json?
   // PHI-free counters (model calls, retries, timings) for operations.
-  telemetry    Json?
+  telemetry   Json?
   // Run lock: "ACTIVE" while a run holds this document, NULL once it reaches a
   // terminal state. Postgres treats NULLs as distinct, so the unique index
   // permits unlimited finished runs but only ONE unfinished run per document.
-  lockKey      String?
+  lockKey     String?
 
   @@unique([sourceDocumentId, lockKey])
   @@index([caseId, sourceDocumentId])
@@ -2035,23 +2055,23 @@ model RecordExtraction {
 // never overwritten by a regeneration — a new run supersedes AI drafts only,
 // and marks reviewed rows STALE when the source bytes changed.
 model ExtractedEncounter {
-  id               String    @id @default(uuid())
-  extractionId     String
-  firmId           String
-  caseId           String
-  sourceDocumentId String
-  page             Int? // NULL = unknown page (never coerced to 1)
-  pageEnd          Int?
-  dateStatus       String    @default("UNKNOWN") // DOCUMENTED | INFERRED | UNKNOWN | DISPUTED
-  encounterDate    DateTime?
-  encounterDateEnd DateTime?
+  id                  String    @id @default(uuid())
+  extractionId        String
+  firmId              String
+  caseId              String
+  sourceDocumentId    String
+  page                Int? // NULL = unknown page (never coerced to 1)
+  pageEnd             Int?
+  dateStatus          String    @default("UNKNOWN") // DOCUMENTED | INFERRED | UNKNOWN | DISPUTED
+  encounterDate       DateTime?
+  encounterDateEnd    DateTime?
   // Verbatim date text as it appeared in the record, for reviewer comparison.
-  dateSourceText   String?
+  dateSourceText      String?
   // CLINICAL | ANCILLARY | ADMINISTRATIVE — deterministic substance class
   // computed from the validated claims; only CLINICAL enters the chronology.
   // substanceReason is the reviewable explanation for any exclusion.
-  substanceClass   String?
-  substanceReason  String?
+  substanceClass      String?
+  substanceReason     String?
   // The TREATING clinician only. A deponent, a filing party, a payer, or a
   // records custodian is not a provider and must never be recorded as one.
   provider            String?
@@ -2066,11 +2086,11 @@ model ExtractedEncounter {
   // EXPERT_OPINION | INCIDENT | FINANCIAL | EMPLOYMENT_ECONOMIC |
   // INSURANCE_ADMINISTRATIVE | LEGAL | CORRESPONDENCE_OR_GENERIC_EVIDENCE |
   // UNKNOWN. Null on rows written before this existed — read as UNKNOWN.
-  analysisClass       String?
+  analysisClass            String?
   /// Stable identity of the sub-document within a consolidated packet.
-  segmentKey          String?
+  segmentKey               String?
   /// DOCUMENT_TYPE | SEGMENT_CONTENT | FALLBACK_UNKNOWN
-  classificationMethod String?
+  classificationMethod     String?
   /// Content-classifier score when the class was derived from content.
   classificationConfidence Float?
 
@@ -2084,55 +2104,55 @@ model ExtractedEncounter {
   facility            String?
   encounterType       String?
   // Deterministically rendered factual summary (from validated claims only).
-  factualSummary   String
+  factualSummary      String
   // Optional LLM synthesis over the validated claims — clearly labeled in UI.
-  synthesis        String?
-  claims           Json // [{field, value, excerpt, page, confidence, warning?}]
-  ocrConfidence    Float?
-  warnings         Json? // string[]
-  status           String    @default("AI_DRAFT") // AI_DRAFT | AI_AUDIT_PASSED | HUMAN_EDITED | REVIEWED | VERIFIED | STALE | SUPERSEDED | EXTRACTION_FAILED
+  synthesis           String?
+  claims              Json // [{field, value, excerpt, page, confidence, warning?}]
+  ocrConfidence       Float?
+  warnings            Json? // string[]
+  status              String    @default("AI_DRAFT") // AI_DRAFT | AI_AUDIT_PASSED | HUMAN_EDITED | REVIEWED | VERIFIED | STALE | SUPERSEDED | EXTRACTION_FAILED
   // Adversarial audit outcome for this encounter's draft:
   // PASS | NEEDS_HUMAN_REVIEW | EXTRACTION_INCOMPLETE | SOURCE_CONFLICT | FAILED
-  auditResult      String?
-  auditFindings    Json? // string[] — LEGACY, retained for compatibility only.
+  auditResult         String?
+  auditFindings       Json? // string[] — LEGACY, retained for compatibility only.
   // Scoped findings in RecordFinding are authoritative for review and metrics;
   // this array copied the whole document's findings onto every row.
-  auditedAt        DateTime?
+  auditedAt           DateTime?
   /// Deterministic audit version that produced auditResult, so a re-audit can
   /// find rows graded by rules that have since been corrected.
-  auditVersion     String?
+  auditVersion        String?
   /// Disputes about THIS entry that no adjudicator could settle. Persisted so
   /// a deterministic re-audit reproduces the same verdict: without it a
   /// re-audit cannot see the conflict and would silently clear it.
-  unresolvedDisputes Int @default(0)
+  unresolvedDisputes  Int       @default(0)
   /// Entry fields adjudication confirmed the source contradicts (date,
   /// provider). Persisted for the same reason; never auto-corrected.
-  contradictedFields Json?
+  contradictedFields  Json?
   // Machine corroboration: an INDEPENDENT blind re-read of the row's source
   // span reproduced (or failed to reproduce) its facts. A quality tier, never
   // a verification — corroboration cannot set VERIFIED or satisfy the human
   // gate. { result: CORROBORATED|NOT_CORROBORATED, at, model, promptVersion,
   //   reproduced, total, unreproducedFields: string[] }
-  corroboration    Json?
+  corroboration       Json?
   // Sentence -> supporting claim ids for the synthesized summary.
-  sentenceClaimMap Json?
+  sentenceClaimMap    Json?
   // Content hash of the claim set + summary a human verified, so a final
   // export can prove it is exporting exactly what was verified.
   verifiedContentHash String?
-  editedFields     Json? // string[] of human-corrected fields
-  reviewNote       String?
-  reviewedById     String?
-  reviewedAt       DateTime?
-  verifiedById     String?
-  verifiedAt       DateTime?
-  supersededById   String?
-  staleReason      String?
-  sourceFingerprint String? // fingerprint of the source at generation time
-  promptVersion    String?
-  schemaVersion    String?
-  model            String?
-  createdAt        DateTime  @default(now())
-  updatedAt        DateTime  @updatedAt
+  editedFields        Json? // string[] of human-corrected fields
+  reviewNote          String?
+  reviewedById        String?
+  reviewedAt          DateTime?
+  verifiedById        String?
+  verifiedAt          DateTime?
+  supersededById      String?
+  staleReason         String?
+  sourceFingerprint   String? // fingerprint of the source at generation time
+  promptVersion       String?
+  schemaVersion       String?
+  model               String?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
   @@index([caseId, sourceDocumentId])
   @@index([caseId, status])
@@ -2180,23 +2200,23 @@ model SourcePage {
 // FUTURE drafts in the SAME firm — they never carry patient names, dates,
 // providers, or case facts into another case's prompt.
 model CorrectionExemplar {
-  id            String   @id @default(uuid())
-  firmId        String
-  caseId        String
-  encounterId   String
-  documentType  String? // taxonomy type of the source document
-  category      String // WRONG_FIELD | BOILERPLATE_REMOVED | DATE_CORRECTED | PROVIDER_CORRECTED | EXCERPT_MISMATCH | SUMMARY_REWORDED | OTHER
-  guidance      String // fact-free, deterministic guidance sentence for prompts
-  fieldDiffs    Json // [{field, changeType}] — no values copied across cases
-  draftSnapshot Json // original AI draft (stays in the owning firm/case only)
+  id                String   @id @default(uuid())
+  firmId            String
+  caseId            String
+  encounterId       String
+  documentType      String? // taxonomy type of the source document
+  category          String // WRONG_FIELD | BOILERPLATE_REMOVED | DATE_CORRECTED | PROVIDER_CORRECTED | EXCERPT_MISMATCH | SUMMARY_REWORDED | OTHER
+  guidance          String // fact-free, deterministic guidance sentence for prompts
+  fieldDiffs        Json // [{field, changeType}] — no values copied across cases
+  draftSnapshot     Json // original AI draft (stays in the owning firm/case only)
   correctedSnapshot Json
-  claimRefs     Json? // claim identifiers within the encounter
-  reviewerId    String
-  promptVersion String?
-  schemaVersion String?
-  model         String?
-  promoted      Boolean  @default(false) // measured as improving accuracy
-  verifiedAt    DateTime @default(now())
+  claimRefs         Json? // claim identifiers within the encounter
+  reviewerId        String
+  promptVersion     String?
+  schemaVersion     String?
+  model             String?
+  promoted          Boolean  @default(false) // measured as improving accuracy
+  verifiedAt        DateTime @default(now())
 
   @@index([firmId, documentType])
   @@index([caseId])
@@ -2227,11 +2247,11 @@ model LearningFinding {
   futureCareItemId  String?
 
   /// EXTRACTION | IDENTITY | SUMMARY | CHRONOLOGY | CARE_PLAN | PRICING
-  stage       String
+  stage           String
   /// Closed vocabulary — see lib/learning/failureTaxonomy.ts
-  failureCode String
+  failureCode     String
   /// SAFETY_CRITICAL | MATERIAL | QUALITY
-  severity    String
+  severity        String
   /// CRITIC | FACTUAL_AUDIT | SECTION_LEDGER | DETERMINISTIC_CHECK | HUMAN_REVIEW
   detectionSource String
 
@@ -2275,7 +2295,7 @@ model LearningFinding {
   sectionType   String?
 
   // Bounded repair: a targeted retry, not an unbounded loop.
-  repairAttempts Int      @default(0)
+  repairAttempts Int       @default(0)
   repairedAt     DateTime?
 
   candidateId String?
@@ -2315,17 +2335,17 @@ model LearningCandidate {
   /// never enough to change firm-scoped clinical behaviour.
   supportCount Int @default(1)
 
-  version Int @default(1)
+  version Int    @default(1)
   /// DRAFT | EVALUATED | ADOPTED | REJECTED_NO_IMPROVEMENT | RETIRED
   status  String @default("DRAFT")
 
   /// Held-out scorecard: metric deltas, cases evaluated, safety-critical checks.
-  evaluation Json?
+  evaluation  Json?
   /// True only when no safety-critical metric regressed.
   safetyClean Boolean?
 
-  adoptedAt  DateTime?
-  retiredAt  DateTime?
+  adoptedAt    DateTime?
+  retiredAt    DateTime?
   /// The candidate this one supersedes, so rollback has a lineage to follow.
   supersedesId String?
 
