@@ -19,15 +19,17 @@ import { readdirSync, readFileSync } from "fs";
 const DIR = "prisma/migrations";
 
 /**
- * Tables whose CREATE is missing from the history TODAY.
+ * Tables whose CREATE is missing from the history.
  *
- * Pre-existing, from the `db push` era — not introduced by any recent change.
- * Repairing them means authoring the CREATE TABLE statements that were never
- * written and inserting them at the right point in the history; until that is
- * done, `prisma migrate deploy` cannot rebuild from empty. Removing a name from
- * this list is how that repair gets verified.
+ * Empty, and meant to stay that way. It held VocationalEntry and
+ * EconomicScenario — introduced with `prisma db push`, so the dev database had
+ * them and the history did not, and CI failed on
+ * `relation "VocationalEntry" does not exist` for weeks. The missing CREATEs
+ * were authored in 20260804110000_vocational_and_economic_tables.
+ *
+ * A name here is a promise to repair, not a licence to ignore.
  */
-const KNOWN_MISSING = new Set(["VocationalEntry", "EconomicScenario"]);
+const KNOWN_MISSING = new Set<string>([]);
 
 function main() {
   const dirs = readdirSync(DIR).filter((d) => d !== "migration_lock.toml");
