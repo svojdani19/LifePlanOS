@@ -19,6 +19,8 @@ import { locateConditionEvidence } from "@/lib/engine/evidence";
 import { buildRecommendationDossier } from "@/lib/engine/medicalNecessity";
 import { persistMachineLedger, relinkPhysicianEvidence, serviceKeyOf } from "@/lib/engine/persistLedger";
 import { classifySupport } from "@/lib/engine/supportClass";
+import { GENERATOR_ORIGINS } from "@/lib/learning/futureCareAgreement";
+import { EVIDENCE_LEDGER_VERSION } from "@/lib/engine/evidenceLedger";
 import { resolveRecommendationCondition } from "@/lib/engine/recommendationCondition";
 import { locateConditionEvidenceInClaims, stateObjectiveEvidence } from "@/lib/engine/conditionEvidence";
 import { CURRENT_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
@@ -568,6 +570,30 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
     if (lineage) {
       await prisma.futureCareItem.update({ where: { id: lineage.priorId }, data: { supersededById: created.id } });
     }
+  }
+
+  // ── Freeze what the generator produced, before anyone touches it ──────────
+  // A benchmark you can edit is not a benchmark. The blind evaluator used to
+  // read live plan rows and filter out reviewed ones, which let planner-EDITED
+  // output — same generator origin, still PENDING — score as generator output.
+  try {
+    const snapItems = await prisma.futureCareItem.findMany({
+      where: { caseId, supersededAt: null, origin: { in: GENERATOR_ORIGINS as never[] } },
+      select: {
+        service: true, category: true, frequencyPerYear: true, durationYears: true,
+        isLifetime: true, presentValue: true, lifetimeCost: true, origin: true, supportClass: true,
+      },
+    });
+    await prisma.generatorSnapshot?.create({
+      data: {
+        firmId: c.firmId,
+        caseId,
+        items: snapItems as never,
+        producerVersions: { ledger: EVIDENCE_LEDGER_VERSION } as never,
+      },
+    });
+  } catch (e) {
+    console.warn(`[snapshot] could not freeze generator output for ${caseId}:`, e);
   }
 
   // ── Evidence ledger ────────────────────────────────────────────────────────

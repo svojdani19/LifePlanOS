@@ -370,6 +370,7 @@ model Case {
   interviewFindings         InterviewFinding[]
   attestations              Attestation[]
   referencePlanItems        ReferencePlanItem[]
+  generatorSnapshots        GeneratorSnapshot[]
 
   @@unique([firmId, caseNumber])
   @@index([firmId])
@@ -1566,6 +1567,33 @@ model ReferencePlanItem {
 
   @@index([firmId, caseId])
   @@index([caseId])
+}
+
+/// An immutable snapshot of what the GENERATOR produced, taken before any human
+/// touched it.
+///
+/// The blind evaluator queried live plan rows and filtered out the ones a
+/// reviewer had approved or modified. That filter is not a freeze: an item a
+/// planner EDITED keeps its generator origin and a PENDING status, so edited
+/// output scored as generator output. And the origin allow-list omitted
+/// TEMPLATE_SPECIALTY, so an entire generator path was silently unscored.
+///
+/// A benchmark you can edit is not a benchmark. This records the run.
+model GeneratorSnapshot {
+  id     String @id @default(uuid())
+  firmId String
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  /// The generation this snapshot froze, for lineage back to the run.
+  planVersion      Int?
+  /// Every item as generated: service, category, quantities, origin, class.
+  items            Json
+  /// Producer versions, so a score is attributable to the code that earned it.
+  producerVersions Json?
+  takenAt          DateTime @default(now())
+
+  @@index([caseId, takenAt])
 }
 
 model GoldCase {

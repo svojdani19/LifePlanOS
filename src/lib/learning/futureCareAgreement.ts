@@ -27,6 +27,16 @@
 
 import { bundleKey, resolveIntervention, type InterventionId, type ServiceFamily } from "@/lib/engine/serviceOntology";
 
+/**
+ * Origins the GENERATOR produces. Declared once, here, because the evaluator's
+ * query hand-listed three of them and omitted TEMPLATE_SPECIALTY — a whole
+ * generator path scored as if it did not exist.
+ */
+export const GENERATOR_ORIGINS: readonly string[] = ["TEMPLATE_CONDITION", "TEMPLATE_BASELINE", "TEMPLATE_SPECIALTY", "RECORD_RECOMMENDED"];
+
+/** Origins a person authored, which are never the generator's output. */
+export const HUMAN_ORIGINS: readonly string[] = ["PHYSICIAN_ADDED", "PLANNER_ADDED", "GOLD_IMPORT"];
+
 export interface ScoredItem {
   service: string;
   category?: string | null;
@@ -37,6 +47,8 @@ export interface ScoredItem {
   /** Generated items only: what put it in the plan. */
   origin?: string | null;
   physicianStatus?: string | null;
+  /** True once a human has edited the row — no longer generator output. */
+  edited?: boolean | null;
 }
 
 export type MatchKind =
@@ -94,8 +106,15 @@ const pv = (xs: ScoredItem[]) => xs.reduce((a, x) => a + (x.presentValue ?? 0), 
  */
 export function assertBlind(generated: readonly ScoredItem[]): void {
   const leaked = generated.filter(
-    (g) => g.origin === "GOLD_IMPORT" || g.origin === "PHYSICIAN_ADDED" || g.origin === "PLANNER_ADDED" ||
-      g.physicianStatus === "APPROVED" || g.physicianStatus === "MODIFIED",
+    (g) =>
+      (g.origin != null && HUMAN_ORIGINS.includes(g.origin)) ||
+      g.physicianStatus === "APPROVED" ||
+      g.physicianStatus === "MODIFIED" ||
+      // An EDITED item keeps its generator origin and a PENDING status, so the
+      // status filter alone let planner-edited output score as generator
+      // output. This is why the evaluator now reads a frozen snapshot rather
+      // than filtering live rows.
+      g.edited === true,
   );
   if (leaked.length) {
     throw new Error(

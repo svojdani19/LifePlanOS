@@ -108,3 +108,27 @@ describe("the report separates the kinds of gap", () => {
     expect(s.matched[0].durationAgrees).toBeNull();
   });
 });
+
+describe("a filter is not a freeze", () => {
+  it("rejects a planner-EDITED row even though its origin and status look generated", () => {
+    // The hole the status filter left: `edited` keeps the generator origin and
+    // a PENDING status, so a planner's rewrite scored as generator output.
+    expect(() => assertBlind([{ service: "Physical therapy", origin: "TEMPLATE_CONDITION", physicianStatus: "PENDING", edited: true }])).toThrow(/Blind evaluation refused/);
+  });
+
+  it("counts TEMPLATE_SPECIALTY as generator output", async () => {
+    // The evaluator's hand-written origin list omitted it, so an entire
+    // generator path was silently unscored.
+    const { GENERATOR_ORIGINS } = await import("@/lib/learning/futureCareAgreement");
+    expect(GENERATOR_ORIGINS).toContain("TEMPLATE_SPECIALTY");
+    expect(() => assertBlind([{ service: "X", origin: "TEMPLATE_SPECIALTY", physicianStatus: "PENDING" }])).not.toThrow();
+  });
+
+  it("covers every schema origin between the generator and human sets", async () => {
+    const { GENERATOR_ORIGINS, HUMAN_ORIGINS } = await import("@/lib/learning/futureCareAgreement");
+    const schemaOrigins = ["TEMPLATE_CONDITION", "TEMPLATE_BASELINE", "TEMPLATE_SPECIALTY", "RECORD_RECOMMENDED", "PHYSICIAN_ADDED", "PLANNER_ADDED", "GOLD_IMPORT"];
+    for (const o of schemaOrigins) {
+      expect(GENERATOR_ORIGINS.includes(o) || HUMAN_ORIGINS.includes(o), o).toBe(true);
+    }
+  });
+});

@@ -39,28 +39,33 @@ async function main() {
       presentValue: r.presentValue,
     }));
 
-    // GENERATOR OUTPUT ONLY. Everything a person touched is excluded here, not
-    // filtered downstream, so a contaminated set cannot be scored by accident.
-    const generated = (await prisma.futureCareItem.findMany({
-      where: {
-        caseId: rc.caseId,
-        supersededAt: null,
-        origin: { in: ["TEMPLATE_CONDITION", "TEMPLATE_BASELINE", "RECORD_RECOMMENDED"] },
-        physicianStatus: { notIn: ["APPROVED", "MODIFIED"] },
-      },
-    })).map<ScoredItem>((i) => ({
+    // THE FROZEN SNAPSHOT, not the live plan.
+    //
+    // This used to query current rows and filter out reviewed ones. A filter is
+    // not a freeze: an item a planner EDITED keeps its generator origin and a
+    // PENDING status, so edited output scored as generator output. The
+    // hand-written origin list also omitted TEMPLATE_SPECIALTY, leaving a whole
+    // generator path unscored.
+    const snapshot = await prisma.generatorSnapshot?.findFirst({
+      where: { caseId: rc.caseId },
+      orderBy: { takenAt: "desc" },
+    }).catch(() => null);
+    if (!snapshot) {
+      console.log(`\n${c?.caseNumber ?? rc.caseId}: no generator snapshot — regenerate the plan to freeze one, then re-run.`);
+      continue;
+    }
+    const generated = (snapshot.items as unknown as ScoredItem[]).map<ScoredItem>((i) => ({
       service: i.service,
-      category: String(i.category),
+      category: i.category ?? null,
       frequencyPerYear: i.frequencyPerYear,
       durationYears: i.durationYears,
       isLifetime: i.isLifetime,
       presentValue: i.presentValue,
       origin: i.origin,
-      physicianStatus: i.physicianStatus,
     }));
 
     console.log(`\n${"═".repeat(78)}\n ${c?.caseNumber ?? rc.caseId} — blind future-care evaluation\n${"═".repeat(78)}`);
-    console.log(` published concepts: ${published.length}   generator candidates: ${generated.length}`);
+    console.log(` published concepts: ${published.length}   generator candidates: ${generated.length}   snapshot ${snapshot.takenAt.toISOString().slice(0, 19)}`);
 
     const s = scoreFutureCareAgreement(generated, published);
     console.log(`\n  precision ${pct(s.precision)}   recall ${pct(s.recall)}   F1 ${pct(s.f1)}`);
