@@ -269,6 +269,19 @@ export function CaseWorkspace({
   const hasPlan = data.futureCareItems.length > 0;
   const pendingPhysician = data.futureCareItems.filter((i: AnyRec) => i.physicianStatus === "PENDING").length;
 
+  // ── What each header number is ABOUT ──────────────────────────────────────
+  // The band read "Future Care Items 34 · Lifetime $149,188 · Present Value
+  // $120,499" — three numbers, none of them describing the same set. The count
+  // was every disclosed item; the money was the 9 items with documented
+  // support. Whichever a reader trusted, they were reading the other one wrong.
+  const supportedCount = totals.planTotals?.supported.items ?? data.futureCareItems.length;
+  const disclosedCount = totals.planTotals?.scenario.items ?? data.futureCareItems.length;
+  // Only qualify the labels when the two sets actually differ; on a plan where
+  // everything is supported, "(supported)" on every tile is noise.
+  const splitTotals = !!totals.planTotals && totals.planTotals.scenario.presentValue > totals.planTotals.supported.presentValue;
+  const itemsLabel = splitTotals ? "Supported Items" : "Future Care Items";
+  const itemsValue = splitTotals ? `${supportedCount} of ${disclosedCount}` : String(disclosedCount);
+
   const TABS = [
     { id: "overview", label: "Intake", icon: FileText },
     { id: "records", label: `Records (${data.documents.length})`, icon: Upload },
@@ -356,24 +369,27 @@ export function CaseWorkspace({
               ? [
                   // Side tiles stay compact; the lifetime estimate is the
                   // attorney's headline number, front and center.
-                  { label: "Future Care Items", value: String(data.futureCareItems.length), cls: "", compact: true },
-                  // Estimate range (-30% / +10%, rounded to the nearest $1k).
-                  { label: "Lifetime (Est. Range)", value: moneyRange(totals.totalLifetime), cls: "text-brand-800", center: true },
+                  { label: itemsLabel, value: itemsValue, cls: "", compact: true },
+                  // Estimate range (-30% / +10%, rounded to the nearest $1k) —
+                  // over the SUPPORTED items only, which the label now says.
+                  { label: splitTotals ? "Lifetime, Supported (Est. Range)" : "Lifetime (Est. Range)", value: moneyRange(totals.totalLifetime), cls: "text-brand-800", center: true },
                   // Absolute count of items blocking ANY report generation.
                   { label: "Pending Resolution", value: String(pendingResolution), cls: pendingResolution > 0 ? "text-amber-700" : "", compact: true },
                 ]
               : [
-                  { label: "Future Care Items", value: String(data.futureCareItems.length), cls: "" },
-                  { label: "Lifetime (Undiscounted)", value: formatMoney(totals.totalLifetime), cls: "" },
-                  { label: "Present Value", value: formatMoney(totals.totalPresentValue), cls: "text-brand-800" },
-                  // The second view. A candidate nobody has supported is real
-                  // future care worth discussing and is not a damages figure,
-                  // so both numbers are shown and neither is hidden inside the
-                  // other.
-                  ...(totals.planTotals && totals.planTotals.scenario.presentValue > totals.planTotals.supported.presentValue
+                  { label: itemsLabel, value: itemsValue, cls: "" },
+                  { label: splitTotals ? "Lifetime, Supported" : "Lifetime (Undiscounted)", value: formatMoney(totals.totalLifetime), cls: "" },
+                  { label: splitTotals ? "Present Value, Supported" : "Present Value", value: formatMoney(totals.totalPresentValue), cls: "text-brand-800" },
+                  // The second view, and the axis it differs on is stated. A
+                  // candidate nobody has supported is real future care worth
+                  // discussing and is not a damages figure — so both numbers
+                  // appear, and neither hides inside the other. "(PV)" matters:
+                  // sitting between an undiscounted lifetime figure and a
+                  // present value, an unlabelled number is read as either.
+                  ...(splitTotals
                     ? [{
-                        label: `Candidate scenario (${totals.planTotals.scenario.items} items)`,
-                        value: formatMoney(totals.planTotals.scenario.presentValue),
+                        label: `Candidate Scenario, PV (${disclosedCount} items)`,
+                        value: formatMoney(totals.planTotals!.scenario.presentValue),
                         cls: "text-ink-500",
                       }]
                     : []),
