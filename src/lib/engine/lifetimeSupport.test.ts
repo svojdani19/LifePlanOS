@@ -62,6 +62,12 @@ function item(overrides: Partial<ReasoningItem> = {}): ReasoningItem {
     unitCost: 500,
     presentValue: 150_000,
     physicianStatus: "PENDING",
+    // Explicit: this fixture is a patient-specific item whose LIFETIME horizon
+    // is the thing under test. It used to omit `origin` and rely on the old
+    // grounding check reading an absent origin as grounded — a legacy branch
+    // no real row could reach, since the column is non-nullable with a default
+    // of TEMPLATE_CONDITION.
+    origin: "RECORD_RECOMMENDED",
     ...overrides,
   };
 }

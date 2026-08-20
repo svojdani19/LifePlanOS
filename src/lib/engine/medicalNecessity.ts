@@ -27,6 +27,7 @@ import {
   type LedgerStrength,
 } from "./evidenceLedger";
 import { citationCompatible, evidenceTier, selectPrimary, structuredConfidence, type ConfidenceLevel } from "./citationQuality";
+import { isGrounded } from "@/lib/reference/origins";
 import { specialtyLens } from "./specialtyReasoning";
 import { assessLifetimeSupport, deriveGuidelineDurationClaim, type GuidelineDurationClaim, type LifetimeSupportResult } from "./lifetimeSupport";
 
@@ -313,11 +314,13 @@ function guidelinesOf(cond: DossierCondition | null): { title?: string; year?: s
  * the conservative reading keeps existing plans reading as they did.
  */
 export function isRecordGrounded(item: { origin?: string | null; physicianStatus?: string | null }): boolean {
-  const origin = item.origin ?? null;
-  if (origin == null) return true;
-  if (origin === "PHYSICIAN_ADDED" || origin === "PLANNER_ADDED" || origin === "RECORD_RECOMMENDED") return true;
-  // A physician who approved a template item has adopted it as their own.
-  return item.physicianStatus === "APPROVED" || item.physicianStatus === "MODIFIED";
+  // One definition, shared with the lifecycle and the report. This carried its
+  // own allowlist that omitted GOLD_IMPORT and included RECORD_RECOMMENDED,
+  // while `lifecycle.ts` used the opposite set — 37 of 59 items on the
+  // reference case were narrated as unsupported scaffolding as a result.
+  // Reference content is now never grounded: an imported plan is evidence about
+  // a planner's opinion, not about this patient.
+  return isGrounded(item);
 }
 
 // Whether a chronology event pertains to this recommendation's diagnosis/region.

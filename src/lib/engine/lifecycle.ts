@@ -74,11 +74,16 @@ export interface PriorItem {
 }
 
 /**
- * Origins a regeneration never touches: content a human (or a reference plan
- * standing in for one) authored deliberately. Templates and record-mined
- * drafts regenerate; authored items persist as-is.
+ * Origins a regeneration never touches: content a human authored deliberately.
+ * Templates and record-mined drafts regenerate; authored items persist as-is.
+ *
+ * Re-exported from the canonical table. GOLD_IMPORT used to be in this literal,
+ * which is precisely what kept a published plan's 37 items alive inside the
+ * runtime plan across every regeneration. Reference content lives in
+ * ReferencePlanItem now.
  */
-export const AUTHORED_ORIGINS = new Set(["GOLD_IMPORT", "PHYSICIAN_ADDED", "PLANNER_ADDED"]);
+export { AUTHORED_ORIGINS } from "@/lib/reference/origins";
+import { AUTHORED_ORIGINS } from "@/lib/reference/origins";
 export interface RegenPlan {
   /** prior item ids safe to hard-delete (no review history) */
   deleteIds: string[];

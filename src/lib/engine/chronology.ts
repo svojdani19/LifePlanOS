@@ -119,6 +119,12 @@ export const EXCLUDED_TYPES = new Set([
   "SURVEILLANCE_VIDEO",
   "EXPERT_REPORT",
   "PEER_REVIEW",
+  // A finalized life care plan is the answer key. Chronicling it would put the
+  // planner's own recommendations into the patient's timeline as though they
+  // were care delivered. It was absent from this list while EXPERT_REPORT was
+  // present — the same document class, one of them guarded.
+  "LIFE_CARE_PLAN",
+  "COST_PROJECTION",
 ]);
 
 // Core clinical treatment/diagnostic records — kept whenever a finding exists.

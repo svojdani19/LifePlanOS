@@ -82,13 +82,24 @@ describe("authored origins survive regeneration", () => {
     physicianStatus: "PENDING", edited: false, lifecycleStatus: "ACTIVE", ...over,
   }) as never;
 
-  it("gold-import, physician-added and planner-added items are retained untouched", () => {
-    for (const origin of ["GOLD_IMPORT", "PHYSICIAN_ADDED", "PLANNER_ADDED"]) {
+  it("physician-added and planner-added items are retained untouched", () => {
+    for (const origin of ["PHYSICIAN_ADDED", "PLANNER_ADDED"]) {
       const plan = planRegeneration([prior({ id: origin, origin })]);
       expect(plan.retain.map((r) => r.id), origin).toEqual([origin]);
       expect(plan.deleteIds).toEqual([]);
       expect(plan.supersede).toEqual([]);
     }
+  });
+
+  it("does NOT retain reference-plan content as authored production content", () => {
+    // GOLD_IMPORT was in this set, and that is exactly what kept a
+    // professionally finalized plan's 37 line items alive inside the runtime
+    // plan across every regeneration — in the panels, in the totals, and in
+    // the gold harness's own input, so the answer key scored itself.
+    // Reference content is preserved in ReferencePlanItem, not by hiding in
+    // the production table.
+    const plan = planRegeneration([prior({ id: "gold", origin: "GOLD_IMPORT" })]);
+    expect(plan.retain.map((r) => r.id)).toEqual([]);
   });
 
   it("template drafts still regenerate normally", () => {

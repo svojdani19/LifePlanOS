@@ -98,7 +98,9 @@ function durationText(i: RDFutureCareItem, life: number | null | undefined): str
  * assumptions. An item generated before provenance was recorded says so rather
  * than implying the records supplied its numbers.
  */
-const AUTHORED_ORIGINS = new Set(["GOLD_IMPORT", "PHYSICIAN_ADDED", "PLANNER_ADDED"]);
+// The canonical set — this file used to carry its own duplicate literal, and
+// the two drifted on GOLD_IMPORT.
+import { AUTHORED_ORIGINS } from "@/lib/reference/origins";
 
 function projectionSentence(it: RDFutureCareItem): string {
   const p = it.inputProvenance as ProjectionInputs | null | undefined;

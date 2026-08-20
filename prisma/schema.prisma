@@ -369,6 +369,7 @@ model Case {
   treatingProviders         TreatingProvider[]
   interviewFindings         InterviewFinding[]
   attestations              Attestation[]
+  referencePlanItems        ReferencePlanItem[]
 
   @@unique([firmId, caseNumber])
   @@index([firmId])
@@ -1509,6 +1510,49 @@ model LearnedPrior {
 
 // A reference case with a known-correct output report — the gold corpus the
 // harness scores generation against.
+/// A line item from a professionally finalized life care plan, preserved as
+/// REFERENCE material.
+///
+/// These arrived as FutureCareItem rows with origin GOLD_IMPORT, which put a
+/// published plan's own conclusions inside the case's active plan: in the
+/// panels, in the totals, in the exported report, and in the gold harness's
+/// own input — the answer key scoring itself. They are preserved here, keyed to
+/// the case they were published for, and withdrawn from the runtime plan.
+///
+/// Nothing about this table is patient-facing output. It exists to score the
+/// generator and to teach it which CATEGORIES of care a planner considers.
+model ReferencePlanItem {
+  id     String @id @default(uuid())
+  firmId String
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  /// The FutureCareItem this was preserved from, so the move is reversible.
+  sourceItemId String? @unique
+
+  service          String
+  category         String
+  specialty        String?
+  cptCode          String?
+  frequencyPerYear Float?
+  durationYears    Float?
+  isLifetime       Boolean @default(false)
+  unitCost         Float?
+  lifetimeCost     Float?
+  presentValue     Float?
+  rationale        String?
+  /// Everything else the published row carried, verbatim, so preservation is
+  /// lossless and the withdrawal can be undone from this table alone.
+  payload          Json
+
+  /// Where the published plan came from, for attribution.
+  sourceLabel String?
+  preservedAt DateTime @default(now())
+
+  @@index([firmId, caseId])
+  @@index([caseId])
+}
+
 model GoldCase {
   id           String   @id @default(uuid())
   firmId       String

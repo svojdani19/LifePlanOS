@@ -1,5 +1,6 @@
 import { prisma } from "@/lib/db";
 import { CHRONOLOGY_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
+import { recordEvidenceSources } from "@/lib/reference/boundary";
 import { packFor, type CareTemplate } from "@/lib/engine/specialty";
 import { CONDITION_CARE, BASELINE_CARE, resolveConditionKeys } from "@/lib/engine/careLibrary";
 import { project, type CaseAssumptions } from "@/lib/engine/cost";
@@ -180,7 +181,15 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
   // and the specialty-pack conditions, so the causation map is comprehensive.
   const additionalDx = (Array.isArray(c.additionalDiagnoses) ? c.additionalDiagnoses : []) as { diagnosis?: string; icd10Code?: string }[];
   // Records once, for locating each condition's objective evidence (doc + page + quote).
-  const caseDocs = await prisma.document.findMany({ where: { caseId }, select: { id: true, filename: true, type: true, extractedText: true, pageCount: true } });
+  // RECORD SOURCES ONLY. This read had no type filter, so a finalized life
+  // care plan or a retained expert's report attached to the case was mined by
+  // `locateConditionEvidence` as though it were a record of care — the answer
+  // key quoted back as evidence, and every recommendation it named appearing
+  // "documented". The boundary is one shared rule; see reference/boundary.ts.
+  const allCaseDocs = await prisma.document.findMany({ where: { caseId }, select: { id: true, filename: true, type: true, extractedText: true, pageCount: true } });
+  const caseDocs = recordEvidenceSources(allCaseDocs);
+  const withheld = allCaseDocs.length - caseDocs.length;
+  if (withheld) console.info(`[boundary] case ${caseId}: ${withheld} reference document(s) withheld from record mining`);
   // …and the VALIDATED extracted claims, which are the better source: typed,
   // page-cited, and the very content a reviewer attests to on the Records
   // page. The text locator greps raw document text and had discarded the one
