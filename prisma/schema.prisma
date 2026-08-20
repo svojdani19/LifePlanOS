@@ -371,6 +371,7 @@ model Case {
   attestations              Attestation[]
   referencePlanItems        ReferencePlanItem[]
   generatorSnapshots        GeneratorSnapshot[]
+  recommendationBases       RecommendationBasis[]
 
   @@unique([firmId, caseNumber])
   @@index([firmId])
@@ -1579,6 +1580,64 @@ model ReferencePlanItem {
 /// TEMPLATE_SPECIALTY, so an entire generator path was silently unscored.
 ///
 /// A benchmark you can edit is not a benchmark. This records the run.
+/// The single authoritative answer to "what does this recommendation rest on".
+///
+/// `buildRecommendationDossier()` is called independently by the panel, the
+/// report, validation, clinical reasoning and the generator. They agree today
+/// only because their inputs were forced to agree; nothing structural stops the
+/// screen and the exported report reconstructing different bases from different
+/// queries, which is how the panel and the ledger came to argue about different
+/// injuries last week.
+///
+/// This is computed once, at generation, and hashed. Consumers read it and
+/// compare against what they would derive now — the same staleness discipline
+/// the evidence ledger already uses — so a divergence is DISCLOSED rather than
+/// silently resolved in whichever direction that consumer happened to compute.
+model RecommendationBasis {
+  id     String @id @default(uuid())
+  firmId String
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+
+  futureCareItemId String  @unique
+  lineageId        String?
+
+  /// Canonical intervention identity and its clinical scope.
+  interventionId String
+  serviceFamily  String
+  conditionId    String?
+  bodyRegion     String?
+  spinalLevels   String[]
+  laterality     String?
+
+  /// The classification governing totals, and its deterministic reason.
+  supportClass  String
+  supportReason String?
+
+  /// The accepted evidence, by role: diagnoses, objective findings, functional
+  /// limitations, prior treatment, treatment response, guidelines, contrary.
+  acceptedEvidence Json
+  /// Prerequisites and whether each is satisfied.
+  prerequisites    Json?
+  /// Frequency / duration / cost basis: RECORD | GUIDELINE | PROFESSIONAL | ASSUMPTION.
+  claimBasis       Json?
+  /// Premises the record does not supply.
+  missingPremises  Json?
+
+  /// The deterministic narrative, persisted rather than regenerated per render.
+  necessityNarrative String?
+
+  /// Versions, so a basis is attributable to the code that produced it.
+  producerVersion String
+  /// sha256 over the accepted evidence + structural fields. Drives staleness.
+  basisHash       String
+
+  createdAt DateTime @default(now())
+
+  @@index([caseId])
+  @@index([firmId, caseId])
+}
+
 model GeneratorSnapshot {
   id     String @id @default(uuid())
   firmId String

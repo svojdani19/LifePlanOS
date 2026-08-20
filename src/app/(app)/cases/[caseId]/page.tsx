@@ -95,6 +95,13 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
   // would refuse — or hold the grant and never be offered it.
   const canAddEvidence = !caseAccess.platformAdminReadOnly && canCanonicalPermission(ctx, "futurecare.edit", { caseId: c.id });
 
+  // The recorded basis for each recommendation — the single authoritative
+  // answer to "what does this rest on". The panel compares it against what it
+  // would derive now and DISCLOSES a divergence rather than silently preferring
+  // either side.
+  const recommendationBases =
+    (await prisma.recommendationBasis?.findMany({ where: { caseId: c.id, firmId: c.firmId } }).catch(() => [])) ?? [];
+
   const evidenceRows = (await prisma.recommendationEvidence
     ?.findMany({
       where: { caseId: c.id, firmId: c.firmId },
@@ -163,7 +170,7 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
         <ArrowLeft className="h-4 w-4" /> All Cases
       </Link>
       <CaseWorkspace
-        data={JSON.parse(JSON.stringify({ ...c, physicianEvidence, recordedEvidence }))}
+        data={JSON.parse(JSON.stringify({ ...c, physicianEvidence, recordedEvidence, recommendationBases }))}
         assumptions={assumptions}
         totals={{ totalLifetime, totalPresentValue, planTotals }}
         permissions={caseAccess.platformAdminReadOnly ? [] : attorneyView ? ROLE_PERMISSIONS.ATTORNEY_REVIEWER : effectivePermissions}

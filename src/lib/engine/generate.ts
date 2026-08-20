@@ -21,6 +21,7 @@ import { persistMachineLedger, relinkPhysicianEvidence, serviceKeyOf } from "@/l
 import { classifySupport } from "@/lib/engine/supportClass";
 import { GENERATOR_ORIGINS } from "@/lib/learning/futureCareAgreement";
 import { EVIDENCE_LEDGER_VERSION } from "@/lib/engine/evidenceLedger";
+import { buildBasis } from "@/lib/engine/recommendationBasis";
 import { resolveRecommendationCondition } from "@/lib/engine/recommendationCondition";
 import { locateConditionEvidenceInClaims, stateObjectiveEvidence } from "@/lib/engine/conditionEvidence";
 import { CURRENT_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
@@ -622,9 +623,13 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
       adult: true,
     };
     let dropped = 0;
+    const bases: ReturnType<typeof buildBasis>[] = [];
     const rows = ledgerItems.flatMap((it) => {
       const cond = resolveRecommendationCondition(it as never, ledgerConditions as never).condition;
       const d = buildRecommendationDossier(it as never, cond, ledgerEvents as never, ledgerCase, ledgerInterviews as never);
+      // One basis per item, from the SAME dossier build that produces the
+      // ledger — so the basis and the ledger cannot describe different evidence.
+      bases.push(buildBasis(it as never, d));
       dropped += d.ledgerDropped;
       return d.ledger;
     });
@@ -638,6 +643,40 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
           (relink.orphaned ? `; ${relink.orphaned} now reference a recommendation no longer in the plan` : ""),
       );
     }
+    // Persist one basis per item. Replaced wholesale, like the derived ledger:
+    // a basis is a function of the record, and keeping a stale one beside a
+    // fresh one would let two consumers read different answers.
+    try {
+      await prisma.recommendationBasis?.deleteMany({ where: { caseId } });
+      for (const b of bases) {
+        if (!b.futureCareItemId) continue;
+        await prisma.recommendationBasis.create({
+          data: {
+            firmId: c.firmId,
+            caseId,
+            futureCareItemId: b.futureCareItemId,
+            lineageId: b.lineageId,
+            interventionId: b.interventionId,
+            serviceFamily: b.serviceFamily,
+            conditionId: b.conditionId,
+            bodyRegion: b.bodyRegion,
+            spinalLevels: b.spinalLevels,
+            laterality: b.laterality,
+            supportClass: b.supportClass,
+            supportReason: b.supportReason,
+            acceptedEvidence: b.acceptedEvidence as never,
+            missingPremises: b.missingPremises as never,
+            necessityNarrative: b.necessityNarrative,
+            producerVersion: b.producerVersion,
+            basisHash: b.basisHash,
+          },
+        });
+      }
+      console.info(`[basis] case ${caseId}: ${bases.length} recommendation bases persisted`);
+    } catch (e) {
+      console.warn(`[basis] could not persist recommendation bases for ${caseId}:`, e);
+    }
+
     const outcome = await persistMachineLedger(prisma as never, { caseId, firmId: c.firmId }, rows);
     // What the cap excluded is stated. A silent truncation reads as "this is
     // all the evidence there was", which is a different claim.

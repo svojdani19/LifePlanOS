@@ -54,6 +54,7 @@ import { presentClaims, labelForField } from "@/lib/records/claimPresentation";
 import { resolveRecommendationCondition } from "@/lib/engine/recommendationCondition";
 import { isChronologyOutputRow } from "@/lib/records/encounterLifecycle";
 import { compareEvidenceSets, describeEvidenceSet, type EvidenceRowIdentity } from "@/lib/engine/evidenceSet";
+import { buildBasis, compareBasis } from "@/lib/engine/recommendationBasis";
 import { rankForDisplay } from "@/lib/engine/evidenceLedger";
 // Aliased: this file already has a `FindingList` for the case's legal
 // findings, which are a different concept from record-audit findings.
@@ -2087,6 +2088,7 @@ function RecommendationDossierView({
   physicianEvidence = [],
   recordedEvidence = [],
   witnessLedger,
+  basisState,
   onAddEvidence,
 }: {
   dossier: RecommendationDossier;
@@ -2098,6 +2100,8 @@ function RecommendationDossierView({
   recordedEvidence?: AnyRec[];
   /** The current derivation over OUTPUT rows — the comparison's witness. */
   witnessLedger?: EvidenceRowIdentity[];
+  /** Set when the recorded basis and the current record disagree. */
+  basisState?: { state: string; notice: string | null } | null;
   /** Present only when the viewer may attach evidence. */
   onAddEvidence?: (input: { reference: string; claim: string; stance: string; note?: string }) => Promise<string | null>;
 }) {
@@ -2159,6 +2163,12 @@ function RecommendationDossierView({
           <AddCitation onAdd={onAddEvidence} />
         </DossierSection>
       )}
+      {basisState?.notice ? (
+        <DossierSection label="Recorded basis" tone="warning">
+          <p className="text-[12px] leading-snug text-amber-800">{basisState.notice}</p>
+        </DossierSection>
+      ) : null}
+
       <RecordedEvidence rows={recordedEvidence} derived={witnessLedger ?? dossier.ledger} />
 
       {/* "Expert-selected", not "Physician-selected": planners hold this
@@ -2231,6 +2241,20 @@ function caseInputs(it: AnyRec, data: AnyRec) {
   const interviews = ((data.interviewFindings ?? []) as AnyRec[]).map((f) => ({ subject: f.subject, category: f.category, text: f.text, quote: f.quote, conditionId: f.conditionId, futureCareItemId: f.futureCareItemId, providerName: f.providerId ? provName.get(f.providerId) ?? null : null }));
   return { cond, kase, interviews };
 }
+/**
+ * Does the recorded basis still match what this panel would derive?
+ *
+ * Neither side wins automatically. A recorded basis that no longer matches is
+ * not obviously wrong — the record may have moved since a physician approved
+ * it, which is the thing a reviewer needs told rather than resolved.
+ */
+function basisStateFor(it: AnyRec, data: AnyRec): { state: string; notice: string | null } | null {
+  const stored = ((data.recommendationBases ?? []) as AnyRec[]).find((b) => b.futureCareItemId === it.id) ?? null;
+  const derived = buildBasis(it as never, dossierForItem(it, data));
+  const c = compareBasis(stored as never, derived);
+  return c.state === "CURRENT" ? null : { state: c.state, notice: c.notice };
+}
+
 function dossierForItem(it: AnyRec, data: AnyRec): RecommendationDossier {
   const { cond, kase, interviews } = caseInputs(it, data);
   return buildRecommendationDossier(it as never, cond as DossierCondition | null, (data.chronologyEvents ?? []) as DossierChronoEvent[], kase, interviews as never);
@@ -2462,6 +2486,7 @@ function FutureCarePanel({ data, canEdit, canAddEvidence = false, attorneyView =
                 condensed={attorneyView}
                 physicianEvidence={((data.physicianEvidence ?? []) as AnyRec[]).filter((e) => e.futureCareItemId === it.id)}
                 recordedEvidence={((data.recordedEvidence ?? []) as AnyRec[]).filter((e) => e.futureCareItemId === it.id)}
+                basisState={basisStateFor(it, data)}
                 witnessLedger={witnessDossierForItem(it, data).ledger as unknown as EvidenceRowIdentity[]}
                 onAddEvidence={
                   canAddEvidence
