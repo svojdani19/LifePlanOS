@@ -243,9 +243,19 @@ describe("specialty-specific, function-driven narrative (Clinical Intelligence S
     expect(typeof d.probability.percentage).toBe("number");
   });
 
-  it("closes complex recommendations with an integrated synthesis (§8)", () => {
-    const d = buildRecommendationDossier(mk({ service: "Total knee arthroplasty", category: "ORTHOPEDIC_SURGERY", presentValue: 120000, isLifetime: true }), knee, chrono, k);
+  it("closes a GROUNDED complex recommendation with an integrated synthesis (§8)", () => {
+    const d = buildRecommendationDossier(mk({ service: "Total knee arthroplasty", category: "ORTHOPEDIC_SURGERY", presentValue: 120000, isLifetime: true, origin: "RECORD_RECOMMENDED" }), knee, chrono, k);
     expect(d.medicalNecessity).toMatch(/taken together|integrating the diagnosis/i);
     expect(d.medicalNecessity).toMatch(/reasonable degree of medical probability/i);
+  });
+
+  it("offers no probability opinion on an item that is only a candidate", () => {
+    // The same paragraph used to close "it is my opinion, to a reasonable
+    // degree of medical probability, that this care is required" one sentence
+    // after saying the item was pending record support.
+    const d = buildRecommendationDossier(mk({ service: "Total knee arthroplasty", category: "ORTHOPEDIC_SURGERY", presentValue: 120000, isLifetime: true, origin: "TEMPLATE_CONDITION" }), knee, chrono, k);
+    expect(d.medicalNecessity).not.toMatch(/reasonable and necessary/i);
+    expect(d.medicalNecessity).not.toMatch(/it is my opinion, to a reasonable degree/i);
+    expect(d.medicalNecessity).toMatch(/offered for review/i);
   });
 });

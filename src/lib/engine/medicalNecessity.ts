@@ -28,7 +28,8 @@ import {
 } from "./evidenceLedger";
 import { citationCompatible, evidenceTier, selectPrimary, structuredConfidence, type ConfidenceLevel } from "./citationQuality";
 import { isGrounded } from "@/lib/reference/origins";
-import { documentsNonResolution } from "@/lib/engine/assertionClassifier";
+import { documentsNonResolution, isClinicalAssertion, statesPresentPathology } from "@/lib/engine/assertionClassifier";
+import { atomize, type AtomicAssertion } from "@/lib/engine/atomize";
 import { specialtyLens } from "./specialtyReasoning";
 import { assessLifetimeSupport, deriveGuidelineDurationClaim, type GuidelineDurationClaim, type LifetimeSupportResult } from "./lifetimeSupport";
 
@@ -445,6 +446,26 @@ export function buildRecommendationDossier(
     else if (strength === "HISTORY") historyEvidence.push({ text: `“${s.quote}”`, source: src });
     else objectiveFindings.push({ text: `“${s.quote}”`, source: src });
   }
+  // ATOMIZE FIRST. Each of the six field reads below used to gate the whole
+  // field and then display `cleanClause(field, N)` — a different string. A
+  // 1,046-character left-knee MRI report classified as "spine" (first pattern
+  // wins over a multi-topic blob), passed the gate for a lumbar discectomy, and
+  // rendered its knee sentence as the finding that anchored the diagnosis.
+  //
+  // `admit` splits the field into single assertions, gates EACH on its own
+  // text, and returns exactly the strings that passed — which are the strings
+  // displayed and the strings persisted.
+  const admit = (field: string | null | undefined, opts: { anatomyGated: boolean }): AtomicAssertion[] =>
+    atomize(field).filter(
+      (a) =>
+        isCleanFinding(a.text) &&
+        // Case administration is not clinical evidence. Atomizing surfaced this
+        // at scale: "The patient was discharged home" and "Tobacco cessation
+        // was discussed" were being filed as PRIOR TREATMENT for a fusion.
+        isClinicalAssertion(a.text) &&
+        (!opts.anatomyGated || regionOk(a.text)),
+    );
+
   for (const e of pertinent) {
     const src = `${mdY(e.eventDate)}${e.provider ? ` · ${e.provider}` : ""}${e.sourcePage ? ` (p. ${e.sourcePage})` : ""}`;
     const on = e.eventDate ? new Date(e.eventDate) : null;
@@ -464,33 +485,37 @@ export function buildRecommendationDossier(
       recordedOn: on,
       verbatim: false,
     } as const;
-    if (e.imagingFindings && isCleanFinding(e.imagingFindings) && regionOk(e.imagingFindings)) {
-      imaging.push({ text: cleanClause(e.imagingFindings, 180), source: src });
-      consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.imagingFindings, 180), field: "imagingFindings", ...prov });
+    for (const a of admit(e.imagingFindings, { anatomyGated: true })) {
+      imaging.push({ text: a.text, source: src });
+      consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: a.text, field: "imagingFindings", ...prov });
     }
-    if (e.objectiveFindings && isCleanFinding(e.objectiveFindings) && regionOk(e.objectiveFindings)) {
-      examination.push({ text: cleanClause(e.objectiveFindings, 180), source: src });
-      consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.objectiveFindings, 180), field: "objectiveFindings", ...prov });
+    for (const a of admit(e.objectiveFindings, { anatomyGated: true })) {
+      examination.push({ text: a.text, source: src });
+      consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: a.text, field: "objectiveFindings", ...prov });
     }
     // A documented functional deficit is evidence for services that ADDRESS
     // function. It is not, by itself, evidence that an imaging study or an
     // injection is indicated — and it used to be shown under both.
     if (functionalGate.objective) {
-      if (e.functionalStatus && isCleanFinding(e.functionalStatus)) {
-        functionalLimitations.push({ text: cleanClause(e.functionalStatus, 160), source: src });
-        consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.functionalStatus, 160), field: "functionalStatus", ...prov });
+      for (const a of admit(e.functionalStatus, { anatomyGated: false })) {
+        functionalLimitations.push({ text: a.text, source: src });
+        consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: a.text, field: "functionalStatus", ...prov });
       }
-      if (e.restrictions && isCleanFinding(e.restrictions)) {
-        functionalLimitations.push({ text: cleanClause(e.restrictions, 160), source: src });
-        consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.restrictions, 160), field: "restrictions", ...prov });
+      for (const a of admit(e.restrictions, { anatomyGated: false })) {
+        functionalLimitations.push({ text: a.text, source: src });
+        consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: a.text, field: "restrictions", ...prov });
       }
     }
-    if (e.procedure && isCleanFinding(e.procedure) && regionOk(e.procedure)) {
-      priorTreatment.push({ text: cleanClause(e.procedure, 160), source: src });
-      consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.procedure, 160), field: "procedure", ...prov });
-    } else if (e.treatment && isCleanFinding(e.treatment) && regionOk(e.treatment)) {
-      priorTreatment.push({ text: cleanClause(e.treatment, 160), source: src });
-      consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: cleanClause(e.treatment, 160), field: "treatment", ...prov });
+    const procedures = admit(e.procedure, { anatomyGated: true });
+    for (const a of procedures) {
+      priorTreatment.push({ text: a.text, source: src });
+      consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: a.text, field: "procedure", ...prov });
+    }
+    if (!procedures.length) {
+      for (const a of admit(e.treatment, { anatomyGated: true })) {
+        priorTreatment.push({ text: a.text, source: src });
+        consider({ strength: "OBJECTIVE", sourceKind: "CHRONOLOGY_EVENT", quote: a.text, field: "treatment", ...prov });
+      }
     }
   }
   if (item.physicianStatus === "APPROVED" || item.physicianStatus === "MODIFIED") {
@@ -609,6 +634,12 @@ export function buildRecommendationDossier(
   // Did the record STATE what prior treatment achieved? One definition, shared
   // with the reasoning engine — the "treatment happened therefore it failed"
   // inference had six independent implementations.
+  // For the narrative's ANCHOR only: the finding must name this diagnosis's own
+  // region, not merely fail to contradict it. "A small to moderate-sized joint
+  // effusion" is region-neutral, so it passed the admission gate for a cervical
+  // fusion and then opened the paragraph as the finding the diagnosis rests on.
+  const anchorConcordant = (text: string): boolean => dxRegion === "general" || bodyRegion(text) === dxRegion;
+
   const treatmentResponseDocumented = documentsNonResolution([...priorTreatment, ...examination, ...functionalLimitations, ...physicianDocumentation]);
 
   // ── Probability assessment (structured + percentage) ───────────────────────
@@ -683,7 +714,7 @@ export function buildRecommendationDossier(
   if (!objectiveFindings.length) potentialChallenges.push("Objective evidence tying this item to the diagnosis is thin on the present record.");
 
   // ── Medical-necessity narrative (physician voice; NOT a diagnosis restate) ─
-  let necessity = buildNecessityNarrative(item, condition, { objectiveFindings, imaging, examination, functionalLimitations, priorTreatment, guidelines: guidelineEvidence, treatmentResponseDocumented }, kase, dxName, durationSupport);
+  let necessity = buildNecessityNarrative(item, condition, { objectiveFindings, imaging, examination, functionalLimitations, priorTreatment, guidelines: guidelineEvidence, treatmentResponseDocumented, anchorConcordant }, kase, dxName, durationSupport);
   // Weave the patient's own account and any treating-provider opinion.
   if (patientReports.length) necessity += ` On interview, ${kase.subject} reports ${lc(cleanClause(patientReports[0].text, 140))}, which the recommendation directly addresses.`;
   if (providerOpinions.length) necessity += ` This is consistent with the opinion of ${providerOpinions[0].providerName ?? "the treating provider"} on interview.`;
@@ -733,7 +764,7 @@ export function buildRecommendationDossier(
 function buildNecessityNarrative(
   item: DossierItem,
   condition: DossierCondition | null,
-  ev: { objectiveFindings: EvidenceItem[]; imaging: EvidenceItem[]; examination: EvidenceItem[]; functionalLimitations: EvidenceItem[]; priorTreatment: EvidenceItem[]; guidelines: EvidenceItem[]; treatmentResponseDocumented: boolean },
+  ev: { objectiveFindings: EvidenceItem[]; imaging: EvidenceItem[]; examination: EvidenceItem[]; functionalLimitations: EvidenceItem[]; priorTreatment: EvidenceItem[]; guidelines: EvidenceItem[]; treatmentResponseDocumented: boolean; anchorConcordant: (t: string) => boolean },
   kase: DossierCase,
   dxName: string,
   durationSupport: LifetimeSupportResult,
@@ -748,7 +779,15 @@ function buildNecessityNarrative(
 
   // 1) Specialty-framed clinical observation — the objective substrate seen
   //    through the responsible specialty's lens (varied so no two open alike).
-  const objective = ev.imaging[0]?.text || ev.objectiveFindings[0]?.text || ev.examination[0]?.text;
+  // The anchor must ASSERT something, and assert it positively. This took the
+  // first entry by chronology out of as many as 632, with no test that it said
+  // anything — so a lumbar discectomy was anchored on a left-knee MRI, and a
+  // cervical fusion on "imaging showed no acute fracture or dislocation": a
+  // negative finding offered as proof the diagnosis is "no bare label".
+  const anchorPool = [...ev.imaging, ...ev.objectiveFindings, ...ev.examination];
+  const objective =
+    anchorPool.find((e) => statesPresentPathology(String(e.text)) && ev.anchorConcordant(String(e.text)))?.text ??
+    anchorPool.find((e) => statesPresentPathology(String(e.text)))?.text;
   if (objective) {
     const o = lc(cleanClause(objective, 150));
     parts.push(variant(sv + "open", [
@@ -782,12 +821,15 @@ function buildNecessityNarrative(
   // for a statement the record had not made.
   if (complex && ev.priorTreatment.length) {
     const tx = ev.priorTreatment.slice(0, 2).map((t) => lc(cleanClause(String(t.text), 90))).join(" and ");
+    // The response sentence must name the entry that EVIDENCES it. Computing
+    // the flag over the whole bucket and then naming the first two treatments
+    // produced "prior [ice pack instructions] did not return the patient to
+    // baseline, as the record states" — a citation for a claim those entries
+    // do not make.
+    const responseEntry = ev.priorTreatment.find((t) => documentsNonResolution([String(t.text)]));
     parts.push(
-      ev.treatmentResponseDocumented
-        ? variant(sv + "tx", [
-            `${cap(kase.pronounPoss)} course has already included ${tx}, and the record documents that the impairment persisted.`,
-            `Prior ${tx} did not return ${S} to baseline, as the record states.`,
-          ])
+      responseEntry
+        ? `${cap(kase.pronounPoss)} course has already included ${tx}, and the record states the outcome: ${lc(cleanClause(String(responseEntry.text), 110))}.`
         : `${cap(kase.pronounPoss)} course has already included ${tx}; the record does not state what that treatment achieved.`,
     );
   }
@@ -811,11 +853,22 @@ function buildNecessityNarrative(
         ? `${S} will require ${lc(sv)} on a recurring basis, projected over ${kase.pronounPoss} remaining life expectancy on the strength of the documented condition evidence`
         : `a remaining-lifetime scenario for ${lc(sv)} is projected for ${S} as a planning assumption, with the clinical duration pending support`
       : `${S} will require ${lc(sv)} over a defined course`;
-  parts.push(variant(sv + "need", [
-    `${cap(lc(sv))} ${areIs} reasonable and necessary to ${lens.goal}, with ${lens.concern} the forward concern; on that basis ${need}.`,
-    `The clinical objective is ${lens.goal}: ${lc(sv)} ${areIs} reasonable and necessary to that end, managing ${lens.concern}. ${cap(need)}.`,
-    `Reasonably and necessarily, ${lc(sv)} addresses ${rationale} toward ${lens.goal} while watching for ${lens.concern}; ${need}.`,
-  ]));
+  // The FRAME must agree with the CONCLUSION. All three variants opened
+  // "reasonable and necessary" and then closed "…is a candidate for clinical
+  // review, pending record support" — one sentence asserting and hedging the
+  // same claim, in a document a physician signs.
+  parts.push(
+    patientSpecific
+      ? variant(sv + "need", [
+          `${cap(lc(sv))} ${areIs} reasonable and necessary to ${lens.goal}, with ${lens.concern} the forward concern; on that basis ${need}.`,
+          `The clinical objective is ${lens.goal}: ${lc(sv)} ${areIs} reasonable and necessary to that end, managing ${lens.concern}. ${cap(need)}.`,
+          `Reasonably and necessarily, ${lc(sv)} addresses ${rationale} toward ${lens.goal} while watching for ${lens.concern}; ${need}.`,
+        ])
+      : variant(sv + "cand", [
+          `${cap(lc(sv))} would address ${lens.goal}, with ${lens.concern} the forward concern. ${cap(need)}.`,
+          `The clinical objective such care would serve is ${lens.goal}, managing ${lens.concern}. ${cap(need)}.`,
+        ]),
+  );
 
   // 5) Synthesis close (§8) — expert-testimony integration for complex items.
   if (complex) {
@@ -826,10 +879,18 @@ function buildNecessityNarrative(
         ? "the documented condition evidence supports the projected long-term course"
         : "the remaining-lifetime horizon is carried as a projection assumption"
       : "a defined further course is anticipated";
-    parts.push(variant(sv + "syn", [
-      `Taken together — the objective pathology,${fx ? " the documented functional loss," : ""} the prior treatment, and that ${prog} — this care is medically necessary to a reasonable degree of medical probability.`,
-      `Integrating the diagnosis, the objective findings,${fx ? " the functional consequences," : ""} and the expected course, it is my opinion, to a reasonable degree of medical probability, that this care is required.`,
-    ]));
+    // A medical-probability opinion is offered only where the record supports
+    // one. On a candidate item the same paragraph used to close "it is my
+    // opinion, to a reasonable degree of medical probability, that this care is
+    // required" one sentence after saying the item was pending record support.
+    parts.push(
+      patientSpecific
+        ? variant(sv + "syn", [
+            `Taken together — the objective pathology,${fx ? " the documented functional loss," : ""} the prior treatment, and that ${prog} — this care is medically necessary to a reasonable degree of medical probability.`,
+            `Integrating the diagnosis, the objective findings,${fx ? " the functional consequences," : ""} and the expected course, it is my opinion, to a reasonable degree of medical probability, that this care is required.`,
+          ])
+        : `Whether this care is required for ${S} is a question the current record leaves open; the finding above is offered for review, not as an opinion to a reasonable degree of medical probability.`,
+    );
   }
 
   return parts.join(" ");

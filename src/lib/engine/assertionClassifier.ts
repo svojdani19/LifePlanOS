@@ -167,7 +167,12 @@ const PATHOLOGY =
  * the direction.
  */
 const NEGATIVE_FINDING =
-  /\bno\s+(?:acute\s+|significant\s+|structural\s+|focal\s+|evidence\s+of\s+)?(?:abnormalit(?:y|ies)|tear|fracture|herniation|stenosis|effusion|instability|compression|impingement|degenerative|pathology|findings?)\b|\b(?:unremarkable|within normal limits|normal (?:study|examination|imaging|MRI|radiographs?))\b/i;
+  // A BOUNDED WINDOW between the negation and the finding, rather than a fixed
+  // list of adjectives. The previous form required the noun to follow "no"
+  // almost immediately, so "there was no central canal or neural foraminal
+  // stenosis" read as a POSITIVE finding and opened a necessity narrative as
+  // the pathology the diagnosis rests on.
+  /\bno\b[^.;]{0,48}?\b(?:abnormalit\w*|tears?|torn|fractures?|herniat\w*|stenosis|effusions?|instabilit\w*|compression|impingement|degenerative|patholog\w*|findings?|lesions?|edema|defects?|significant\w*)\b|\b(?:unremarkable|within normal limits|negative for|normal (?:study|examination|exam|imaging|mri|radiographs?))\b|\bintact\b/i;
 
 export interface ClassifiableSource {
   quote: string;
@@ -254,4 +259,42 @@ export function documentsNonResolution(texts: readonly (string | { text: string 
     const s = typeof t === "string" ? t : t.text;
     return TREATMENT_RESPONSE.test(s) || PERSISTENCE.test(s);
   });
+}
+
+
+/**
+ * Administrative, logistical or counselling text that is not clinical evidence.
+ *
+ * Atomizing the extraction fields made this visible at scale: "The patient was
+ * discharged home", "Tobacco cessation was discussed including plan, trigger,
+ * and challenges", "The patient arrived to the unit at 0219 from the emergency
+ * department" were all filed as PRIOR TREATMENT for a spinal fusion. They are
+ * things that happened during care, not care that treats the condition.
+ */
+const ADMINISTRATIVE =
+  /\b(?:was discharged|discharge (?:instructions|disposition|planning)|arrived to the (?:unit|floor)|admitted to the (?:unit|floor)|transferred to|was transported|consent (?:was )?(?:obtained|signed)|education was provided|was educated|cessation was discussed|was discussed including|reviewed with the patient|follow[- ]?up was scheduled|appointment was (?:made|scheduled)|was (?:instructed|advised|encouraged|counseled|educated)\b|instructions? (?:were|was) (?:given|provided|reviewed)|advised that\b|encouraged to\b|questions were answered|tolerated the procedure well|to the (?:pacu|recovery room)|verbal(?:ly)? (?:understanding|consent)|no complications were noted during transport)\b/i;
+
+/** Vital signs and routine monitoring — measured, but not evidence for care. */
+const ROUTINE_MEASUREMENT =
+  /\b(?:blood pressure was|heart rate was|respirations? (?:were|was)|temperature was|oxygen saturation|\bspo2\b|aorta pressures? were|pulse was|weight was recorded)\b/i;
+
+/** Is this assertion clinical evidence at all, as opposed to case admin? */
+export const isClinicalAssertion = (text: string): boolean =>
+  !ADMINISTRATIVE.test(text) && !ROUTINE_MEASUREMENT.test(text);
+
+/**
+ * Does this assertion state PRESENT pathology — the kind a narrative may
+ * anchor a diagnosis on?
+ *
+ * `supportsSpecificIntervention` is deliberately topical: it admits "no
+ * structural abnormality" so that opposing findings survive. An anchor is a
+ * different job. "the record shows imaging showed no acute fracture" is not
+ * evidence that a condition is "no bare label" — it is evidence of the
+ * opposite, and it was opening the necessity narrative.
+ */
+export function statesPresentPathology(text: string): boolean {
+  if (!isClinicalAssertion(text)) return false;
+  if (NEGATIVE_FINDING.test(text)) return false;
+  const p = classifyAssertion({ quote: text });
+  return p.supportsSpecificIntervention || p.statesDiagnosis;
 }

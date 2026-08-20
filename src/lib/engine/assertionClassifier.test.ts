@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyAssertion, claimsAssertedBy, assertionSupportsClaim, CLAIM_REQUIRES } from "@/lib/engine/assertionClassifier";
+import { classifyAssertion, claimsAssertedBy, assertionSupportsClaim, statesPresentPathology, CLAIM_REQUIRES } from "@/lib/engine/assertionClassifier";
 import { buildLedgerForItem, EVIDENCE_CLAIMS, type CandidateSource } from "@/lib/engine/evidenceLedger";
 
 // The defect this module exists for: on the reference case the ledger held 698
@@ -177,5 +177,39 @@ describe("a statement of preserved function is not a functional deficit", () => 
   it("still reads a deficit stated in ADL terms", () => {
     expect(classifyAssertion({ quote: "Requires assistance with activities of daily living" }).statesFunctionalDeficit).toBe(true);
     expect(classifyAssertion({ quote: "Difficulty with ADLs since the injury" }).statesFunctionalDeficit).toBe(true);
+  });
+});
+
+describe("a negative finding is recognised however it is phrased", () => {
+  // The lexicon required the finding to follow "no" almost immediately, so
+  // "there was no central canal or neural foraminal stenosis" read as POSITIVE
+  // pathology and opened a necessity narrative as the finding the diagnosis
+  // rests on.
+  const negatives = [
+    "There was no central canal or neural foraminal stenosis",
+    "No evidence of acute fracture or dislocation",
+    "There was no significant disc herniation at any level",
+    "The menisci were unremarkable",
+    "MRI of the lumbar spine was within normal limits",
+    "The anterior and posterior cruciate ligaments were intact",
+    "Negative for acute intracranial abnormality",
+  ];
+  it.each(negatives)("does not anchor a diagnosis on: %s", (text) => {
+    expect(statesPresentPathology(text)).toBe(false);
+  });
+
+  const positives = [
+    "MRI shows a full-thickness supraspinatus tear with retraction",
+    "There is a broad-based disc protrusion at L4-5 with nerve root contact",
+    "Medial joint space narrowing with reduced range of motion",
+  ];
+  it.each(positives)("still anchors on present pathology: %s", (text) => {
+    expect(statesPresentPathology(text)).toBe(true);
+  });
+
+  it("keeps negative findings admissible as evidence — they argue the other way", () => {
+    // Direction is the ledger's `stance` column. Excluding them from EVIDENCE
+    // would delete every finding that argues against a recommendation.
+    expect(classifyAssertion({ quote: "There was no central canal stenosis" }).supportsSpecificIntervention).toBe(true);
   });
 });
