@@ -15,6 +15,7 @@ import {
   type RecordCareSupport,
 } from "./careGrounding";
 import { resolveTemporal, type StatementKind } from "./temporalResolution";
+import { entersSupportedTotal } from "@/lib/engine/supportClass";
 
 /**
  * A citation as the loader produces it: cited AND placed in time. Fixtures go
@@ -74,10 +75,15 @@ describe("surgical gate — projections never invent operations", () => {
     expect(surgicalSupport("Anterior cervical discectomy & fusion (ACDF)", [lumbarRec]).supported).toBe(false);
   });
 
-  it("no recommendation, no surgery — with the reason stated", () => {
+  it("no recommendation: a candidate, never record-supported, with the reason stated", () => {
+    // The guarantee is that a projection never INVENTS an operation — not that
+    // the candidate is deleted. Deleting it removed every surgical projection
+    // on the reference case and cost most of the measured recall.
     const g = gateTemplateItem({ category: "FUTURE_SURGERY", service: "Lumbar decompression / fusion" }, support());
-    expect(g.allowed).toBe(false);
-    expect(g.reason).toMatch(/surgical projection requires/);
+    expect(g.disposition).toBe("CANDIDATE");
+    expect(g.citation).toBeNull();
+    expect(g.reason).toMatch(/No documented treating-provider recommendation/);
+    expect(entersSupportedTotal("CANDIDATE_REVIEW")).toBe(false);
   });
 
   it("a grounded surgical item carries its citation", () => {
@@ -87,8 +93,8 @@ describe("surgical gate — projections never invent operations", () => {
   });
 
   it("revision surgery is held to the same standard", () => {
-    expect(gateTemplateItem({ category: "REVISION_SURGERY", service: "Revision lumbar fusion" }, support()).allowed).toBe(false);
-    expect(gateTemplateItem({ category: "REVISION_SURGERY", service: "Revision lumbar fusion" }, support({ recommendations: [lumbarRec] })).allowed).toBe(true);
+    expect(gateTemplateItem({ category: "REVISION_SURGERY", service: "Revision lumbar fusion" }, support()).disposition).toBe("CANDIDATE");
+    expect(gateTemplateItem({ category: "REVISION_SURGERY", service: "Revision lumbar fusion" }, support({ recommendations: [lumbarRec] })).disposition).toBe("RECORD_RECOMMENDED");
   });
 });
 
@@ -201,20 +207,30 @@ describe("paperwork recommendations are never care items", () => {
   });
 });
 
+// A surgical projection is never DELETED for want of a recommendation — it is
+// disclosed as a candidate and kept out of the supported total. What must never
+// happen is the opposite: presenting it as record-supported. These assert that.
 describe("temporal resolution gates the record support", () => {
   it("a surgery the patient already had grounds no future surgery", () => {
     const s = support({ recommendations: [cite("Status post L4-L5 lumbar fusion.")] });
-    expect(gateTemplateItem({ category: "FUTURE_SURGERY", service: "Lumbar decompression / fusion" }, s).allowed).toBe(false);
+    const g = gateTemplateItem({ category: "FUTURE_SURGERY", service: "Lumbar decompression / fusion" }, s);
+    expect(g.disposition).toBe("CANDIDATE");
+    expect(g.citation).toBeNull();
+    expect(entersSupportedTotal("CANDIDATE_REVIEW")).toBe(false);
   });
 
   it("a surgery the patient declined grounds no future surgery", () => {
     const s = support({ recommendations: [cite("Patient declined the recommended lumbar fusion.")] });
-    expect(gateTemplateItem({ category: "FUTURE_SURGERY", service: "Lumbar decompression / fusion" }, s).allowed).toBe(false);
+    const g = gateTemplateItem({ category: "FUTURE_SURGERY", service: "Lumbar decompression / fusion" }, s);
+    expect(g.disposition).toBe("CANDIDATE");
+    expect(g.citation).toBeNull();
   });
 
   it("an UNDATED recommendation never satisfies a gate, however emphatic", () => {
     const s = support({ recommendations: [cite("Recommend lumbar decompression surgery at L4-L5.", { date: null })] });
-    expect(gateTemplateItem({ category: "FUTURE_SURGERY", service: "Lumbar decompression / fusion" }, s).allowed).toBe(false);
+    const g = gateTemplateItem({ category: "FUTURE_SURGERY", service: "Lumbar decompression / fusion" }, s);
+    expect(g.disposition).toBe("CANDIDATE");
+    expect(g.citation).toBeNull();
   });
 
   it("an undated dependence marker never grounds catastrophic care", () => {

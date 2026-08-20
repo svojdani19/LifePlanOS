@@ -854,6 +854,21 @@ model FutureCareItem {
   // Physician review (Module 12).
   // Provenance: which generator path and template rule produced this item.
   origin         RecommendationOrigin @default(TEMPLATE_CONDITION)
+  /// What stands behind this recommendation, and whether it enters the totals.
+  ///
+  /// RECORD_RECOMMENDED | PATIENT_SPECIFIC | PROFESSIONALLY_ADOPTED |
+  /// CANDIDATE_REVIEW | CONDITIONAL | UNSUPPORTED — see engine/supportClass.ts.
+  ///
+  /// Replaces `hasPatientRecordSupport()`, which returned true when the matched
+  /// CONDITION carried records (46 of 55 items, $518,879 of present value on
+  /// the reference case) or, failing that, when confidence >= 60 — a bar the
+  /// care library clears by default at 75, before any case evidence exists.
+  ///
+  /// Defaults to CANDIDATE_REVIEW so a row written before this column existed
+  /// is disclosed rather than silently counted in the headline total.
+  supportClass   String               @default("CANDIDATE_REVIEW")
+  /// The deterministic sentence explaining that classification.
+  supportReason  String?
   templateRuleId String? // stable id of the care-library template row
   conditionKey   String? // careLibrary condition bucket that matched
 

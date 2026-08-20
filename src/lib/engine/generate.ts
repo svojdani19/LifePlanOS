@@ -18,6 +18,7 @@ import { ALL_ASSUMED, sealProvenance, projectionNote, type ProjectionInputs } fr
 import { locateConditionEvidence } from "@/lib/engine/evidence";
 import { buildRecommendationDossier } from "@/lib/engine/medicalNecessity";
 import { persistMachineLedger, relinkPhysicianEvidence, serviceKeyOf } from "@/lib/engine/persistLedger";
+import { classifySupport } from "@/lib/engine/supportClass";
 import { resolveRecommendationCondition } from "@/lib/engine/recommendationCondition";
 import { locateConditionEvidenceInClaims, stateObjectiveEvidence } from "@/lib/engine/conditionEvidence";
 import { CURRENT_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
@@ -331,13 +332,34 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
   const citeOf = (c: TimedCitation) => ({ filename: c.filename, page: c.page, date: c.date, provider: c.provider });
   const setProvenance = (service: string, p: ProjectionInputs) => provenanceOf.set(service.trim().toLowerCase(), sealProvenance(p));
 
+  // How each surviving template is classified. Keyed like `originOf`, so it
+  // survives dedupe and pricing.
+  const dispositionOf = new Map<string, { supportClass: string; reason: string }>();
+  const setDisposition = (service: string, supportClass: string, reason: string) =>
+    dispositionOf.set(service.trim().toLowerCase(), { supportClass, reason });
+
   const firstPass: CareTemplate[] = [];
   for (const t of deduped) {
     const gate = gateTemplateItem(t, support);
     if (!gate.allowed) {
-      suppressed.push({ service: t.service, reason: gate.reason ?? "no record support" });
+      // The only exclusion left: the item presupposes an injury this patient
+      // does not have. Everything else is now disclosed and classified.
+      suppressed.push({ service: t.service, reason: gate.reason ?? "not clinically applicable to this patient" });
       continue;
     }
+    setDisposition(
+      t.service,
+      gate.disposition === "RECORD_RECOMMENDED" ? "RECORD_RECOMMENDED" : "CANDIDATE_REVIEW",
+      gate.reason ?? classifySupport({
+        providerRecommendation: gate.disposition === "RECORD_RECOMMENDED",
+        professionalAdoption: false,
+        professionalRejection: false,
+        indicationChainComplete: false,
+        contradicted: false,
+        conditional: false,
+        clinicallyRelevant: true,
+      }).reason,
+    );
     if (gate.citation) {
       t.rationale = `${t.rationale} ${citedRationale("Grounded in documented recommendation", gate.citation)}`;
     }
@@ -359,8 +381,10 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
   const gated: CareTemplate[] = [];
   for (const t of firstPass) {
     if (["REVISION_SURGERY", "COMPLICATION_MANAGEMENT"].includes(t.category) && !survivingPrimary) {
-      suppressed.push({ service: t.service, reason: "Projects the sequelae of a surgery that is itself not supported in the records." });
-      continue;
+      // A contingency, not a deletion: the sequelae of an operation that is
+      // itself only a candidate are real future care IF the operation happens.
+      // Disclosed as CONDITIONAL and kept out of the supported total.
+      setDisposition(t.service, "CONDITIONAL", "Projects the sequelae of a surgery that is itself not established in the records; disclosed as a contingency.");
     }
     gated.push(t);
   }
@@ -390,6 +414,8 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
       };
       careItems.push(template);
       tagOrigin(template, "RECORD_RECOMMENDED", null, "documented-medication");
+      // The drug is documented in the record as prescribed for this patient.
+      setDisposition(template.service, "RECORD_RECOMMENDED", "This medication is documented in the treating record as part of the patient's regimen.");
       // The DRUG is documented; an annual refill count and a $300 unit price
       // are the planner's conventions, and the citation says nothing about
       // either.
@@ -424,6 +450,8 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
     };
     careItems.push(template);
     tagOrigin(template, "RECORD_RECOMMENDED", null, "record-recommendation");
+    // The item's service IS the treating provider's recommendation.
+    setDisposition(template.service, "RECORD_RECOMMENDED", "A treating provider recommended this service in the records.");
     // A mined item's service IS the recommendation. Its frequency and duration
     // are record-stated only when the note actually stated them ("twice weekly
     // for 12 weeks"); pricing never is.
@@ -511,6 +539,11 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
         pricedAt: priced?.live && priced.retrievedAt ? new Date(priced.retrievedAt) : null,
         pricingDetail: priced?.live && priced.detail ? (priced.detail as never) : Prisma.DbNull,
         ...(originOf.get(t.service.trim().toLowerCase()) ?? {}),
+        // What stands behind this item, and therefore which total it enters.
+        // Never derived from confidence, probability, origin or body region —
+        // every one of those has manufactured support before.
+        supportClass: dispositionOf.get(t.service.trim().toLowerCase())?.supportClass ?? "CANDIDATE_REVIEW",
+        supportReason: dispositionOf.get(t.service.trim().toLowerCase())?.reason ?? null,
         // Which of this line's numbers the records supplied, and which the
         // planner did. Persisted with the line so the report can say so and a
         // reviewer can challenge the right thing.

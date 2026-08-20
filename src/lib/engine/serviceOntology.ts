@@ -52,7 +52,7 @@ export type InterventionId =
   | "SPECIALIST_FOLLOWUP" | "PRIMARY_CARE" | "PSYCH_EVALUATION" | "NEUROPSYCH_EVALUATION"
   | "FUNCTIONAL_CAPACITY_EVAL" | "CASE_MANAGEMENT"
   // Imaging & electrodiagnostics
-  | "MRI" | "CT" | "RADIOGRAPH" | "ULTRASOUND" | "EMG_NCS" | "IMAGING_SURVEILLANCE"
+  | "MRI" | "CT" | "RADIOGRAPH" | "ULTRASOUND" | "EMG_NCS"
   // Therapy
   | "PHYSICAL_THERAPY" | "OCCUPATIONAL_THERAPY" | "SPEECH_THERAPY" | "COGNITIVE_THERAPY"
   | "PSYCHOTHERAPY" | "AQUATIC_THERAPY" | "FUNCTIONAL_RESTORATION" | "CHIROPRACTIC"
@@ -86,6 +86,18 @@ export interface ResolvedIntervention {
   laterality: Side;
   /** True when the name says "each additional level/unit" — an add-on line. */
   addOn: boolean;
+  /**
+   * Surveillance rather than a fresh diagnostic question.
+   *
+   * A STAGE, not an identity: "Lumbar MRI surveillance" and "Lumbar MRI w/o
+   * contrast" are the same procedure answering different questions. Modelling
+   * surveillance as its own intervention made them non-matching concepts, so a
+   * generator proposing surveillance scored a false positive AND a miss against
+   * a planner who published the study. The indication belongs in the
+   * prerequisite model, where it can be required; it does not belong in the
+   * procedure's identity.
+   */
+  surveillance: boolean;
   /** How the id was reached, for audit. */
   matchedOn: string;
 }
@@ -124,7 +136,6 @@ const RULES: Rule[] = [
 
   // ── Imaging & electrodiagnostics ──────────────────────────────────────────
   { id: "EMG_NCS", family: "DIAGNOSTIC_PROCEDURE", re: /\b(?:emg|ncv|ncs)\b|electromyograph\w*|nerve conduction/i },
-  { id: "IMAGING_SURVEILLANCE", family: "IMAGING", re: /\bsurveillance\b/i },
   { id: "MRI", family: "IMAGING", re: /\bmri\b|magnetic resonance/i },
   { id: "CT", family: "IMAGING", re: /\bct\b|computed tomograph\w*|\bcat scan\b/i },
   { id: "ULTRASOUND", family: "IMAGING", re: /\bultrasound\w*\b|sonograph\w*/i },
@@ -203,6 +214,7 @@ export function resolveIntervention(item: { service: string; category?: string |
     spinalLevels: spineSubRegions(name),
     laterality: sideOf(name),
     addOn: ADD_ON.test(name),
+    surveillance: /\bsurveillance\b|\bmonitoring\b/i.test(name),
     matchedOn: hit ? hit.id : "category-fallback",
   };
 }

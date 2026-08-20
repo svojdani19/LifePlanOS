@@ -47,7 +47,11 @@ describe("identity survives how a human wrote it", () => {
 
   it("does not match two different procedures that share words", () => {
     expect(sameIntervention(svc("Lumbar facet block"), svc("Lumbar medial branch block"))).toBe(false);
-    expect(sameIntervention(svc("Lumbar MRI"), svc("Lumbar MRI surveillance"))).toBe(false);
+    // …but surveillance is a STAGE, not a different procedure: an MRI is an
+    // MRI whether it answers a new question or monitors a known lesion.
+    expect(sameIntervention(svc("Lumbar MRI"), svc("Lumbar MRI surveillance"))).toBe(true);
+    expect(resolveIntervention(svc("Lumbar MRI surveillance")).surveillance).toBe(true);
+    expect(resolveIntervention(svc("Lumbar MRI w/o contrast")).surveillance).toBe(false);
   });
 
   it("refuses to match anything it could not classify", () => {

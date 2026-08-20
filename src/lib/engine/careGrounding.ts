@@ -230,9 +230,14 @@ export function surgicalSupport(service: string, recommendations: TimedCitation[
 // ── Template gate ────────────────────────────────────────────────────────────
 
 export interface TemplateGate {
+  /** False ONLY for a category error — see TemplateDisposition. */
   allowed: boolean;
-  reason: string | null; // suppression reason (reviewable), null when allowed
-  citation: TimedCitation | null; // support citation when one grounds the item
+  /** What the record says about this item; drives its support classification. */
+  disposition: TemplateDisposition;
+  /** Why, in words a reviewer reads. Present for candidates too, not just exclusions. */
+  reason: string | null;
+  /** The citation grounding it, when a documented recommendation was found. */
+  citation: TimedCitation | null;
 }
 
 /**
@@ -245,46 +250,87 @@ export interface TemplateGate {
 const CATASTROPHIC_CONTENT_RE =
   /\b(?:pressure (?:injur|ulcer|sore)|neurogenic (?:bowel|bladder)|spinal cord injur|\bsci\b|urinary catheter|ostomy|ventilator|tracheostom|peg tube|dysreflexia)\b/i;
 
+/**
+ * What the record says about a template item — as a DISPOSITION, not a verdict.
+ *
+ * This gate used to answer allowed/not-allowed, and "not allowed" deleted the
+ * item. On the reference case that removed 28 of 40 library templates before
+ * anyone could see them: every injection, every diagnostic imaging study and
+ * every surgical projection. Recall measured 14% against the published plan,
+ * and the missing items were not absent — they were suppressed.
+ *
+ * Suppression is right for exactly one thing: an item that presupposes an
+ * injury this patient does not have. A ventilator on an ankle sprain is not a
+ * candidate awaiting evidence, it is a category error. Everything else —
+ * "no provider recommended this surgery yet" — is a SUPPORT question, and the
+ * honest answer is to show it and say so.
+ */
+export type TemplateDisposition =
+  /** The record recommends this service; a citation is attached. */
+  | "RECORD_RECOMMENDED"
+  /** Clinically relevant, no patient-specific indication yet. Show it. */
+  | "CANDIDATE"
+  /** Contingent on a pathway that is not itself established. Show it as such. */
+  | "CONDITIONAL"
+  /** Presupposes an injury or dependence the records do not document. */
+  | "EXCLUDE";
+
 export function gateTemplateItem(
   t: { category: string; service: string; rationale?: string },
   support: RecordCareSupport,
 ): TemplateGate {
+  // ── Category error: the item presupposes an injury this patient lacks ─────
+  // The ONLY reason to withhold a candidate entirely. A ventilator on an ankle
+  // sprain is not awaiting evidence; it is about a different patient.
   if (CATASTROPHIC_CONTENT_RE.test(`${t.service} ${t.rationale ?? ""}`)) {
     const s = severitySupportsCatastrophic(support.functionalMarkers);
     if (!s.supported) {
       return {
         allowed: false,
+        disposition: "EXCLUDE",
         citation: null,
         reason: `"${t.service}" presupposes major neurological injury or dependence that the records do not document.`,
       };
     }
-  }
-  if (SURGICAL_CATEGORIES.has(t.category)) {
-    const s = surgicalSupport(t.service, support.recommendations);
-    if (!s.supported) {
-      return {
-        allowed: false,
-        citation: null,
-        reason: `No documented treating-provider recommendation supports "${t.service}"; a surgical projection requires one.`,
-      };
-    }
-    return { allowed: true, reason: null, citation: s.citation };
   }
   if (CATASTROPHIC_CATEGORIES.has(t.category)) {
     const s = severitySupportsCatastrophic(support.functionalMarkers);
     if (!s.supported) {
       return {
         allowed: false,
+        disposition: "EXCLUDE",
         citation: null,
         reason: `The records document no functional dependence supporting "${t.service}" (${t.category.replace(/_/g, " ").toLowerCase()}).`,
       };
     }
-    return { allowed: true, reason: null, citation: null };
+    return { allowed: true, disposition: "CANDIDATE", reason: null, citation: null };
   }
-  // Ordinary condition-driven care (visits, therapy, imaging, injections,
-  // psych, labs…) stays: it is the reviewable clinical scaffolding, priced
-  // conservatively and pending physician review like everything else.
-  return { allowed: true, reason: null, citation: null };
+
+  // ── Surgery: a support question, not a relevance question ─────────────────
+  // A documented recommendation makes it record-supported. Its ABSENCE used to
+  // delete the item; it now classifies it as a candidate, visible and excluded
+  // from the supported total. Every surgical projection on the reference case
+  // was being removed this way, which is most of the missing recall.
+  if (SURGICAL_CATEGORIES.has(t.category)) {
+    const s = surgicalSupport(t.service, support.recommendations);
+    if (!s.supported) {
+      return {
+        allowed: true,
+        disposition: "CANDIDATE",
+        citation: null,
+        reason: `No documented treating-provider recommendation supports "${t.service}"; disclosed as a candidate for review rather than as supported care.`,
+      };
+    }
+    return { allowed: true, disposition: "RECORD_RECOMMENDED", reason: null, citation: s.citation };
+  }
+
+  // ── Ordinary condition-driven care ────────────────────────────────────────
+  // Visits, therapy, imaging, injections, psych, labs. A documented
+  // recommendation for the same service promotes it; otherwise it is a
+  // reviewable candidate.
+  const rec = surgicalSupport(t.service, support.recommendations);
+  if (rec.supported) return { allowed: true, disposition: "RECORD_RECOMMENDED", reason: null, citation: rec.citation };
+  return { allowed: true, disposition: "CANDIDATE", reason: null, citation: null };
 }
 
 // ── Documented medications ──────────────────────────────────────────────────
