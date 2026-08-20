@@ -194,3 +194,64 @@ describe("every indication names the guideline that pairs the diagnosis with the
     expect(v.convention).toBeGreaterThan(0);
   });
 });
+
+describe("a guideline's DIRECTION is not the same as its topic", () => {
+  // The first version of this table modelled "a guideline discusses this
+  // topic" as "the guideline supports this intervention", and two rows came
+  // out backwards on screen.
+  it("does not present knee osteoarthritis as supporting arthroscopy", () => {
+    // AAOS recommends AGAINST arthroscopic lavage/debridement for primary knee
+    // osteoarthritis. Citing AAOS beside it lent the guideline's authority to
+    // the opposite of what it says.
+    const r = indicationFor("right knee osteoarthritis", "ARTHROSCOPY");
+    expect(r.verdict).toBe("COUNTER_INDICATED");
+    expect(diagnosisSupports("right knee osteoarthritis", "ARTHROSCOPY")).toBe(false);
+    expect(contextReason("right knee osteoarthritis", "ARTHROSCOPY")).toMatch(/recommends against/i);
+  });
+
+  it("still supports arthroscopy for what it IS offered for", () => {
+    expect(indicationFor("medial meniscal tear", "ARTHROSCOPY").verdict).toBe("INDICATED");
+  });
+
+  it("marks the CDC opioid position as conditional, not as endorsement", () => {
+    const r = indicationFor("chronic low back pain", "OPIOID");
+    expect(r.verdict).toBe("INDICATED");
+    expect(r.basis).toMatchObject({ direction: "CONDITIONAL", sourceId: "cdc-opioid" });
+    expect((r.basis as { position: string }).position).toMatch(/nonopioid therapy/i);
+  });
+
+  it("lets a counter-indication outrank any other matching row", () => {
+    // A diagnosis naming several concepts must not have an AGAINST row
+    // silently outvoted by a SUPPORTS row that also matched.
+    const r = indicationFor("knee osteoarthritis with joint instability", "ARTHROSCOPY");
+    expect(r.verdict).toBe("COUNTER_INDICATED");
+  });
+});
+
+describe("an unverified mapping never borrows a guideline's authority", () => {
+  it("refuses to cite anything while the table is unverified", async () => {
+    const { citableAsGuidelineAuthority, verificationSummary } = await import("@/lib/engine/diagnosisIndication");
+    expect(verificationSummary().verified).toBe(0);
+    // Nothing in the table may be printed as authority today.
+    for (const v of Object.values(INDICATIONS)) {
+      if (v === "ANY" || !v) continue;
+      for (const r of v) expect(citableAsGuidelineAuthority(r.basis === "CONVENTION" ? "CONVENTION" : r.basis)).toBe(false);
+    }
+  });
+
+  it("would cite a verified, supporting row", async () => {
+    const { citableAsGuidelineAuthority } = await import("@/lib/engine/diagnosisIndication");
+    expect(citableAsGuidelineAuthority({ sourceId: "nass", namedDiagnosis: "x", direction: "SUPPORTS", status: "VERIFIED" })).toBe(true);
+  });
+
+  it("would still refuse a verified row pointing AGAINST", async () => {
+    const { citableAsGuidelineAuthority } = await import("@/lib/engine/diagnosisIndication");
+    expect(citableAsGuidelineAuthority({ sourceId: "aaos", namedDiagnosis: "x", direction: "AGAINST", status: "VERIFIED" })).toBe(false);
+  });
+
+  it("still uses the mapping to decide support vs background while unverified", () => {
+    // The mapping keeps doing its job; what it may not do is name a guideline.
+    expect(diagnosisSupports("lumbar radiculopathy", "EPIDURAL_STEROID")).toBe(true);
+    expect(diagnosisSupports("lumbar facet arthropathy", "EPIDURAL_STEROID")).toBe(false);
+  });
+});

@@ -31,7 +31,7 @@ import { isGrounded } from "@/lib/reference/origins";
 import { documentsNonResolution, isClinicalAssertion, statesPresentPathology } from "@/lib/engine/assertionClassifier";
 import { atomize, type AtomicAssertion } from "@/lib/engine/atomize";
 import { resolveIntervention } from "@/lib/engine/serviceOntology";
-import { diagnosisSupports, contextReason, indicationFor } from "@/lib/engine/diagnosisIndication";
+import { diagnosisSupports, contextReason, indicationFor, citableAsGuidelineAuthority } from "@/lib/engine/diagnosisIndication";
 import { guidelineLabel } from "@/lib/references/sources";
 import { specialtyLens } from "./specialtyReasoning";
 import { assessLifetimeSupport, deriveGuidelineDurationClaim, type GuidelineDurationClaim, type LifetimeSupportResult } from "./lifetimeSupport";
@@ -589,9 +589,10 @@ export function buildRecommendationDossier(
       // document is where discectomy is discussed — the pairing is the
       // guideline's, and a reader is entitled to see whose.
       const r = indicationFor(String(e.text), interventionId);
-      if (r.verdict === "INDICATED" && r.basis && r.basis !== "CONVENTION") {
+      if (citableAsGuidelineAuthority(r.basis)) {
         const label = guidelineLabel(r.basis.sourceId);
-        return { ...e, source: `${e.source ? `${e.source} · ` : ""}indication per ${label} (${r.basis.namedDiagnosis})` };
+        const qualifier = r.basis.direction === "CONDITIONAL" && r.basis.position ? ` — ${r.basis.position}` : "";
+        return { ...e, source: `${e.source ? `${e.source} · ` : ""}indication per ${label} (${r.basis.namedDiagnosis})${qualifier}` };
       }
       return e;
     }

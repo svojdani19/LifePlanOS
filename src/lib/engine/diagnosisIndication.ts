@@ -148,6 +148,26 @@ export interface IndicationBasis {
   /** The guideline's own named population — the diagnosis it is written about. */
   namedDiagnosis: string;
   /**
+   * WHICH WAY the guideline points for this pairing.
+   *
+   * The first version of this table had no direction field, and modelled "a
+   * guideline discusses this topic" as "the guideline supports this
+   * intervention". Two rows were therefore backwards on screen:
+   *
+   *   • arthroscopy for primary knee osteoarthritis cited AAOS — which
+   *     recommends AGAINST arthroscopic lavage and debridement for it;
+   *   • opioids for chronic pain cited the CDC — which prefers nonopioid
+   *     therapy and supports opioids only where the benefits are expected to
+   *     outweigh the risks for that patient.
+   *
+   * A citation that reverses the guideline's position is worse than no
+   * citation: it lends the guideline's authority to the opposite of what it
+   * says, in a document that gets read aloud under oath.
+   */
+  direction: "SUPPORTS" | "CONDITIONAL" | "AGAINST";
+  /** For CONDITIONAL and AGAINST: the guideline's actual position, in brief. */
+  position?: string;
+  /**
    * VERIFICATION STATUS.
    *
    * `UNVERIFIED` means the body, its named population and the intervention it
@@ -165,7 +185,11 @@ export interface IndicationRow {
   basis: IndicationBasis | "CONVENTION";
 }
 
-const g = (sourceId: IndicationBasis["sourceId"], namedDiagnosis: string): IndicationBasis => ({ sourceId, namedDiagnosis, status: "UNVERIFIED" });
+const g = (sourceId: IndicationBasis["sourceId"], namedDiagnosis: string): IndicationBasis => ({ sourceId, namedDiagnosis, direction: "SUPPORTS", status: "UNVERIFIED" });
+/** A guideline that qualifies rather than endorses. */
+const gCond = (sourceId: IndicationBasis["sourceId"], namedDiagnosis: string, position: string): IndicationBasis => ({ sourceId, namedDiagnosis, direction: "CONDITIONAL", position, status: "UNVERIFIED" });
+/** A guideline that recommends AGAINST this intervention for this diagnosis. */
+const gAgainst = (sourceId: IndicationBasis["sourceId"], namedDiagnosis: string, position: string): IndicationBasis => ({ sourceId, namedDiagnosis, direction: "AGAINST", position, status: "UNVERIFIED" });
 const row = (concept: DiagnosisConcept, basis: IndicationBasis | "CONVENTION"): IndicationRow => ({ concept, basis });
 const CONV = "CONVENTION" as const;
 
@@ -258,7 +282,7 @@ export const INDICATIONS: Partial<Record<InterventionId, readonly IndicationRow[
   ],
   ARTHROSCOPY: [
     row("INTRA_ARTICULAR_TEAR", g("aaos", "management of rotator cuff injuries")),
-    row("OSTEOARTHRITIS", g("aaos", "osteoarthritis of the knee")),
+    row("OSTEOARTHRITIS", gAgainst("aaos", "osteoarthritis of the knee", "AAOS recommends against arthroscopy with lavage and/or debridement for primary knee osteoarthritis")),
     row("JOINT_INSTABILITY", g("aaos", "glenohumeral instability")),
   ],
   FRACTURE_FIXATION: [
@@ -318,7 +342,7 @@ export const INDICATIONS: Partial<Record<InterventionId, readonly IndicationRow[
   ],
 
   // ── Medication ────────────────────────────────────────────────────────────
-  OPIOID: [row("CHRONIC_PAIN", g("cdc-opioid", "subacute and chronic pain"))],
+  OPIOID: [row("CHRONIC_PAIN", gCond("cdc-opioid", "subacute and chronic pain", "CDC prefers nonopioid therapy; opioids only where expected benefits outweigh risks for this patient"))],
   NSAID: [
     row("CHRONIC_PAIN", g("acoem", "chronic pain")),
     row("OSTEOARTHRITIS", g("aaos", "osteoarthritis of the knee")),
@@ -418,6 +442,8 @@ export type IndicationVerdict =
   | "INDICATED"
   /** A real diagnosis in the case that this intervention is not offered for. */
   | "CONTEXT"
+  /** A guideline recommends AGAINST this intervention for this diagnosis. */
+  | "COUNTER_INDICATED"
   /** The intervention is legitimately non-specific. */
   | "NON_SPECIFIC"
   /** Nothing in the text resolved to a clinical concept. */
@@ -446,6 +472,15 @@ export function indicationFor(diagnosisText: string, intervention: InterventionI
   if (!concepts.length || !allowed) return { verdict: "UNCLASSIFIED", concepts, matched: [], basis: null };
   const hits = allowed.filter((r) => concepts.includes(r.concept));
   if (!hits.length) return { verdict: "CONTEXT", concepts, matched: [], basis: null };
+
+  // A guideline that recommends AGAINST this pairing is not support. It is the
+  // strongest thing the table can say, and it must not be silently outvoted by
+  // some other row that happens to match.
+  const against = hits.find((r) => r.basis !== "CONVENTION" && r.basis.direction === "AGAINST");
+  if (against && against.basis !== "CONVENTION") {
+    return { verdict: "COUNTER_INDICATED", concepts, matched: [], basis: against.basis };
+  }
+
   // Prefer a guideline-backed row over a convention one, so the panel cites the
   // strongest basis available for this pairing.
   const cited = hits.find((r) => r.basis !== "CONVENTION") ?? hits[0];
@@ -463,9 +498,31 @@ export const diagnosisSupports = (diagnosisText: string, intervention: Intervent
   return v === "INDICATED" || v === "NON_SPECIFIC" || v === "UNCLASSIFIED";
 };
 
+/**
+ * May this indication be PRINTED as guideline authority?
+ *
+ * Only a VERIFIED row pointing the right way. Every row currently ships
+ * UNVERIFIED, so nothing is cited as authority today — which is the honest
+ * state, and the state the previous commit failed to enforce: it printed
+ * "indication per AAOS clinical practice guidelines" from a mapping nobody had
+ * checked against the publication.
+ *
+ * The mapping still does its job while unverified: it decides which diagnoses
+ * READ as support and which read as background. What it may not do is borrow a
+ * guideline's name for that decision.
+ */
+export const citableAsGuidelineAuthority = (basis: IndicationBasis | "CONVENTION" | null): basis is IndicationBasis =>
+  !!basis && basis !== "CONVENTION" && basis.status === "VERIFIED" && basis.direction !== "AGAINST";
+
 /** Why a diagnosis is shown as background rather than as support. */
 export function contextReason(diagnosisText: string, intervention: InterventionId): string | null {
   const r = indicationFor(diagnosisText, intervention);
+  if (r.verdict === "COUNTER_INDICATED" && r.basis && r.basis !== "CONVENTION") {
+    // State the guideline's actual position. This is the one case where naming
+    // the body is safe while unverified: the claim being made is that the
+    // pairing is NOT endorsed, which is the conservative direction.
+    return r.basis.position ?? "a clinical guideline recommends against this intervention for this diagnosis";
+  }
   if (r.verdict !== "CONTEXT") return null;
   const names = r.concepts.map((c) => c.replace(/_/g, " ").toLowerCase()).join(", ");
   return `documents ${names}, which is not an indication for this service`;
