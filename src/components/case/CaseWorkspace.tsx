@@ -174,7 +174,13 @@ export function CaseWorkspace({
 }: {
   data: AnyRec;
   assumptions: { lifeExpectancyYears: number; discountRate: number; medicalInflation: number; geographicFactor: number };
-  totals: { totalLifetime: number; totalPresentValue: number };
+  totals: {
+    /** The SUPPORTED plan — what the record and professional judgement carry. */
+    totalLifetime: number;
+    totalPresentValue: number;
+    /** Both views: supported, and the disclosed candidate/contingency scenario. */
+    planTotals?: { supported: { items: number; presentValue: number; lifetimeCost: number }; scenario: { items: number; presentValue: number; lifetimeCost: number } };
+  };
   permissions: Permission[];
   /** Server-computed canonical records.verify for THIS case (factual review). */
   canVerifyRecords?: boolean;
@@ -360,6 +366,17 @@ export function CaseWorkspace({
                   { label: "Future Care Items", value: String(data.futureCareItems.length), cls: "" },
                   { label: "Lifetime (Undiscounted)", value: formatMoney(totals.totalLifetime), cls: "" },
                   { label: "Present Value", value: formatMoney(totals.totalPresentValue), cls: "text-brand-800" },
+                  // The second view. A candidate nobody has supported is real
+                  // future care worth discussing and is not a damages figure,
+                  // so both numbers are shown and neither is hidden inside the
+                  // other.
+                  ...(totals.planTotals && totals.planTotals.scenario.presentValue > totals.planTotals.supported.presentValue
+                    ? [{
+                        label: `Candidate scenario (${totals.planTotals.scenario.items} items)`,
+                        value: formatMoney(totals.planTotals.scenario.presentValue),
+                        cls: "text-ink-500",
+                      }]
+                    : []),
                   { label: "Physician Pending", value: String(pendingPhysician), cls: pendingPhysician > 0 ? "text-amber-700" : "" },
                   { label: "Open Findings", value: String(data.reviewFindings.length), cls: data.reviewFindings.length > 0 ? "text-amber-700" : "" },
                 ]

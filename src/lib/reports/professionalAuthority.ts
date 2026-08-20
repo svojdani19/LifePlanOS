@@ -31,7 +31,7 @@
 
 import { createHash } from "crypto";
 import { prisma } from "@/lib/db";
-import { runIntegrityCheck, hasPatientRecordSupport, type RecInput, type CondInput } from "@/lib/engine/integrity";
+import { runIntegrityCheck, type RecInput, type CondInput } from "@/lib/engine/integrity";
 import {
   verifyAttestation,
   attestationContentHash,
@@ -148,11 +148,6 @@ export function computeIncludedPlanItems(
   const integrity = runIntegrityCheck({
     recommendations: items as unknown as RecInput[],
     conditions,
-    hasRecordSupport: (rec, matched) =>
-      hasPatientRecordSupport(
-        rec as unknown as FutureCareItem,
-        matched as (CondInput & { evidenceSources?: unknown }) | null,
-      ),
   });
   return items
     .filter((it) => integrity.perItem.get(it as unknown as RecInput)?.includedInTotal)

@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { computePlanTotals } from "@/lib/engine/supportClass";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { requireContext, requireCase, caseAccessFor, canCanonicalPermission } from "@/lib/tenant";
@@ -125,8 +126,15 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
   });
 
   const assumptions = assumptionsFor(c);
-  const totalLifetime = c.futureCareItems.reduce((s, i) => s + i.lifetimeCost, 0);
-  const totalPresentValue = c.futureCareItems.reduce((s, i) => s + i.presentValue, 0);
+  // TWO totals, from the persisted classification alone.
+  //
+  // The headline summed every live item, so a care-library candidate nobody
+  // has supported counted the same as a service a treating provider
+  // recommended. Broad candidate discovery would have inflated the plan's
+  // damages figure the moment it started working.
+  const planTotals = computePlanTotals(c.futureCareItems);
+  const totalLifetime = planTotals.supported.lifetimeCost;
+  const totalPresentValue = planTotals.supported.presentValue;
 
   // Rank the firm's precedent library against this case by "likeness".
   const precedents = await prisma.precedentPlan.findMany({ where: { firmId: ctx.firm.id } });
@@ -157,7 +165,7 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
       <CaseWorkspace
         data={JSON.parse(JSON.stringify({ ...c, physicianEvidence, recordedEvidence }))}
         assumptions={assumptions}
-        totals={{ totalLifetime, totalPresentValue }}
+        totals={{ totalLifetime, totalPresentValue, planTotals }}
         permissions={caseAccess.platformAdminReadOnly ? [] : attorneyView ? ROLE_PERMISSIONS.ATTORNEY_REVIEWER : effectivePermissions}
         precedents={JSON.parse(JSON.stringify(ranked))}
         physicians={JSON.parse(JSON.stringify(physicians))}

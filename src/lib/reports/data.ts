@@ -4,8 +4,7 @@ import { CHRONOLOGY_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
 import { significanceOf } from "@/lib/engine/chronology";
 import {
   runIntegrityCheck,
-  hasPatientRecordSupport,
-  type RecInput,
+    type RecInput,
   type CondInput,
   type IntegrityReport,
 } from "@/lib/engine/integrity";
@@ -273,15 +272,9 @@ export function computeIntegrity(
   items: RDFutureCareItem[],
   conditions: RDCondition[],
 ): { integrity: IntegrityReport; includedIds: Set<string> } {
-  const hasRecordSupport = (rec: RecInput, matched: CondInput | null): boolean =>
-    hasPatientRecordSupport(
-      rec as unknown as { missingSupport?: string | null; confidence?: number },
-      matched as (CondInput & { evidenceSources?: unknown }) | null,
-    );
   const integrity = runIntegrityCheck({
     recommendations: items as unknown as RecInput[],
     conditions: conditions as unknown as CondInput[],
-    hasRecordSupport,
   });
   const includedIds = new Set<string>();
   for (const it of items) {

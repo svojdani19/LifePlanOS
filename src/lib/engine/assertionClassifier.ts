@@ -225,3 +225,33 @@ export function claimsAssertedBy(source: ClassifiableSource): EvidenceClaim[] {
   const profile = classifyAssertion(source);
   return (Object.keys(CLAIM_REQUIRES) as EvidenceClaim[]).filter((claim) => assertionSupportsClaim(profile, claim));
 }
+
+
+/**
+ * Does any of this text actually STATE what treatment achieved?
+ *
+ * One definition, because the inference "treatment happened, therefore
+ * treatment failed" had six independent implementations — a narrative clause, a
+ * probability factor, a reasoning-chain node, a `conservativeExhausted` flag, a
+ * clinical-status argument and a response summary. Five of them survived the
+ * first repair of the sixth.
+ *
+ * Non-resolution is a statement a record makes or does not make. Examination
+ * findings count: a deficit still present on exam is the most direct statement
+ * that earlier care did not resolve it.
+ */
+export function documentsTreatmentResponse(texts: readonly (string | { text: string })[]): boolean {
+  return texts.some((t) => TREATMENT_RESPONSE.test(typeof t === "string" ? t : t.text));
+}
+
+/** Documented persistence of the impairment, in the record's own words. */
+const PERSISTENCE =
+  /\b(?:persistent(?:ly)?\s+(?:pain|symptoms?|deficits?)|symptoms? persist(?:ed|s)?|exhausted|maximum medical improvement|\bmmi\b|plateaued?|recurr(?:ed|ence|ent))\b/i;
+
+/** Either an explicit response, or documented persistence of the impairment. */
+export function documentsNonResolution(texts: readonly (string | { text: string })[]): boolean {
+  return texts.some((t) => {
+    const s = typeof t === "string" ? t : t.text;
+    return TREATMENT_RESPONSE.test(s) || PERSISTENCE.test(s);
+  });
+}

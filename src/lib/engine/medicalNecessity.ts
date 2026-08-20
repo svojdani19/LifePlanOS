@@ -28,6 +28,7 @@ import {
 } from "./evidenceLedger";
 import { citationCompatible, evidenceTier, selectPrimary, structuredConfidence, type ConfidenceLevel } from "./citationQuality";
 import { isGrounded } from "@/lib/reference/origins";
+import { documentsNonResolution } from "@/lib/engine/assertionClassifier";
 import { specialtyLens } from "./specialtyReasoning";
 import { assessLifetimeSupport, deriveGuidelineDurationClaim, type GuidelineDurationClaim, type LifetimeSupportResult } from "./lifetimeSupport";
 
@@ -605,10 +606,18 @@ export function buildRecommendationDossier(
     hasMissingInfo: !!condition?.missingInfo || !!item.missingSupport,
   });
 
+  // Did the record STATE what prior treatment achieved? One definition, shared
+  // with the reasoning engine — the "treatment happened therefore it failed"
+  // inference had six independent implementations.
+  const treatmentResponseDocumented = documentsNonResolution([...priorTreatment, ...examination, ...functionalLimitations, ...physicianDocumentation]);
+
   // ── Probability assessment (structured + percentage) ───────────────────────
   const probFactors = [
     { label: "Objective findings", present: objectiveFindings.length > 0, detail: objectiveFindings.length ? "documented in the record" : "not independently documented" },
-    { label: "Treatment response / course", present: priorTreatment.length > 0, detail: priorTreatment.length ? "prior treatment for this condition is documented" : "no prior treatment documented" },
+    // The LABEL says response; the test used to measure existence. A factor
+    // called "treatment response" that fires on any documented treatment adds
+    // probability for something the record never said.
+    { label: "Documented treatment response", present: treatmentResponseDocumented, detail: treatmentResponseDocumented ? "the record states what prior treatment achieved" : priorTreatment.length ? "prior treatment is documented; its response is not stated" : "no prior treatment documented" },
     { label: "Treating-physician documentation", present: physicianDocumentation.length > 0, detail: physicianDocumentation.length ? "physician review or note on file" : "awaiting physician confirmation" },
     { label: "Guideline support", present: guidelineEvidence.length > 0, detail: guidelineEvidence.length ? "supported by cited clinical guidance" : "no on-point guideline located" },
     // Lifetime-Honesty: the projection horizon (`isLifetime`) never counts as a
@@ -674,7 +683,7 @@ export function buildRecommendationDossier(
   if (!objectiveFindings.length) potentialChallenges.push("Objective evidence tying this item to the diagnosis is thin on the present record.");
 
   // ── Medical-necessity narrative (physician voice; NOT a diagnosis restate) ─
-  let necessity = buildNecessityNarrative(item, condition, { objectiveFindings, imaging, examination, functionalLimitations, priorTreatment, guidelines: guidelineEvidence }, kase, dxName, durationSupport);
+  let necessity = buildNecessityNarrative(item, condition, { objectiveFindings, imaging, examination, functionalLimitations, priorTreatment, guidelines: guidelineEvidence, treatmentResponseDocumented }, kase, dxName, durationSupport);
   // Weave the patient's own account and any treating-provider opinion.
   if (patientReports.length) necessity += ` On interview, ${kase.subject} reports ${lc(cleanClause(patientReports[0].text, 140))}, which the recommendation directly addresses.`;
   if (providerOpinions.length) necessity += ` This is consistent with the opinion of ${providerOpinions[0].providerName ?? "the treating provider"} on interview.`;
@@ -724,7 +733,7 @@ export function buildRecommendationDossier(
 function buildNecessityNarrative(
   item: DossierItem,
   condition: DossierCondition | null,
-  ev: { objectiveFindings: EvidenceItem[]; imaging: EvidenceItem[]; examination: EvidenceItem[]; functionalLimitations: EvidenceItem[]; priorTreatment: EvidenceItem[]; guidelines: EvidenceItem[] },
+  ev: { objectiveFindings: EvidenceItem[]; imaging: EvidenceItem[]; examination: EvidenceItem[]; functionalLimitations: EvidenceItem[]; priorTreatment: EvidenceItem[]; guidelines: EvidenceItem[]; treatmentResponseDocumented: boolean },
   kase: DossierCase,
   dxName: string,
   durationSupport: LifetimeSupportResult,
@@ -765,13 +774,22 @@ function buildNecessityNarrative(
     ]));
   }
 
-  // 3) Prior treatment → residual impairment (complex items only).
+  // 3) Prior treatment, and what the record says it achieved.
+  //
+  // Both variants used to assert non-resolution — "yet the impairment has not
+  // resolved", "has not returned S to baseline, as the record reflects" — from
+  // the mere PRESENCE of prior treatment. The second sentence cited the record
+  // for a statement the record had not made.
   if (complex && ev.priorTreatment.length) {
     const tx = ev.priorTreatment.slice(0, 2).map((t) => lc(cleanClause(String(t.text), 90))).join(" and ");
-    parts.push(variant(sv + "tx", [
-      `${cap(kase.pronounPoss)} course has already included ${tx}, yet the impairment has not resolved.`,
-      `Prior ${tx} has not returned ${S} to baseline, as the record reflects.`,
-    ]));
+    parts.push(
+      ev.treatmentResponseDocumented
+        ? variant(sv + "tx", [
+            `${cap(kase.pronounPoss)} course has already included ${tx}, and the record documents that the impairment persisted.`,
+            `Prior ${tx} did not return ${S} to baseline, as the record states.`,
+          ])
+        : `${cap(kase.pronounPoss)} course has already included ${tx}; the record does not state what that treatment achieved.`,
+    );
   }
 
   // 4) The necessity, in the specialty's own voice (§1/§6) — its clinical goal

@@ -21,9 +21,10 @@ import { prisma } from "@/lib/db";
 import { assumptionsFor } from "@/lib/engine/generate";
 import { significanceOf } from "@/lib/engine/chronology";
 import { seriesCitation, seriesMembersOf } from "@/lib/records/seriesCitation";
-import { runIntegrityCheck, reviewLabel, evaluateCitation, functionalFinding, hasPatientRecordSupport, type RecInput, type CondInput, type PerItem, type IntegrityFinding } from "@/lib/engine/integrity";
+import { runIntegrityCheck, reviewLabel, evaluateCitation, functionalFinding, type RecInput, type CondInput, type PerItem, type IntegrityFinding } from "@/lib/engine/integrity";
 import { buildRecommendationDossier, type DossierCondition, type DossierChronoEvent, type DossierCase, type EvidenceItem } from "@/lib/engine/medicalNecessity";
 import { compareEvidenceSets, describeEvidenceSet, type EvidenceRowIdentity } from "@/lib/engine/evidenceSet";
+import { itemIsSupported, supportClassOf, SUPPORT_LABEL, computePlanTotals } from "@/lib/engine/supportClass";
 import { buildReasoningAssessment, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningItem, type ReasoningAssessment } from "@/lib/engine/clinicalReasoning";
 import { referencesFor, guidelineSourcesFor } from "@/lib/references/sources";
 import { parseBasis, basisNarrative } from "@/lib/engine/lifeExpectancy";
@@ -300,9 +301,10 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   // region-matched, free of a critical coding defect, and either
   // physician-approved or record-supported and medically probable. "Offered for
   // confirmation" alone does NOT include an unsupported item.
-  const hasRecordSupport = (rec: RecInput, matched: CondInput | null): boolean =>
-    hasPatientRecordSupport(rec as unknown as FutureCareItem, matched as (CondInput & { evidenceSources?: unknown }) | null);
-  const integrity = runIntegrityCheck({ recommendations: items as unknown as RecInput[], conditions: c.conditions as unknown as CondInput[], hasRecordSupport });
+  // Inclusion follows each item's OWN persisted classification, read straight
+  // off the row. It used to be recomputed here from the matched condition's
+  // records, so the report could include an item the panel excluded.
+  const integrity = runIntegrityCheck({ recommendations: items as unknown as RecInput[], conditions: c.conditions as unknown as CondInput[] });
   const perItemOf = (it: FutureCareItem): PerItem => integrity.perItem.get(it as unknown as RecInput)!;
   const reportItems = items.filter((i) => perItemOf(i).includedInTotal);
   const excludedForReview = items.filter((i) => !perItemOf(i).includedInTotal);
@@ -416,7 +418,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     const per = perItemOf(it);
     const cond = per.mapping.condition as unknown as (typeof c.conditions)[number] | null;
     const dxName = cond?.name || c.diagnosis || "the injuries at issue";
-    const recordSupport = hasRecordSupport(it as unknown as RecInput, cond as unknown as CondInput | null);
+    const recordSupport = itemIsSupported(it as unknown as { supportClass?: string | null });
     const dossier = buildRecommendationDossier(it as never, cond as unknown as DossierCondition | null, c.chronologyEvents as unknown as DossierChronoEvent[], dossierCase, dossierInterviews as never);
     const out: (Paragraph | Table)[] = [];
     out.push(new Paragraph({ spacing: { before: 260, after: 60 }, keepNext: true, children: [new TextRun({ text: it.service, bold: true, size: 22, color: NAVY })] }));
@@ -1416,8 +1418,6 @@ export async function buildCostCsv(caseId: string): Promise<CostCsvPayload> {
   const integrity = runIntegrityCheck({
     recommendations: items as unknown as RecInput[],
     conditions: conditions as unknown as CondInput[],
-    hasRecordSupport: (rec, matched) =>
-      hasPatientRecordSupport(rec as never, matched as never),
   });
   const includedSet = new Set(items.filter((i) => integrity.perItem.get(i as unknown as RecInput)?.includedInTotal).map((i) => i.id));
   const warningsFor = (service: string) =>

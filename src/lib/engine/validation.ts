@@ -13,7 +13,6 @@ import { prisma } from "@/lib/db";
 import { checkIndication } from "@/lib/engine/indications";
 import {
   runIntegrityCheck,
-  hasPatientRecordSupport,
   type CondInput,
   type RecInput,
   type IntegrityReport,
@@ -53,11 +52,6 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
   const report = runIntegrityCheck({
     recommendations: items as unknown as RecInput[],
     conditions: conditions as unknown as CondInput[],
-    hasRecordSupport: (rec, matched) =>
-      hasPatientRecordSupport(
-        rec as { missingSupport?: string | null; confidence?: number },
-        matched as (CondInput & { evidenceSources?: unknown }) | null,
-      ),
   });
   // Clinical Evidence Sprint — validate the stored citations themselves:
   // incompatible citations, weak primaries, cross-region article reuse.

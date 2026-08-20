@@ -1,8 +1,10 @@
 import { buildRecommendationDossier, type DossierItem, type DossierCondition, type DossierChronoEvent, type DossierCase, type DossierInterview } from "@/lib/engine/medicalNecessity";
-import { mapRecommendationToCondition, validateCode, validatePricing, classifyRecommendation, hasPatientRecordSupport, bodyRegion, anatomyCompatible, type RecInput, type CondInput } from "@/lib/engine/integrity";
+import { mapRecommendationToCondition, validateCode, validatePricing, classifyRecommendation, bodyRegion, anatomyCompatible, type RecInput, type CondInput } from "@/lib/engine/integrity";
 import { resolveRecommendationCondition } from "@/lib/engine/recommendationCondition";
 import { citationCompatible } from "@/lib/engine/citationQuality";
 import { serviceKindOf } from "@/lib/engine/evidenceLedger";
+import { entersSupportedTotal, supportClassOf } from "@/lib/engine/supportClass";
+import { documentsNonResolution } from "@/lib/engine/assertionClassifier";
 import { evidenceSetFingerprint, type EvidenceRowIdentity } from "@/lib/engine/evidenceSet";
 import { specialtyLens } from "@/lib/engine/specialtyReasoning";
 import { lintAssessmentNarratives } from "@/lib/engine/narrativeSanity";
@@ -688,9 +690,14 @@ export function buildReasoningAssessment(
   const dossier = buildRecommendationDossier(item, condition, chronology, kase, interviews);
   const code = validateCode(rec);
   const pricing = validatePricing(rec);
-  const recordSupport = hasPatientRecordSupport({ missingSupport: item.missingSupport, confidence: item.confidence }, mapping.condition);
+  // The item's OWN classification. This read the matched CONDITION's records,
+  // and failing that `confidence >= 60` — so a template's default confidence of
+  // 75 could establish "record support" for a service nothing in the file
+  // mentions.
+  const itemSupportClass = supportClassOf(item as { supportClass?: string | null });
+  const recordSupport = entersSupportedTotal(itemSupportClass);
   const codeCritical = code.status === "Code mismatch" || pricing.status === "Pricing mismatch";
-  const classify = classifyRecommendation(rec, { matched: mapping.matched, codeCritical, hasRecordSupport: recordSupport });
+  const classify = classifyRecommendation(rec, { matched: mapping.matched, codeCritical, supportClass: itemSupportClass });
 
   const lens = specialtyLens(item.category, item.service);
   const region = bodyRegion(`${item.service} ${condition?.name ?? ""}`);
@@ -745,9 +752,9 @@ export function buildReasoningAssessment(
   // "has not resolved the impairment" without one of these.
   // Examination is included deliberately: a deficit still present on exam is
   // the most direct statement that earlier care did not resolve it.
-  const documentedNonResolution = [...se.priorTreatment, ...se.examination, ...se.functionalLimitations, ...se.physicianDocumentation].some((e) =>
-    /\b(?:failed|no (?:significant |lasting |meaningful )?(?:relief|improvement|benefit|change)|did not (?:improve|resolve|help)|unresponsive|refractory|persistent(?:ly)? (?:pain|symptoms|deficit)|symptoms persist(?:ed)?|exhausted|maximum medical improvement|plateaued?|recurr(?:ed|ence))\b/i.test(e.text),
-  );
+  // One shared definition — see assertionClassifier. This file carried its own
+  // regex, medicalNecessity carried another, and they could drift.
+  const documentedNonResolution = documentsNonResolution([...se.priorTreatment, ...se.examination, ...se.functionalLimitations, ...se.physicianDocumentation]);
   const freqN = item.frequencyPerYear ?? 1;
   const frequencyRationale = frequencySupported
     ? `The ${freqN}×/yr frequency is grounded in ${[cadenceFromTreatment.length ? "a cadence stated in the treatment record" : "", cadenceFromGuideline.length ? "a cadence stated in the cited guidance" : "", physicianApproved ? "physician review" : ""].filter(Boolean).join(", ")}.`
@@ -886,12 +893,20 @@ export function buildReasoningAssessment(
     exam: sum(se.examination),
     functional: dossier.functionalLink ? `${dossier.functionalLink.domain} — ${dossier.functionalLink.limitation}` : sum(se.functionalLimitations),
     priorTreatment: sum(se.priorTreatment),
-    response: se.priorTreatment.length ? "Documented treatment has not resolved the impairment." : null,
-    necessity: true,
+    // The RECORD must state the response. This read the LENGTH of the
+    // prior-treatment list, so any documented care produced "treatment has not
+    // resolved the impairment" — a clinical conclusion manufactured from the
+    // fact that treatment happened.
+    response: documentedNonResolution ? "The record documents that prior treatment did not resolve the impairment." : null,
+    // Necessity is a DETERMINATION, not a constant. Hard-coded true, this node
+    // asserted medical necessity for every recommendation the engine ever
+    // assessed, including ones it had just classified as unsupported.
+    necessity: entersSupportedTotal(itemSupportClass),
     pv: item.presentValue ?? null,
     physicianStatus: item.physicianStatus ?? "PENDING",
     sources,
-    conservativeExhausted: se.priorTreatment.length > 0,
+    // Exhaustion is a documented state, not a non-empty list.
+    conservativeExhausted: documentedNonResolution,
   });
   const selfCritique = buildSelfCritique({
     service: item.service,
@@ -941,6 +956,11 @@ export function buildReasoningAssessment(
     laterality,
     conditionSeverity: severityOf(condition),
     conditionChronicity: chronicityOf(condition),
+    // Deliberately still the COUNT, and correct that way: a patient with
+    // documented treatment is under active treatment. That is a statement
+    // about care being delivered, not about whether it worked — which is the
+    // inference the rest of this pass had to stop making. Over-applying the
+    // rule here would deny an active-treatment status the record does support.
     currentClinicalStatus: clinicalStatusOf(condition, se.priorTreatment.length),
     responsibleSpecialty: lens.label,
     conditionTrajectory: trajectory,

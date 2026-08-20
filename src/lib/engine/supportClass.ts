@@ -159,3 +159,21 @@ export function computePlanTotals(
   }
   return { supported, scenario };
 }
+
+
+/**
+ * Is this item supported, read from its persisted classification?
+ *
+ * The replacement for `hasPatientRecordSupport(rec, matchedCondition)`. Note
+ * that it takes NO condition: the matched diagnosis carrying records is not a
+ * fact about this service, and treating it as one admitted 46 of 55 items and
+ * $518,879 of present value on the reference case.
+ */
+export const itemIsSupported = (item: { supportClass?: string | null }): boolean =>
+  entersSupportedTotal((item.supportClass ?? "CANDIDATE_REVIEW") as SupportClass);
+
+/** The class an item carries, defaulting closed. */
+export const supportClassOf = (item: { supportClass?: string | null }): SupportClass =>
+  (SUPPORT_CLASSES as readonly string[]).includes(String(item.supportClass))
+    ? (item.supportClass as SupportClass)
+    : "CANDIDATE_REVIEW";

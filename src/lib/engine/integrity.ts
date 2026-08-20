@@ -18,6 +18,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { analyzeConsistency, type ConsistencyRec, type ConsistencyResult } from "@/lib/engine/recommendationConsistency";
+import { entersSupportedTotal, supportClassOf, SUPPORT_LABEL, type SupportClass } from "@/lib/engine/supportClass";
 
 // ── Body region / anatomy ────────────────────────────────────────────────────
 export type BodyRegion =
@@ -545,13 +546,28 @@ const REVIEW_LABEL: Record<string, string> = {
   MODIFIED: "Physician approved with modification",
   REJECTED: "Physician rejected",
 };
+/** `hasRecordSupport` here means "this item's own classification enters the
+ *  supported total" — never "its diagnosis has records". */
 export function reviewLabel(physicianStatus: string | undefined, hasRecordSupport: boolean): string {
   const st = physicianStatus ?? "PENDING";
   if (st === "PENDING" && hasRecordSupport) return "Supported in treating record; awaiting physician review";
   return REVIEW_LABEL[st] ?? "Not reviewed";
 }
 
-export interface ClassifyContext { matched: boolean; codeCritical: boolean; hasRecordSupport: boolean }
+export interface ClassifyContext {
+  matched: boolean;
+  codeCritical: boolean;
+  /**
+   * The item's own support classification — see engine/supportClass.ts.
+   *
+   * Replaces the `hasRecordSupport` boolean, which was computed from the
+   * matched CONDITION's records or, failing that, from `confidence >= 60`.
+   * The care library assigns confidence 75 by default, so a region-matched
+   * condition carrying no records at all produced RECORD_SUPPORTED_PENDING
+   * and entered the totals.
+   */
+  supportClass: SupportClass;
+}
 export interface ClassifyResult { status: RecStatus; label: string; includedInTotal: boolean; reason: string }
 
 /**
@@ -580,24 +596,27 @@ export function classifyRecommendation(rec: RecInput, ctx: ClassifyContext): Cla
   if (prob === "NOT_SUPPORTED") return { status: "INSUFFICIENT", label: STATUS_LABEL.INSUFFICIENT, includedInTotal: false, reason: "Not supported by the current record." };
   if (prob === "SPECULATIVE") return { status: "SPECULATIVE", label: STATUS_LABEL.SPECULATIVE, includedInTotal: false, reason: "Foreseeable but not more likely than not." };
 
-  const probable = prob === "PROBABLE";
-  if (ctx.hasRecordSupport && probable) return { status: "RECORD_SUPPORTED_PENDING", label: STATUS_LABEL.RECORD_SUPPORTED_PENDING, includedInTotal: true, reason: "Record-supported and medically probable; physician confirmation pending." };
-  return { status: "POSSIBLE_CONTINGENCY", label: STATUS_LABEL.POSSIBLE_CONTINGENCY, includedInTotal: false, reason: "Record support is thin; additional evidence or physician confirmation required." };
+  // Inclusion follows the item's OWN support, not the diagnosis's records and
+  // not a probability label. `probability` still gates the STATUS a reader
+  // sees, but it can no longer admit an item on its own.
+  if (entersSupportedTotal(ctx.supportClass)) {
+    return {
+      status: "RECORD_SUPPORTED_PENDING",
+      label: STATUS_LABEL.RECORD_SUPPORTED_PENDING,
+      includedInTotal: true,
+      reason: SUPPORT_LABEL[ctx.supportClass] + "; physician confirmation pending.",
+    };
+  }
+  return { status: "POSSIBLE_CONTINGENCY", label: STATUS_LABEL.POSSIBLE_CONTINGENCY, includedInTotal: false, reason: SUPPORT_LABEL[ctx.supportClass] };
 }
 
-// Whether a recommendation has patient-specific record support: its matched
-// diagnosis carries explicit supporting records / evidence sources, or —
-// fallback — the item itself has no open missing-support note and reasonable
-// extraction confidence. Shared by the report and the validation service so
-// the two can never disagree.
-export function hasPatientRecordSupport(
-  rec: { missingSupport?: string | null; confidence?: number },
-  matched: (CondInput & { evidenceSources?: unknown }) | null,
-): boolean {
-  const evCount = matched && Array.isArray(matched.evidenceSources) ? (matched.evidenceSources as unknown[]).length : 0;
-  if (matched && (matched.supportingRecords || evCount > 0)) return true;
-  return !rec.missingSupport && (rec.confidence ?? 0) >= 60;
-}
+// `hasPatientRecordSupport` lived here. It returned true when the matched
+// CONDITION carried records — so one lumbar diagnosis supported lumbar visits,
+// therapy, imaging, injections and braces alike — or, failing that, when
+// `confidence >= 60`, a bar the care library clears by default at 75 before any
+// case evidence exists. Both branches answered a question about the diagnosis
+// and reported it as an answer about the service. Removed rather than patched:
+// see `engine/supportClass.ts` for the item-specific replacement.
 
 // ── 10. Integrity check ──────────────────────────────────────────────────────
 export type Severity = "Critical" | "High" | "Moderate" | "Low";
@@ -631,7 +650,12 @@ export interface IntegrityInput {
   recommendations: RecInput[];
   conditions: CondInput[];
   /** whether the matched diagnosis has patient-specific record support */
-  hasRecordSupport: (rec: RecInput, matched: CondInput | null) => boolean;
+  /**
+   * The item's persisted support classification. Injected rather than computed
+   * so the integrity pass, the panel, the report and the totals read one
+   * verdict instead of four independent re-derivations of it.
+   */
+  supportClassOf?: (rec: RecInput) => SupportClass;
 }
 
 /** Run the full integrity check across a case's recommendations. */
@@ -644,9 +668,10 @@ export function runIntegrityCheck(input: IntegrityInput): IntegrityReport {
     const mapping = mapRecommendationToCondition(rec, input.conditions);
     const code = validateCode(rec);
     const pricing = validatePricing(rec);
-    const hasRecordSupport = input.hasRecordSupport(rec, mapping.condition);
+    const cls = input.supportClassOf ? input.supportClassOf(rec) : supportClassOf(rec as { supportClass?: string | null });
+    const hasRecordSupport = entersSupportedTotal(cls);
     const codeCritical = code.status === "Code mismatch" || pricing.status === "Pricing mismatch";
-    const classify = classifyRecommendation(rec, { matched: mapping.matched, codeCritical, hasRecordSupport });
+    const classify = classifyRecommendation(rec, { matched: mapping.matched, codeCritical, supportClass: cls });
 
     perItem.set(rec, { rec, mapping, code, pricing, classify, includedInTotal: classify.includedInTotal });
     if (classify.includedInTotal) included++; else excluded++;

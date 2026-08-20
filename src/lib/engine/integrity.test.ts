@@ -136,24 +136,24 @@ describe("literature relevance", () => {
 
 describe("recommendation status & inclusion", () => {
   it("does not include an unsupported, unapproved item in the total", () => {
-    const r = classifyRecommendation({ service: "Speculative future surgery", probability: "POSSIBLE", physicianStatus: "PENDING" }, { matched: true, codeCritical: false, hasRecordSupport: false });
+    const r = classifyRecommendation({ service: "Speculative future surgery", probability: "POSSIBLE", physicianStatus: "PENDING" }, { matched: true, codeCritical: false, supportClass: "CANDIDATE_REVIEW" });
     expect(r.includedInTotal).toBe(false);
     expect(r.status).toBe("POSSIBLE_CONTINGENCY");
   });
 
   it("includes a record-supported, probable item pending confirmation", () => {
-    const r = classifyRecommendation({ service: "Pain management visits", probability: "PROBABLE", physicianStatus: "PENDING" }, { matched: true, codeCritical: false, hasRecordSupport: true });
+    const r = classifyRecommendation({ service: "Pain management visits", probability: "PROBABLE", physicianStatus: "PENDING" }, { matched: true, codeCritical: false, supportClass: "RECORD_RECOMMENDED" });
     expect(r.includedInTotal).toBe(true);
     expect(r.status).toBe("RECORD_SUPPORTED_PENDING");
   });
 
   it("excludes an item with a critical coding defect", () => {
-    const r = classifyRecommendation({ service: "Lumbar fusion revision", probability: "PROBABLE", physicianStatus: "PENDING" }, { matched: true, codeCritical: true, hasRecordSupport: true });
+    const r = classifyRecommendation({ service: "Lumbar fusion revision", probability: "PROBABLE", physicianStatus: "PENDING" }, { matched: true, codeCritical: true, supportClass: "RECORD_RECOMMENDED" });
     expect(r.includedInTotal).toBe(false);
   });
 
   it("includes a physician-approved item", () => {
-    const r = classifyRecommendation({ service: "Knee injections", probability: "PROBABLE", physicianStatus: "APPROVED" }, { matched: true, codeCritical: false, hasRecordSupport: true });
+    const r = classifyRecommendation({ service: "Knee injections", probability: "PROBABLE", physicianStatus: "APPROVED" }, { matched: true, codeCritical: false, supportClass: "RECORD_RECOMMENDED" });
     expect(r.includedInTotal).toBe(true);
     expect(r.status).toBe("SUPPORTED_INCLUDED");
   });
@@ -191,7 +191,6 @@ describe("functional finding extraction", () => {
 });
 
 describe("integrity check — export blocking", () => {
-  const hasRecordSupport = (_r: RecInput, m: CondInput | null) => !!(m && m.supportingRecords);
 
   it("blocks export on a wrong-region diagnosis mapping and a code mismatch", () => {
     const report = runIntegrityCheck({
@@ -201,7 +200,7 @@ describe("integrity check — export blocking", () => {
         { service: "Rotator cuff repair", cptCode: "29827", probability: "PROBABLE" }, // no shoulder dx — critical
       ],
       conditions,
-      hasRecordSupport,
+      supportClassOf: () => "RECORD_RECOMMENDED",
     });
     expect(report.blocking).toBe(true);
     const critical = report.findings.filter((f) => f.severity === "Critical");
@@ -218,7 +217,7 @@ describe("integrity check — export blocking", () => {
         { service: "Urology evaluation", cptCode: "99204", probability: "PROBABLE" },
       ],
       conditions,
-      hasRecordSupport,
+      supportClassOf: () => "RECORD_RECOMMENDED",
     });
     expect(report.blocking).toBe(false);
     expect(report.counts.included).toBe(3);
