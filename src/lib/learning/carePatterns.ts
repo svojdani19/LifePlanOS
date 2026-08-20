@@ -149,3 +149,31 @@ export function assertPatternFactFree(patterns: readonly CarePattern[]): void {
     if (blob.length > 300) throw new Error("Care pattern rejected: unexpectedly large payload.");
   }
 }
+
+
+/**
+ * Load the APPROVED care patterns for a firm.
+ *
+ * Unapproved artifacts are invisible here. A machine-derived lesson is a
+ * candidate; adoption is a person's act, and the existing learning loop already
+ * works this way for priors. Wiring consumption to `createdAt` instead would
+ * make running a script equivalent to authorising a clinical rule.
+ */
+export async function approvedCarePatterns(
+  db: { learnedArtifact?: { findFirst(args: unknown): Promise<{ payload: unknown; heldOut: string[] } | null> } },
+  firmId: string,
+  /** Exclude an artifact that learned from the case being evaluated. */
+  excludeIfLearnedFrom?: string,
+): Promise<CarePattern[]> {
+  const row = await db.learnedArtifact
+    ?.findFirst({
+      where: { firmId, kind: "CARE_PATTERNS", approvedById: { not: null }, supersededById: null },
+      orderBy: { createdAt: "desc" },
+    })
+    .catch(() => null);
+  if (!row) return [];
+  // Leave-one-out at the point of USE, not only at derivation: an artifact that
+  // learned from this case cannot inform the run being scored on it.
+  if (excludeIfLearnedFrom && !row.heldOut.includes(excludeIfLearnedFrom)) return [];
+  return (row.payload as CarePattern[]) ?? [];
+}

@@ -48,6 +48,22 @@ can never do more, whatever its corpus share. `patternSupportCeiling()` returns
 the same value at 3-of-3 as at 2-of-3, and support still has to come from this
 patient's own record.
 
+## Storage, approval and consumption
+
+Artifacts persist to `LearnedArtifact` — versioned, attributable, with the
+sample size and the held-out cases recorded. `scripts/reference-learn.ts
+--write` creates them with `approvedById` **null**.
+
+**Nothing consumes an unapproved artifact.** `approvedCarePatterns()` filters on
+`approvedById: { not: null }`, so running the script is not the same act as
+authorising a clinical rule. That is the same discipline the learning loop
+already applies to priors.
+
+Leave-one-out is enforced at the point of **use**, not only at derivation: an
+artifact whose `heldOut` does not include the case being generated is refused
+for that case. An artifact that learned from a case cannot inform the run being
+scored on it.
+
 ## Current limitation: the corpus is one plan
 
 `MIN_CORPUS_PLANS = 3`, and **only REF-2026-0005 has a preserved reference
@@ -59,10 +75,17 @@ every case sharing a diagnosis keyword.
 So the pattern layer is **deliberately inert today**. It is built, verified and
 tested; it suggests nothing until the corpus grows.
 
-Reference cases 0001–0004 have documents and chronology but no conditions and no
-future-care items — the causation and future-care stages were never run for
-them. Generating those plans is the prerequisite for this layer doing anything,
-and it is a data change requiring authorization.
+Reference cases 0001–0004 are extracted — documents, encounters and chronology —
+but carry **no preserved reference plan** (`ReferencePlanItem` count is zero for
+all four). Generating future-care plans for them would exercise the pipeline on
+other diagnoses, which is worth doing, but it would not grow the LEARNING
+corpus: there is no published plan to learn from or score against.
+
+Growing this layer needs the finalized reports for those cases imported as
+`LIFE_CARE_PLAN` / `EXPERT_REPORT` documents and their published items preserved
+via `scripts/preserve-reference-plan.ts`. Until then the style profile has no
+input either — the derivation runs and reports that it found no finalized-report
+documents rather than inventing one.
 
 ## Leave-one-out
 

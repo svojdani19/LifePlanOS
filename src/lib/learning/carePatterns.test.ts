@@ -91,3 +91,37 @@ describe("a corpus too small to generalise suggests nothing", () => {
     expect(entersSupportedTotal(patternSupportCeiling())).toBe(false);
   });
 });
+
+describe("only an approved artifact can reach production", () => {
+  const artifact = (over: Record<string, unknown> = {}) => ({
+    payload: [{ intervention: "EPIDURAL_STEROID", family: "INJECTION", conditionKey: "LUMBAR_SPINE", observedIn: 3, outOf: 3 }],
+    heldOut: ["case-under-test"],
+    ...over,
+  });
+  const db = (row: unknown) => ({ learnedArtifact: { findFirst: async () => row as never } });
+
+  it("returns nothing when no approved artifact exists", async () => {
+    const { approvedCarePatterns } = await import("@/lib/learning/carePatterns");
+    expect(await approvedCarePatterns(db(null), "firm-1")).toEqual([]);
+  });
+
+  it("returns an approved artifact's patterns", async () => {
+    const { approvedCarePatterns } = await import("@/lib/learning/carePatterns");
+    const p = await approvedCarePatterns(db(artifact()), "firm-1");
+    expect(p).toHaveLength(1);
+    expect(p[0].intervention).toBe("EPIDURAL_STEROID");
+  });
+
+  it("refuses an artifact that learned from the case being scored", async () => {
+    // Leave-one-out at the point of USE, not only at derivation. An artifact
+    // built from this case cannot inform the run being evaluated on it.
+    const { approvedCarePatterns } = await import("@/lib/learning/carePatterns");
+    expect(await approvedCarePatterns(db(artifact({ heldOut: [] })), "firm-1", "case-under-test")).toEqual([]);
+    expect(await approvedCarePatterns(db(artifact()), "firm-1", "case-under-test")).toHaveLength(1);
+  });
+
+  it("survives a client that predates the model", async () => {
+    const { approvedCarePatterns } = await import("@/lib/learning/carePatterns");
+    expect(await approvedCarePatterns({}, "firm-1")).toEqual([]);
+  });
+});

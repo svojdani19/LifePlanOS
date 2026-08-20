@@ -22,6 +22,7 @@ import { classifySupport } from "@/lib/engine/supportClass";
 import { GENERATOR_ORIGINS } from "@/lib/learning/futureCareAgreement";
 import { EVIDENCE_LEDGER_VERSION } from "@/lib/engine/evidenceLedger";
 import { buildBasis } from "@/lib/engine/recommendationBasis";
+import { approvedCarePatterns, suggestedInterventions } from "@/lib/learning/carePatterns";
 import { resolveRecommendationCondition } from "@/lib/engine/recommendationCondition";
 import { locateConditionEvidenceInClaims, stateObjectiveEvidence } from "@/lib/engine/conditionEvidence";
 import { CURRENT_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
@@ -291,6 +292,23 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
     const key = t.service.trim().toLowerCase();
     if (!originOf.has(key)) originOf.set(key, { origin, conditionKey, templateRuleId: ruleId(scope, t.service) });
   };
+  // Care a professional would CONSIDER for a case like this, learned from
+  // finalized reference plans. Identities only — never another patient's
+  // frequency, duration or cost — and it can raise an item no higher than a
+  // reviewable candidate, whatever its corpus share.
+  //
+  // Only APPROVED artifacts are consulted, and only ones that held this case
+  // out. With one reference plan the corpus floor makes this return nothing;
+  // the path exists so that growing the corpus is a data change rather than a
+  // code change.
+  const learnedPatterns = await approvedCarePatterns(prisma as never, c.firmId, caseId);
+  const suggested = learnedPatterns.length
+    ? suggestedInterventions(learnedPatterns, { conditionKeys: matchedKeys, regions: [] })
+    : [];
+  if (suggested.length) {
+    console.info(`[learning] case ${caseId}: ${suggested.length} intervention(s) suggested by approved reference patterns`);
+  }
+
   if (matchedKeys.length > 0) {
     for (const k of matchedKeys) for (const t of CONDITION_CARE[k]) { care.push(t); tagOrigin(t, "TEMPLATE_CONDITION", k, k); }
     for (const t of BASELINE_CARE) { care.push(t); tagOrigin(t, "TEMPLATE_BASELINE", null, "baseline"); }

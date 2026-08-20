@@ -1638,6 +1638,40 @@ model RecommendationBasis {
   @@index([firmId, caseId])
 }
 
+/// A versioned, attributable learning artifact derived from reference plans.
+///
+/// Fact-free by construction — see `src/lib/learning/referenceStyle.ts` and
+/// `carePatterns.ts`, whose types have nowhere to put a patient fact. Stored
+/// rather than recomputed so a plan can name the artifact version that shaped
+/// it, and so promotion is an auditable act rather than a side effect of
+/// running a script.
+///
+/// `approvedById` is null until a qualified person adopts it. Nothing here
+/// auto-adopts: a machine-derived lesson is a candidate, and the existing
+/// learning loop's discipline (repeated consistent corrections, clinical
+/// approval, leave-one-out) applies unchanged.
+model LearnedArtifact {
+  id     String @id @default(uuid())
+  firmId String
+
+  /// STYLE_PROFILE | CARE_PATTERNS
+  kind    String
+  version String
+  /// The fact-free payload.
+  payload Json
+
+  /// How many reference plans it was derived from, and which were held out.
+  sampleSize Int
+  heldOut    String[]
+
+  approvedById   String?
+  approvedAt     DateTime?
+  supersededById String?
+  createdAt      DateTime  @default(now())
+
+  @@index([firmId, kind, createdAt])
+}
+
 model GeneratorSnapshot {
   id     String @id @default(uuid())
   firmId String

@@ -20,6 +20,9 @@
 import { prisma } from "../src/lib/db";
 import { deriveCarePatterns, assertPatternFactFree, type PatternSource } from "../src/lib/learning/carePatterns";
 import { resolveConditionKeys } from "../src/lib/engine/careLibrary";
+import { CARE_PATTERN_VERSION } from "../src/lib/learning/carePatterns";
+import { deriveStyleProfile, assertFactFree, styleGuidance, STYLE_PROFILE_VERSION, type StyleProfile } from "../src/lib/learning/referenceStyle";
+import { REFERENCE_DOC_TYPES } from "../src/lib/reference/boundary";
 
 const arg = (f: string) => { const i = process.argv.indexOf(f); return i >= 0 ? process.argv[i + 1] : undefined; };
 const has = (f: string) => process.argv.includes(f);
@@ -54,14 +57,50 @@ async function main() {
     console.log(`  ${p.conditionKey.padEnd(16)} ${p.intervention.padEnd(28)} ${p.observedIn}/${p.outOf}  (${share}%)`);
   }
 
+  // Style learning, where finalized-report TEXT is available. Reference
+  // documents are the only legitimate source; record documents are the
+  // patient's own file and must never shape prose across cases.
+  const reportDocs = await prisma.document.findMany({
+    where: { type: { in: [...REFERENCE_DOC_TYPES] as never[] }, caseId: { in: included.map((c) => c.id) } },
+    select: { extractedText: true },
+  });
+  let style: StyleProfile | null = null;
+  if (reportDocs.length) {
+    style = deriveStyleProfile(
+      reportDocs.map((d) => ({ paragraphs: String(d.extractedText ?? "").split(/\n\s*\n/).filter((x) => x.trim().length > 40) })),
+    );
+    assertFactFree(style);
+    console.log(`\nStyle profile from ${reportDocs.length} finalized report(s):`);
+    for (const g of styleGuidance(style)) console.log(`  · ${g}`);
+  } else {
+    console.log("\nNo finalized-report documents attached to the reference cases, so no style");
+    console.log("profile can be derived. Attach them as LIFE_CARE_PLAN / EXPERT_REPORT documents;");
+    console.log("the boundary keeps them out of patient evidence (see reference/boundary.ts).");
+  }
+
   if (!write) {
     console.log("\nDry run. Re-run with --write to persist.");
+    await prisma.$disconnect();
     return;
   }
-  console.log("\n[not persisted] Artifact storage is deliberately not wired in this pass — the");
-  console.log("patterns above are derived and verified fact-free, and promotion to a stored,");
-  console.log("versioned artifact requires the clinical-approval path the learning loop already");
-  console.log("uses for priors. See docs/reference-learning.md.");
+
+  const firmId = (await prisma.case.findFirst({ where: { id: included[0]?.id }, select: { firmId: true } }))?.firmId;
+  if (!firmId) {
+    console.error("No firm resolved; nothing persisted.");
+    return;
+  }
+  const heldOut = holdOut ? [holdOut] : [];
+  await prisma.learnedArtifact.create({
+    data: { firmId, kind: "CARE_PATTERNS", version: CARE_PATTERN_VERSION, payload: patterns as never, sampleSize: included.length, heldOut },
+  });
+  if (style) {
+    await prisma.learnedArtifact.create({
+      data: { firmId, kind: "STYLE_PROFILE", version: STYLE_PROFILE_VERSION, payload: style as never, sampleSize: reportDocs.length, heldOut },
+    });
+  }
+  console.log(`\nPersisted as UNAPPROVED candidates (approvedById is null).`);
+  console.log("Nothing consumes an unapproved artifact — a machine-derived lesson is a");
+  console.log("candidate, and adoption is a person's act. See docs/reference-learning.md.");
   await prisma.$disconnect();
 }
 
