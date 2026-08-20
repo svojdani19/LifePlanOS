@@ -30,6 +30,8 @@ import { citationCompatible, evidenceTier, selectPrimary, structuredConfidence, 
 import { isGrounded } from "@/lib/reference/origins";
 import { documentsNonResolution, isClinicalAssertion, statesPresentPathology } from "@/lib/engine/assertionClassifier";
 import { atomize, type AtomicAssertion } from "@/lib/engine/atomize";
+import { resolveIntervention } from "@/lib/engine/serviceOntology";
+import { diagnosisSupports, contextReason } from "@/lib/engine/diagnosisIndication";
 import { specialtyLens } from "./specialtyReasoning";
 import { assessLifetimeSupport, deriveGuidelineDurationClaim, type GuidelineDurationClaim, type LifetimeSupportResult } from "./lifetimeSupport";
 
@@ -567,9 +569,32 @@ export function buildRecommendationDossier(
       asserts: { supportsSpecificIntervention: true, statesDuration: g.duration?.supportsDuration ? true : undefined },
     });
 
+  // ── Is this diagnosis a REASON to offer this service? ─────────────────────
+  // Anatomy answers "right body part". It cannot answer "would a clinician
+  // offer THIS procedure FOR THIS diagnosis", so a lumbar discectomy was shown
+  // as supported by "chronic cervical, thoracic and lumbar pain" and by a
+  // lumbar burst fracture — the first is not an indication for a discectomy,
+  // and the second indicates stabilisation, a different operation.
+  //
+  // A diagnosis that fails this is NOT removed: it is marked CONDITION, so it
+  // reads as background rather than as support. Hiding a diagnosis a physician
+  // may need to see would be the worse error.
+  const interventionId = resolveIntervention(item).id;
+  const asDiagnosisEvidence = (e: EvidenceItem): EvidenceItem => {
+    if (e.scope === "CONDITION") return e;
+    if (diagnosisSupports(String(e.text), interventionId)) return e;
+    // Say WHY it moved. "Condition context" without a reason invites the reader
+    // to assume the program simply failed to connect it.
+    const why = contextReason(String(e.text), interventionId);
+    return { ...e, scope: "CONDITION", source: why ? `${e.source ? `${e.source} · ` : ""}${why}` : e.source };
+  };
+
+  const conditionName = condition
+    ? `${condition.name}${condition.relatedness ? ` — ${condition.relatedness.replace(/_/g, " ").toLowerCase()}` : ""}`
+    : null;
   const diagnoses: EvidenceItem[] = [
-    ...(condition ? [{ text: `${condition.name}${condition.relatedness ? ` — ${condition.relatedness.replace(/_/g, " ").toLowerCase()}` : ""}`, source: condition.reasoning ? "causation analysis" : null, scope: "CONDITION" as const }] : []),
-    ...diagnosisEvidence,
+    ...(condition ? [{ text: conditionName!, source: condition.reasoning ? "causation analysis" : null, scope: "CONDITION" as const }] : []),
+    ...diagnosisEvidence.map(asDiagnosisEvidence),
   ];
 
   // Lifetime-duration support (Lifetime-Honesty sprint): the deterministic
