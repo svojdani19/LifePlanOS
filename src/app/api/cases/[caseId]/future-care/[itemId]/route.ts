@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { reviewDecisionFields } from "@/lib/engine/reviewDecision";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit } from "@/lib/tenant";
 import { project } from "@/lib/engine/cost";
@@ -78,6 +79,16 @@ export async function PATCH(req: Request, { params: paramsPromise }: { params: P
           plaintiffValue: item.plaintiffValue,
           defenseVulnerability: item.defenseVulnerability,
           missingSupport: item.missingSupport,
+          // The classification and its reason are part of the historical record:
+          // a frozen copy that omits them cannot show what the plan claimed
+          // about this item at the moment it was approved — which is precisely
+          // the question a deposition asks of a superseded version.
+          supportClass: item.supportClass,
+          supportReason: item.supportReason,
+          origin: item.origin,
+          conditionKey: item.conditionKey,
+          templateRuleId: item.templateRuleId,
+          inputProvenance: item.inputProvenance as never,
           physicianStatus: item.physicianStatus,
           physicianNote: item.physicianNote,
           physicianSummary: item.physicianSummary,
@@ -112,7 +123,17 @@ export async function PATCH(req: Request, { params: paramsPromise }: { params: P
       data: {
         ...input,
         ...(invalidates
-          ? { physicianStatus: "PENDING" as const, lifecycleStatus: "PLANNER_PROPOSED" as const, version: item.version + 1 }
+          ? {
+              // A material edit invalidates the approval, so it must invalidate
+              // what the approval CLASSIFIED. Leaving PROFESSIONALLY_ADOPTED on
+              // a row whose approval was just revoked would keep it in the
+              // supported total on the strength of a decision that no longer
+              // stands.
+              ...(reviewDecisionFields({ ...item, physicianStatus: "PENDING" } as never, "PENDING", "PLANNER_PROPOSED") as unknown as Record<string, unknown>),
+              physicianStatus: "PENDING" as const,
+              lifecycleStatus: "PLANNER_PROPOSED" as const,
+              version: item.version + 1,
+            }
           : {}),
         edited: true,
         unitCost: p.unitCost,

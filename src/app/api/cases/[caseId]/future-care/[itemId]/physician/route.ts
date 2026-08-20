@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { reviewDecisionFields } from "@/lib/engine/reviewDecision";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requireCanonicalPermission, requireCase, audit } from "@/lib/tenant";
 import { enforceReviewCredential } from "@/lib/authz/credentialGate";
@@ -63,7 +64,11 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
     const updated = await prisma.futureCareItem.update({
       where: { id: item.id },
       data: {
-        physicianStatus: input.status,
+        // Every field a review decision writes, from one place. This route set
+        // `physicianStatus` alone, so an approved item stayed classified
+        // CANDIDATE_REVIEW and out of the supported total while report logic
+        // keyed on approval counted it — two screens, two answers.
+        ...(reviewDecisionFields(item as never, input.status, newLifecycle) as unknown as Record<string, unknown>),
         lifecycleStatus: newLifecycle as never,
         physicianNote: note,
         probability: merged.probability,

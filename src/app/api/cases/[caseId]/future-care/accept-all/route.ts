@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/db";
+import { reviewDecisionFields } from "@/lib/engine/reviewDecision";
 import { requireApiContext, requireCanonicalPermission, requireCase, audit } from "@/lib/tenant";
 import { enforceReviewCredential } from "@/lib/authz/credentialGate";
 import { generateReviews } from "@/lib/engine/generate";
@@ -22,7 +23,10 @@ export async function POST(_req: Request, { params: paramsPromise }: { params: P
     // row — bulk approval must be as auditable as an individual decision.
     const pending = await prisma.futureCareItem.findMany({
       where: { caseId: params.caseId, physicianStatus: "PENDING", supersededAt: null },
-      select: { id: true, lineageId: true, lifecycleStatus: true },
+      // `origin` is needed to classify: an approved RECORD_RECOMMENDED item and
+      // an approved template are both adopted, and the classifier says so from
+      // one place rather than each route guessing.
+      select: { id: true, lineageId: true, lifecycleStatus: true, origin: true, supportClass: true },
     });
     // Each approval is conditional on the exact item version the confirmation
     // covered: an item that was decided, changed, or superseded between the
@@ -32,7 +36,11 @@ export async function POST(_req: Request, { params: paramsPromise }: { params: P
     for (const p of pending) {
       const res = await prisma.futureCareItem.updateMany({
         where: { id: p.id, physicianStatus: "PENDING", supersededAt: null },
-        data: { physicianStatus: "APPROVED" },
+        // The same fields an individual approval writes. This route set
+        // `physicianStatus` alone — not the support class, and not even the
+        // lifecycle status — so a bulk approval left the plan in a state no
+        // single-item approval could produce.
+        data: reviewDecisionFields(p as never, "APPROVED", "PHYSICIAN_APPROVED") as never,
       });
       if (res.count === 1) approved.push(p);
     }
