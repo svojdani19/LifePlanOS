@@ -134,3 +134,37 @@ describe("no rule loses to its own word endings", () => {
     expect(unresolved.map(([s]) => s)).toEqual([]);
   });
 });
+
+describe("nothing a real plan contains falls through unclassified", () => {
+  // An UNCLASSIFIED item is skipped by the benchmark entirely, so a gap here is
+  // INVISIBLE rather than wrong — the worst kind. These are the real service
+  // names that fell through across the five reference cases.
+  const realNames: [string, string][] = [
+    ["Cervical trigger-point injections", "TRIGGER_POINT"],
+    ["Adjacent-segment / revision surgery (one anticipated)", "SURGERY_OTHER"],
+    ["Subacromial corticosteroid injections", "JOINT_INJECTION"],
+    ["Neuropathic pain & anti-inflammatory medications", "MEDICATION_OTHER"],
+  ];
+  it.each(realNames)("resolves %s", (service, expected) => {
+    expect(resolveIntervention({ service, category: null }).id).toBe(expected);
+  });
+
+  it("still lets a named procedure beat the family fallback", () => {
+    // The fallbacks sit last; a specific operation must never lose to them.
+    expect(resolveIntervention({ service: "Revision total knee arthroplasty surgery" }).id).toBe("REVISION_ARTHROPLASTY");
+    expect(resolveIntervention({ service: "Lumbar fusion surgery" }).id).toBe("SPINAL_FUSION");
+    expect(resolveIntervention({ service: "Gabapentin 300mg medication" }).id).toBe("NEUROPATHIC_AGENT");
+  });
+
+  it("gives every declared intervention id at least one rule", () => {
+    // SURGERY_OTHER and MEDICATION_OTHER were declared in the type and never
+    // given a rule, so nothing could ever resolve to them.
+    const witnesses: Record<string, string> = {
+      SURGERY_OTHER: "revision surgery", MEDICATION_OTHER: "pain medications",
+      TRIGGER_POINT: "trigger-point injections", JOINT_INJECTION: "subacromial corticosteroid injections",
+    };
+    for (const [id, service] of Object.entries(witnesses)) {
+      expect(resolveIntervention({ service, category: null }).id, service).toBe(id);
+    }
+  });
+});

@@ -118,9 +118,13 @@ const RULES: Rule[] = [
   { id: "SYMPATHETIC_BLOCK", family: "INJECTION", re: /\b(?:stellate|sympathetic|ganglion impar|celiac plexus)\b/i },
   { id: "VISCOSUPPLEMENTATION", family: "INJECTION", re: /viscosupplement\w*|hyaluron\w*/i },
   { id: "PRP_INJECTION", family: "INJECTION", re: /\b(?:prp|platelet[- ]rich|stem cell)\b/i },
-  { id: "TRIGGER_POINT", family: "INJECTION", re: /\btrigger point\w*\b|\bbotulinum\b|\bbotox\b/i },
+  { id: "TRIGGER_POINT", family: "INJECTION", re: /\btrigger[- ]point\w*/i, },
+  { id: "TRIGGER_POINT", family: "INJECTION", re: /\bbotulinum\b|\bbotox\b/i },
   { id: "INJECTION_GUIDANCE", family: "INJECTION", re: /\b(?:ultrasound|fluoroscop\w*|image)[- ]guidance\b|guidance for injection/i },
-  { id: "JOINT_INJECTION", family: "INJECTION", re: /\b(?:joint|bursa|intra[- ]articular|subacromial)\s*(?:steroid\s*)?injection\w*/i },
+  // Any qualifier may sit between the anatomy and the word "injection":
+  // "subacromial CORTICOSTEROID injections" missed a pattern that allowed only
+  // an optional "steroid".
+  { id: "JOINT_INJECTION", family: "INJECTION", re: /\b(?:joint|bursa|intra[- ]articular|subacromial|glenohumeral)\b[^.;]{0,24}?\binjection\w*|\binjection\w*[^.;]{0,24}?\b(?:joint|bursa|subacromial)\b/i },
 
   // ── Surgery ───────────────────────────────────────────────────────────────
   { id: "REVISION_ARTHROPLASTY", family: "SURGERY", re: /\brevision\b.*\b(?:arthroplast\w*|replacement\w*)\b|\b(?:arthroplast\w*|replacement\w*)\b.*\brevision\b/i },
@@ -133,6 +137,11 @@ const RULES: Rule[] = [
   { id: "HARDWARE_REMOVAL", family: "SURGERY", re: /\bhardware removal\b|removal of (?:hardware|implant\w*)/i },
   { id: "FRACTURE_FIXATION", family: "SURGERY", re: /\b(?:orif|open reduction|fracture fixation|internal fixation)\b/i },
   { id: "ARTHROSCOPY", family: "SURGERY", re: /arthroscop\w*|meniscectom\w*|rotator cuff repair|labral repair/i },
+  // Declared in InterventionId and never given a rule, so "Adjacent-segment /
+  // revision surgery" resolved UNCLASSIFIED — and an UNCLASSIFIED item is
+  // skipped by the benchmark entirely, so it was invisible rather than wrong.
+  // Last in the surgical block: every named operation above still wins.
+  { id: "SURGERY_OTHER", family: "SURGERY", re: /\bsurger\w*|\boperati\w*|\bprocedure\b/i },
 
   // ── Imaging & electrodiagnostics ──────────────────────────────────────────
   { id: "EMG_NCS", family: "DIAGNOSTIC_PROCEDURE", re: /\b(?:emg|ncv|ncs)\b|electromyograph\w*|nerve conduction/i },
@@ -159,6 +168,9 @@ const RULES: Rule[] = [
   { id: "NSAID", family: "MEDICATION", re: /\b(?:ibuprofen|naproxen|meloxicam|celecoxib|diclofenac|nsaids?|acetaminophen|tylenol)\b/i },
   { id: "TOPICAL_ANALGESIC", family: "MEDICATION", re: /\b(?:lidocaine|topical|patch\w*|capsaicin)\b|voltaren/i },
   { id: "PSYCHOTROPIC", family: "MEDICATION", re: /\b(?:sertraline|fluoxetine|escitalopram|bupropion|trazodone|antidepressant\w*|anxiolytic\w*)\b/i },
+  // Same gap on the medication side: "Neuropathic pain & anti-inflammatory
+  // medications" named no specific drug and fell through to UNCLASSIFIED.
+  { id: "MEDICATION_OTHER", family: "MEDICATION", re: /\bmedications?\b|\bpharmacolog\w*|\bprescription\w*\b/i },
 
   // ── Equipment ─────────────────────────────────────────────────────────────
   { id: "TENS_UNIT", family: "EQUIPMENT", re: /\btens\b|transcutaneous electrical/i },
