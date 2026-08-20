@@ -31,7 +31,8 @@ import { isGrounded } from "@/lib/reference/origins";
 import { documentsNonResolution, isClinicalAssertion, statesPresentPathology } from "@/lib/engine/assertionClassifier";
 import { atomize, type AtomicAssertion } from "@/lib/engine/atomize";
 import { resolveIntervention } from "@/lib/engine/serviceOntology";
-import { diagnosisSupports, contextReason } from "@/lib/engine/diagnosisIndication";
+import { diagnosisSupports, contextReason, indicationFor } from "@/lib/engine/diagnosisIndication";
+import { guidelineLabel } from "@/lib/references/sources";
 import { specialtyLens } from "./specialtyReasoning";
 import { assessLifetimeSupport, deriveGuidelineDurationClaim, type GuidelineDurationClaim, type LifetimeSupportResult } from "./lifetimeSupport";
 
@@ -582,7 +583,18 @@ export function buildRecommendationDossier(
   const interventionId = resolveIntervention(item).id;
   const asDiagnosisEvidence = (e: EvidenceItem): EvidenceItem => {
     if (e.scope === "CONDITION") return e;
-    if (diagnosisSupports(String(e.text), interventionId)) return e;
+    if (diagnosisSupports(String(e.text), interventionId)) {
+      // Say WHICH guideline pairs this diagnosis with this procedure. NASS
+      // writes about "lumbar disc herniation with radiculopathy" and that
+      // document is where discectomy is discussed — the pairing is the
+      // guideline's, and a reader is entitled to see whose.
+      const r = indicationFor(String(e.text), interventionId);
+      if (r.verdict === "INDICATED" && r.basis && r.basis !== "CONVENTION") {
+        const label = guidelineLabel(r.basis.sourceId);
+        return { ...e, source: `${e.source ? `${e.source} · ` : ""}indication per ${label} (${r.basis.namedDiagnosis})` };
+      }
+      return e;
+    }
     // Say WHY it moved. "Condition context" without a reason invites the reader
     // to assume the program simply failed to connect it.
     const why = contextReason(String(e.text), interventionId);

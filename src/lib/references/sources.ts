@@ -34,6 +34,20 @@ export interface ReferenceSource {
   prices?: CareCategory[];
   /** body regions or care areas this GUIDELINE/REFERENCE source is apt for; empty = general */
   applies?: string[];
+  /**
+   * List this source ONLY where something explicitly cites it.
+   *
+   * `guidelineSourcesFor` sweeps in every guideline whose region tags match the
+   * category, and the report then prints them as "applied to determine whether
+   * this care is medically necessary". That is already generous. Registering the
+   * condition-specific CPG bodies without this flag would have added six more
+   * guidelines to every report that no indication had actually invoked — a
+   * citation nobody made, which is the decoration this work is trying to remove.
+   *
+   * These bodies surface where they are earned: on the supporting diagnosis
+   * whose indication row names them.
+   */
+  citedOnly?: boolean;
 }
 
 // ── Pricing sources ──────────────────────────────────────────────────────────
@@ -144,6 +158,53 @@ export const SOURCES: ReferenceSource[] = [
     citation: "Institute for Clinical Systems Improvement (ICSI) — evidence-based clinical guidelines.",
     applies: [],
   },
+  // ── Condition-specific clinical practice guidelines ───────────────────────
+  // These are the bodies whose CPGs are written ABOUT a named diagnosis and
+  // address a named intervention for it. `diagnosisIndication.ts` cites them
+  // per indication row, so the panel can say which guideline puts a given
+  // diagnosis and a given procedure in the same document.
+  //
+  // Titles and years are deliberately NOT asserted here. A citation is only
+  // worth printing when it has been checked against the publication, and these
+  // rows record the BODY and its scope. See `diagnosisIndication.ts` for the
+  // verification status of each indication that cites them.
+  {
+    id: "nass", citedOnly: true, name: "North American Spine Society (NASS)", url: "https://www.spine.org", role: "guideline",
+    label: "NASS evidence-based clinical guidelines",
+    citation: "North American Spine Society (spine.org) — evidence-based clinical guidelines for degenerative and traumatic spinal conditions, each written for a named diagnosis (e.g. lumbar disc herniation with radiculopathy, degenerative lumbar spinal stenosis, degenerative lumbar spondylolisthesis).",
+    applies: ["spine", "lumbar", "cervical", "thoracic"],
+  },
+  {
+    id: "aaos", citedOnly: true, name: "American Academy of Orthopaedic Surgeons (AAOS)", url: "https://www.aaos.org/quality", role: "guideline",
+    label: "AAOS clinical practice guidelines",
+    citation: "American Academy of Orthopaedic Surgeons (aaos.org/quality) — clinical practice guidelines and appropriate-use criteria for named orthopaedic conditions (e.g. osteoarthritis of the knee, rotator cuff injuries, distal radius fracture).",
+    applies: ["knee", "hip", "shoulder", "elbow", "wrist_hand", "ankle_foot"],
+  },
+  {
+    id: "asipp", citedOnly: true, name: "American Society of Interventional Pain Physicians (ASIPP)", url: "https://www.asipp.org", role: "guideline",
+    label: "ASIPP interventional pain guidelines",
+    citation: "American Society of Interventional Pain Physicians (asipp.org) — evidence-based guidelines for interventional techniques in chronic spinal pain, distinguishing epidural (radicular) from facet-joint (axial) indications.",
+    applies: ["spine", "lumbar", "cervical", "thoracic", "pain"],
+  },
+  {
+    id: "aan", citedOnly: true, name: "American Academy of Neurology (AAN)", url: "https://www.aan.com/practice/guidelines", role: "guideline",
+    label: "AAN practice guidelines",
+    citation: "American Academy of Neurology (aan.com/practice/guidelines) — practice guidelines and parameters for neurologic diagnosis and management, including electrodiagnostic assessment and neuropathic pain.",
+    applies: ["spine", "neuro", "pain"],
+  },
+  {
+    id: "cdc-opioid", citedOnly: true, name: "CDC Clinical Practice Guideline for Prescribing Opioids for Pain", url: "https://www.cdc.gov/opioids", role: "guideline",
+    label: "CDC opioid prescribing guideline",
+    citation: "Centers for Disease Control and Prevention — Clinical Practice Guideline for Prescribing Opioids for Pain, addressing subacute and chronic pain in outpatient settings.",
+    applies: ["pain", "opioid", "medication"],
+  },
+  {
+    id: "acoem", citedOnly: true, name: "ACOEM Practice Guidelines", url: "https://acoem.org/Practice-Resources", role: "guideline",
+    label: "ACOEM occupational practice guidelines",
+    citation: "American College of Occupational and Environmental Medicine (acoem.org) — evidence-based practice guidelines organised by body region and named diagnosis.",
+    applies: [],
+  },
+
   {
     id: "statpearls", name: "StatPearls (NCBI Bookshelf)", url: "https://www.statpearls.com", role: "reference",
     label: "StatPearls (NCBI Bookshelf)",
@@ -173,6 +234,9 @@ export const SOURCES: ReferenceSource[] = [
 const byId = new Map(SOURCES.map((s) => [s.id, s]));
 export const source = (id: string): ReferenceSource | undefined => byId.get(id);
 
+/** The short name a panel or report uses when citing a guideline body. */
+export const guidelineLabel = (id: string): string => byId.get(id)?.label ?? id.toUpperCase();
+
 /** The pricing source that values a care category (primary basis). */
 export function pricingSourceFor(category: CareCategory): ReferenceSource {
   return SOURCES.find((s) => s.role === "pricing" && s.prices?.includes(category)) ?? byId.get("fairhealth")!;
@@ -194,6 +258,7 @@ export function guidelineSourcesFor(category: CareCategory, region?: string): Re
   const out: ReferenceSource[] = [byId.get("odg")!];
   for (const s of SOURCES) {
     if (s.id === "odg") continue;
+    if (s.citedOnly) continue; // surfaces only where an indication row names it
     if ((s.role === "guideline" || s.role === "utilization" || s.role === "literature") && apt(s)) out.push(s);
   }
   return out;

@@ -128,54 +128,166 @@ export function classifyDiagnosis(text: string | null | undefined): DiagnosisCon
 const ANY = "ANY" as const;
 
 /**
- * Which diagnosis concepts indicate which intervention.
+ * Where an indication comes from.
+ *
+ * A row is not my opinion that a diagnosis suits a procedure — it names the
+ * guideline whose OWN population is that diagnosis and which addresses that
+ * procedure for it. NASS writes a guideline about "lumbar disc herniation with
+ * radiculopathy" and that document is where discectomy and epidural injection
+ * are discussed; AAOS writes about "osteoarthritis of the knee" and that is
+ * where arthroplasty is discussed. The pairing is the guideline's, not mine.
+ *
+ * `CONVENTION` is the honest value where no condition-specific CPG establishes
+ * the pairing — durable medical equipment, transportation, case management.
+ * Marking those rather than attaching a plausible-sounding guideline is the
+ * difference between a citation and a decoration.
+ */
+export interface IndicationBasis {
+  /** ReferenceSource id in `src/lib/references/sources.ts`. */
+  sourceId: "nass" | "aaos" | "asipp" | "aan" | "cdc-opioid" | "acoem" | "odg" | "icsi";
+  /** The guideline's own named population — the diagnosis it is written about. */
+  namedDiagnosis: string;
+  /**
+   * VERIFICATION STATUS.
+   *
+   * `UNVERIFIED` means the body, its named population and the intervention it
+   * addresses are stated from general knowledge and have NOT been checked
+   * against the publication. Every row ships UNVERIFIED. A citation is worth
+   * printing only once someone has opened the document, and asserting a title,
+   * a year or a recommendation grade that nobody checked is exactly the kind of
+   * decoration this file exists to avoid.
+   */
+  status: "UNVERIFIED" | "VERIFIED";
+}
+
+export interface IndicationRow {
+  concept: DiagnosisConcept;
+  basis: IndicationBasis | "CONVENTION";
+}
+
+const g = (sourceId: IndicationBasis["sourceId"], namedDiagnosis: string): IndicationBasis => ({ sourceId, namedDiagnosis, status: "UNVERIFIED" });
+const row = (concept: DiagnosisConcept, basis: IndicationBasis | "CONVENTION"): IndicationRow => ({ concept, basis });
+const CONV = "CONVENTION" as const;
+
+/**
+ * Which diagnoses indicate which intervention, and under which guideline.
  *
  * ── FOR CLINICAL REVIEW ─────────────────────────────────────────────────────
- * Each row answers: "for which documented problems would a clinician offer
- * this?" Rows are conservative — a concept absent here does not make the care
- * wrong, it makes that diagnosis not the thing that supports it, and the panel
- * then shows the diagnosis as background rather than as support.
+ * Read a row as: "this guideline is written about THIS diagnosis and addresses
+ * THIS intervention for it." A concept absent from a row does not make the care
+ * wrong — it makes that diagnosis background rather than support, and the panel
+ * says so with the reason.
+ *
+ * Every row is UNVERIFIED until someone checks it against the publication.
+ * `verificationSummary()` reports how many remain.
  */
-export const INDICATIONS: Partial<Record<InterventionId, readonly DiagnosisConcept[] | typeof ANY>> = {
+export const INDICATIONS: Partial<Record<InterventionId, readonly IndicationRow[] | typeof ANY>> = {
   // ── Interventional pain ───────────────────────────────────────────────────
-  // An epidural addresses nerve-root pain; a facet procedure addresses axial
-  // joint pain. They are not interchangeable, and this is where that is stated.
-  EPIDURAL_STEROID: ["RADICULOPATHY", "DISC_HERNIATION", "SPINAL_STENOSIS"],
-  MEDIAL_BRANCH_BLOCK: ["FACET_ARTHROPATHY", "CHRONIC_PAIN"],
-  FACET_INJECTION: ["FACET_ARTHROPATHY", "CHRONIC_PAIN"],
-  RADIOFREQUENCY_ABLATION: ["FACET_ARTHROPATHY", "CHRONIC_PAIN"],
-  SYMPATHETIC_BLOCK: ["CRPS", "PERIPHERAL_NEUROPATHY"],
-  JOINT_INJECTION: ["OSTEOARTHRITIS", "TENDINOPATHY", "INTRA_ARTICULAR_TEAR"],
-  VISCOSUPPLEMENTATION: ["OSTEOARTHRITIS"],
-  PRP_INJECTION: ["OSTEOARTHRITIS", "TENDINOPATHY"],
-  TRIGGER_POINT: ["MYOFASCIAL_SPASM", "CHRONIC_PAIN", "HEADACHE"],
+  // ASIPP's interventional-techniques guidelines separate the radicular
+  // (epidural) indication from the axial facet-joint indication. That
+  // separation is the guideline's, and it is why these rows differ.
+  EPIDURAL_STEROID: [
+    row("RADICULOPATHY", g("nass", "lumbar disc herniation with radiculopathy")),
+    row("DISC_HERNIATION", g("nass", "lumbar disc herniation with radiculopathy")),
+    row("SPINAL_STENOSIS", g("nass", "degenerative lumbar spinal stenosis")),
+  ],
+  MEDIAL_BRANCH_BLOCK: [
+    row("FACET_ARTHROPATHY", g("asipp", "facet-joint (axial) chronic spinal pain")),
+    row("CHRONIC_PAIN", g("asipp", "chronic axial spinal pain")),
+  ],
+  FACET_INJECTION: [
+    row("FACET_ARTHROPATHY", g("asipp", "facet-joint (axial) chronic spinal pain")),
+    row("CHRONIC_PAIN", g("asipp", "chronic axial spinal pain")),
+  ],
+  RADIOFREQUENCY_ABLATION: [
+    row("FACET_ARTHROPATHY", g("asipp", "facet-joint (axial) chronic spinal pain")),
+    row("CHRONIC_PAIN", g("asipp", "chronic axial spinal pain")),
+  ],
+  SYMPATHETIC_BLOCK: [
+    row("CRPS", g("odg", "complex regional pain syndrome")),
+    row("PERIPHERAL_NEUROPATHY", g("odg", "sympathetically-mediated pain")),
+  ],
+  JOINT_INJECTION: [
+    row("OSTEOARTHRITIS", g("aaos", "osteoarthritis of the knee")),
+    row("TENDINOPATHY", g("aaos", "rotator cuff and tendon disorders")),
+    row("INTRA_ARTICULAR_TEAR", g("aaos", "meniscal and articular cartilage lesions")),
+  ],
+  VISCOSUPPLEMENTATION: [row("OSTEOARTHRITIS", g("aaos", "osteoarthritis of the knee"))],
+  PRP_INJECTION: [
+    row("OSTEOARTHRITIS", g("aaos", "osteoarthritis of the knee")),
+    row("TENDINOPATHY", g("aaos", "tendinopathy")),
+  ],
+  TRIGGER_POINT: [
+    row("MYOFASCIAL_SPASM", g("odg", "myofascial pain")),
+    row("CHRONIC_PAIN", g("odg", "chronic pain")),
+    row("HEADACHE", g("aan", "chronic migraine")),
+  ],
   INJECTION_GUIDANCE: ANY,
 
   // ── Surgery ───────────────────────────────────────────────────────────────
-  // A discectomy removes herniated disc material compressing a nerve root. A
-  // burst fracture is not an indication for it — that indicates stabilisation.
-  DISCECTOMY: ["DISC_HERNIATION", "RADICULOPATHY"],
-  LAMINECTOMY_DECOMPRESSION: ["SPINAL_STENOSIS", "MYELOPATHY", "RADICULOPATHY"],
-  // Fusion spans more than instability. An ACDF is the standard operation for
-  // cervical radiculopathy from disc disease, and a lumbar fusion is offered
-  // for stenosis or herniation with instability. Excluding radiculopathy here
-  // made the panel call a cervical radiculopathy "not an indication" for an
-  // ACDF — the one operation most clearly offered for it.
-  //
-  // Fusion's specificity comes from PREREQUISITES — documented instability,
-  // failed conservative care — not from a narrow diagnosis list. See
-  // `indications.ts` for the prerequisite checklists.
-  SPINAL_FUSION: ["SEGMENTAL_INSTABILITY", "VERTEBRAL_FRACTURE", "SPINAL_CORD_INJURY", "MYELOPATHY", "RADICULOPATHY", "DISC_HERNIATION", "SPINAL_STENOSIS"],
-  ARTHROPLASTY: ["OSTEOARTHRITIS", "NONUNION", "APPENDICULAR_FRACTURE"],
-  REVISION_ARTHROPLASTY: ["OSTEOARTHRITIS", "NONUNION", "JOINT_INSTABILITY"],
-  ARTHROSCOPY: ["INTRA_ARTICULAR_TEAR", "OSTEOARTHRITIS", "JOINT_INSTABILITY"],
-  FRACTURE_FIXATION: ["APPENDICULAR_FRACTURE", "VERTEBRAL_FRACTURE", "NONUNION"],
-  HARDWARE_REMOVAL: ["NONUNION", "APPENDICULAR_FRACTURE", "VERTEBRAL_FRACTURE"],
-  SPINAL_CORD_STIMULATOR: ["CHRONIC_PAIN", "CRPS", "RADICULOPATHY", "PERIPHERAL_NEUROPATHY"],
-  PUMP_IMPLANT: ["CHRONIC_PAIN", "SPINAL_CORD_INJURY"],
+  DISCECTOMY: [
+    row("DISC_HERNIATION", g("nass", "lumbar disc herniation with radiculopathy")),
+    row("RADICULOPATHY", g("nass", "lumbar disc herniation with radiculopathy")),
+  ],
+  LAMINECTOMY_DECOMPRESSION: [
+    row("SPINAL_STENOSIS", g("nass", "degenerative lumbar spinal stenosis")),
+    row("MYELOPATHY", g("nass", "cervical degenerative myelopathy")),
+    row("RADICULOPATHY", g("nass", "cervical radiculopathy from degenerative disorders")),
+  ],
+  // Fusion appears in several guidelines, each about a different diagnosis —
+  // which is why this row is the broadest. Its discipline comes from the
+  // PREREQUISITE checklists in `indications.ts`, not from a narrow list here.
+  SPINAL_FUSION: [
+    row("SEGMENTAL_INSTABILITY", g("nass", "degenerative lumbar spondylolisthesis")),
+    row("VERTEBRAL_FRACTURE", g("odg", "vertebral fracture requiring stabilisation")),
+    row("SPINAL_CORD_INJURY", g("odg", "traumatic spinal cord injury")),
+    row("MYELOPATHY", g("nass", "cervical degenerative myelopathy")),
+    row("RADICULOPATHY", g("nass", "cervical radiculopathy from degenerative disorders")),
+    row("DISC_HERNIATION", g("nass", "cervical radiculopathy from degenerative disorders")),
+    row("SPINAL_STENOSIS", g("nass", "degenerative lumbar spinal stenosis")),
+  ],
+  ARTHROPLASTY: [
+    row("OSTEOARTHRITIS", g("aaos", "surgical management of osteoarthritis of the knee")),
+    row("NONUNION", g("aaos", "hip fracture in the elderly")),
+    row("APPENDICULAR_FRACTURE", g("aaos", "hip fracture in the elderly")),
+  ],
+  REVISION_ARTHROPLASTY: [
+    row("OSTEOARTHRITIS", g("aaos", "revision total joint arthroplasty")),
+    row("NONUNION", g("aaos", "periprosthetic joint complications")),
+    row("JOINT_INSTABILITY", g("aaos", "periprosthetic joint complications")),
+  ],
+  ARTHROSCOPY: [
+    row("INTRA_ARTICULAR_TEAR", g("aaos", "management of rotator cuff injuries")),
+    row("OSTEOARTHRITIS", g("aaos", "osteoarthritis of the knee")),
+    row("JOINT_INSTABILITY", g("aaos", "glenohumeral instability")),
+  ],
+  FRACTURE_FIXATION: [
+    row("APPENDICULAR_FRACTURE", g("aaos", "distal radius / hip / tibial fracture management")),
+    row("VERTEBRAL_FRACTURE", g("odg", "vertebral fracture requiring stabilisation")),
+    row("NONUNION", g("aaos", "fracture nonunion")),
+  ],
+  HARDWARE_REMOVAL: [
+    row("NONUNION", CONV),
+    row("APPENDICULAR_FRACTURE", CONV),
+    row("VERTEBRAL_FRACTURE", CONV),
+  ],
+  SPINAL_CORD_STIMULATOR: [
+    row("CHRONIC_PAIN", g("asipp", "chronic refractory spinal pain")),
+    row("CRPS", g("odg", "complex regional pain syndrome")),
+    row("RADICULOPATHY", g("asipp", "post-surgical persistent radicular pain")),
+    row("PERIPHERAL_NEUROPATHY", g("aan", "painful diabetic and other neuropathies")),
+  ],
+  PUMP_IMPLANT: [
+    row("CHRONIC_PAIN", g("asipp", "chronic refractory pain")),
+    row("SPINAL_CORD_INJURY", g("odg", "spasticity in spinal cord injury")),
+  ],
 
   // ── Diagnostics ───────────────────────────────────────────────────────────
-  EMG_NCS: ["RADICULOPATHY", "PERIPHERAL_NEUROPATHY", "MYELOPATHY"],
+  EMG_NCS: [
+    row("RADICULOPATHY", g("aan", "electrodiagnostic assessment of radiculopathy")),
+    row("PERIPHERAL_NEUROPATHY", g("aan", "distal symmetric polyneuropathy")),
+    row("MYELOPATHY", g("aan", "electrodiagnostic assessment of myelopathy")),
+  ],
   MRI: ANY,
   CT: ANY,
   RADIOGRAPH: ANY,
@@ -185,48 +297,121 @@ export const INDICATIONS: Partial<Record<InterventionId, readonly DiagnosisConce
   PHYSICAL_THERAPY: ANY,
   OCCUPATIONAL_THERAPY: ANY,
   AQUATIC_THERAPY: ANY,
-  FUNCTIONAL_RESTORATION: ["CHRONIC_PAIN", "FUNCTIONAL_DEPENDENCE"],
-  CHIROPRACTIC: ["MYOFASCIAL_SPASM", "CHRONIC_PAIN", "FACET_ARTHROPATHY"],
-  SPEECH_THERAPY: ["TBI_COGNITIVE", "SPINAL_CORD_INJURY"],
-  COGNITIVE_THERAPY: ["TBI_COGNITIVE"],
-  PSYCHOTHERAPY: ["PSYCHIATRIC", "CHRONIC_PAIN", "TBI_COGNITIVE"],
+  FUNCTIONAL_RESTORATION: [
+    row("CHRONIC_PAIN", g("acoem", "chronic pain — functional restoration")),
+    row("FUNCTIONAL_DEPENDENCE", g("acoem", "chronic pain — functional restoration")),
+  ],
+  CHIROPRACTIC: [
+    row("MYOFASCIAL_SPASM", g("acoem", "low back disorders")),
+    row("CHRONIC_PAIN", g("acoem", "low back disorders")),
+    row("FACET_ARTHROPATHY", g("acoem", "low back disorders")),
+  ],
+  SPEECH_THERAPY: [
+    row("TBI_COGNITIVE", g("acoem", "traumatic brain injury")),
+    row("SPINAL_CORD_INJURY", CONV),
+  ],
+  COGNITIVE_THERAPY: [row("TBI_COGNITIVE", g("acoem", "traumatic brain injury"))],
+  PSYCHOTHERAPY: [
+    row("PSYCHIATRIC", g("icsi", "depression and anxiety in adults")),
+    row("CHRONIC_PAIN", g("acoem", "chronic pain — psychological treatment")),
+    row("TBI_COGNITIVE", g("acoem", "traumatic brain injury")),
+  ],
 
   // ── Medication ────────────────────────────────────────────────────────────
-  OPIOID: ["CHRONIC_PAIN"],
-  NSAID: ["CHRONIC_PAIN", "OSTEOARTHRITIS", "TENDINOPATHY", "MYOFASCIAL_SPASM"],
-  NEUROPATHIC_AGENT: ["RADICULOPATHY", "PERIPHERAL_NEUROPATHY", "CRPS", "CHRONIC_PAIN"],
-  MUSCLE_RELAXANT: ["MYOFASCIAL_SPASM", "CHRONIC_PAIN"],
-  TOPICAL_ANALGESIC: ["CHRONIC_PAIN", "OSTEOARTHRITIS", "MYOFASCIAL_SPASM", "TENDINOPATHY"],
-  PSYCHOTROPIC: ["PSYCHIATRIC", "CHRONIC_PAIN"],
+  OPIOID: [row("CHRONIC_PAIN", g("cdc-opioid", "subacute and chronic pain"))],
+  NSAID: [
+    row("CHRONIC_PAIN", g("acoem", "chronic pain")),
+    row("OSTEOARTHRITIS", g("aaos", "osteoarthritis of the knee")),
+    row("TENDINOPATHY", g("acoem", "shoulder and elbow disorders")),
+    row("MYOFASCIAL_SPASM", g("acoem", "low back disorders")),
+  ],
+  NEUROPATHIC_AGENT: [
+    row("RADICULOPATHY", g("acoem", "low back disorders — neuropathic pain")),
+    row("PERIPHERAL_NEUROPATHY", g("aan", "painful diabetic neuropathy")),
+    row("CRPS", g("odg", "complex regional pain syndrome")),
+    row("CHRONIC_PAIN", g("acoem", "chronic pain")),
+  ],
+  MUSCLE_RELAXANT: [
+    row("MYOFASCIAL_SPASM", g("acoem", "low back disorders")),
+    row("CHRONIC_PAIN", g("acoem", "chronic pain")),
+  ],
+  TOPICAL_ANALGESIC: [
+    row("CHRONIC_PAIN", g("acoem", "chronic pain")),
+    row("OSTEOARTHRITIS", g("aaos", "osteoarthritis of the knee")),
+    row("MYOFASCIAL_SPASM", g("acoem", "low back disorders")),
+    row("TENDINOPATHY", g("acoem", "shoulder and elbow disorders")),
+  ],
+  PSYCHOTROPIC: [
+    row("PSYCHIATRIC", g("icsi", "depression and anxiety in adults")),
+    row("CHRONIC_PAIN", g("acoem", "chronic pain")),
+  ],
   MEDICATION_MONITORING: ANY,
   LAB_MONITORING: ANY,
 
   // ── Equipment ─────────────────────────────────────────────────────────────
-  ORTHOSIS_BRACE: ["SEGMENTAL_INSTABILITY", "JOINT_INSTABILITY", "APPENDICULAR_FRACTURE", "VERTEBRAL_FRACTURE", "OSTEOARTHRITIS", "FUNCTIONAL_DEPENDENCE"],
-  MOBILITY_AID: ["FUNCTIONAL_DEPENDENCE", "SPINAL_CORD_INJURY", "OSTEOARTHRITIS", "APPENDICULAR_FRACTURE"],
-  WHEELCHAIR: ["FUNCTIONAL_DEPENDENCE", "SPINAL_CORD_INJURY"],
-  TENS_UNIT: ["CHRONIC_PAIN", "MYOFASCIAL_SPASM", "RADICULOPATHY"],
-  NMES_UNIT: ["FUNCTIONAL_DEPENDENCE", "SPINAL_CORD_INJURY", "PERIPHERAL_NEUROPATHY"],
-  PROSTHESIS: ["APPENDICULAR_FRACTURE", "FUNCTIONAL_DEPENDENCE"],
-  HOSPITAL_BED: ["FUNCTIONAL_DEPENDENCE", "SPINAL_CORD_INJURY"],
-  BATHROOM_SAFETY: ["FUNCTIONAL_DEPENDENCE", "SPINAL_CORD_INJURY"],
-  ASSISTIVE_TECH: ["FUNCTIONAL_DEPENDENCE", "TBI_COGNITIVE", "SPINAL_CORD_INJURY"],
+  // Durable medical equipment is largely CONVENTION: it is prescribed from a
+  // documented deficit rather than from a condition-specific CPG. Saying so is
+  // more useful than attaching a guideline that does not address the device.
+  ORTHOSIS_BRACE: [
+    row("SEGMENTAL_INSTABILITY", g("odg", "spinal bracing")),
+    row("VERTEBRAL_FRACTURE", g("odg", "spinal bracing")),
+    row("JOINT_INSTABILITY", CONV),
+    row("APPENDICULAR_FRACTURE", CONV),
+    row("OSTEOARTHRITIS", g("aaos", "osteoarthritis of the knee — bracing")),
+    row("FUNCTIONAL_DEPENDENCE", CONV),
+  ],
+  MOBILITY_AID: [
+    row("FUNCTIONAL_DEPENDENCE", CONV), row("SPINAL_CORD_INJURY", CONV),
+    row("OSTEOARTHRITIS", CONV), row("APPENDICULAR_FRACTURE", CONV),
+  ],
+  WHEELCHAIR: [row("FUNCTIONAL_DEPENDENCE", CONV), row("SPINAL_CORD_INJURY", CONV)],
+  TENS_UNIT: [
+    row("CHRONIC_PAIN", g("odg", "transcutaneous electrical nerve stimulation")),
+    row("MYOFASCIAL_SPASM", g("odg", "transcutaneous electrical nerve stimulation")),
+    row("RADICULOPATHY", g("odg", "transcutaneous electrical nerve stimulation")),
+  ],
+  NMES_UNIT: [row("FUNCTIONAL_DEPENDENCE", CONV), row("SPINAL_CORD_INJURY", CONV), row("PERIPHERAL_NEUROPATHY", CONV)],
+  PROSTHESIS: [row("APPENDICULAR_FRACTURE", CONV), row("FUNCTIONAL_DEPENDENCE", CONV)],
+  HOSPITAL_BED: [row("FUNCTIONAL_DEPENDENCE", CONV), row("SPINAL_CORD_INJURY", CONV)],
+  BATHROOM_SAFETY: [row("FUNCTIONAL_DEPENDENCE", CONV), row("SPINAL_CORD_INJURY", CONV)],
+  ASSISTIVE_TECH: [row("FUNCTIONAL_DEPENDENCE", CONV), row("TBI_COGNITIVE", CONV), row("SPINAL_CORD_INJURY", CONV)],
   SUPPLIES: ANY,
 
   // ── Care & environment ────────────────────────────────────────────────────
-  ATTENDANT_CARE: ["FUNCTIONAL_DEPENDENCE", "SPINAL_CORD_INJURY", "TBI_COGNITIVE"],
-  SKILLED_NURSING: ["FUNCTIONAL_DEPENDENCE", "SPINAL_CORD_INJURY"],
-  HOME_MODIFICATION: ["FUNCTIONAL_DEPENDENCE", "SPINAL_CORD_INJURY"],
-  TRANSPORTATION: ["FUNCTIONAL_DEPENDENCE", "SPINAL_CORD_INJURY", "TBI_COGNITIVE"],
+  ATTENDANT_CARE: [row("FUNCTIONAL_DEPENDENCE", CONV), row("SPINAL_CORD_INJURY", CONV), row("TBI_COGNITIVE", CONV)],
+  SKILLED_NURSING: [row("FUNCTIONAL_DEPENDENCE", CONV), row("SPINAL_CORD_INJURY", CONV)],
+  HOME_MODIFICATION: [row("FUNCTIONAL_DEPENDENCE", CONV), row("SPINAL_CORD_INJURY", CONV)],
+  TRANSPORTATION: [row("FUNCTIONAL_DEPENDENCE", CONV), row("SPINAL_CORD_INJURY", CONV), row("TBI_COGNITIVE", CONV)],
   CASE_MANAGEMENT: ANY,
 
   // ── Evaluation ────────────────────────────────────────────────────────────
   SPECIALIST_FOLLOWUP: ANY,
   PRIMARY_CARE: ANY,
-  PSYCH_EVALUATION: ["PSYCHIATRIC", "CHRONIC_PAIN", "TBI_COGNITIVE"],
-  NEUROPSYCH_EVALUATION: ["TBI_COGNITIVE", "PSYCHIATRIC"],
+  PSYCH_EVALUATION: [
+    row("PSYCHIATRIC", g("icsi", "depression and anxiety in adults")),
+    row("CHRONIC_PAIN", g("acoem", "chronic pain — psychological assessment")),
+    row("TBI_COGNITIVE", g("acoem", "traumatic brain injury")),
+  ],
+  NEUROPSYCH_EVALUATION: [
+    row("TBI_COGNITIVE", g("acoem", "traumatic brain injury")),
+    row("PSYCHIATRIC", g("icsi", "depression and anxiety in adults")),
+  ],
   FUNCTIONAL_CAPACITY_EVAL: ANY,
 };
+
+/** How much of the table has actually been checked against a publication. */
+export function verificationSummary(): { total: number; verified: number; unverified: number; convention: number } {
+  let verified = 0, unverified = 0, convention = 0;
+  for (const v of Object.values(INDICATIONS)) {
+    if (v === ANY || !v) continue;
+    for (const r of v) {
+      if (r.basis === "CONVENTION") convention++;
+      else if (r.basis.status === "VERIFIED") verified++;
+      else unverified++;
+    }
+  }
+  return { total: verified + unverified + convention, verified, unverified, convention };
+}
 
 export type IndicationVerdict =
   /** A recognised indication for this intervention. */
@@ -243,6 +428,8 @@ export interface IndicationResult {
   concepts: DiagnosisConcept[];
   /** The concepts that actually did the indicating, for disclosure. */
   matched: DiagnosisConcept[];
+  /** The guideline that puts this diagnosis and this procedure in one document. */
+  basis: IndicationBasis | "CONVENTION" | null;
 }
 
 /**
@@ -255,11 +442,19 @@ export interface IndicationResult {
 export function indicationFor(diagnosisText: string, intervention: InterventionId): IndicationResult {
   const concepts = classifyDiagnosis(diagnosisText);
   const allowed = INDICATIONS[intervention];
-  if (allowed === ANY) return { verdict: "NON_SPECIFIC", concepts, matched: concepts };
-  if (!concepts.length) return { verdict: "UNCLASSIFIED", concepts, matched: [] };
-  if (!allowed) return { verdict: "UNCLASSIFIED", concepts, matched: [] };
-  const matched = concepts.filter((c) => allowed.includes(c));
-  return { verdict: matched.length ? "INDICATED" : "CONTEXT", concepts, matched };
+  if (allowed === ANY) return { verdict: "NON_SPECIFIC", concepts, matched: [], basis: null };
+  if (!concepts.length || !allowed) return { verdict: "UNCLASSIFIED", concepts, matched: [], basis: null };
+  const hits = allowed.filter((r) => concepts.includes(r.concept));
+  if (!hits.length) return { verdict: "CONTEXT", concepts, matched: [], basis: null };
+  // Prefer a guideline-backed row over a convention one, so the panel cites the
+  // strongest basis available for this pairing.
+  const cited = hits.find((r) => r.basis !== "CONVENTION") ?? hits[0];
+  return {
+    verdict: "INDICATED",
+    concepts,
+    matched: hits.map((r) => r.concept),
+    basis: cited.basis === "CONVENTION" ? "CONVENTION" : cited.basis,
+  };
 }
 
 /** May this diagnosis be presented as SUPPORT for this intervention? */

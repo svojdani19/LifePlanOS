@@ -98,7 +98,7 @@ describe("the table is reviewable as data", () => {
     ] as never[]));
     for (const [intervention, allowed] of Object.entries(INDICATIONS)) {
       if (allowed === "ANY" || !allowed) continue;
-      for (const c of allowed) expect(declared.has(c as never), `${intervention} → ${c}`).toBe(true);
+      for (const r of allowed) expect(declared.has(r.concept as never), `${intervention} → ${r.concept}`).toBe(true);
     }
   });
 
@@ -114,7 +114,7 @@ describe("the table is reviewable as data", () => {
     };
     for (const [intervention, allowed] of Object.entries(INDICATIONS)) {
       if (allowed === "ANY" || !allowed) continue;
-      const first = allowed[0] as string;
+      const first = allowed[0].concept as string;
       expect(indicationFor(witness[first], intervention as never).verdict, `${intervention} ← ${first}`).toBe("INDICATED");
     }
   });
@@ -139,5 +139,58 @@ describe("corrections found by checking the model against real records", () => {
     // as naming no clinical concept at all.
     expect(classifyDiagnosis("Chronic cervical, thoracic, and lumbar pain with tailbone-region pain and functional limitation"))
       .toEqual(expect.arrayContaining(["CHRONIC_PAIN", "FUNCTIONAL_DEPENDENCE"]));
+  });
+});
+
+describe("every indication names the guideline that pairs the diagnosis with the procedure", () => {
+  it("cites the guideline written about that diagnosis", () => {
+    // NASS writes about "lumbar disc herniation with radiculopathy"; that
+    // document is where discectomy is discussed. The pairing is the
+    // guideline's, not the table author's.
+    const r = indicationFor("L4-5 disc herniation with radiculopathy", "DISCECTOMY");
+    expect(r.verdict).toBe("INDICATED");
+    expect(r.basis).not.toBeNull();
+    expect(r.basis).toMatchObject({ sourceId: "nass", namedDiagnosis: expect.stringMatching(/disc herniation with radiculopathy/i) });
+  });
+
+  it("cites ASIPP's axial/radicular split, which is why these two rows differ", () => {
+    expect(indicationFor("lumbar facet arthropathy", "RADIOFREQUENCY_ABLATION").basis).toMatchObject({ sourceId: "asipp" });
+    expect(indicationFor("lumbar radiculopathy", "EPIDURAL_STEROID").basis).toMatchObject({ sourceId: "nass" });
+  });
+
+  it("cites CDC for opioids and AAOS for knee arthroplasty", () => {
+    expect(indicationFor("chronic low back pain", "OPIOID").basis).toMatchObject({ sourceId: "cdc-opioid" });
+    expect(indicationFor("right knee osteoarthritis", "ARTHROPLASTY").basis).toMatchObject({ sourceId: "aaos" });
+  });
+
+  it("says CONVENTION where no condition-specific guideline establishes the pairing", () => {
+    // Attaching a plausible-sounding guideline to a shower chair is the
+    // difference between a citation and a decoration.
+    expect(indicationFor("dependent for transfers", "BATHROOM_SAFETY").basis).toBe("CONVENTION");
+    expect(indicationFor("dependent for transfers", "ATTENDANT_CARE").basis).toBe("CONVENTION");
+  });
+
+  it("prefers a guideline-backed row over a convention row for the same pairing", () => {
+    // ORTHOSIS_BRACE has both kinds; a diagnosis matching a guideline-backed
+    // concept must cite the guideline.
+    expect(indicationFor("burst fracture of the spine", "ORTHOSIS_BRACE").basis).toMatchObject({ sourceId: "odg" });
+  });
+
+  it("every cited source is registered in the reference registry", async () => {
+    const { SOURCES } = await import("@/lib/references/sources");
+    const ids = new Set(SOURCES.map((s) => s.id));
+    for (const v of Object.values(INDICATIONS)) {
+      if (v === "ANY" || !v) continue;
+      for (const r of v) if (r.basis !== "CONVENTION") expect(ids.has(r.basis.sourceId), r.basis.sourceId).toBe(true);
+    }
+  });
+
+  it("reports honestly that nothing has been verified against a publication yet", async () => {
+    const { verificationSummary } = await import("@/lib/engine/diagnosisIndication");
+    const v = verificationSummary();
+    expect(v.total).toBeGreaterThan(50);
+    expect(v.verified).toBe(0);
+    expect(v.unverified).toBeGreaterThan(0);
+    expect(v.convention).toBeGreaterThan(0);
   });
 });
