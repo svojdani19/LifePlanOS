@@ -667,7 +667,9 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
       const d = buildRecommendationDossier(it as never, cond, ledgerEvents as never, ledgerCase, ledgerInterviews as never);
       // One basis per item, from the SAME dossier build that produces the
       // ledger — so the basis and the ledger cannot describe different evidence.
-      bases.push(buildBasis(it as never, d));
+      // The projection assumptions travel with the basis: a lifetime figure
+      // computed at 3% and one computed at 5% are different claims.
+      bases.push(buildBasis(it as never, d, { ...a, pricedAt: (it as { pricedAt?: Date | null }).pricedAt?.toISOString() ?? null }));
       dropped += d.ledgerDropped;
       return d.ledger;
     });
@@ -715,6 +717,9 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
               evidenceProvenance: b.evidenceProvenance as never,
               claimBasis: b.claimBasis as never,
               probabilityBasis: b.probabilityBasis as never,
+              projectionBasis: b.projectionBasis as never,
+              contradictions: b.contradictions as never,
+              literature: b.literature as never,
               missingPremises: b.missingPremises as never,
               necessityNarrative: b.necessityNarrative,
               producerVersion: b.producerVersion,

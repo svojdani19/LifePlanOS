@@ -22,6 +22,7 @@ import { buildRecommendationDossier, validateRecommendationCompleteness, type Do
 import { buildBasis, compareBasis } from "@/lib/engine/recommendationBasis";
 import { CHRONOLOGY_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
 import { resolveRecommendationCondition } from "@/lib/engine/recommendationCondition";
+import { assumptionsFor } from "@/lib/engine/generate";
 import { reasoningFindings, type ReasoningItem } from "./clinicalReasoning";
 import { baselineLifeExpectancy, lifeExpectancyFindings, parseBasis, type BasisSex } from "./lifeExpectancy";
 import type { CondInput as ReasoningCond } from "./integrity";
@@ -46,7 +47,9 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
     prisma.condition.findMany({ where: { caseId } }),
     prisma.case.findUnique({
       where: { id: caseId },
-      select: { dateOfBirth: true, sex: true, lifeExpectancyYears: true, lifeExpectancyBasis: true, specialty: true, additionalSpecialties: true },
+      // The projection assumptions are part of the basis now, so validation
+      // needs the same inputs the generator used to compute them.
+      select: { id: true, dateOfBirth: true, sex: true, lifeExpectancyYears: true, lifeExpectancyBasis: true, specialty: true, additionalSpecialties: true, discountRate: true, medicalInflation: true, geographicFactor: true },
     }),
     // THE SAME chronology the generator recorded the basis from: OUTPUT rows
     // only, in a deterministic order. This read every row — superseded and
@@ -80,6 +83,8 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
   // export continues with the disclosure and the unresolved-issues appendix,
   // final expert export is refused until the plan is regenerated or the finding
   // is explicitly resolved.
+  const caseAssumptions = kase ? assumptionsFor(kase as never) : { lifeExpectancyYears: 40, discountRate: 0, medicalInflation: 0, geographicFactor: 1 };
+
   const recordedBases = new Map<string, { basisHash?: string | null }>(
     (((await prisma.recommendationBasis?.findMany({ where: { caseId } }).catch(() => [])) ?? []) as { futureCareItemId: string; basisHash: string }[])
       .map((b) => [b.futureCareItemId, b]),
@@ -98,17 +103,28 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
     const dossier = buildRecommendationDossier(it as never, cond, chronology as unknown as DossierChronoEvent[], dossierCase, interviews as never);
     const id = (it as { id: string }).id;
     const service = (it as { service: string }).service;
-    const check = compareBasis(recordedBases.get(id) ?? null, buildBasis(it as never, dossier));
+    // The SAME assumptions the generator recorded from — otherwise the witness
+    // differs on the projection inputs alone and every item reads stale.
+    const check = compareBasis(recordedBases.get(id) ?? null, buildBasis(it as never, dossier, { ...caseAssumptions, pricedAt: (it as { pricedAt?: Date | null }).pricedAt?.toISOString() ?? null }));
     if (check.state !== "CURRENT") {
       basisFindings.push({
         service,
-        result: check.state === "MISSING" ? "BASIS_MISSING" : "BASIS_STALE",
+        // The divergence's OWN identity, in the result code.
+        //
+        // Disposition is carried across re-runs on `${service}::${result}`, and
+        // the issue text for these findings is fixed — so a reviewer who
+        // resolved one divergence silently resolved every later one on the same
+        // item, and `openBlockingCount` stopped counting it. Embedding the hash
+        // pair means a different divergence is a different finding, and reopens
+        // as OPEN.
+        result: `${check.state === "MISSING" ? "BASIS_MISSING" : "BASIS_STALE"}:${(check.storedHash ?? "none").slice(-12)}->${check.derivedHash.slice(-12)}`,
         issue:
           check.state === "MISSING"
             ? "No recommendation basis has been recorded for this item, so the exported report has nothing authoritative to render from."
             : "The recorded basis for this item no longer matches the current record. The plan and the report would state different things.",
         severity: "Critical",
-        suggestion: "Regenerate the plan to record a current basis, or resolve this finding explicitly if the recorded basis is the intended one.",
+        suggestion:
+          "Regenerate the plan to record a current basis. Resolving this finding closes only THIS divergence — a later, different divergence raises a new finding with its own hash pair.",
         // Draft export continues and says so; final expert export is refused.
         exportBlocking: true,
       });

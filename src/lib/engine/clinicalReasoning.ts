@@ -964,8 +964,23 @@ export function buildReasoningAssessment(
   // When a basis was recorded, its hash IS the evidence fingerprint: the two
   // must not be computed differently or an approval could be staled by one and
   // not the other.
-  const basisFingerprint = recordedBasis?.basisHash ?? null;
-  const evidenceFingerprint = basisFingerprint ?? evidenceSetFingerprint([...(dossier.ledger as unknown as EvidenceRowIdentity[]), ...handEnteredEvidence]);
+  // BOTH identities, never one substituted for the other.
+  //
+  // This took the recorded hash when one was supplied and dropped the witness.
+  // Since every field of this assessment is still derived from the CURRENT
+  // dossier, that pinned the identity of re-derived content to an old record:
+  // when the case moved and the basis did not, `materialHash` stayed put, the
+  // approval was not invalidated, and `clinicalReasoningPersist` skipped the
+  // recompute on a cache hit. The change made the hash LESS sensitive than the
+  // witness it replaced — the opposite of the intent.
+  //
+  // Combining them can only increase sensitivity: the identity moves when the
+  // record moves OR when the recorded basis moves. That is the correct
+  // behaviour while presentation and witness reasoning share one function, and
+  // it is what `assessmentFromBasis` / `deriveWitnessAssessment` below make
+  // explicit at the call sites.
+  const witnessFingerprint = evidenceSetFingerprint([...(dossier.ledger as unknown as EvidenceRowIdentity[]), ...handEnteredEvidence]);
+  const evidenceFingerprint = recordedBasis?.basisHash ? `${recordedBasis.basisHash}+${witnessFingerprint}` : witnessFingerprint;
   const materialHash = hashStr([item.service, item.category ?? "", mapping.conditionId ?? "", region, laterality, purposeFor(item.category, !!item.isLifetime), freqN, durationClass, durationSupport.fingerprint, probabilityClassification, inclusionInTotalsStatus, item.startTrigger ?? "", item.replacesService ?? "", item.physicianStatus ?? "", evidenceStrength, evidenceFingerprint, setContext.conflicts.map((c) => c.type + c.otherService).sort().join(",")].join("|"));
 
   return {
@@ -1152,3 +1167,57 @@ export function reasoningFindings(
 
 // Persistence lives in ./clinicalReasoningPersist (imports prisma). This module
 // stays pure so it can be imported into client components and the report.
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Two jobs, two entry points.
+//
+// `buildReasoningAssessment` serves both, and a caller reading it could not
+// tell which one it was asking for. The distinction matters: an assessment that
+// will be DISPLAYED or PERSISTED must be anchored to the recorded basis, while
+// an assessment used to detect staleness must be derived from the record alone.
+// Mixing them is how re-derived content came to sit under a recorded hash.
+//
+// Both are thin, and both stay pure — they take what they need and fetch
+// nothing.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The assessment shown to a reviewer and persisted, anchored to the record. */
+export function assessmentFromBasis(
+  item: ReasoningItem,
+  conditions: (CondInput & DossierCondition & { id: string })[],
+  chronology: DossierChronoEvent[],
+  kase: DossierCase,
+  recordedBasis: BasisRecord,
+  opts: { interviews?: DossierInterview[]; setContext?: SetContext; handEnteredEvidence?: readonly EvidenceRowIdentity[] } = {},
+): ReasoningAssessment {
+  return buildReasoningAssessment(
+    item, conditions, chronology, kase,
+    opts.interviews ?? [],
+    opts.setContext ?? { conflicts: [], replacedByActive: false },
+    opts.handEnteredEvidence ?? [],
+    recordedBasis,
+  );
+}
+
+/**
+ * The assessment derived from the CURRENT record, for staleness only.
+ *
+ * Explicitly basis-free: passing a recorded basis here would defeat the point,
+ * so the parameter is not offered.
+ */
+export function deriveWitnessAssessment(
+  item: ReasoningItem,
+  conditions: (CondInput & DossierCondition & { id: string })[],
+  chronology: DossierChronoEvent[],
+  kase: DossierCase,
+  opts: { interviews?: DossierInterview[]; setContext?: SetContext; handEnteredEvidence?: readonly EvidenceRowIdentity[] } = {},
+): ReasoningAssessment {
+  return buildReasoningAssessment(
+    item, conditions, chronology, kase,
+    opts.interviews ?? [],
+    opts.setContext ?? { conflicts: [], replacedByActive: false },
+    opts.handEnteredEvidence ?? [],
+    null,
+  );
+}

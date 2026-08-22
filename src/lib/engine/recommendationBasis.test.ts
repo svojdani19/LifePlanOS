@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildBasis, basisHash, compareBasis, BASIS_VERSION } from "@/lib/engine/recommendationBasis";
+import { buildBasis, basisHash, compareBasis, hashableCore, BASIS_VERSION } from "@/lib/engine/recommendationBasis";
 import { buildRecommendationDossier, type DossierCondition, type DossierChronoEvent, type DossierCase } from "@/lib/engine/medicalNecessity";
 
 const kase: DossierCase = { subject: "Ms. Trice", pronounPoss: "her", lifeExpectancyYears: 30, adult: true };
@@ -70,30 +70,13 @@ describe("the hash decides staleness, and decides it on the right things", () =>
     // the evidence must stale exactly the ones affected.
     const b = basisOf();
     const reworded = { ...b, necessityNarrative: "Entirely different prose about the same evidence." };
-    const core = {
-      futureCareItemId: reworded.futureCareItemId, lineageId: reworded.lineageId, interventionId: reworded.interventionId,
-      serviceFamily: reworded.serviceFamily, conditionId: reworded.conditionId, bodyRegion: reworded.bodyRegion,
-      spinalLevels: reworded.spinalLevels, laterality: reworded.laterality, supportClass: reworded.supportClass,
-      supportReason: reworded.supportReason, acceptedEvidence: reworded.acceptedEvidence,
-      evidenceProvenance: reworded.evidenceProvenance, claimBasis: reworded.claimBasis,
-      probabilityBasis: reworded.probabilityBasis, missingPremises: reworded.missingPremises,
-    };
+    const core = { ...hashableCore(reworded) };
     expect(basisHash(core)).toBe(b.basisHash);
   });
 
   it("is order-independent, so re-persisting is not a change", () => {
     const b = basisOf();
-    const shuffled = {
-      futureCareItemId: b.futureCareItemId, lineageId: b.lineageId, interventionId: b.interventionId,
-      serviceFamily: b.serviceFamily, conditionId: b.conditionId, bodyRegion: b.bodyRegion,
-      spinalLevels: [...b.spinalLevels].reverse(), laterality: b.laterality, supportClass: b.supportClass,
-      supportReason: b.supportReason,
-      acceptedEvidence: { ...b.acceptedEvidence, objectiveFindings: [...b.acceptedEvidence.objectiveFindings].reverse() },
-      evidenceProvenance: [...b.evidenceProvenance].reverse(),
-      claimBasis: b.claimBasis,
-      probabilityBasis: b.probabilityBasis,
-      missingPremises: [...b.missingPremises].reverse(),
-    };
+    const shuffled = { ...hashableCore(b) };
     expect(basisHash(shuffled)).toBe(b.basisHash);
   });
 });
@@ -127,18 +110,7 @@ describe("citation identity is part of the hash, not just the quote", () => {
   // could all change while the basis kept reporting CURRENT. A citation whose
   // attribution silently moves is worse than a missing one: the quote still
   // reads true and now points somewhere else.
-  const core = (over: Record<string, unknown> = {}) => {
-    const b = basisOf();
-    return {
-      futureCareItemId: b.futureCareItemId, lineageId: b.lineageId, interventionId: b.interventionId,
-      serviceFamily: b.serviceFamily, conditionId: b.conditionId, bodyRegion: b.bodyRegion,
-      spinalLevels: b.spinalLevels, laterality: b.laterality, supportClass: b.supportClass,
-      supportReason: b.supportReason, acceptedEvidence: b.acceptedEvidence,
-      evidenceProvenance: b.evidenceProvenance, claimBasis: b.claimBasis,
-      probabilityBasis: b.probabilityBasis, missingPremises: b.missingPremises,
-      ...over,
-    };
-  };
+  const core = (over: Record<string, unknown> = {}) => ({ ...hashableCore(basisOf()), ...over });
 
   it("carries provenance for every accepted row", () => {
     const b = basisOf();
@@ -203,14 +175,7 @@ describe("frequency, duration and cost each carry their own basis", () => {
     // A frequency moving from RECORD to ASSUMPTION changes what the plan claims
     // about it, and must invalidate an approval given on the other reading.
     const b = basisOf();
-    const core = {
-      futureCareItemId: b.futureCareItemId, lineageId: b.lineageId, interventionId: b.interventionId,
-      serviceFamily: b.serviceFamily, conditionId: b.conditionId, bodyRegion: b.bodyRegion,
-      spinalLevels: b.spinalLevels, laterality: b.laterality, supportClass: b.supportClass,
-      supportReason: b.supportReason, acceptedEvidence: b.acceptedEvidence,
-      evidenceProvenance: b.evidenceProvenance, probabilityBasis: b.probabilityBasis, missingPremises: b.missingPremises,
-      claimBasis: { ...b.claimBasis, frequency: { kind: "RECORD" as const, statement: "The record states a cadence for this service." } },
-    };
+    const core = { ...hashableCore(b), claimBasis: { ...b.claimBasis, frequency: { kind: "RECORD" as const, statement: "The record states a cadence for this service." } } };
     expect(basisHash(core)).not.toBe(b.basisHash);
   });
 });
@@ -227,44 +192,21 @@ describe("the probability determination is material, not presentation", () => {
     // hash, it could flip from a reasonable possibility to a probability
     // without invalidating an approval given on the other reading.
     const b = basisOf();
-    const core = (pb: typeof b.probabilityBasis) => ({
-      futureCareItemId: b.futureCareItemId, lineageId: b.lineageId, interventionId: b.interventionId,
-      serviceFamily: b.serviceFamily, conditionId: b.conditionId, bodyRegion: b.bodyRegion,
-      spinalLevels: b.spinalLevels, laterality: b.laterality, supportClass: b.supportClass,
-      supportReason: b.supportReason, acceptedEvidence: b.acceptedEvidence,
-      evidenceProvenance: b.evidenceProvenance, claimBasis: b.claimBasis,
-      probabilityBasis: pb, missingPremises: b.missingPremises,
-    });
+    const core = (pb: typeof b.probabilityBasis) => ({ ...hashableCore(b), probabilityBasis: pb });
     expect(basisHash(core({ ...b.probabilityBasis, classification: "reasonable possibility" }))).not.toBe(b.basisHash);
   });
 
   it("changes the hash when a FACTOR's presence changes", () => {
     const b = basisOf();
     const flipped = { ...b.probabilityBasis, factors: b.probabilityBasis.factors.map((f, i) => (i === 0 ? { ...f, present: !f.present } : f)) };
-    const core = {
-      futureCareItemId: b.futureCareItemId, lineageId: b.lineageId, interventionId: b.interventionId,
-      serviceFamily: b.serviceFamily, conditionId: b.conditionId, bodyRegion: b.bodyRegion,
-      spinalLevels: b.spinalLevels, laterality: b.laterality, supportClass: b.supportClass,
-      supportReason: b.supportReason, acceptedEvidence: b.acceptedEvidence,
-      evidenceProvenance: b.evidenceProvenance, claimBasis: b.claimBasis,
-      probabilityBasis: flipped, missingPremises: b.missingPremises,
-    };
-    expect(basisHash(core)).not.toBe(b.basisHash);
+    expect(basisHash({ ...hashableCore(b), probabilityBasis: flipped })).not.toBe(b.basisHash);
   });
 
   it("does NOT change the hash when only the STATEMENT is reworded", () => {
     // The statement is prose generated from the classification and factors.
     // Rewording it is stylistic and must not stale an approval.
     const b = basisOf();
-    const core = {
-      futureCareItemId: b.futureCareItemId, lineageId: b.lineageId, interventionId: b.interventionId,
-      serviceFamily: b.serviceFamily, conditionId: b.conditionId, bodyRegion: b.bodyRegion,
-      spinalLevels: b.spinalLevels, laterality: b.laterality, supportClass: b.supportClass,
-      supportReason: b.supportReason, acceptedEvidence: b.acceptedEvidence,
-      evidenceProvenance: b.evidenceProvenance, claimBasis: b.claimBasis,
-      probabilityBasis: { ...b.probabilityBasis, statement: "Completely different wording, same determination." },
-      missingPremises: b.missingPremises,
-    };
+    const core = { ...hashableCore(b) };
     expect(basisHash(core)).toBe(b.basisHash);
   });
 });

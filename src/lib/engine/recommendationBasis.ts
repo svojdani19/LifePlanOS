@@ -95,6 +95,43 @@ export interface ProbabilityBasis {
   factors: { label: string; present: boolean }[];
 }
 
+/**
+ * Every input that can move a dollar or change a care claim.
+ *
+ * `ClaimBasis` recorded the KIND of each quantity's support and none of the
+ * values, so the hash carried "frequency is an assumption" and not "four visits
+ * a year". Changing four visits to six, or $300 to $500, left all three kinds
+ * unchanged and the basis reported CURRENT — while `materialHash` in the
+ * reasoning engine DID move, so the assessment staled and the export gate,
+ * which reads the basis, did not. Split brain over exactly the numbers a
+ * defence expert attacks.
+ *
+ * Chart amounts and market pricing are kept apart on purpose. A frequency the
+ * treating record states is patient evidence; a fee-schedule figure is a
+ * commercial input that happens to be attached to this patient.
+ */
+export interface ProjectionBasis {
+  /** What the plan claims about the care itself. */
+  frequencyPerYear: number | null;
+  frequencyUnit: "per_year";
+  durationYears: number | null;
+  durationClass: "one_time" | "defined_course" | "lifetime";
+  isLifetime: boolean;
+
+  /** External market pricing — NOT a fact about this patient. */
+  unitCost: number | null;
+  pricingSourceCategory: "FEE_SCHEDULE" | "SURVEY" | "VENDOR" | "CASE_RECORD" | "UNKNOWN";
+  pricingSourceId: string | null;
+  /** When that price was retrieved, so a stale market figure is visible. */
+  pricedAt: string | null;
+
+  /** The projection assumptions that turn a unit cost into a lifetime figure. */
+  horizonYears: number | null;
+  discountRate: number | null;
+  medicalInflation: number | null;
+  geographicFactor: number | null;
+}
+
 export interface BasisRecord {
   futureCareItemId: string;
   lineageId: string | null;
@@ -113,6 +150,12 @@ export interface BasisRecord {
   claimBasis: { frequency: ClaimBasis; duration: ClaimBasis; cost: ClaimBasis };
   /** The probability determination — material, versioned, hashed. */
   probabilityBasis: ProbabilityBasis;
+  /** Every quantity and pricing input that can change dollars. */
+  projectionBasis: ProjectionBasis;
+  /** Evidentiary material the report must print without re-deriving it. */
+  contradictions: string[];
+  /** Citation identity for the literature the report renders. */
+  literature: { title: string; journal: string | null; year: string | null; authors: string | null; pmid: string | null; doi: string | null; studyType: string; supports: string; limitations: string | null }[];
   missingPremises: string[];
   necessityNarrative: string;
   producerVersion: string;
@@ -169,6 +212,19 @@ export function basisHash(input: Omit<BasisRecord, "basisHash" | "necessityNarra
       input.probabilityBasis.classification,
       ...input.probabilityBasis.factors.map((f) => `${f.label}=${f.present}`).sort(),
     ],
+    // Every input that can move a dollar or change the care claim. The KINDS
+    // above say where a quantity came from; these say what it IS.
+    projection: [
+      input.projectionBasis.frequencyPerYear, input.projectionBasis.frequencyUnit,
+      input.projectionBasis.durationYears, input.projectionBasis.durationClass, input.projectionBasis.isLifetime,
+      input.projectionBasis.unitCost, input.projectionBasis.pricingSourceCategory, input.projectionBasis.pricingSourceId,
+      input.projectionBasis.pricedAt, input.projectionBasis.horizonYears,
+      input.projectionBasis.discountRate, input.projectionBasis.medicalInflation, input.projectionBasis.geographicFactor,
+    ],
+    // Evidentiary material the report prints. Recorded so the report never has
+    // to re-derive it, and hashed so it cannot drift unnoticed.
+    contradictions: [...input.contradictions].sort(),
+    literature: input.literature.map((l) => `${l.pmid ?? l.doi ?? l.title}|${l.supports}`).sort(),
     missing: [...input.missingPremises].sort(),
   };
   return `${BASIS_VERSION}:${createHash("sha256").update(JSON.stringify(canonical), "utf8").digest("hex").slice(0, 32)}`;
@@ -176,8 +232,15 @@ export function basisHash(input: Omit<BasisRecord, "basisHash" | "necessityNarra
 
 /** Assemble the basis for one item from its dossier and its persisted class. */
 export function buildBasis(
-  item: DossierItem & { id?: string | null; lineageId?: string | null; supportClass?: string | null; supportReason?: string | null },
+  item: DossierItem & { id?: string | null; lineageId?: string | null; supportClass?: string | null; supportReason?: string | null; pricedAt?: Date | string | null },
   dossier: RecommendationDossier,
+  /**
+   * The case's projection assumptions. Optional so a caller with none states
+   * that explicitly and gets nulls, rather than a fabricated horizon — but
+   * every production caller supplies them, because a lifetime figure computed
+   * at 3% and one computed at 5% are different claims.
+   */
+  assumptions?: { lifeExpectancyYears?: number | null; discountRate?: number | null; medicalInflation?: number | null; geographicFactor?: number | null; pricedAt?: string | null } | null,
 ): BasisRecord {
   const r = resolveIntervention(item as { service: string; category?: string | null });
   const se = dossier.supportingEvidence;
@@ -226,6 +289,37 @@ export function buildBasis(
       : ({ kind: "ASSUMPTION", statement: `Priced from ${item.pricingSource ?? "the configured pricing source"}; no case-specific cost is documented.` } as ClaimBasis),
   };
 
+  // Pricing provenance, categorised. A fee schedule, a cost survey and a vendor
+  // quote are different kinds of authority, and none of them is a fact about
+  // this patient — which is why they are recorded apart from the chart amounts.
+  const src = String(item.pricingSource ?? "");
+  const pricingSourceCategory: ProjectionBasis["pricingSourceCategory"] =
+    /fee schedule|medicare|cms|cpt/i.test(src) ? "FEE_SCHEDULE"
+    : /survey|genworth|fair ?health|costhelper/i.test(src) ? "SURVEY"
+    : /vendor|quote|dme|rs medical|tenspros|rinella/i.test(src) ? "VENDOR"
+    : /record|chart|billed/i.test(src) ? "CASE_RECORD"
+    : src ? "UNKNOWN" : "UNKNOWN";
+
+  const durationClass: ProjectionBasis["durationClass"] = item.isLifetime
+    ? "lifetime"
+    : (item.durationYears ?? 0) <= 1 ? "one_time" : "defined_course";
+
+  const projectionBasis: ProjectionBasis = {
+    frequencyPerYear: item.frequencyPerYear ?? null,
+    frequencyUnit: "per_year",
+    durationYears: item.durationYears ?? null,
+    durationClass,
+    isLifetime: !!item.isLifetime,
+    unitCost: item.unitCost ?? null,
+    pricingSourceCategory,
+    pricingSourceId: item.pricingSource ?? null,
+    pricedAt: assumptions?.pricedAt ?? null,
+    horizonYears: item.isLifetime ? assumptions?.lifeExpectancyYears ?? null : item.durationYears ?? null,
+    discountRate: assumptions?.discountRate ?? null,
+    medicalInflation: assumptions?.medicalInflation ?? null,
+    geographicFactor: assumptions?.geographicFactor ?? null,
+  };
+
   const probabilityBasis: ProbabilityBasis = {
     classification: dossier.probability.classification,
     statement: dossier.probability.statement,
@@ -247,6 +341,12 @@ export function buildBasis(
     evidenceProvenance,
     claimBasis,
     probabilityBasis,
+    projectionBasis,
+    contradictions: dossier.contradictoryEvidence.map((c) => String(c).replace(/\s+/g, " ").trim()),
+    literature: dossier.literature.map((l) => ({
+      title: l.title, journal: l.journal ?? null, year: l.year ?? null, authors: l.authors ?? null,
+      pmid: l.pmid ?? null, doi: l.doi ?? null, studyType: l.studyType, supports: l.supports, limitations: l.limitations ?? null,
+    })),
     missingPremises: dossier.unknowns.map((u) => String(u)),
   };
   return {
@@ -256,6 +356,34 @@ export function buildBasis(
     basisHash: basisHash(core),
   };
 }
+
+/**
+ * The hashable core of a basis.
+ *
+ * One definition, because every caller that needed to re-hash a modified basis
+ * was hand-assembling this object — so each new material field silently left
+ * those call sites hashing an older shape until the compiler caught them.
+ */
+export const hashableCore = (b: BasisRecord): Omit<BasisRecord, "basisHash" | "necessityNarrative" | "producerVersion"> => ({
+  futureCareItemId: b.futureCareItemId,
+  lineageId: b.lineageId,
+  interventionId: b.interventionId,
+  serviceFamily: b.serviceFamily,
+  conditionId: b.conditionId,
+  bodyRegion: b.bodyRegion,
+  spinalLevels: b.spinalLevels,
+  laterality: b.laterality,
+  supportClass: b.supportClass,
+  supportReason: b.supportReason,
+  acceptedEvidence: b.acceptedEvidence,
+  evidenceProvenance: b.evidenceProvenance,
+  claimBasis: b.claimBasis,
+  probabilityBasis: b.probabilityBasis,
+  projectionBasis: b.projectionBasis,
+  contradictions: b.contradictions,
+  literature: b.literature,
+  missingPremises: b.missingPremises,
+});
 
 export type BasisState = "CURRENT" | "STALE" | "MISSING";
 

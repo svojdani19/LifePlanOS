@@ -1631,6 +1631,16 @@ model RecommendationBasis {
   /// invalidating an approval would let a plan be signed on one reading and
   /// printed on another.
   probabilityBasis   Json?
+  /// Every input that can move a dollar or change the care claim: frequency,
+  /// duration and lifetime status, unit cost, pricing-source category and
+  /// identity, retrieval date, projection horizon, inflation and discount.
+  /// Chart amounts and market pricing are kept apart — a frequency the record
+  /// states is patient evidence; a fee-schedule figure is not.
+  projectionBasis    Json?
+  /// Contradictory evidence and literature identity, recorded so the report
+  /// renders them without live re-derivation.
+  contradictions     Json?
+  literature         Json?
   /// Premises the record does not supply.
   missingPremises    Json?
 

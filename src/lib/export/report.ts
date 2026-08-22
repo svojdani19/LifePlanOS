@@ -453,8 +453,20 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     // approved. The recorded narrative wins; a divergence is disclosed, and
     // final export is blocked by the validation finding rather than by silently
     // printing either version.
-    const recordedBasis = basisByItem.get(it.id) as { necessityNarrative?: string | null; basisHash?: string | null } | undefined;
-    const basisCheck = compareBasis(recordedBasis ?? null, buildBasis(it as never, dossier));
+    const recordedBasis = basisByItem.get(it.id) as
+      | {
+          necessityNarrative?: string | null;
+          basisHash?: string | null;
+          probabilityBasis?: { classification?: string; statement?: string; factors?: { label: string; present: boolean }[] } | null;
+          contradictions?: string[] | null;
+          literature?: { title: string; journal: string | null; year: string | null; authors: string | null; pmid: string | null; doi: string | null; studyType: string; supports: string; limitations: string | null }[] | null;
+          missingPremises?: string[] | null;
+          acceptedEvidence?: Record<string, { text: string; source: string | null }[]> | null;
+        }
+      | undefined;
+    // The SAME assumptions the generator recorded from. A witness derived under
+    // a different discount rate would report every basis stale.
+    const basisCheck = compareBasis(recordedBasis ?? null, buildBasis(it as never, dossier, { ...a, pricedAt: it.pricedAt?.toISOString() ?? null }));
     const necessityText = recordedBasis?.necessityNarrative || dossier.medicalNecessity;
 
     // Medical necessity — the physician narrative (why, patient-specific).
@@ -471,11 +483,36 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     );
 
     // Probability assessment (structured + percentage).
-    const probPresent = dossier.probability.factors.filter((f) => f.present).map((f) => lc(f.label));
-    out.push(labeled("Probability", `${dossier.probability.statement}${probPresent.length ? ` This assessment is supported by ${probPresent.join(", ")}.` : ""}`));
+    // RECORDED, not re-derived. Every evidentiary assertion below reads from
+    // the basis; the fresh dossier is the staleness witness only. The report is
+    // the artifact that goes to court, and it printed a recorded narrative
+    // beside newly-derived probability, evidence, contradictions and unknowns —
+    // an amalgam of two readings that never existed as a whole.
+    const rProbability = recordedBasis?.probabilityBasis ?? null;
+    const probStatement = rProbability?.statement ?? dossier.probability.statement;
+    const probFactors = rProbability?.factors ?? dossier.probability.factors;
+    const probPresent = probFactors.filter((f) => f.present).map((f) => lc(f.label));
+    out.push(labeled("Probability", `${probStatement}${probPresent.length ? ` This assessment is supported by ${probPresent.join(", ")}.` : ""}`));
 
     // Supporting clinical evidence — organized and source-traceable.
-    const se = dossier.supportingEvidence;
+    // Accepted evidence as recorded. Falls back to the derivation only when no
+    // basis exists at all — and that case is a BASIS_MISSING finding that
+    // blocks final export, so it can only ever reach a labelled draft.
+    const rEv = recordedBasis?.acceptedEvidence ?? null;
+    const asItems = (xs: { text: string; source: string | null }[] | undefined) => (xs ?? []).map((x) => ({ text: x.text, source: x.source }));
+    const se = rEv
+      ? {
+          diagnoses: asItems(rEv.diagnoses),
+          priorHistory: [] as EvidenceItem[],
+          objectiveFindings: asItems(rEv.objectiveFindings),
+          imaging: [] as EvidenceItem[],
+          examination: [] as EvidenceItem[],
+          functionalLimitations: asItems(rEv.functionalLimitations),
+          physicianDocumentation: [] as EvidenceItem[],
+          priorTreatment: asItems(rEv.priorTreatment),
+          guidelines: asItems(rEv.guidelines),
+        }
+      : dossier.supportingEvidence;
     const evBlock = [
       evLines("Supporting objective findings", se.objectiveFindings),
       evLines("Supporting imaging", se.imaging),
@@ -513,8 +550,9 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     if (guideBasis.length) out.push(labeled("Guideline basis", `${guideBasis.join("; ")} — applied to determine whether this care is medically necessary now or in the future.`));
 
     // Literature — each article stating exactly what it supports + limitations.
-    if (dossier.literature.length) {
-      for (const l of dossier.literature) {
+    const rLiterature = recordedBasis?.literature ?? dossier.literature;
+    if (rLiterature.length) {
+      for (const l of rLiterature) {
         out.push(
           new Paragraph({
             spacing: { after: 60, line: 288 },
@@ -531,8 +569,10 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     }
 
     // Contradictory evidence, unknowns, potential challenges — never hidden.
-    if (dossier.contradictoryEvidence.length) out.push(labeled("Contradictory evidence", dossier.contradictoryEvidence.slice(0, 3).join(" ")));
-    if (dossier.unknowns.length) out.push(labeled("Unknowns", dossier.unknowns.slice(0, 3).join(" ")));
+    const rContradictions = recordedBasis?.contradictions ?? dossier.contradictoryEvidence;
+    const rUnknowns = recordedBasis?.missingPremises ?? dossier.unknowns;
+    if (rContradictions.length) out.push(labeled("Contradictory evidence", rContradictions.slice(0, 3).join(" ")));
+    if (rUnknowns.length) out.push(labeled("Unknowns", rUnknowns.slice(0, 3).join(" ")));
     out.push(labeled("Potential challenges", dossier.potentialChallenges.slice(0, 4).join(" ")));
 
     // Functional basis (§12) — the documented limitation this care addresses.
@@ -608,8 +648,30 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   const openBlockingPersisted = integrity.blocking
     ? await prisma.validationFinding.count({ where: { caseId, exportBlocking: true, status: "OPEN" } })
     : 0;
+  // A basis problem is not just "an unresolved finding" — it means the document
+  // may not describe the plan on file. Counted separately so the cover can say
+  // so in those words.
+  const openBasisFindings = await prisma.validationFinding.count({
+    where: { caseId, status: "OPEN", result: { startsWith: "BASIS_" } },
+  }).catch(() => 0);
   const isDraft = integrity.blocking && openBlockingPersisted > 0;
   if (isDraft) body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 200, after: 200 }, children: [new TextRun({ text: "DRAFT — CONTAINS UNRESOLVED CRITICAL VALIDATION ISSUES · NOT FOR SERVICE", bold: true, size: 24, color: "B91C1C" })] }));
+  if (openBasisFindings > 0) {
+    body.push(
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        spacing: { before: 60, after: 200 },
+        children: [
+          new TextRun({
+            text: `DRAFT — ${openBasisFindings} RECOMMENDATION${openBasisFindings === 1 ? "" : "S"} HAVE NO CURRENT RECORDED BASIS · CONTENT MAY NOT MATCH THE PLAN ON FILE · REGENERATE BEFORE RELIANCE`,
+            bold: true,
+            size: 22,
+            color: "B91C1C",
+          }),
+        ],
+      }),
+    );
+  }
   body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: isDraft ? 200 : 720, after: 40 }, children: [new TextRun({ text: c.firm.letterhead || c.firm.name, bold: true, size: 26, color: NAVY })] }));
   body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 480 }, children: [new TextRun({ text: c.firm.letterhead ? "" : "Certified Life Care Planning", size: 20, color: GREY })] }));
   // CRE v1 §18 — a draft export is visibly a draft on its face.
