@@ -391,10 +391,17 @@ const DEFINITIONS: PermissionDefinition[] = [
   def(
     "learning.approve",
     "Approve editorial lessons",
-    "Adopt or reject learned lessons about presentation and structure (task guidance, salience preferences).",
+    "Adopt or reject learned lessons about presentation and structure (task guidance, salience preferences). Held by the platform operator — the product's designated all-access authority — because adopting one is a standing change to how every future case is processed, not a per-case decision.",
     "ORGANIZATION",
     "HIGH",
-    { scopes: ORG_ONLY, delegable: false, externalAssignable: false, privileged: true },
+    {
+      scopes: ORG_ONLY,
+      platformOnly: true,
+      delegable: false,
+      externalAssignable: false,
+      customRoleAssignable: false,
+      privileged: true,
+    },
   ),
   def(
     "learning.approve_clinical",

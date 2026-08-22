@@ -34,9 +34,14 @@ export default async function LearningPage() {
     hasVerifiedCredential(ctx, "PHYSICIAN"),
   ]);
 
-  // A firm administrator may adopt editorial lessons. A clinical lesson needs a
-  // verified physician credential — holding the seat is not holding the
-  // credential, and the route enforces that again regardless of what is shown.
+  // Who may adopt what:
+  //   editorial (STYLE) — the platform operator, the product's designated
+  //     all-access authority. A firm administrator sees the queue and cannot
+  //     adopt from it; adopting is a standing change to how every future case
+  //     in the firm is processed, not a per-case decision.
+  //   clinical (FACT)   — a credentialed physician. Holding the seat is not
+  //     holding the credential.
+  // The routes enforce both again, regardless of what is rendered here.
   const canApproveStyle = canCanonicalPermission(ctx, "learning.approve");
   const canApproveClinical = canCanonicalPermission(ctx, "learning.approve_clinical") && physicianCredentialed;
 

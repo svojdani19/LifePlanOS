@@ -36,11 +36,35 @@ function template(
   return { key, name, description, permissions, defaultScope, externalFacing };
 }
 
+// ── Where STYLE learning approval lives, and why ─────────────────────────────
+// Adopting a learned lesson changes how every future case in a firm is
+// processed. Even an editorial one is a standing change to the program's
+// behaviour, not a per-case decision, so it belongs to the product's single
+// all-access authority.
+//
+// This product has no literal SUPER_ADMIN. The role model is three layers:
+//   • the legacy UserRole enum (ADMIN, PLANNER, PHYSICIAN_REVIEWER, …), a
+//     coarse compat surface with fourteen permissions;
+//   • the canonical built-in templates below, which is where real authority is
+//     expressed;
+//   • PLATFORM_SYSTEM_ADMINISTRATOR, the LifePlanOS operator.
+//
+// FIRM_ADMINISTRATOR is emphatically NOT all-access: its own description says
+// it cannot attest reports or vocational/economic conclusions, and physician
+// sign-off stays credential-gated away from it. It is the most powerful role
+// INSIDE a firm, which is a different thing. Granting it STYLE approval, as
+// this previously did, handed a standing behavioural change to every ordinary
+// firm administrator.
+//
+// PLATFORM_SYSTEM_ADMINISTRATOR is the designated all-access administrator, and
+// it holds STYLE approval. Clinical (FACT) approval is NOT here: it stays with
+// credentialed clinicians, because no amount of platform authority makes
+// someone qualified to adopt a standing medical opinion.
 export const PLATFORM_SYSTEM_ADMINISTRATOR = template(
   "PLATFORM_SYSTEM_ADMINISTRATOR",
   "Platform System Administrator",
-  "LifePlanOS operator. Manages tenants, feature flags, and integrations. Never assignable to firm users; every key here is platform-only.",
-  ["featureflags.manage", "integrations.manage", "organizations.manage", "organizations.impersonate", "platform.audit"],
+  "LifePlanOS operator. Manages tenants, feature flags, and integrations, and is the designated all-access authority for adopting editorial (STYLE) learned lessons. Clinical lessons remain with credentialed physicians. Never assignable to firm users; every key here is platform-only.",
+  ["featureflags.manage", "integrations.manage", "organizations.manage", "organizations.impersonate", "platform.audit", "learning.view", "learning.approve"],
   "ORGANIZATION",
   false,
 );
@@ -101,10 +125,10 @@ export const FIRM_ADMINISTRATOR = template(
     "report.supersede",
     "attestation.view",
     "attestation.invalidate",
-    // Learning: an administrator may adopt editorial lessons. Clinical lessons
-    // need a credentialed physician and are deliberately absent here.
+    // Learning: an administrator may SEE the queue. Adopting even an editorial
+    // lesson is not theirs — see PLATFORM_SYSTEM_ADMINISTRATOR below for who
+    // holds it and why this role does not.
     "learning.view",
-    "learning.approve",
     // Feature-gated views.
     "vocational.view",
     "economic.view",

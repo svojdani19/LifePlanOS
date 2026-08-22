@@ -78,7 +78,10 @@ export function LearningQueue({
       ? physicianCredentialed
         ? "Adopting a clinical lesson is a physician act; your role does not carry it."
         : "This lesson changes what the program asserts about care. It needs a verified physician credential."
-      : "Adopting an editorial lesson requires firm-administrator access.";
+      // Was "requires firm-administrator access", which did not match what the
+      // server enforces: a firm administrator may see this queue and cannot
+      // adopt from it.
+      : "Adopting an editorial lesson is a standing change to how every future case is processed, so it rests with the platform operator rather than with firm administration.";
 
   const pending = rows.filter((r) => r.status === "APPROVAL_PENDING");
   const decided = rows.filter((r) => r.status !== "APPROVAL_PENDING");

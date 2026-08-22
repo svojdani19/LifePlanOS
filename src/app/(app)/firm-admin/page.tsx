@@ -57,7 +57,7 @@ export default async function FirmAdminPage() {
     { href: "/billing", icon: CreditCard, title: "Billing", desc: "Plan, seats, and usage for this firm.", metric: ctx.subscription ? `${ctx.subscription.tier.toLowerCase()} plan` : "no subscription" },
     { href: "/team", icon: BadgeCheck, title: "Credentials", desc: "Professional credentials on file; verification gates expert approvals.", metric: `${unverifiedCount} awaiting verification` },
     { href: "/settings/audit", icon: ScrollText, title: "Audit Log", desc: "The append-only trail of every action in the firm.", metric: "view trail" },
-    { href: "/settings/learning", icon: GraduationCap, title: "Learned Lessons", desc: "Corrections generalised into guidance. Editorial lessons are adopted here; clinical ones need a credentialed physician.", metric: `${pendingLessons} awaiting approval` },
+    { href: "/settings/learning", icon: GraduationCap, title: "Learned Lessons", desc: "Corrections generalised into guidance, and what the firm has adopted. Editorial lessons are adopted by the platform operator; clinical ones by a credentialed physician.", metric: `${pendingLessons} awaiting approval` },
   ];
 
   return (
