@@ -28,6 +28,15 @@ export type RetrievalStatus =
   | "NOT_ATTEMPTED"
   /** Queried, and at least one result survived the producer's own gates. */
   | "SUCCEEDED"
+  /**
+   * Some sources answered and produced usable rows; others failed.
+   *
+   * SUCCEEDED covered this, and retrievalFinding says nothing about a
+   * SUCCEEDED run — so a case where half the literature was unreachable
+   * reported clean, and the only trace was a detail string on a row nothing
+   * displayed. The results are real and are kept; the gap is now visible.
+   */
+  | "PARTIAL"
   /** Queried successfully; nothing came back, or nothing cleared the gates. */
   | "NO_RESULTS"
   /** Queried, and the attempt itself broke. Says nothing about the medicine. */
@@ -60,13 +69,18 @@ export interface RetrievalOutcome {
   considered: number;
   /** External sources actually queried, for the audit trail. */
   sources: readonly string[];
+  /**
+   * Sources that did not answer, with why. Structured rather than buried in
+   * prose so the report and the review surface can name them exactly.
+   */
+  failedSources: readonly { source: string; failure: RetrievalFailure }[];
 }
 
 export const notAttempted = (
   failure: RetrievalFailure,
   detail: string,
   considered = 0,
-): RetrievalOutcome => ({ status: "NOT_ATTEMPTED", failure, detail, produced: 0, considered, sources: [] });
+): RetrievalOutcome => ({ status: "NOT_ATTEMPTED", failure, detail, produced: 0, considered, sources: [], failedSources: [] });
 
 export const nothingToDo = (detail: string): RetrievalOutcome => ({
   status: "NOT_ATTEMPTED",
@@ -75,6 +89,7 @@ export const nothingToDo = (detail: string): RetrievalOutcome => ({
   produced: 0,
   considered: 0,
   sources: [],
+  failedSources: [],
 });
 
 export const retrieved = (
@@ -89,6 +104,7 @@ export const retrieved = (
   produced,
   considered,
   sources,
+  failedSources: [],
 });
 
 /**
@@ -150,6 +166,7 @@ export async function runRetrieval(
       produced: 0,
       considered: 0,
       sources: [],
+      failedSources: [],
     });
   }
 }
@@ -221,6 +238,11 @@ export function outcomeFromAttempts(
     ? ` ${rejected.length} of ${asked.length} source-queries failed (${[...new Set(rejected.map((r) => `${r.source}:${r.failure ?? "UNKNOWN"}`))].join(", ")}).`
     : "";
 
+  // Deduplicated by source: one flaky source across eight queries is one gap,
+  // not eight. Inflating the count would turn a single outage into an apparent
+  // pile of obligations.
+  const failedSources = [...new Map(rejected.map((r) => [r.source, { source: r.source, failure: r.failure ?? ("UNKNOWN" as RetrievalFailure) }])).values()];
+
   if (!fulfilled.length) {
     return {
       status: "FAILED",
@@ -229,13 +251,28 @@ export function outcomeFromAttempts(
       produced: 0,
       considered,
       sources: [],
+      failedSources,
     };
   }
 
   if (produced > 0) {
-    // Partial success. The results stand and the gap is disclosed rather than
-    // hidden behind a clean SUCCEEDED.
-    return { status: "SUCCEEDED", failure: null, detail: `${summary}${failedNote}`.slice(0, 300), produced, considered, sources };
+    // Results were retrieved AND something was unreachable. This reported
+    // SUCCEEDED, and a SUCCEEDED run produces no finding at all — so a case
+    // where half the literature could not be searched read as clean, with the
+    // only trace a detail string nothing displayed. The rows are kept, because
+    // they are real; the gap is now a state of its own.
+    if (failedSources.length) {
+      return {
+        status: "PARTIAL",
+        failure: dominantFailure(failedSources.map((f) => f.failure)),
+        detail: `${summary}${failedNote}`.slice(0, 300),
+        produced,
+        considered,
+        sources,
+        failedSources,
+      };
+    }
+    return { status: "SUCCEEDED", failure: null, detail: summary.slice(0, 300), produced, considered, sources, failedSources: [] };
   }
 
   if (rejected.length) {
@@ -246,10 +283,11 @@ export function outcomeFromAttempts(
       produced: 0,
       considered,
       sources,
+      failedSources,
     };
   }
 
-  return { status: "NO_RESULTS", failure: null, detail: `${summary} Every case-specific query completed.`.slice(0, 300), produced: 0, considered, sources };
+  return { status: "NO_RESULTS", failure: null, detail: `${summary} Every case-specific query completed.`.slice(0, 300), produced: 0, considered, sources, failedSources: [] };
 }
 
 // ── What the plan is allowed to claim, given what actually happened ─────────
@@ -338,10 +376,30 @@ export const RETRIEVAL_FINDING_PREFIX = "RETRIEVAL_";
  * did not fail, there was simply no work.
  */
 export function retrievalFinding(
-  a: Pick<RetrievalOutcome, "status" | "failure" | "detail" | "produced" | "considered"> & { producer: string },
+  a: Pick<RetrievalOutcome, "status" | "failure" | "detail" | "produced" | "considered"> & {
+    producer: string;
+    failedSources?: readonly { source: string; failure: RetrievalFailure }[];
+  },
 ): RetrievalFindingRow | null {
   const { label, consequence, emptyIsAnswer, emptyMeans } = describe(a.producer);
   if (a.status === "SUCCEEDED") return null;
+
+  if (a.status === "PARTIAL") {
+    const named = (a.failedSources ?? []).map((f) => `${f.source} (${f.failure.toLowerCase().replace(/_/g, " ")})`).join(", ");
+    return {
+      service: "Case-wide",
+      result: `${RETRIEVAL_FINDING_PREFIX}PARTIAL:${a.producer}`,
+      issue:
+        `${label} completed against some sources and not others: ${named || "one or more sources did not answer"}. ` +
+        `What was retrieved is usable and is shown. What those sources would have returned is unknown, so this plan's coverage is narrower than a clean run's — it is not evidence that nothing further exists.`,
+      // Disclosed, not blocking. Real results were obtained, and a partial
+      // outage is a fact about the search rather than a defect in the plan.
+      severity: "Moderate",
+      suggestion:
+        "No per-recommendation action is required. Re-run generation once the source is reachable if broader coverage matters for this plan.",
+      exportBlocking: false,
+    };
+  }
   if (a.status === "NOT_ATTEMPTED" && a.failure === null) return null; // no work to do
 
   if (a.status === "NO_RESULTS") {
@@ -441,6 +499,7 @@ export async function recordRetrievalAttempts(
         produced: a.produced,
         considered: a.considered,
         sources: [...a.sources],
+        failedSources: (a.failedSources ?? []).map((f) => `${f.source}:${f.failure}`),
         durationMs: a.durationMs ?? null,
       },
       update: {
@@ -451,6 +510,7 @@ export async function recordRetrievalAttempts(
         produced: a.produced,
         considered: a.considered,
         sources: [...a.sources],
+        failedSources: (a.failedSources ?? []).map((f) => `${f.source}:${f.failure}`),
         durationMs: a.durationMs ?? null,
         attemptedAt: new Date(),
       },

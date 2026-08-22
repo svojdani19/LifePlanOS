@@ -8,7 +8,7 @@
 // Synthetic queries only — no PHI.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { outcomeFromAttempts, dominantFailure, type QueryAttempt } from "@/lib/engine/retrievalStatus";
+import { outcomeFromAttempts, dominantFailure, retrievalFinding, type QueryAttempt } from "@/lib/engine/retrievalStatus";
 
 const art = (key: string) => ({ source: "europepmc" as const, key, title: `Study ${key}`, authors: "A", journal: "J", year: "2020", url: "u" });
 
@@ -146,11 +146,30 @@ describe("NO_RESULTS is earned, not assumed", () => {
     expect(r.detail).toMatch(/not every source answered/i);
   });
 
-  it("partial success keeps the results AND discloses the failed source", () => {
+  it("partial success keeps the results AND is its own status", () => {
+    // This asserted SUCCEEDED, which is precisely the defect: retrievalFinding
+    // says nothing about a SUCCEEDED run, so a case where half the sources were
+    // unreachable read as clean.
     const r = outcomeFromAttempts([a({ results: 3 }), a({ source: "crossref", status: "REJECTED", failure: "TIMEOUT" })], 3, 14, "Attached 3 of 14.");
-    expect(r.status).toBe("SUCCEEDED");
+    expect(r.status).toBe("PARTIAL");
     expect(r.produced).toBe(3);
+    expect(r.failedSources).toEqual([{ source: "crossref", failure: "TIMEOUT" }]);
     expect(r.detail).toMatch(/crossref:TIMEOUT/);
+  });
+
+  it("a clean run is SUCCEEDED with no failed sources", () => {
+    const r = outcomeFromAttempts([a({ results: 3 }), a({ source: "crossref", results: 1 })], 3, 14, "Attached 3 of 14.");
+    expect(r.status).toBe("SUCCEEDED");
+    expect(r.failedSources).toEqual([]);
+  });
+
+  it("counts one flaky source once, however many queries it failed", () => {
+    // Eight failed queries against one outage is one gap, not eight. Inflating
+    // it turns a single outage into an apparent pile of obligations.
+    const many = Array.from({ length: 8 }, (_, i) => a({ source: "crossref", query: `q${i}`, status: "REJECTED" as const, failure: "TIMEOUT" as const }));
+    const r = outcomeFromAttempts([a({ results: 2 }), ...many], 2, 14, "x");
+    expect(r.status).toBe("PARTIAL");
+    expect(r.failedSources).toHaveLength(1);
   });
 
   it("skipped sources are neither evidence of absence nor failure", () => {
@@ -204,6 +223,50 @@ describe("retries and isolation", () => {
     // pinned to one case in an audit row they narrow it more than they help.
     expect(r.detail).not.toContain("total knee arthroplasty");
     expect(r.detail).not.toMatch(/\bpatient\b|\bmrn\b|\bdob\b|firmId|caseId/i);
-    expect(Object.keys(r).sort()).toEqual(["considered", "detail", "failure", "produced", "sources", "status"]);
+    expect(Object.keys(r).sort()).toEqual(["considered", "detail", "failedSources", "failure", "produced", "sources", "status"]);
+  });
+});
+
+describe("a partial run is disclosed, scoped, and not inflated", () => {
+  const partial = {
+    producer: "article-citations",
+    status: "PARTIAL" as const,
+    failure: "TIMEOUT" as const,
+    detail: "Attached 3 of 14.",
+    produced: 3,
+    considered: 14,
+    failedSources: [{ source: "crossref", failure: "TIMEOUT" as const }],
+  };
+
+  it("produces a finding at all — a SUCCEEDED run produced none", () => {
+    const f = retrievalFinding(partial);
+    expect(f).not.toBeNull();
+    expect(f!.result).toBe("RETRIEVAL_PARTIAL:article-citations");
+  });
+
+  it("names exactly which source failed and why", () => {
+    expect(retrievalFinding(partial)!.issue).toMatch(/crossref \(timeout\)/i);
+  });
+
+  it("says the retrieved results are still usable", () => {
+    const issue = retrievalFinding(partial)!.issue;
+    expect(issue).toMatch(/usable and is shown/i);
+    expect(issue).toMatch(/not evidence that nothing further exists/i);
+  });
+
+  it("does not block the export — real results were obtained", () => {
+    expect(retrievalFinding(partial)!.exportBlocking).toBe(false);
+  });
+
+  it("asks for no per-recommendation action, so it cannot inflate physician obligations", () => {
+    const f = retrievalFinding(partial)!;
+    expect(f.service).toBe("Case-wide");
+    expect(f.suggestion).toMatch(/no per-recommendation action is required/i);
+  });
+
+  it("is one finding per producer, so two producers do not merge or duplicate", () => {
+    const other = retrievalFinding({ ...partial, producer: "standard-of-care" })!;
+    expect(other.result).toBe("RETRIEVAL_PARTIAL:standard-of-care");
+    expect(other.result).not.toBe(retrievalFinding(partial)!.result);
   });
 });

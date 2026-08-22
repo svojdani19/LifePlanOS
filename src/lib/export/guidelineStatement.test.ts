@@ -167,3 +167,40 @@ describe("the report renders whatever this decides", () => {
     expect(src).not.toMatch(/applied to determine whether this care is medically necessary/);
   });
 });
+
+describe("a partial retrieval is disclosed in the report, not hidden", () => {
+  const partial = { status: "PARTIAL", failure: "TIMEOUT", failedSources: ["crossref:TIMEOUT"] };
+
+  it("keeps verified support AND states the narrower coverage", () => {
+    // The results are real. What is unknown is what the unreachable source
+    // would have added, and that must not read as a complete search.
+    const r = guidelineStatement(input({ retrieval: partial, verifiedItemSpecific: [{ title: "NASS", claim: "discectomy" }] }));
+    expect(r.state).toBe("APPLIED");
+    expect(r.text).toContain("NASS");
+    expect(r.text).toMatch(/could not be reached/i);
+    expect(r.text).toMatch(/crossref:TIMEOUT/);
+    expect(r.text).toMatch(/not evidence that no further guidance exists/i);
+  });
+
+  it("discloses it on an unverified pairing too", () => {
+    const r = guidelineStatement(input({ retrieval: partial, recordedGuidelineEvidence: [{ text: "ODG mapping", source: null }] }));
+    expect(r.state).toBe("REVIEW_CANDIDATE");
+    expect(r.text).toMatch(/could not be reached/i);
+  });
+
+  it("discloses it when nothing item-specific was found", () => {
+    const r = guidelineStatement(input({ retrieval: partial }));
+    expect(r.state).toBe("NONE");
+    expect(r.text).toMatch(/could not be reached/i);
+  });
+
+  it("a clean SUCCEEDED run says nothing about unreachable sources", () => {
+    const r = guidelineStatement(input({ verifiedItemSpecific: [{ title: "NASS", claim: "discectomy" }] }));
+    expect(r.text).not.toMatch(/could not be reached/i);
+  });
+
+  it("does not downgrade a partial run to an unresolved one", () => {
+    // PARTIAL is not FAILED: real guidance was retrieved and may be relied on.
+    expect(guidelineStatement(input({ retrieval: partial })).state).not.toBe("RETRIEVAL_UNRESOLVED");
+  });
+});

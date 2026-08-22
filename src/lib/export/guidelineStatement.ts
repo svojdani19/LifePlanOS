@@ -40,7 +40,7 @@ export interface GuidelineStatementInput {
   /** Whether the recorded basis still matches the current record. */
   basisState: "CURRENT" | "STALE" | "MISSING";
   /** Latest outcome of the standard-of-care producer for this case. */
-  retrieval: { status: string; failure: string | null } | null;
+  retrieval: { status: string; failure: string | null; failedSources?: readonly string[] } | null;
 }
 
 export interface GuidelineStatement {
@@ -85,6 +85,14 @@ export function guidelineStatement(input: GuidelineStatementInput): GuidelineSta
     };
   }
 
+  // A partial run retrieved real guidance AND could not reach some sources.
+  // The results stand; the narrower coverage is stated rather than left to be
+  // inferred from a clean-looking document.
+  const partialTail =
+    r && r.status === "PARTIAL"
+      ? ` Some sources could not be reached during this search (${(r.failedSources ?? []).join(", ") || "one or more sources"}), so coverage here is narrower than a complete run — that is not evidence that no further guidance exists.`
+      : "";
+
   if (input.verifiedItemSpecific.length) {
     const cited = input.verifiedItemSpecific
       .slice(0, 3)
@@ -93,7 +101,7 @@ export function guidelineStatement(input: GuidelineStatementInput): GuidelineSta
     return {
       state: "APPLIED",
       label: "Guideline basis",
-      text: `${cited}. Each was verified against its publication for this diagnosis and intervention, and is recorded in this recommendation's basis.`,
+      text: `${cited}. Each was verified against its publication for this diagnosis and intervention, and is recorded in this recommendation's basis.${partialTail}`,
     };
   }
 
@@ -109,7 +117,7 @@ export function guidelineStatement(input: GuidelineStatementInput): GuidelineSta
     return {
       state: "REVIEW_CANDIDATE",
       label: "Guideline review candidates",
-      text: `${shown}. These pairings have not been verified against their publications and are shown for review only — they are not relied upon as support for medical necessity.${contextTail}`,
+      text: `${shown}. These pairings have not been verified against their publications and are shown for review only — they are not relied upon as support for medical necessity.${partialTail}${contextTail}`,
     };
   }
 
@@ -117,7 +125,7 @@ export function guidelineStatement(input: GuidelineStatementInput): GuidelineSta
     return {
       state: "NONE",
       label: "Guideline status",
-      text: `No verified, item-specific guideline support is recorded for this recommendation.${contextTail}`,
+      text: `No verified, item-specific guideline support is recorded for this recommendation.${partialTail}${contextTail}`,
     };
   }
 

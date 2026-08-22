@@ -408,8 +408,8 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   // the report must say which of the two it is in.
   const socRetrieval = ((await prisma.retrievalAttempt?.findFirst({
     where: { caseId, producer: "standard-of-care" },
-    select: { status: true, failure: true },
-  }).catch(() => null)) ?? null) as { status: string; failure: string | null } | null;
+    select: { status: true, failure: true, failedSources: true },
+  }).catch(() => null)) ?? null) as { status: string; failure: string | null; failedSources?: string[] } | null;
 
   // One recorded basis per item, loaded once. An unreadable store is kept
   // distinct from an empty one: the document says "no recorded basis exists"

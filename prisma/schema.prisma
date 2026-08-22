@@ -2655,10 +2655,13 @@ model RetrievalAttempt {
   detail  String
 
   /// Rows written, and units considered — "0 of 0" is not "0 of 14".
-  produced   Int      @default(0)
-  considered Int      @default(0)
+  produced      Int      @default(0)
+  considered    Int      @default(0)
   /// External sources actually queried.
-  sources    String[] @default([])
+  sources       String[] @default([])
+  /// Sources that did NOT answer, as "name:CATEGORY". Structured so the report
+  /// and the review surface can name the gap exactly rather than quoting prose.
+  failedSources String[] @default([])
 
   attemptedAt DateTime @default(now())
   durationMs  Int?

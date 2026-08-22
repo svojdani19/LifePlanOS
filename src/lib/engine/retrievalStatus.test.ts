@@ -183,6 +183,7 @@ describe("persistence records the attempt and republishes its findings", () => {
     produced: 0,
     considered: 5,
     sources: [],
+    failedSources: [],
     ...over,
   });
 
