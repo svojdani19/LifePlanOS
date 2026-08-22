@@ -1250,6 +1250,11 @@ export function assessmentFromBasis(
 ): ReasoningAssessment | null {
   const m = recordedBasis.assessmentBasis;
   if (!m) return null;
+  // An INCOMPLETE basis cannot produce an assessment either. This read
+  // `recordedBasis.specification.service` unguarded and threw on a legacy row
+  // that has no specification — a crash where the honest answer is "this
+  // record cannot answer", which the caller already handles.
+  if (!recordedBasis.specification) return null;
 
   const ev = recordedBasis.acceptedEvidence;
   const asClassified = (xs: { text: string; source: string | null }[], kind: string): ClassifiedEvidenceItem[] =>

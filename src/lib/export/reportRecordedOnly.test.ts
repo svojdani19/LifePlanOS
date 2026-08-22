@@ -122,7 +122,8 @@ describe("the renderer reads the record, and never falls through to the live row
     // `||` silently replaced a recorded-but-blank narrative with a fresh one.
     const src = await read();
     expect(src).not.toMatch(/recordedBasis\?\.necessityNarrative \|\| dossier\.medicalNecessity/);
-    expect(src).toMatch(/recordedBasis \? recordedBasis\.necessityNarrative \?\? "" : dossier\.medicalNecessity/);
+    // Conditioned on basis ABSENCE now, not on the subfield.
+    expect(src).toMatch(/noBasis \? dossier\.medicalNecessity : V\.necessityNarrative \?\? NOT_RECORDED/);
   });
 
   it("a persisted assessment is used only when it was computed from THIS basis", async () => {
@@ -370,7 +371,9 @@ describe("the WHOLE document prints A, including totals, schedules and appendice
       return readFileSync(join(__dirname, "report.ts"), "utf8");
     })();
     expect(src).toMatch(/const pvInputs = \(it: FutureCareItem\)/);
-    expect(src).toMatch(/project\(pvInputs\(it\)/);
+    expect(src).toMatch(/project\(\{ category: it\.category, \.\.\.pvInputs\(it\) \}/);
+    // And the inputs come from the view, which is keyed on basis existence.
+    expect(src).toMatch(/const pj = vw\(it\)\.projection;/);
   });
 
   it("a legacy basis missing a subfield prints 'not recorded' rather than the live value", async () => {

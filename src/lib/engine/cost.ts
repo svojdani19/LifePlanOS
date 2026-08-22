@@ -84,8 +84,13 @@ export interface Projection {
   years: number;
 }
 
-const LOW = 0.85;
-const HIGH = 1.25;
+/** Scenario multipliers over the expected present value. Exported so the
+ *  report derives low/high from the RECORDED expected figure with the same
+ *  arithmetic the engine used, instead of reading live scenario columns. */
+export const LOW_SCENARIO_MULTIPLIER = 0.85;
+const LOW = LOW_SCENARIO_MULTIPLIER;
+export const HIGH_SCENARIO_MULTIPLIER = 1.25;
+const HIGH = HIGH_SCENARIO_MULTIPLIER;
 
 export function project(input: ProjectionInput, a: CaseAssumptions): Projection {
   const ref = UNIT_COSTS[input.category];

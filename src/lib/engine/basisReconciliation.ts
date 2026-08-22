@@ -1,3 +1,4 @@
+import { isIncompleteBasisFinding } from "@/lib/engine/basisCompleteness";
 /**
  * Closing a basis divergence.
  *
@@ -156,8 +157,20 @@ export function dispositionAllowed(result: string | null | undefined, action: Ge
   // saying so, and it is not in the divergence prefix set, so it slipped
   // through the check below.
   const unknowable = r === "BASIS_UNREADABLE";
-  if (!isBasisDivergenceFinding(result) && !unknowable) return { allowed: true, reason: null };
+  // A basis that exists and cannot answer is not a judgment call either. The
+  // missing fields ARE what the report would otherwise assert, so dispositioning
+  // it would licence exactly the fallback this removes. It closes by
+  // regenerating a complete basis.
+  const incomplete = isIncompleteBasisFinding(r);
+  if (!isBasisDivergenceFinding(result) && !unknowable && !incomplete) return { allowed: true, reason: null };
   if (action === "reopen") return { allowed: true, reason: null };
+  if (incomplete) {
+    return {
+      allowed: false,
+      reason:
+        "This recommendation's recorded basis is missing required fields, so the report cannot state them and does not fall back to the current record. Resolving the finding would not supply the missing values — regenerate the plan so a complete basis is recorded.",
+    };
+  }
   if (unknowable) {
     return {
       allowed: false,
@@ -230,6 +243,8 @@ export function statusForFinding(
   // would catch it — nothing was compared — so a legacy RESOLVED_AS_IS on this
   // key would be the whole bypass, restored.
   if (result === "BASIS_UNREADABLE") return { status: "OPEN", resolvedById: null, resolvedAt: null };
+  // Same reasoning: no disposition can supply a field the record does not hold.
+  if (isIncompleteBasisFinding(result)) return { status: "OPEN", resolvedById: null, resolvedAt: null };
 
   const identity = decodeBasisFinding(result);
   if (identity) {

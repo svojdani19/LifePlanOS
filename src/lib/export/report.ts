@@ -28,6 +28,8 @@ import { compareBasis, freqText, durationText, type BasisRecord } from "@/lib/en
 import { assembleBasis } from "@/lib/engine/basisAssembly";
 import { loadRecordedBases, type BasisStore } from "@/lib/engine/basisStore";
 import { itemIsSupported, supportClassOf, SUPPORT_LABEL, computePlanTotals } from "@/lib/engine/supportClass";
+import { LOW_SCENARIO_MULTIPLIER, HIGH_SCENARIO_MULTIPLIER } from "@/lib/engine/cost";
+import { assessBasisCompleteness } from "@/lib/engine/basisCompleteness";
 import { deriveWitnessAssessment, assessmentFromBasis, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningItem, type ReasoningAssessment } from "@/lib/engine/clinicalReasoning";
 import { referencesFor, guidelineSourcesFor } from "@/lib/references/sources";
 import { guidelineStatement } from "@/lib/export/guidelineStatement";
@@ -328,33 +330,93 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   // as "not recorded" and blocks a final export — it never falls through to the
   // live row, because the live row is precisely what the approval did not
   // cover.
+  const NOT_RECORDED = "not recorded";
   const viewOf = (it: FutureCareItem) => {
-    const b = basisByItem.get(it.id) as
-      | { specification?: Record<string, unknown> | null; projectionBasis?: Record<string, unknown> | null }
-      | undefined;
-    const spec = (b?.specification ?? null) as Record<string, unknown> | null;
-    const proj = (b?.projectionBasis ?? null) as Record<string, unknown> | null;
+    const raw = basisByItem.get(it.id) ?? null;
+    const completeness = assessBasisCompleteness(raw);
+    const b = (raw ?? {}) as Record<string, unknown>;
+    const spec = (b.specification ?? null) as Record<string, unknown> | null;
+    const proj = (b.projectionBasis ?? null) as Record<string, unknown> | null;
+    const prob = (b.probabilityBasis ?? null) as Record<string, unknown> | null;
+    const m = (b.assessmentBasis ?? null) as Record<string, unknown> | null;
+    const ev = (b.acceptedEvidence ?? null) as Record<string, { text: string; source: string | null }[]> | null;
+
     const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
     const str = (v: unknown): string | null => (typeof v === "string" && v.length ? v : null);
+    const arr = <T,>(v: unknown): T[] | null => (Array.isArray(v) ? (v as T[]) : null);
+
+    // THE rule. A fallback is conditioned on the absence of the ENTIRE basis,
+    // never on the truthiness of one subfield. With a basis on file — however
+    // partial — a missing value is "not recorded" and the finding below blocks
+    // the export. Reading the live row to cover the gap is what produced a
+    // document that mixed recorded and current values.
+    const absent = completeness.state === "ABSENT";
+
+    // Low/high are derived from the RECORDED expected present value with the
+    // engine's own multipliers, unless the basis records them. They were summed
+    // from the live scenario columns, so the range around a recorded expected
+    // figure belonged to a different plan.
+    const recordedPv = absent ? it.presentValue : num(spec?.presentValue);
+    const recLow = num((spec as Record<string, unknown> | null)?.lowCost);
+    const recHigh = num((spec as Record<string, unknown> | null)?.highCost);
+
     return {
-      /** True when the values below come from the record rather than the row. */
-      authoritative: !!spec,
-      service: spec ? str(spec.service) : it.service,
-      cptCode: spec ? str(spec.cptCode) : it.cptCode,
-      unitCost: spec ? num(spec.unitCost) : it.unitCost,
-      lifetimeCost: spec ? num(spec.lifetimeCost) : it.lifetimeCost,
-      presentValue: spec ? num(spec.presentValue) : it.presentValue,
-      physicianStatus: spec ? str(spec.physicianStatus) ?? it.physicianStatus : it.physicianStatus,
-      frequencyText: spec ? str(spec.frequencyText) : freqText(it),
-      durationText: spec ? str(spec.durationText) : durationText(it, a.lifeExpectancyYears),
-      specialty: spec ? str(spec.responsibleSpecialty) : it.specialty,
-      supportingDiagnosis: spec ? str(spec.supportingDiagnosis) : null,
-      // The pricing authority. Already recorded and hashed on projectionBasis;
-      // the traceability appendix was reading the live column, whose text
-      // embeds the code and so printed the live CPT beside a recorded service.
-      pricingSource: spec ? str(proj?.pricingSourceId) : it.pricingSource,
+      basisState: completeness.state,
+      missingPaths: completeness.missing,
+      fingerprint: completeness.fingerprint,
+      /** True only when the record can answer for every material field. */
+      authoritative: completeness.state === "COMPLETE",
+
+      service: absent ? it.service : str(spec?.service),
+      supportingDiagnosis: absent ? null : str(spec?.supportingDiagnosis),
+      specialty: absent ? it.specialty : str(spec?.responsibleSpecialty),
+      cptCode: absent ? it.cptCode : str(spec?.cptCode),
+      unitCost: absent ? it.unitCost : num(spec?.unitCost),
+      lifetimeCost: absent ? it.lifetimeCost : num(spec?.lifetimeCost),
+      presentValue: recordedPv,
+      lowCost: absent ? it.lowCost : recLow ?? (recordedPv === null ? null : Math.round(recordedPv * LOW_SCENARIO_MULTIPLIER)),
+      highCost: absent ? it.highCost : recHigh ?? (recordedPv === null ? null : Math.round(recordedPv * HIGH_SCENARIO_MULTIPLIER)),
+      physicianStatus: absent ? it.physicianStatus : str(spec?.physicianStatus),
+      frequencyText: absent ? freqText(it) : str(spec?.frequencyText),
+      durationText: absent ? durationText(it, a.lifeExpectancyYears) : str(spec?.durationText),
+      lifetimeQuantity: absent ? null : num(spec?.lifetimeQuantity),
+      contingencyOnly: absent ? !!it.contingencyOnly : spec?.contingencyOnly === true,
+      pricingSource: absent ? it.pricingSource : str(proj?.pricingSourceId),
+
+      /** Recorded projection inputs, for the sensitivity re-projection. */
+      projection: absent
+        ? { unitCost: it.unitCost, frequencyPerYear: it.frequencyPerYear, durationYears: it.durationYears, isLifetime: it.isLifetime }
+        : proj
+          ? {
+              unitCost: num(proj.unitCost) ?? 0,
+              frequencyPerYear: num(proj.frequencyPerYear) ?? 0,
+              durationYears: num(proj.durationYears),
+              isLifetime: proj.isLifetime === true,
+            }
+          : null,
+
+      /** Inclusion is a RECORDED decision, not a re-derivation from live state. */
+      inclusionStatus: absent ? null : str(m?.inclusionInTotalsStatus),
+
+      probabilityStatement: absent ? null : str(prob?.statement),
+      probabilityFactors: absent ? null : arr<{ label: string; present: boolean }>(prob?.factors),
+      probabilityClassification: absent ? null : str(prob?.classification) ?? str(m?.probabilityClassification),
+      acceptedEvidence: absent ? null : ev,
+      literature: absent ? null : arr<Record<string, unknown>>(b.literature),
+      contradictions: absent ? null : arr<string>(b.contradictions),
+      missingPremises: absent ? null : arr<string>(b.missingPremises),
+      potentialChallenges: absent ? null : arr<string>(m?.potentialChallenges),
+      functionalBasis: absent ? null : ((m?.functionalBasis ?? null) as Record<string, unknown> | null),
+      confidenceLevel: absent ? null : str(m?.confidenceLevel),
+      confidenceExplanation: absent ? null : str(m?.confidenceLevelExplanation),
+      necessityNarrative: absent ? null : str(b.necessityNarrative),
+      missingSupport: absent ? it.missingSupport : str(m?.residualUncertainty),
+      evidenceStrength: absent ? null : str(m?.evidenceStrength),
+      recommendationConfidence: absent ? null : str(m?.recommendationConfidence),
+      inclusionRationale: absent ? null : str(m?.inclusionRationale),
     };
   };
+
   const viewCache = new Map<string, ReturnType<typeof viewOf>>();
   const vw = (it: FutureCareItem) => {
     const hit = viewCache.get(it.id);
@@ -383,9 +445,23 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   // records, so the report could include an item the panel excluded.
   const integrity = runIntegrityCheck({ recommendations: items as unknown as RecInput[], conditions: c.conditions as unknown as CondInput[] });
   const perItemOf = (it: FutureCareItem): PerItem => integrity.perItem.get(it as unknown as RecInput)!;
-  const reportItems = items.filter((i) => perItemOf(i).includedInTotal);
-  const excludedForReview = items.filter((i) => !perItemOf(i).includedInTotal);
-  const reviewStarted = items.length > 0 && items.some((i) => i.physicianStatus !== "PENDING");
+  // Membership is the RECORDED decision. It was re-derived from live physician
+  // status and live integrity output, so flipping a status after approval moved
+  // an item into or out of the plan, its counts and its totals — under a
+  // narrative that still described the approved set.
+  //
+  // With no basis at all we fall back to the live decision, in a labelled draft
+  // that BASIS_MISSING already blocks. With a basis that cannot answer, the
+  // item is EXCLUDED from totals rather than assumed in: an incomplete record
+  // is not authority to count money.
+  const includedByRecord = (i: FutureCareItem): boolean => {
+    const v = vw(i);
+    if (v.basisState === "ABSENT") return perItemOf(i).includedInTotal;
+    return v.inclusionStatus === "included";
+  };
+  const reportItems = items.filter(includedByRecord);
+  const excludedForReview = items.filter((i) => !includedByRecord(i));
+  const reviewStarted = items.length > 0 && items.some((i) => (vw(i).physicianStatus ?? "PENDING") !== "PENDING");
   // Totals sum the RECORDED figures. These summed the live rows, so the number
   // on the front page could belong to neither the approved plan nor the
   // narrative beneath it. A recorded null contributes nothing and is disclosed
@@ -393,8 +469,11 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   // value — and the missing-subfield case blocks a final export.
   const totalLifetime = reportItems.reduce((s, i) => s + vNum(vw(i).lifetimeCost), 0);
   const totalPresentValue = reportItems.reduce((s, i) => s + vNum(vw(i).presentValue), 0);
-  const totalLow = reportItems.reduce((s, i) => s + i.lowCost, 0);
-  const totalHigh = reportItems.reduce((s, i) => s + i.highCost, 0);
+  // Derived from the RECORDED expected figure with the engine's own
+  // multipliers. These summed the live scenario columns, so the range printed
+  // around a recorded expected value described a different plan.
+  const totalLow = reportItems.reduce((s, i) => s + vNum(vw(i).lowCost), 0);
+  const totalHigh = reportItems.reduce((s, i) => s + vNum(vw(i).highCost), 0);
 
   const subject = subjectName(c.clientName, c.sex);
   // Graceful phrasing when the date of injury is not in the record, so prose
@@ -502,6 +581,12 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     const dxName = cond?.name || c.diagnosis || "the injuries at issue";
     const recordSupport = itemIsSupported(it as unknown as { supportClass?: string | null });
     const dossier = buildRecommendationDossier(it as never, cond as unknown as DossierCondition | null, c.chronologyEvents as unknown as DossierChronoEvent[], dossierCase, dossierInterviews as never);
+    // Conditioned on basis ABSENCE, not on any subfield. A basis that records
+    // no probability (or evidence, or narrative) says "not recorded"; it never
+    // borrows the live one, because the live row is what the approval did not
+    // cover.
+    const V = vw(it);
+    const noBasis = V.basisState === "ABSENT";
     const out: (Paragraph | Table)[] = [];
 
     // ── The RECORDED basis is what the report prints ──────────────────────
@@ -553,7 +638,6 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     // value was not recorded, and it renders as such — falling through to the
     // live row on a null was the same defect in miniature, and it fired exactly
     // where the record was weakest. `NOT_RECORDED` never reads as a value.
-    const NOT_RECORDED = "not recorded";
     const asRecorded = <T,>(v: T | null | undefined, render: (x: T) => string): string =>
       v === null || v === undefined ? NOT_RECORDED : render(v);
     out.push(
@@ -591,7 +675,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     // Same rule: with a basis on file the recorded narrative is the narrative,
     // empty or not. `||` silently replaced a recorded-but-blank narrative with
     // a freshly derived one.
-    const necessityText = recordedBasis ? recordedBasis.necessityNarrative ?? "" : dossier.medicalNecessity;
+    const necessityText = noBasis ? dossier.medicalNecessity : V.necessityNarrative ?? NOT_RECORDED;
 
     // Medical necessity — the physician narrative (why, patient-specific).
     out.push(new Paragraph({ spacing: { before: 120, after: 40 }, children: [new TextRun({ text: "Medical necessity.", bold: true, size: 21, color: NAVY })] }));
@@ -612,17 +696,16 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     // the artifact that goes to court, and it printed a recorded narrative
     // beside newly-derived probability, evidence, contradictions and unknowns —
     // an amalgam of two readings that never existed as a whole.
-    const rProbability = recordedBasis?.probabilityBasis ?? null;
-    const probStatement = rProbability?.statement ?? dossier.probability.statement;
-    const probFactors = rProbability?.factors ?? dossier.probability.factors;
+    const probStatement = noBasis ? dossier.probability.statement : V.probabilityStatement;
+    const probFactors = noBasis ? dossier.probability.factors : V.probabilityFactors ?? [];
     const probPresent = probFactors.filter((f) => f.present).map((f) => lc(f.label));
-    out.push(labeled("Probability", `${probStatement}${probPresent.length ? ` This assessment is supported by ${probPresent.join(", ")}.` : ""}`));
+    out.push(labeled("Probability", `${probStatement ?? NOT_RECORDED}${probPresent.length ? ` This assessment is supported by ${probPresent.join(", ")}.` : ""}`));
 
     // Supporting clinical evidence — organized and source-traceable.
     // Accepted evidence as recorded. Falls back to the derivation only when no
     // basis exists at all — and that case is a BASIS_MISSING finding that
     // blocks final export, so it can only ever reach a labelled draft.
-    const rEv = recordedBasis?.acceptedEvidence ?? null;
+    const rEv = noBasis ? null : V.acceptedEvidence;
     const asItems = (xs: { text: string; source: string | null }[] | undefined) => (xs ?? []).map((x) => ({ text: x.text, source: x.source }));
     const se = rEv
       ? {
@@ -693,7 +776,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     out.push(labeled(guideline.label, guideline.text));
 
     // Literature — each article stating exactly what it supports + limitations.
-    const rLiterature = recordedBasis?.literature ?? dossier.literature;
+    const rLiterature = (noBasis ? dossier.literature : V.literature ?? []) as typeof dossier.literature;
     if (rLiterature.length) {
       for (const l of rLiterature) {
         out.push(
@@ -712,18 +795,18 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     }
 
     // Contradictory evidence, unknowns, potential challenges — never hidden.
-    const rContradictions = recordedBasis?.contradictions ?? dossier.contradictoryEvidence;
-    const rUnknowns = recordedBasis?.missingPremises ?? dossier.unknowns;
+    const rContradictions = noBasis ? dossier.contradictoryEvidence : V.contradictions ?? [];
+    const rUnknowns = noBasis ? dossier.unknowns : V.missingPremises ?? [];
     if (rContradictions.length) out.push(labeled("Contradictory evidence", rContradictions.slice(0, 3).join(" ")));
     if (rUnknowns.length) out.push(labeled("Unknowns", rUnknowns.slice(0, 3).join(" ")));
     // Recorded, like everything else the document asserts. These were read
     // from a dossier rebuilt at export time, so a plan approved on one set of
     // defence challenges and functional findings could print another.
-    const rChallenges = rMaterial?.potentialChallenges ?? dossier.potentialChallenges;
+    const rChallenges = noBasis ? dossier.potentialChallenges : V.potentialChallenges ?? [];
     if (rChallenges.length) out.push(labeled("Potential challenges", rChallenges.slice(0, 4).join(" ")));
 
     // Functional basis (§12) — the documented limitation this care addresses.
-    const fl = rMaterial ? rMaterial.functionalBasis : dossier.functionalLink;
+    const fl = (noBasis ? dossier.functionalLink : V.functionalBasis) as typeof dossier.functionalLink;
     if (fl) {
       out.push(labeled("Functional basis", `${fl.domain} — ${fl.limitation}${fl.source ? ` (${fl.source})` : ""}${fl.quantified ? "; quantified in the record" : ""}. ${fl.relationship}`));
     }
@@ -747,9 +830,9 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     // that may have moved since the plan was approved.
     out.push(labeled(
       "Clinical confidence",
-      rMaterial
-        ? `${rMaterial.confidenceLevel}. ${rMaterial.confidenceLevelExplanation}`
-        : `${dossier.confidence.level}. ${dossier.confidence.explanation}`,
+      noBasis
+        ? `${dossier.confidence.level}. ${dossier.confidence.explanation}`
+        : `${V.confidenceLevel ?? NOT_RECORDED}. ${V.confidenceExplanation ?? NOT_RECORDED}`,
     ));
 
     // Clinical reasoning (Clinical Reasoning Engine) — the structured
@@ -1376,21 +1459,14 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   // status off the live row, so the what-if analysis modelled a plan nobody had
   // approved, sitting under an expected figure that came from the record.
   const pvInputs = (it: FutureCareItem) => {
-    const b = basisByItem.get(it.id) as { projectionBasis?: Record<string, unknown> | null } | undefined;
-    const pb = (b?.projectionBasis ?? null) as Record<string, unknown> | null;
-    const n = (v: unknown, fallback: number | null): number | null => (typeof v === "number" ? v : fallback);
-    return pb
-      ? {
-          category: it.category,
-          unitCost: n(pb.unitCost, 0) ?? 0,
-          frequencyPerYear: n(pb.frequencyPerYear, 0) ?? 0,
-          durationYears: n(pb.durationYears, null),
-          isLifetime: pb.isLifetime === true,
-        }
-      : { category: it.category, unitCost: it.unitCost, frequencyPerYear: it.frequencyPerYear, durationYears: it.durationYears, isLifetime: it.isLifetime };
+    const pj = vw(it).projection;
+    // Null only when a basis exists and records no projection — in which case
+    // there is nothing honest to re-project, and the BASIS_INCOMPLETE finding
+    // is already blocking the export.
+    return pj ?? { category: it.category, unitCost: 0, frequencyPerYear: 0, durationYears: null, isLifetime: false };
   };
   const pvUnder = (disc: number, infl: number) =>
-    reportItems.reduce((s, it) => s + project(pvInputs(it), { lifeExpectancyYears: life, discountRate: disc, medicalInflation: infl, geographicFactor: 1 }).presentValue, 0);
+    reportItems.reduce((s, it) => s + project({ category: it.category, ...pvInputs(it) }, { lifeExpectancyYears: life, discountRate: disc, medicalInflation: infl, geographicFactor: 1 }).presentValue, 0);
   const sens: TableRow[] = [rowOf([td("Discount ↓ / Inflation →", { header: true, width: 28 }), ...infls.map((inf) => td(`${(inf * 100).toFixed(1)}%`, { header: true, width: 24, align: AlignmentType.RIGHT }))])];
   for (const disc of discs) {
     sens.push(
@@ -1462,7 +1538,19 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
       ),
     );
     for (const i of speculative) body.push(bullet(`${vw(i).service ?? "not recorded"}${i.missingSupport ? ` — ${lc(i.missingSupport)}` : ""}.`));
-    for (const i of excludedForReview) body.push(bullet(`${vw(i).service ?? "not recorded"} — ${vw(i).physicianStatus === "REJECTED" ? "not endorsed on physician review" : "pending physician confirmation"}.`));
+    for (const i of excludedForReview) {
+      const v = vw(i);
+      // An incomplete basis cannot say why the item is out, and guessing
+      // "pending physician confirmation" would be a claim about a review that
+      // may never have happened.
+      const why =
+        v.basisState === "INCOMPLETE"
+          ? `inclusion ${NOT_RECORDED} — the recorded basis for this recommendation is incomplete`
+          : v.physicianStatus === "REJECTED"
+            ? "not endorsed on physician review"
+            : "pending physician confirmation";
+      body.push(bullet(`${v.service ?? NOT_RECORDED} — ${why}.`));
+    }
   }
   body.push(
     p(
@@ -1569,10 +1657,33 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
         td(vw(it).service ?? "not recorded", { fill }),
         // The recorded supporting diagnosis; the live condition only where no
         // basis exists, which is a blocked draft.
-        td(vw(it).supportingDiagnosis ?? (vw(it).authoritative ? "not recorded" : cond?.name || c.diagnosis || "—"), { fill }),
-        td(cond?.supportingRecords || "Chronology & records index", { fill }),
-        td(it.literatureSupport || it.evidenceStrength || "Case-specific", { fill }),
-        td(vw(it).pricingSource ?? (vw(it).authoritative ? "not recorded" : "UCR benchmark"), { fill }),
+        td(vw(it).supportingDiagnosis ?? (vw(it).basisState === "ABSENT" ? cond?.name || c.diagnosis || "—" : NOT_RECORDED), { fill }),
+        // Records and literature come from the RECORDED evidence for this item.
+        // These read the live condition column and the live literature field,
+        // so the traceability table cited support the approval never covered.
+        td(
+          vw(it).basisState === "ABSENT"
+            ? cond?.supportingRecords || "Chronology & records index"
+            : (() => {
+                const ev = vw(it).acceptedEvidence;
+                if (!ev) return NOT_RECORDED;
+                const n = Object.values(ev).reduce((t, xs) => t + (Array.isArray(xs) ? xs.length : 0), 0);
+                return `${n} recorded finding(s); see the evidence ledger`;
+              })(),
+          { fill },
+        ),
+        td(
+          vw(it).basisState === "ABSENT"
+            ? it.literatureSupport || it.evidenceStrength || "Case-specific"
+            : (() => {
+                const lit = vw(it).literature;
+                if (!lit) return NOT_RECORDED;
+                if (!lit.length) return "None recorded for this item";
+                return lit.slice(0, 2).map((l) => String((l as Record<string, unknown>).title ?? "")).filter(Boolean).join("; ") || NOT_RECORDED;
+              })(),
+          { fill },
+        ),
+        td(vw(it).pricingSource ?? (vw(it).basisState === "ABSENT" ? "UCR benchmark" : NOT_RECORDED), { fill }),
       ]),
     );
   });

@@ -284,7 +284,7 @@ describe("the engine marks its own guidance as retrieved", () => {
     const src = readFileSync(join(__dirname, "report.ts"), "utf8");
     // The literature block renders from recordedBasis.literature; the guideline
     // statement never draws on it.
-    expect(src).toMatch(/const rLiterature = recordedBasis\?\.literature/);
+    expect(src).toMatch(/const rLiterature = \(noBasis \? dossier\.literature : V\.literature/);
     const gs = readFileSync(join(__dirname, "guidelineStatement.ts"), "utf8");
     expect(gs).not.toMatch(/literature/i);
   });

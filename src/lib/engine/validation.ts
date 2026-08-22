@@ -22,6 +22,7 @@ import { buildRecommendationDossier, validateRecommendationCompleteness, type Do
 import { compareBasis } from "@/lib/engine/recommendationBasis";
 import { isBasisDivergenceFinding, encodeBasisFinding, decodeBasisFinding, reconciliationCovers, reconcilable, statusForFinding, snapshotOf, snapshotDifferences, type BasisSnapshot } from "@/lib/engine/basisReconciliation";
 import { loadRecordedBases, unreadableBasisFinding, type BasisStore } from "@/lib/engine/basisStore";
+import { assessBasisCompleteness, incompleteBasisFinding, isIncompleteBasisFinding } from "@/lib/engine/basisCompleteness";
 import { assembleBasis } from "@/lib/engine/basisAssembly";
 import { CHRONOLOGY_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
 import { resolveRecommendationCondition } from "@/lib/engine/recommendationCondition";
@@ -127,6 +128,24 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
         assumptions: { ...caseAssumptions, pricedAt: (it as { pricedAt?: Date | null }).pricedAt?.toISOString() ?? null, conditionName: cond?.name ?? null },
       }),
     );
+    // A basis that EXISTS but cannot answer is its own defect, distinct from
+    // one that is missing and from one that has drifted. Without this, the
+    // report fell back to the live row wherever a subfield was absent and
+    // nothing said so.
+    const rawBasis = basisLoad.readable ? basisLoad.byItem.get(id) ?? null : null;
+    if (rawBasis) {
+      const completeness = assessBasisCompleteness(rawBasis);
+      if (completeness.state === "INCOMPLETE") {
+        basisFindings.push(
+          incompleteBasisFinding({
+            service,
+            futureCareItemId: id,
+            missing: completeness.missing,
+            fingerprint: completeness.fingerprint!,
+          }),
+        );
+      }
+    }
     if (check && check.state !== "CURRENT") {
       basisFindings.push({
         service,
