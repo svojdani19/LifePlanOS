@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { supportClassForDecision, classifyExistingItem, needsReclassification, reviewDecisionFields, refreshAfterReview } from "@/lib/engine/reviewDecision";
+import { supportClassForDecision, classifyExistingItem, needsReclassification, reviewDecisionFields, refreshAfterReview, type ReviewRefreshDeps } from "@/lib/engine/reviewDecision";
 import { entersSupportedTotal, computePlanTotals } from "@/lib/engine/supportClass";
 
 describe("a review decision writes the classification, not just the status", () => {
@@ -84,7 +84,7 @@ describe("the backfill is deterministic, idempotent, and agrees with the routes"
 });
 
 describe("the safeguards a decision triggers do not depend on which button produced it", () => {
-  const deps = () => {
+  const deps = (): { calls: string[]; deps: ReviewRefreshDeps } => {
     const calls: string[] = [];
     return {
       calls,
@@ -119,7 +119,7 @@ describe("the safeguards a decision triggers do not depend on which button produ
   it("marks a review decision so the reasoning pass records a fresh verdict", async () => {
     let opts: Record<string, unknown> = {};
     const { deps: d } = deps();
-    d.persistCaseReasoning = async (_c: string, _f: string, o: Record<string, unknown>) => { opts = o; };
+    d.persistCaseReasoning = async (_c, _f, o) => { opts = o as Record<string, unknown>; };
     await refreshAfterReview(d, "case-1", "firm-1", { recommendationIds: ["i-1"], actorUserId: "u-1" });
     expect(opts.reviewDecision).toBe(true);
     expect(opts.recommendationIds).toEqual(["i-1"]);
