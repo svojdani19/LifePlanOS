@@ -2280,7 +2280,10 @@ function assessmentForItem(it: AnyRec, data: AnyRec): ReasoningAssessment {
   const { kase, interviews } = caseInputs(it, data);
   const items = (data.futureCareItems ?? []) as ReasoningItem[];
   const { flags, replacedByActive } = detectSetConflicts(items);
-  return buildReasoningAssessment(it as ReasoningItem, (data.conditions ?? []) as never, (data.chronologyEvents ?? []) as DossierChronoEvent[], kase, interviews as never, { conflicts: flags.get(it.id) ?? [], replacedByActive: replacedByActive.has(it.id) }, ((data.physicianEvidence ?? []) as AnyRec[]).filter((e) => e.futureCareItemId === it.id) as never);
+  return buildReasoningAssessment(it as ReasoningItem, (data.conditions ?? []) as never, (data.chronologyEvents ?? []) as DossierChronoEvent[], kase, interviews as never, { conflicts: flags.get(it.id) ?? [], replacedByActive: replacedByActive.has(it.id) }, ((data.physicianEvidence ?? []) as AnyRec[]).filter((e) => e.futureCareItemId === it.id) as never,
+    // The RECORDED basis, so the panel's reasoning and its evidence display
+    // cannot come from different readings of the case.
+    (((data.recommendationBases ?? []) as AnyRec[]).find((b) => b.futureCareItemId === it.id) as never) ?? null);
 }
 
 

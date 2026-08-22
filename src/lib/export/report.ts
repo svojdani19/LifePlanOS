@@ -24,6 +24,7 @@ import { seriesCitation, seriesMembersOf } from "@/lib/records/seriesCitation";
 import { runIntegrityCheck, reviewLabel, evaluateCitation, functionalFinding, type RecInput, type CondInput, type PerItem, type IntegrityFinding } from "@/lib/engine/integrity";
 import { buildRecommendationDossier, type DossierCondition, type DossierChronoEvent, type DossierCase, type EvidenceItem } from "@/lib/engine/medicalNecessity";
 import { compareEvidenceSets, describeEvidenceSet, type EvidenceRowIdentity } from "@/lib/engine/evidenceSet";
+import { buildBasis, compareBasis } from "@/lib/engine/recommendationBasis";
 import { itemIsSupported, supportClassOf, SUPPORT_LABEL, computePlanTotals } from "@/lib/engine/supportClass";
 import { buildReasoningAssessment, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningItem, type ReasoningAssessment } from "@/lib/engine/clinicalReasoning";
 import { referencesFor, guidelineSourcesFor } from "@/lib/references/sources";
@@ -405,6 +406,11 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     page: number | null;
     verbatim: boolean;
   }[];
+  // One recorded basis per item, loaded once.
+  const basisByItem = new Map<string, unknown>(
+    (((await prisma.recommendationBasis?.findMany({ where: { caseId } }).catch(() => [])) ?? []) as { futureCareItemId: string }[]).map((b) => [b.futureCareItemId, b]),
+  );
+
   const recordedByItem = new Map<string, typeof ledgerRows>();
   for (const r of ledgerRows) if (r.addedById == null) recordedByItem.set(r.futureCareItemId, [...(recordedByItem.get(r.futureCareItemId) ?? []), r]);
   const assessmentByRec = new Map(persistedAssessments.map((r) => [r.recommendationId, r]));
@@ -441,13 +447,23 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
       ]),
     );
 
+    // ── The RECORDED basis is what the report prints ──────────────────────
+    // This rebuilt its own dossier, so the exported document could state a
+    // different necessity narrative than the panel showed and the physician
+    // approved. The recorded narrative wins; a divergence is disclosed, and
+    // final export is blocked by the validation finding rather than by silently
+    // printing either version.
+    const recordedBasis = basisByItem.get(it.id) as { necessityNarrative?: string | null; basisHash?: string | null } | undefined;
+    const basisCheck = compareBasis(recordedBasis ?? null, buildBasis(it as never, dossier));
+    const necessityText = recordedBasis?.necessityNarrative || dossier.medicalNecessity;
+
     // Medical necessity — the physician narrative (why, patient-specific).
     out.push(new Paragraph({ spacing: { before: 120, after: 40 }, children: [new TextRun({ text: "Medical necessity.", bold: true, size: 21, color: NAVY })] }));
     out.push(
       p(
         expertVoice
-          ? dossier.medicalNecessity
-          : dossier.medicalNecessity.replace(
+          ? necessityText
+          : necessityText.replace(
               /it is my opinion, to a reasonable degree of medical probability, that this care is required\./g,
               "the record-supported analysis identifies this care as required under the methodology's probability standard, subject to professional confirmation.",
             ),
@@ -489,6 +505,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     }
     const setNotice = describeEvidenceSet(setStatus);
     if (setNotice) out.push(labeled("Evidence ledger status", setNotice));
+    if (basisCheck.notice) out.push(labeled("Recorded basis status", basisCheck.notice));
 
     // Applicable treatment-guideline sources (ODG first, then specialty-apt) —
     // the basis on which medical necessity now/in future is assessed (§9).
@@ -554,6 +571,9 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
           dossierInterviews as never,
           { conflicts: reasoningConflicts.get(it.id) ?? [], replacedByActive: reasoningReplaced.has(it.id) },
           ledgerRows.filter((r) => r.futureCareItemId === it.id && r.addedById != null),
+          // The RECORDED basis. The report is the artifact that goes to court;
+          // it must reason from the record, not from its own rebuild.
+          (basisByItem.get(it.id) as never) ?? null,
         );
     out.push(labeled(
       "Clinical reasoning",

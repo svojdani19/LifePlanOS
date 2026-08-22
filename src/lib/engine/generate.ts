@@ -615,6 +615,26 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
     console.warn(`[snapshot] could not freeze generator output for ${caseId}:`, e);
   }
 
+  // ── Enrich the conditions BEFORE anything records what they support ───────
+  // These ran near the end, after the evidence ledger and the recommendation
+  // bases had already been built and persisted. So a basis was snapshotted
+  // before its condition had any guidelines attached, and every later reader —
+  // panel, report, validation — derived a DIFFERENT dossier from the enriched
+  // condition. Every item on the reference case reported BASIS_STALE the
+  // instant it was generated.
+  //
+  // Both need the future-care items, which exist by now, so they belong here:
+  // the basis must be the last thing recorded, from inputs that are final.
+  //
+  // Standard-of-care analysis per causation item: locate real clinical practice
+  // guidelines, quote their direct language verbatim, and map the documented
+  // care against them. Best-effort — never blocks or fabricates.
+  await generateStandardOfCare(caseId).catch(() => {});
+
+  // Attach the strongest real supporting article (PubMed) to each item.
+  // Best-effort — never blocks or fabricates; skipped when PubMed is unreachable.
+  await enrichCitations(caseId).catch(() => {});
+
   // ── Evidence ledger ────────────────────────────────────────────────────────
   // Which sources support WHICH claim about WHICH recommendation, persisted
   // once from the same builder the panel and the report call — so the three
@@ -692,7 +712,9 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
               supportClass: b.supportClass,
               supportReason: b.supportReason,
               acceptedEvidence: b.acceptedEvidence as never,
+              evidenceProvenance: b.evidenceProvenance as never,
               claimBasis: b.claimBasis as never,
+              probabilityBasis: b.probabilityBasis as never,
               missingPremises: b.missingPremises as never,
               necessityNarrative: b.necessityNarrative,
               producerVersion: b.producerVersion,
@@ -787,14 +809,6 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
 
   await generateReviews(caseId);
 
-  // Standard-of-care analysis per causation item: locate real clinical practice
-  // guidelines, quote their direct language verbatim, and map the documented
-  // care against them. Best-effort — never blocks or fabricates.
-  await generateStandardOfCare(caseId).catch(() => {});
-
-  // Attach the strongest real supporting article (PubMed) to each item.
-  // Best-effort — never blocks or fabricates; skipped when PubMed is unreachable.
-  await enrichCitations(caseId).catch(() => {});
 
   // Materialize the evidence graph from the structured output above (P2).
   await rebuildEvidenceGraph(caseId, c.firmId).catch(() => {});

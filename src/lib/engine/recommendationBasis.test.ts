@@ -75,7 +75,8 @@ describe("the hash decides staleness, and decides it on the right things", () =>
       serviceFamily: reworded.serviceFamily, conditionId: reworded.conditionId, bodyRegion: reworded.bodyRegion,
       spinalLevels: reworded.spinalLevels, laterality: reworded.laterality, supportClass: reworded.supportClass,
       supportReason: reworded.supportReason, acceptedEvidence: reworded.acceptedEvidence,
-      evidenceProvenance: reworded.evidenceProvenance, claimBasis: reworded.claimBasis, missingPremises: reworded.missingPremises,
+      evidenceProvenance: reworded.evidenceProvenance, claimBasis: reworded.claimBasis,
+      probabilityBasis: reworded.probabilityBasis, missingPremises: reworded.missingPremises,
     };
     expect(basisHash(core)).toBe(b.basisHash);
   });
@@ -90,6 +91,7 @@ describe("the hash decides staleness, and decides it on the right things", () =>
       acceptedEvidence: { ...b.acceptedEvidence, objectiveFindings: [...b.acceptedEvidence.objectiveFindings].reverse() },
       evidenceProvenance: [...b.evidenceProvenance].reverse(),
       claimBasis: b.claimBasis,
+      probabilityBasis: b.probabilityBasis,
       missingPremises: [...b.missingPremises].reverse(),
     };
     expect(basisHash(shuffled)).toBe(b.basisHash);
@@ -132,7 +134,8 @@ describe("citation identity is part of the hash, not just the quote", () => {
       serviceFamily: b.serviceFamily, conditionId: b.conditionId, bodyRegion: b.bodyRegion,
       spinalLevels: b.spinalLevels, laterality: b.laterality, supportClass: b.supportClass,
       supportReason: b.supportReason, acceptedEvidence: b.acceptedEvidence,
-      evidenceProvenance: b.evidenceProvenance, claimBasis: b.claimBasis, missingPremises: b.missingPremises,
+      evidenceProvenance: b.evidenceProvenance, claimBasis: b.claimBasis,
+      probabilityBasis: b.probabilityBasis, missingPremises: b.missingPremises,
       ...over,
     };
   };
@@ -205,9 +208,63 @@ describe("frequency, duration and cost each carry their own basis", () => {
       serviceFamily: b.serviceFamily, conditionId: b.conditionId, bodyRegion: b.bodyRegion,
       spinalLevels: b.spinalLevels, laterality: b.laterality, supportClass: b.supportClass,
       supportReason: b.supportReason, acceptedEvidence: b.acceptedEvidence,
-      evidenceProvenance: b.evidenceProvenance, missingPremises: b.missingPremises,
+      evidenceProvenance: b.evidenceProvenance, probabilityBasis: b.probabilityBasis, missingPremises: b.missingPremises,
       claimBasis: { ...b.claimBasis, frequency: { kind: "RECORD" as const, statement: "The record states a cadence for this service." } },
     };
     expect(basisHash(core)).not.toBe(b.basisHash);
+  });
+});
+
+describe("the probability determination is material, not presentation", () => {
+  it("is carried in the basis", () => {
+    const b = basisOf();
+    expect(b.probabilityBasis.classification).toMatch(/more likely than not|reasonable possibility/);
+    expect(b.probabilityBasis.factors.length).toBeGreaterThan(0);
+  });
+
+  it("changes the hash when the CLASSIFICATION flips", () => {
+    // "More likely than not" is a clinical and legal claim. Left out of the
+    // hash, it could flip from a reasonable possibility to a probability
+    // without invalidating an approval given on the other reading.
+    const b = basisOf();
+    const core = (pb: typeof b.probabilityBasis) => ({
+      futureCareItemId: b.futureCareItemId, lineageId: b.lineageId, interventionId: b.interventionId,
+      serviceFamily: b.serviceFamily, conditionId: b.conditionId, bodyRegion: b.bodyRegion,
+      spinalLevels: b.spinalLevels, laterality: b.laterality, supportClass: b.supportClass,
+      supportReason: b.supportReason, acceptedEvidence: b.acceptedEvidence,
+      evidenceProvenance: b.evidenceProvenance, claimBasis: b.claimBasis,
+      probabilityBasis: pb, missingPremises: b.missingPremises,
+    });
+    expect(basisHash(core({ ...b.probabilityBasis, classification: "reasonable possibility" }))).not.toBe(b.basisHash);
+  });
+
+  it("changes the hash when a FACTOR's presence changes", () => {
+    const b = basisOf();
+    const flipped = { ...b.probabilityBasis, factors: b.probabilityBasis.factors.map((f, i) => (i === 0 ? { ...f, present: !f.present } : f)) };
+    const core = {
+      futureCareItemId: b.futureCareItemId, lineageId: b.lineageId, interventionId: b.interventionId,
+      serviceFamily: b.serviceFamily, conditionId: b.conditionId, bodyRegion: b.bodyRegion,
+      spinalLevels: b.spinalLevels, laterality: b.laterality, supportClass: b.supportClass,
+      supportReason: b.supportReason, acceptedEvidence: b.acceptedEvidence,
+      evidenceProvenance: b.evidenceProvenance, claimBasis: b.claimBasis,
+      probabilityBasis: flipped, missingPremises: b.missingPremises,
+    };
+    expect(basisHash(core)).not.toBe(b.basisHash);
+  });
+
+  it("does NOT change the hash when only the STATEMENT is reworded", () => {
+    // The statement is prose generated from the classification and factors.
+    // Rewording it is stylistic and must not stale an approval.
+    const b = basisOf();
+    const core = {
+      futureCareItemId: b.futureCareItemId, lineageId: b.lineageId, interventionId: b.interventionId,
+      serviceFamily: b.serviceFamily, conditionId: b.conditionId, bodyRegion: b.bodyRegion,
+      spinalLevels: b.spinalLevels, laterality: b.laterality, supportClass: b.supportClass,
+      supportReason: b.supportReason, acceptedEvidence: b.acceptedEvidence,
+      evidenceProvenance: b.evidenceProvenance, claimBasis: b.claimBasis,
+      probabilityBasis: { ...b.probabilityBasis, statement: "Completely different wording, same determination." },
+      missingPremises: b.missingPremises,
+    };
+    expect(basisHash(core)).toBe(b.basisHash);
   });
 });

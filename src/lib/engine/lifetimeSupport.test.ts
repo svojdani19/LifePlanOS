@@ -75,8 +75,8 @@ function item(overrides: Partial<ReasoningItem> = {}): ReasoningItem {
 // ── (1) Flipping ONLY isLifetime changes no clinical fact ────────────────────
 describe("isLifetime is a projection horizon only (#1, #15 regression)", () => {
   it("flipping only isLifetime changes no chronicity, trajectory, sufficiency, or confidence", () => {
-    const off = buildReasoningAssessment(item({ isLifetime: false, durationYears: 3 }), [fractureAcute], [], kase);
-    const on = buildReasoningAssessment(item({ isLifetime: true, durationYears: null }), [fractureAcute], [], kase);
+    const off = buildReasoningAssessment(item({ isLifetime: false, durationYears: 3 }), [fractureAcute], [], kase, [], undefined, [], null);
+    const on = buildReasoningAssessment(item({ isLifetime: true, durationYears: null }), [fractureAcute], [], kase, [], undefined, [], null);
     expect(on.conditionChronicity).toBe(off.conditionChronicity);
     expect(on.conditionChronicity).toBe("acute"); // from the documented record, not the horizon
     expect(on.conditionTrajectory).toBe(off.conditionTrajectory);
@@ -99,14 +99,14 @@ describe("isLifetime is a projection horizon only (#1, #15 regression)", () => {
   // progressive" → "lifetime supported" is now impossible without independent
   // support.
   it("#15 the circular chain isLifetime → chronic/progressive → lifetime-supported is broken", () => {
-    const a = buildReasoningAssessment(item({ isLifetime: true }), [fractureAcute], [], kase);
+    const a = buildReasoningAssessment(item({ isLifetime: true }), [fractureAcute], [], kase, [], undefined, [], null);
     expect(a.conditionChronicity).toBe("acute");
     expect(a.conditionTrajectory).toBe("undetermined");
     expect(a.durationSupport.clinicallySupported).toBe(false);
     expect(a.durationRationale).not.toMatch(/chronic and progressive/i);
     expect(a.lifecycleStatus).not.toBe("VALIDATED");
     // …and the chain closes only through independent evidence:
-    const b = buildReasoningAssessment(item({ isLifetime: true }), [fractureChronicPrognosis], [], kase);
+    const b = buildReasoningAssessment(item({ isLifetime: true }), [fractureChronicPrognosis], [], kase, [], undefined, [], null);
     expect(b.durationSupport.clinicallySupported).toBe(true);
   });
 });
@@ -114,7 +114,7 @@ describe("isLifetime is a projection horizon only (#1, #15 regression)", () => {
 // ── (2) No manufactured progression ──────────────────────────────────────────
 describe("no manufactured progression (#2)", () => {
   it("never invents a progressive trajectory or a chronic-progression narrative from the horizon", () => {
-    const a = buildReasoningAssessment(item({ isLifetime: true }), [fractureAcute], [], kase);
+    const a = buildReasoningAssessment(item({ isLifetime: true }), [fractureAcute], [], kase, [], undefined, [], null);
     expect(a.conditionTrajectory).toBe("undetermined");
     expect(a.medicalNecessityRationale).not.toMatch(/chronic and (expected to )?progress/i);
     expect(a.medicalNecessityRationale).toMatch(/projection assumption|planning assumption/i);
@@ -122,7 +122,7 @@ describe("no manufactured progression (#2)", () => {
 
   it("states a stable-to-worsening trajectory only from documented condition evidence", () => {
     const degen: Cond = { ...fractureAcute, id: "cond-deg", name: "Post-traumatic osteoarthritis of the right knee, progressive on serial imaging" };
-    const a = buildReasoningAssessment(item({ isLifetime: false, durationYears: 3 }), [degen], [], kase);
+    const a = buildReasoningAssessment(item({ isLifetime: false, durationYears: 3 }), [degen], [], kase, [], undefined, [], null);
     expect(a.conditionTrajectory).toMatch(/per documented condition evidence/i);
   });
 });
@@ -194,7 +194,7 @@ describe("assessLifetimeSupport — decision model (#3–#8)", () => {
     expect(r.mayEnterFinalizedTotals).toBe(true); // existing adoption policy preserved
     expect(r.uncertaintyNotes.join(" ")).toMatch(/professional adoption .* not treating-record evidence/i);
     // And the condition itself stays acute in the assessment:
-    const a = buildReasoningAssessment(item({ physicianStatus: "APPROVED" }), [fractureAcute], [], kase);
+    const a = buildReasoningAssessment(item({ physicianStatus: "APPROVED" }), [fractureAcute], [], kase, [], undefined, [], null);
     expect(a.conditionChronicity).toBe("acute");
   });
 
@@ -276,7 +276,7 @@ describe("guideline duration claims (#21–#26)", () => {
       ...fractureAcute,
       socAnalysis: { guidelines: [{ title: "Knee injury rehabilitation guideline", year: "2022", quote: "Supervised rehabilitation improves functional outcomes after knee injury.", relevance: { evidenceLevel: 1, evidenceLabel: "Clinical practice guideline" } }] },
     };
-    const a = buildReasoningAssessment(item(), [genericGuideline], [], kase);
+    const a = buildReasoningAssessment(item(), [genericGuideline], [], kase, [], undefined, [], null);
     expect(a.durationSupport.clinicallySupported).toBe(false);
     expect(a.durationSupport.status).toBe("ASSUMPTION_PENDING_REVIEW");
     // …while the guideline still supports necessity elsewhere:
@@ -286,7 +286,7 @@ describe("guideline duration claims (#21–#26)", () => {
   });
 
   it("#23 a verified duration claim supports it, and the basis carries sourceId + quote", () => {
-    const a = buildReasoningAssessment(item(), [fractureWithGuideline], [], kase);
+    const a = buildReasoningAssessment(item(), [fractureWithGuideline], [], kase, [], undefined, [], null);
     expect(a.durationSupport.status).toBe("SUPPORTED_BY_GUIDELINE");
     expect(a.durationSupport.clinicallySupported).toBe(true);
     const basis = a.durationSupport.bases.find((b) => b.kind === "guideline_natural_history");
@@ -308,7 +308,7 @@ describe("guideline duration claims (#21–#26)", () => {
       ...fractureAcute,
       socAnalysis: { guidelines: [{ title: "Rotator cuff tear management guideline", year: "2021", quote: "Progressive degeneration of the shoulder is expected; lifelong surveillance is recommended.", relevance: { evidenceLevel: 1 } }] },
     };
-    const a = buildReasoningAssessment(item({ service: "Knee brace replacement", category: "MOBILITY_AID" }), [shoulderGuideline], [], kase);
+    const a = buildReasoningAssessment(item({ service: "Knee brace replacement", category: "MOBILITY_AID" }), [shoulderGuideline], [], kase, [], undefined, [], null);
     expect(a.durationSupport.clinicallySupported).toBe(false);
     // Wrong service: a service-specific claim counts only when the item's
     // service matches its stated scope.
@@ -443,7 +443,7 @@ describe("deriveGuidelineDurationClaim — construction-site derivation", () => 
 // ── (9)–(10) Narrative honesty ───────────────────────────────────────────────
 describe("narrative honesty (#9–#10)", () => {
   it("#9 unsupported lifetime narratives use projection/assumption language and never claim chronic progression", () => {
-    const a = buildReasoningAssessment(item(), [fractureAcute], [], kase);
+    const a = buildReasoningAssessment(item(), [fractureAcute], [], kase, [], undefined, [], null);
     expect(a.durationRationale).toMatch(/remaining-lifetime scenario is shown as a projection assumption/i);
     expect(a.durationRationale).toMatch(/not itself evidence of permanence/i);
     expect(a.durationRationale).not.toMatch(/chronic|progressive/i);
@@ -453,7 +453,7 @@ describe("narrative honesty (#9–#10)", () => {
   });
 
   it("#10 supported lifetime narratives name the independent basis", () => {
-    const a = buildReasoningAssessment(item(), [fractureChronicPrognosis], [], kase);
+    const a = buildReasoningAssessment(item(), [fractureChronicPrognosis], [], kase, [], undefined, [], null);
     expect(a.durationRationale).toMatch(/remaining-lifetime projection is based on documented chronicity in the condition record \(prognosis\.pdf, p\. 12\)/i);
     expect(a.durationRationale).toMatch(/remaining life-expectancy horizon/i);
     expect(a.weakeningEvidence.some((x) => x.claim === "duration")).toBe(false); // nothing manufactured
@@ -485,7 +485,7 @@ describe("unsupported lifetime scenarios stay disclosed (#12)", () => {
     expect(f?.exportBlocking).toBe(true);
     expect(f?.issue).toMatch(/projection assumption/i);
     // The assessment still carries the full lifetime projection — nothing dropped.
-    const a = buildReasoningAssessment(pending, [fractureAcute], [], kase);
+    const a = buildReasoningAssessment(pending, [fractureAcute], [], kase, [], undefined, [], null);
     expect(a.durationClass).toBe("LIFETIME");
     expect(["included", "excluded", "contingency"]).toContain(a.inclusionInTotalsStatus);
   });
@@ -502,21 +502,21 @@ describe("unsupported lifetime scenarios stay disclosed (#12)", () => {
 // ── (13) Lifecycle — duration-support changes are material ───────────────────
 describe("duration-support changes are material (#13)", () => {
   it("new duration-support evidence changes the material hash (supersede + approval invalidation trigger)", () => {
-    const before = buildReasoningAssessment(item(), [fractureAcute], [], kase);
-    const after = buildReasoningAssessment(item(), [fractureChronicPrognosis], [], kase);
+    const before = buildReasoningAssessment(item(), [fractureAcute], [], kase, [], undefined, [], null);
+    const after = buildReasoningAssessment(item(), [fractureChronicPrognosis], [], kase, [], undefined, [], null);
     expect(after.materialHash).not.toBe(before.materialHash);
     expect(after.durationSupport.fingerprint).not.toBe(before.durationSupport.fingerprint);
   });
 
   it("a new attributed professional duration rationale changes the material hash", () => {
-    const noOpinion = buildReasoningAssessment(item({ physicianStatus: "MODIFIED", physicianNote: "Please verify the unit pricing." }), [fractureAcute], [], kase);
-    const withOpinion = buildReasoningAssessment(item({ physicianStatus: "MODIFIED", physicianNote: "Lifetime support is required given the permanent deficit." }), [fractureAcute], [], kase);
+    const noOpinion = buildReasoningAssessment(item({ physicianStatus: "MODIFIED", physicianNote: "Please verify the unit pricing." }), [fractureAcute], [], kase, [], undefined, [], null);
+    const withOpinion = buildReasoningAssessment(item({ physicianStatus: "MODIFIED", physicianNote: "Lifetime support is required given the permanent deficit." }), [fractureAcute], [], kase, [], undefined, [], null);
     expect(withOpinion.materialHash).not.toBe(noOpinion.materialHash);
   });
 
   it("an unchanged item re-runs to an identical hash (idempotent cache key)", () => {
-    const a = buildReasoningAssessment(item(), [fractureAcute], [], kase);
-    const b = buildReasoningAssessment(item(), [fractureAcute], [], kase);
+    const a = buildReasoningAssessment(item(), [fractureAcute], [], kase, [], undefined, [], null);
+    const b = buildReasoningAssessment(item(), [fractureAcute], [], kase, [], undefined, [], null);
     expect(b.materialHash).toBe(a.materialHash);
   });
 });
@@ -524,16 +524,16 @@ describe("duration-support changes are material (#13)", () => {
 // ── (14) Non-lifetime duration classes unchanged ─────────────────────────────
 describe("short-term / fixed / episodic / conditional items unchanged (#14)", () => {
   it("keeps the existing classes and rationales for every non-lifetime duration", () => {
-    const one = buildReasoningAssessment(item({ isLifetime: false, durationYears: 0 }), [fractureAcute], [], kase);
+    const one = buildReasoningAssessment(item({ isLifetime: false, durationYears: 0 }), [fractureAcute], [], kase, [], undefined, [], null);
     expect(one.durationClass).toBe("ONE_TIME");
-    const short = buildReasoningAssessment(item({ isLifetime: false, durationYears: 1 }), [fractureAcute], [], kase);
+    const short = buildReasoningAssessment(item({ isLifetime: false, durationYears: 1 }), [fractureAcute], [], kase, [], undefined, [], null);
     expect(short.durationClass).toBe("SHORT_TERM");
-    const episodic = buildReasoningAssessment(item({ isLifetime: false, durationYears: 5, service: "Physical therapy", category: "PHYSICAL_THERAPY" }), [fractureAcute], [], kase);
+    const episodic = buildReasoningAssessment(item({ isLifetime: false, durationYears: 5, service: "Physical therapy", category: "PHYSICAL_THERAPY" }), [fractureAcute], [], kase, [], undefined, [], null);
     expect(episodic.durationClass).toBe("EPISODIC");
-    const multi = buildReasoningAssessment(item({ isLifetime: false, durationYears: 5 }), [fractureAcute], [], kase);
+    const multi = buildReasoningAssessment(item({ isLifetime: false, durationYears: 5 }), [fractureAcute], [], kase, [], undefined, [], null);
     expect(multi.durationClass).toBe("MULTI_YEAR");
     expect(multi.durationRationale).toMatch(/multi-year course/i);
-    const conditional = buildReasoningAssessment(item({ isLifetime: false, startTrigger: "loss of caregiver support" }), [fractureAcute], [], kase);
+    const conditional = buildReasoningAssessment(item({ isLifetime: false, startTrigger: "loss of caregiver support" }), [fractureAcute], [], kase, [], undefined, [], null);
     expect(conditional.durationClass).toBe("CONDITIONAL");
     expect(conditional.durationRationale).toMatch(/excluded from finalized totals until the trigger is met/i);
   });

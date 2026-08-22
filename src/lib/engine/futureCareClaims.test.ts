@@ -53,7 +53,7 @@ const event = (over: Partial<DossierChronoEvent> = {}): DossierChronoEvent =>
   ({ eventDate: new Date("2025-03-14"), summary: "Lumbar visit", provider: "A. Rivera, MD", sourcePage: 1, ...over }) as DossierChronoEvent;
 
 const assess = (it: DossierItem, chronology: DossierChronoEvent[], cond = condition()) =>
-  buildReasoningAssessment(it as never, [cond as never], chronology, KASE);
+  buildReasoningAssessment(it as never, [cond as never], chronology, KASE, [], undefined, [], null);
 
 describe("frequency needs a documented cadence, not a documented treatment", () => {
   it("does not call the frequency grounded when the record only shows that treatment happened", () => {

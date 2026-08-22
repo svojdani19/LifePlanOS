@@ -1,0 +1,13 @@
+-- The probability determination belongs in the basis.
+--
+-- "More likely than not" is a clinical and legal claim, not a rendering choice.
+-- Left out of the basis, the classification could flip — from a reasonable
+-- possibility to a probability — without invalidating an approval given on the
+-- other reading.
+--
+-- The generated statement is stored for rendering and excluded from the hash;
+-- the classification and which factors are present are hashed.
+--
+-- Additive and reversible:
+--   ALTER TABLE "RecommendationBasis" DROP COLUMN "probabilityBasis";
+ALTER TABLE "RecommendationBasis" ADD COLUMN IF NOT EXISTS "probabilityBasis" JSONB;

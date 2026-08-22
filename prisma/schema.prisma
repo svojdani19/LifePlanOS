@@ -1616,13 +1616,23 @@ model RecommendationBasis {
 
   /// The accepted evidence, by role: diagnoses, objective findings, functional
   /// limitations, prior treatment, treatment response, guidelines, contrary.
-  acceptedEvidence Json
+  acceptedEvidence   Json
+  /// Full citation identity for every accepted row: document, encounter,
+  /// chronology event, page, field, stance, verbatim status and source
+  /// fingerprint. Hashed AND stored — hashing provenance without persisting it
+  /// made a divergence impossible to diagnose.
+  evidenceProvenance Json?
   /// Prerequisites and whether each is satisfied.
-  prerequisites    Json?
+  prerequisites      Json?
   /// Frequency / duration / cost basis: RECORD | GUIDELINE | PROFESSIONAL | ASSUMPTION.
-  claimBasis       Json?
+  claimBasis         Json?
+  /// The probability determination. Material, not presentation: "more likely
+  /// than not" is a clinical and legal claim, and letting it flip without
+  /// invalidating an approval would let a plan be signed on one reading and
+  /// printed on another.
+  probabilityBasis   Json?
   /// Premises the record does not supply.
-  missingPremises  Json?
+  missingPremises    Json?
 
   /// The deterministic narrative, persisted rather than regenerated per render.
   necessityNarrative String?

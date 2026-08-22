@@ -144,6 +144,12 @@ export async function persistCaseReasoning(caseId: string, firmId: string, opts:
   const conds = conditions as unknown as (CondInput & DossierCondition & { id: string })[];
   const caseVersion = latestSnapshot?.version ?? null;
 
+  // The recorded basis per item. The assessment must reason from the same
+  // record the panel and the report render, not from its own rebuild.
+  const basisByItem = new Map<string, unknown>(
+    (((await prisma.recommendationBasis?.findMany({ where: { caseId } }).catch(() => [])) ?? []) as { futureCareItemId: string }[]).map((b) => [b.futureCareItemId, b]),
+  );
+
   const existing = await prisma.clinicalReasoningAssessment.findMany({ where: { caseId, status: { not: "SUPERSEDED" } } });
   const byRec = new Map(existing.map((e) => [e.recommendationId, e]));
   const seenRec = new Set<string>();
@@ -159,7 +165,7 @@ export async function persistCaseReasoning(caseId: string, firmId: string, opts:
     seenRec.add(it.id);
     const lineage = { recommendationLineageId: (it as { lineageId?: string }).lineageId ?? null, recommendationVersion: (it as { version?: number }).version ?? null, caseVersion };
     try {
-      const a = buildReasoningAssessment(it as unknown as ReasoningItem, conds, chronology as unknown as DossierChronoEvent[], dossierCase, interviews as unknown as DossierInterview[], { conflicts: conflictFlags.get(it.id) ?? [], replacedByActive: replacedByActive.has(it.id) }, handEntered.get(it.id) ?? []);
+      const a = buildReasoningAssessment(it as unknown as ReasoningItem, conds, chronology as unknown as DossierChronoEvent[], dossierCase, interviews as unknown as DossierInterview[], { conflicts: conflictFlags.get(it.id) ?? [], replacedByActive: replacedByActive.has(it.id) }, handEntered.get(it.id) ?? [], (basisByItem.get(it.id) as never) ?? null);
       const prior = byRec.get(it.id);
       if (!prior) {
         await prisma.clinicalReasoningAssessment.create({ data: { ...toRow(a), ...lineage, caseId, firmId, recommendationId: it.id } });

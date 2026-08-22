@@ -6,6 +6,7 @@ import { serviceKindOf } from "@/lib/engine/evidenceLedger";
 import { entersSupportedTotal, supportClassOf } from "@/lib/engine/supportClass";
 import { documentsNonResolution } from "@/lib/engine/assertionClassifier";
 import { evidenceSetFingerprint, type EvidenceRowIdentity } from "@/lib/engine/evidenceSet";
+import type { BasisRecord } from "@/lib/engine/recommendationBasis";
 import { specialtyLens } from "@/lib/engine/specialtyReasoning";
 import { lintAssessmentNarratives } from "@/lib/engine/narrativeSanity";
 import { assessLifetimeSupport, describeLifetimeBasis, type LifetimeSupportResult } from "@/lib/engine/lifetimeSupport";
@@ -682,6 +683,20 @@ export function buildReasoningAssessment(
    * persistence pass); omitted, the assessment is exactly what it was.
    */
   handEnteredEvidence: readonly EvidenceRowIdentity[] = [],
+  /**
+   * The RECORDED basis for this item, or an explicit null.
+   *
+   * REQUIRED, and deliberately not defaulted: every caller must state its
+   * answer. Production consumers pass the persisted basis so the panel, the
+   * report and the persistence pass all reason from the same record; a caller
+   * with no basis available says `null` and gets a derivation, which is a
+   * decision rather than an oversight.
+   *
+   * This function stays PURE — it takes the basis, it does not fetch one. Given
+   * a database dependency it would stop running identically on the server and
+   * in the browser, which is the property the whole engine is built on.
+   */
+  recordedBasis: BasisRecord | null,
 ): ReasoningAssessment {
   const rec = item as unknown as RecInput;
   const mapping = mapRecommendationToCondition(rec, conditions);
@@ -946,7 +961,11 @@ export function buildReasoningAssessment(
   // carried over silently onto evidence they had never seen. The set's
   // fingerprint closes that: change the evidence and the assessment is a new
   // one, needing review again.
-  const evidenceFingerprint = evidenceSetFingerprint([...(dossier.ledger as unknown as EvidenceRowIdentity[]), ...handEnteredEvidence]);
+  // When a basis was recorded, its hash IS the evidence fingerprint: the two
+  // must not be computed differently or an approval could be staled by one and
+  // not the other.
+  const basisFingerprint = recordedBasis?.basisHash ?? null;
+  const evidenceFingerprint = basisFingerprint ?? evidenceSetFingerprint([...(dossier.ledger as unknown as EvidenceRowIdentity[]), ...handEnteredEvidence]);
   const materialHash = hashStr([item.service, item.category ?? "", mapping.conditionId ?? "", region, laterality, purposeFor(item.category, !!item.isLifetime), freqN, durationClass, durationSupport.fingerprint, probabilityClassification, inclusionInTotalsStatus, item.startTrigger ?? "", item.replacesService ?? "", item.physicianStatus ?? "", evidenceStrength, evidenceFingerprint, setContext.conflicts.map((c) => c.type + c.otherService).sort().join(",")].join("|"));
 
   return {
@@ -1064,7 +1083,10 @@ export function reasoningFindings(
   for (const it of items) {
     const id = it.id ?? "";
     const inTotals = includedIds.has(id);
-    const a = buildReasoningAssessment(it, conditions, chronology, kase, [], { conflicts: flags.get(id) ?? [], replacedByActive: replacedByActive.has(id) });
+    // Set-level coherence only: this helper has no database and exists to
+    // compare items against each other, so it states `null` rather than
+    // pretending to a recorded basis it cannot see.
+    const a = buildReasoningAssessment(it, conditions, chronology, kase, [], { conflicts: flags.get(id) ?? [], replacedByActive: replacedByActive.has(id) }, [], null);
     const physicianApproved = it.physicianStatus === "APPROVED" || it.physicianStatus === "MODIFIED";
     const pv = it.presentValue ?? 0;
     // Double-count: totaled alongside its own lower-cost alternative → blocking.

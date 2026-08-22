@@ -68,21 +68,21 @@ function tka(overrides: Partial<ReasoningItem> = {}): ReasoningItem {
 
 describe("buildReasoningAssessment — probability classification (§7)", () => {
   it("classifies a well-supported, non-staged recommendation as PROBABLE_INCLUDED", () => {
-    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase);
+    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase, [], undefined, [], null);
     expect(a.probabilityClassification).toBe("PROBABLE_INCLUDED");
     expect(a.inclusionInTotalsStatus).toBe("included");
     expect(a.supportingDiagnosisIds).toContain("cond-knee");
   });
 
   it("classifies a triggered recommendation as CONDITIONAL_STAGED and excludes it from totals", () => {
-    const a = buildReasoningAssessment(tka({ startTrigger: "progression to end-stage collapse" }), [kneeStrong], chronology, kase);
+    const a = buildReasoningAssessment(tka({ startTrigger: "progression to end-stage collapse" }), [kneeStrong], chronology, kase, [], undefined, [], null);
     expect(a.probabilityClassification).toBe("CONDITIONAL_STAGED");
     expect(a.inclusionInTotalsStatus).toBe("contingency");
     expect(a.durationClass).toBe("UNTIL_SURGERY");
   });
 
   it("marks a physician-rejected recommendation REJECTED_BY_REVIEWER", () => {
-    const a = buildReasoningAssessment(tka({ physicianStatus: "REJECTED" }), [kneeStrong], chronology, kase);
+    const a = buildReasoningAssessment(tka({ physicianStatus: "REJECTED" }), [kneeStrong], chronology, kase, [], undefined, [], null);
     expect(a.probabilityClassification).toBe("REJECTED_BY_REVIEWER");
   });
 });
@@ -90,13 +90,13 @@ describe("buildReasoningAssessment — probability classification (§7)", () => 
 describe("buildReasoningAssessment — frequency support (§10, test #6)", () => {
   it("does NOT treat a frequency as supported when there is no cadence, guideline, or physician review", () => {
     const injections: ReasoningItem = { service: "Genicular nerve block injections", category: "INJECTION", frequencyPerYear: 4, durationYears: 5, isLifetime: false, probability: "POSSIBLE", physicianStatus: "PENDING", cptCode: "64454" };
-    const a = buildReasoningAssessment(injections, [kneeBare], [], kase);
+    const a = buildReasoningAssessment(injections, [kneeBare], [], kase, [], undefined, [], null);
     expect(a.frequencySupported).toBe(false);
     expect(a.frequencyRationale).toMatch(/pending review|not yet grounded/i);
   });
 
   it("treats frequency as supported once a physician has approved it", () => {
-    const a = buildReasoningAssessment(tka({ frequencyPerYear: 1, physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase);
+    const a = buildReasoningAssessment(tka({ frequencyPerYear: 1, physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase, [], undefined, [], null);
     expect(a.frequencySupported).toBe(true);
     expect(a.frequencyRationale).toMatch(/physician review/i);
   });
@@ -108,7 +108,7 @@ describe("buildReasoningAssessment — lifetime duration (§11, test #7)", () =>
   // unsupported lifetime scenario as a projection assumption, never as a
   // clinical fact.
   it("discloses an unsupported lifetime duration as a projection assumption", () => {
-    const a = buildReasoningAssessment(tka({ service: "Attendant care", category: "ATTENDANT_CARE", isLifetime: true, physicianStatus: "PENDING" }), [kneeBare], [], kase);
+    const a = buildReasoningAssessment(tka({ service: "Attendant care", category: "ATTENDANT_CARE", isLifetime: true, physicianStatus: "PENDING" }), [kneeBare], [], kase, [], undefined, [], null);
     expect(a.durationClass).toBe("LIFETIME");
     expect(a.durationRationale).toMatch(/projection assumption/i);
     expect(a.durationRationale).toMatch(/not itself evidence of permanence/i);
@@ -121,7 +121,7 @@ describe("buildReasoningAssessment — lifetime duration (§11, test #7)", () =>
   // traumatic osteoarthritis with source-linked findings) plus a diagnosis-
   // keyed guideline — and the rationale names that basis.
   it("accepts a lifetime duration backed by independent chronicity evidence and a diagnosis-keyed guideline", () => {
-    const a = buildReasoningAssessment(tka({ service: "Home-based maintenance therapy", category: "PHYSICAL_THERAPY", isLifetime: true, physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase);
+    const a = buildReasoningAssessment(tka({ service: "Home-based maintenance therapy", category: "PHYSICAL_THERAPY", isLifetime: true, physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase, [], undefined, [], null);
     expect(a.durationClass).toBe("LIFETIME");
     expect(a.durationRationale).toMatch(/remaining-lifetime projection is based on/i);
     expect(a.durationSupport.clinicallySupported).toBe(true);
@@ -132,7 +132,7 @@ describe("buildReasoningAssessment — lifetime duration (§11, test #7)", () =>
 describe("buildReasoningAssessment — evidence strength vs. recommendation confidence (§8, tests #11–#12)", () => {
   it("#11 strong patient-specific evidence yields HIGH confidence even when literature is limited", () => {
     // Records + objective + physician + guideline, but no cited literature study.
-    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase);
+    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase, [], undefined, [], null);
     expect(a.recommendationConfidence).toBe("HIGH");
     // Literature was NOT the basis — evidence strength rests on expert consensus/guideline, not STRONG literature.
     expect(a.evidenceStrength).not.toBe("STRONG");
@@ -141,13 +141,13 @@ describe("buildReasoningAssessment — evidence strength vs. recommendation conf
 
   it("#12 strong literature cannot rescue confidence when there is no patient-specific support", () => {
     // Level-1 literature attached, but the diagnosis has no records/objective/physician support.
-    const a = buildReasoningAssessment(tka({ physicianStatus: "PENDING", citation: strongLiterature }), [kneeBare], [], kase);
+    const a = buildReasoningAssessment(tka({ physicianStatus: "PENDING", citation: strongLiterature }), [kneeBare], [], kase, [], undefined, [], null);
     expect(a.evidenceStrength).toBe("STRONG"); // the literature itself is strong
     expect(["LOW", "INDETERMINATE"]).toContain(a.recommendationConfidence); // but confidence is not
   });
 
   it("keeps evidence strength (about the literature) distinct from confidence (about this patient)", () => {
-    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED", citation: strongLiterature }), [kneeStrong], chronology, kase);
+    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED", citation: strongLiterature }), [kneeStrong], chronology, kase, [], undefined, [], null);
     expect(a.evidenceStrength).toBe("STRONG");
     expect(a.recommendationConfidence).toBe("HIGH");
     expect(a.materialHash).toMatch(/^[0-9a-f]+$/);
@@ -156,14 +156,14 @@ describe("buildReasoningAssessment — evidence strength vs. recommendation conf
 
 describe("Phase B — clinical pathway (§8)", () => {
   it("places a surgery on the definitive-surgical pathway and a therapy on conservative management", () => {
-    const surg = buildReasoningAssessment(tka(), [kneeStrong], chronology, kase);
+    const surg = buildReasoningAssessment(tka(), [kneeStrong], chronology, kase, [], undefined, [], null);
     expect(surg.clinicalPathway).toBe("definitive surgical");
-    const pt = buildReasoningAssessment(tka({ service: "Physical therapy", category: "PHYSICAL_THERAPY" }), [kneeStrong], chronology, kase);
+    const pt = buildReasoningAssessment(tka({ service: "Physical therapy", category: "PHYSICAL_THERAPY" }), [kneeStrong], chronology, kase, [], undefined, [], null);
     expect(pt.clinicalPathway).toBe("conservative management");
   });
 
   it("prefixes a staged recommendation's pathway with 'contingent'", () => {
-    const a = buildReasoningAssessment(tka({ startTrigger: "failure of conservative care" }), [kneeStrong], chronology, kase);
+    const a = buildReasoningAssessment(tka({ startTrigger: "failure of conservative care" }), [kneeStrong], chronology, kase, [], undefined, [], null);
     expect(a.clinicalPathway).toMatch(/^contingent /);
   });
 });
@@ -182,7 +182,7 @@ describe("Phase B — cross-recommendation conflicts (§9)", () => {
     const { flags, replacedByActive } = detectSetConflicts([A, revision]);
     expect(flags.get("a")?.some((f) => f.type === "REPLACED_BY")).toBe(true);
     expect(replacedByActive.has("a")).toBe(true);
-    const assessed = buildReasoningAssessment(A, [kneeStrong], chronology, kase, [], { conflicts: flags.get("a") ?? [], replacedByActive: true });
+    const assessed = buildReasoningAssessment(A, [kneeStrong], chronology, kase, [], { conflicts: flags.get("a") ?? [], replacedByActive: true }, [], null);
     expect(assessed.inclusionInTotalsStatus).toBe("excluded");
     expect(assessed.inclusionRationale).toMatch(/replaces|double/i);
   });
@@ -195,7 +195,7 @@ describe("Phase B — cross-recommendation conflicts (§9)", () => {
   });
 
   it("surfaces a lower-cost alternative in the assessment's alternativesConsidered", () => {
-    const a = buildReasoningAssessment(tka({ lowerCostAlternative: "Unicompartmental knee replacement" }), [kneeStrong], chronology, kase);
+    const a = buildReasoningAssessment(tka({ lowerCostAlternative: "Unicompartmental knee replacement" }), [kneeStrong], chronology, kase, [], undefined, [], null);
     expect(a.alternativesConsidered[0].alternative).toMatch(/unicompartmental/i);
     expect(a.alternativesConsidered[0].rationale).toMatch(/only one belongs in totals/i);
   });
@@ -203,13 +203,13 @@ describe("Phase B — cross-recommendation conflicts (§9)", () => {
 
 describe("Phase C — literature synthesis (§15)", () => {
   it("states plainly when no published literature was located", () => {
-    const a = buildReasoningAssessment(tka(), [kneeStrong], chronology, kase);
+    const a = buildReasoningAssessment(tka(), [kneeStrong], chronology, kase, [], undefined, [], null);
     expect(a.supportingLiteratureAssessments.length).toBe(0);
     expect(a.literatureSynthesis).toMatch(/no (accepted )?(published|individual) /i);
   });
 
   it("synthesizes the strength and applicability of cited literature", () => {
-    const a = buildReasoningAssessment(tka({ citation: strongLiterature }), [kneeStrong], chronology, kase);
+    const a = buildReasoningAssessment(tka({ citation: strongLiterature }), [kneeStrong], chronology, kase, [], undefined, [], null);
     expect(a.literatureSynthesis).toMatch(/systematic review/i);
     expect(a.literatureSynthesis).toMatch(/directly addresses|pairing/i);
   });
@@ -217,7 +217,7 @@ describe("Phase C — literature synthesis (§15)", () => {
 
 describe("Phase C — counter-analysis and missing evidence (§13–§14)", () => {
   it("enumerates concrete weaknesses when support is thin", () => {
-    const a = buildReasoningAssessment(tka({ service: "Genicular nerve block injections", category: "INJECTION", frequencyPerYear: 4, physicianStatus: "PENDING" }), [kneeBare], [], kase);
+    const a = buildReasoningAssessment(tka({ service: "Genicular nerve block injections", category: "INJECTION", frequencyPerYear: 4, physicianStatus: "PENDING" }), [kneeBare], [], kase, [], undefined, [], null);
     const w = a.weakeningEvidence.map((x) => x.detail).join(" | ").toLowerCase();
     expect(w).toMatch(/no independent objective finding/);
     expect(w).toMatch(/physician/);
@@ -229,7 +229,7 @@ describe("Phase C — counter-analysis and missing evidence (§13–§14)", () =
   });
 
   it("turns gaps into actionable missing-evidence requests", () => {
-    const a = buildReasoningAssessment(tka({ category: "INJECTION", physicianStatus: "PENDING" }), [kneeBare], [], kase);
+    const a = buildReasoningAssessment(tka({ category: "INJECTION", physicianStatus: "PENDING" }), [kneeBare], [], kase, [], undefined, [], null);
     const m = a.missingEvidenceRequests.join(" | ").toLowerCase();
     expect(m).toMatch(/obtain current imaging|obtain objective/);
     expect(m).toMatch(/physician review/);
@@ -241,7 +241,7 @@ describe("Phase C — counter-analysis and missing evidence (§13–§14)", () =
   });
 
   it("does not manufacture weaknesses when the recommendation is well supported", () => {
-    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED", citation: strongLiterature }), [kneeStrong], chronology, kase);
+    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED", citation: strongLiterature }), [kneeStrong], chronology, kase, [], undefined, [], null);
     const w = a.weakeningEvidence.map((x) => x.detail).join(" ").toLowerCase();
     expect(w).not.toMatch(/no independent objective finding/);
     expect(w).not.toMatch(/not yet confirmed/);
@@ -278,13 +278,13 @@ describe("Phase D — export-gating findings", () => {
 
 describe("Phase C — residual uncertainty", () => {
   it("reads as low uncertainty for a high-confidence recommendation", () => {
-    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase);
+    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase, [], undefined, [], null);
     expect(a.recommendationConfidence).toBe("HIGH");
     expect(a.residualUncertainty).toMatch(/little material uncertainty/i);
   });
 
   it("names what would strengthen a weakly-supported recommendation", () => {
-    const a = buildReasoningAssessment(tka({ category: "INJECTION", physicianStatus: "PENDING" }), [kneeBare], [], kase);
+    const a = buildReasoningAssessment(tka({ category: "INJECTION", physicianStatus: "PENDING" }), [kneeBare], [], kase, [], undefined, [], null);
     expect(a.residualUncertainty).toMatch(/uncertainty remains|cannot yet be assessed/i);
     expect(a.residualUncertainty).toMatch(/would strengthen most with/i);
   });
@@ -308,7 +308,7 @@ const lumbarOnly: typeof kneeStrong = {
 
 describe("CRE v1 §3 — condition definition", () => {
   it("#1 a knee recommendation cannot use a lumbar diagnosis", () => {
-    const a = buildReasoningAssessment(tka(), [lumbarOnly], chronology, kase);
+    const a = buildReasoningAssessment(tka(), [lumbarOnly], chronology, kase, [], undefined, [], null);
     expect(a.supportingDiagnosisIds).not.toContain("cond-lumbar");
     expect(a.supportingDiagnosisIds.length).toBe(0);
     expect(a.lifecycleStatus).toBe("INVALID"); // structural defect — no diagnosis in the region
@@ -319,14 +319,14 @@ describe("CRE v1 §3 — condition definition", () => {
     expect(lateralityOf("Left total knee arthroplasty")).toBe("left");
     expect(lateralityOf("Osteoarthritis of the right knee")).toBe("right");
     const leftTka = tka({ service: "Left total knee arthroplasty" });
-    const a = buildReasoningAssessment(leftTka, [kneeStrong], chronology, kase); // kneeStrong is RIGHT knee
+    const a = buildReasoningAssessment(leftTka, [kneeStrong], chronology, kase, [], undefined, [], null); // kneeStrong is RIGHT knee
     expect(a.laterality).toBe("left");
     expect(a.lifecycleStatus).toBe("INVALID");
     expect(a.weakeningEvidence.some((w) => w.claim === "anatomic laterality")).toBe(true);
   });
 
   it("derives severity, chronicity, and current clinical status from the record", () => {
-    const a = buildReasoningAssessment(tka(), [kneeStrong], chronology, kase);
+    const a = buildReasoningAssessment(tka(), [kneeStrong], chronology, kase, [], undefined, [], null);
     expect(a.conditionSeverity).toBe("severe"); // "high-grade chondral loss"
     expect(a.conditionChronicity).toBe("chronic"); // post-traumatic osteoarthritis
     expect(a.currentClinicalStatus).toBe("under active treatment"); // prior treatment documented
@@ -339,7 +339,7 @@ describe("CRE v1 §4 — epistemic evidence classification", () => {
       ...chronology,
       { eventDate: "2024-09-01", provider: "PT", functionalStatus: "Patient reports pain with prolonged standing", diagnosis: "knee", sourcePage: 7 },
     ];
-    const a = buildReasoningAssessment(tka(), [kneeStrong], chronoWithReport, kase);
+    const a = buildReasoningAssessment(tka(), [kneeStrong], chronoWithReport, kase, [], undefined, [], null);
     const reported = a.evidenceItems.filter((e) => /patient reports/i.test(e.text));
     expect(reported.length).toBeGreaterThan(0);
     for (const r of reported) {
@@ -391,7 +391,7 @@ describe("CRE v1 §12 — recommendation-specific literature filter", () => {
   it("rejected literature never feeds evidence strength", () => {
     // A single incompatible citation (pediatric) attached to an adult knee rec:
     const pedLit = [{ title: "Congenital knee deformity in children: management guideline", year: "2020", pmid: "999", relevance: { evidenceLevel: 1, evidenceLabel: "Clinical practice guideline", supports: "x", whyRelevant: "keyword", limitations: null } }];
-    const a = buildReasoningAssessment(tka({ citation: pedLit, physicianStatus: "PENDING" }), [kneeBare], [], kase);
+    const a = buildReasoningAssessment(tka({ citation: pedLit, physicianStatus: "PENDING" }), [kneeBare], [], kase, [], undefined, [], null);
     expect(a.rejectedLiterature.length).toBe(1);
     expect(a.supportingLiteratureAssessments.length).toBe(0);
     expect(a.evidenceStrength).toBe("INSUFFICIENT"); // the rejected guideline did not count
@@ -411,7 +411,7 @@ describe("CRE v1 §7–§10 — findings for duration, gaps, and confidence", ()
   });
 
   it("#9 material unknowns block inclusion-worthiness and reduce confidence", () => {
-    const a = buildReasoningAssessment(tka({ physicianStatus: "PENDING" }), [kneeBare], [], kase);
+    const a = buildReasoningAssessment(tka({ physicianStatus: "PENDING" }), [kneeBare], [], kase, [], undefined, [], null);
     const blocking = a.unknowns.find((u) => u.blocksInclusion);
     expect(blocking).toBeTruthy(); // no objective study on file
     expect(a.lifecycleStatus).not.toBe("VALIDATED");
@@ -421,26 +421,21 @@ describe("CRE v1 §7–§10 — findings for duration, gaps, and confidence", ()
   });
 
   it("#11 a material change produces a different material hash (approval-invalidation trigger)", () => {
-    const base = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase);
-    const freqChanged = buildReasoningAssessment(tka({ physicianStatus: "APPROVED", frequencyPerYear: 12 }), [kneeStrong], chronology, kase);
-    const durChanged = buildReasoningAssessment(tka({ physicianStatus: "APPROVED", isLifetime: true }), [kneeStrong], chronology, kase);
+    const base = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase, [], undefined, [], null);
+    const freqChanged = buildReasoningAssessment(tka({ physicianStatus: "APPROVED", frequencyPerYear: 12 }), [kneeStrong], chronology, kase, [], undefined, [], null);
+    const durChanged = buildReasoningAssessment(tka({ physicianStatus: "APPROVED", isLifetime: true }), [kneeStrong], chronology, kase, [], undefined, [], null);
     expect(freqChanged.materialHash).not.toBe(base.materialHash);
     expect(durChanged.materialHash).not.toBe(base.materialHash);
     // And an immaterial rerun is stable (idempotent cache key).
-    const rerun = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase);
+    const rerun = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase, [], undefined, [], null);
     // The EVIDENCE is material too. Every other input to the hash is a
     // conclusion, and two different bodies of evidence routinely produce the
     // same conclusions — so an approval could carry over onto findings the
     // physician never saw.
-    const withExtraFinding = buildReasoningAssessment(
-      tka({ physicianStatus: "APPROVED" }),
-      [kneeStrong],
-      [...chronology, { eventDate: new Date("2025-06-02"), provider: "K. Adeyemi, MD", objectiveFindings: "Right knee effusion with medial joint line tenderness", sourcePage: 9 } as never],
-      kase,
-    );
+    const withExtraFinding = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], [...chronology, { eventDate: new Date("2025-06-02"), provider: "K. Adeyemi, MD", objectiveFindings: "Right knee effusion with medial joint line tenderness", sourcePage: 9 } as never], kase, [], undefined, [], null);
     const withCitation = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase, [], undefined, [
       { claim: "NECESSITY", stance: "SUPPORTS", strength: "LITERATURE", sourceKind: "PHYSICIAN", quote: "Arthroplasty outcomes in end-stage osteoarthritis" },
-    ]);
+    ], null);
     expect(rerun.materialHash).toBe(base.materialHash);
     expect(withExtraFinding.materialHash, "a new finding is a new assessment").not.toBe(base.materialHash);
     expect(withCitation.materialHash, "a hand-entered citation is a new assessment").not.toBe(base.materialHash);
@@ -455,10 +450,10 @@ describe("CRE v1 §7–§10 — findings for duration, gaps, and confidence", ()
 
   it("#18 an assessment is never VALIDATED merely because it was computed", () => {
     // Unsupported item (backfill scenario): computed, but gates fail → NEEDS_REVIEW/INVALID, not VALIDATED.
-    const a = buildReasoningAssessment(tka({ physicianStatus: "PENDING", category: "INJECTION", frequencyPerYear: 6 }), [kneeBare], [], kase);
+    const a = buildReasoningAssessment(tka({ physicianStatus: "PENDING", category: "INJECTION", frequencyPerYear: 6 }), [kneeBare], [], kase, [], undefined, [], null);
     expect(a.lifecycleStatus).not.toBe("VALIDATED");
     // Fully supported item: gates pass → VALIDATED.
-    const good = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase);
+    const good = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase, [], undefined, [], null);
     expect(good.lifecycleStatus).toBe("VALIDATED");
   });
 });
@@ -469,7 +464,7 @@ describe("CRE v1 §7–§10 — findings for duration, gaps, and confidence", ()
 
 describe("Reliability — evidence sufficiency (Phase 2)", () => {
   it("states 'insufficient supporting evidence' with exactly what is missing", () => {
-    const a = buildReasoningAssessment(tka({ physicianStatus: "PENDING" }), [kneeBare], [], kase);
+    const a = buildReasoningAssessment(tka({ physicianStatus: "PENDING" }), [kneeBare], [], kase, [], undefined, [], null);
     expect(a.evidenceSufficiency.sufficient).toBe(false);
     expect(a.evidenceSufficiency.explanation).toMatch(/insufficient supporting evidence/i);
     expect(a.evidenceSufficiency.missing.join(" ")).toMatch(/imaging|objective/i);
@@ -477,7 +472,7 @@ describe("Reliability — evidence sufficiency (Phase 2)", () => {
   });
 
   it("passes the threshold when objective, imaging, record, and provider evidence exist", () => {
-    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase);
+    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase, [], undefined, [], null);
     expect(a.evidenceSufficiency.sufficient).toBe(true);
     expect(a.evidenceSufficiency.score).toBeGreaterThanOrEqual(a.evidenceSufficiency.threshold);
     expect(a.evidenceSufficiency.missing.length).toBeLessThan(3);
@@ -486,7 +481,7 @@ describe("Reliability — evidence sufficiency (Phase 2)", () => {
 
 describe("Reliability — reasoning chain (Phase 1/6)", () => {
   it("stores a complete complaint→approval chain where every node declares its basis and rationale", () => {
-    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase);
+    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase, [], undefined, [], null);
     expect(a.reasoningChain.length).toBe(12);
     expect(a.reasoningChain.map((n) => n.stage)[0]).toMatch(/complaint/i);
     expect(a.reasoningChain.map((n) => n.stage).at(-1)).toMatch(/physician/i);
@@ -500,7 +495,7 @@ describe("Reliability — reasoning chain (Phase 1/6)", () => {
   });
 
   it("records an absent step as null content — never fabricated", () => {
-    const a = buildReasoningAssessment(tka({ physicianStatus: "PENDING" }), [kneeBare], [], kase);
+    const a = buildReasoningAssessment(tka({ physicianStatus: "PENDING" }), [kneeBare], [], kase, [], undefined, [], null);
     const imaging = a.reasoningChain.find((n) => /^imaging/i.test(n.stage));
     expect(imaging?.content).toBeNull();
   });
@@ -508,7 +503,7 @@ describe("Reliability — reasoning chain (Phase 1/6)", () => {
 
 describe("Reliability — self-critique (Phase 4)", () => {
   it("answers why / why-not / what-would-change and names its assumptions", () => {
-    const a = buildReasoningAssessment(tka({ service: "Attendant care", category: "ATTENDANT_CARE", isLifetime: true, frequencyPerYear: 4, physicianStatus: "PENDING" }), [kneeBare], [], kase);
+    const a = buildReasoningAssessment(tka({ service: "Attendant care", category: "ATTENDANT_CARE", isLifetime: true, frequencyPerYear: 4, physicianStatus: "PENDING" }), [kneeBare], [], kase, [], undefined, [], null);
     const c = a.selfCritique;
     expect(c.whyRecommended.length).toBeGreaterThan(40);
     expect(c.whyPossiblyWrong.length).toBeGreaterThan(0);
@@ -519,7 +514,7 @@ describe("Reliability — self-critique (Phase 4)", () => {
 
 describe("Reliability — confidence vector (Phase 7)", () => {
   it("scores ten dimensions independently — literature cannot mask absent patient evidence", () => {
-    const a = buildReasoningAssessment(tka({ physicianStatus: "PENDING", citation: strongLiterature }), [kneeBare], [], kase);
+    const a = buildReasoningAssessment(tka({ physicianStatus: "PENDING", citation: strongLiterature }), [kneeBare], [], kase, [], undefined, [], null);
     const v = a.confidenceVector;
     expect(Object.keys(v).length).toBe(10);
     expect(v.literatureSupport).toBeGreaterThan(50); // strong literature
@@ -531,12 +526,12 @@ describe("Reliability — confidence vector (Phase 7)", () => {
 describe("Reliability — alternative explanations (Phase 3)", () => {
   it("surfaces same-region competing diagnoses from the case's own causation map only", () => {
     const preexisting: typeof kneeBare = { ...kneeBare, id: "cond-preex", name: "Degenerative arthritis of the right knee (pre-existing)", relatedness: "PREEXISTING_UNRELATED" };
-    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong, preexisting], chronology, kase);
+    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong, preexisting], chronology, kase, [], undefined, [], null);
     expect(a.alternativeExplanations.length).toBe(1);
     expect(a.alternativeExplanations[0].name).toMatch(/pre-existing/i);
     expect(a.alternativeExplanations[0].whyConsidered).toMatch(/unrelated condition/i);
     // No alternatives invented when none exist in the map.
-    const solo = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase);
+    const solo = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], chronology, kase, [], undefined, [], null);
     expect(solo.alternativeExplanations.length).toBe(0);
   });
 });
@@ -558,7 +553,7 @@ describe("Reliability — anatomy gate (cross-region evidence leakage)", () => {
   };
 
   it("excludes cross-region evidence from the narrative and evidence buckets", () => {
-    const a = buildReasoningAssessment(tka({ service: "Attendant / home care (hours per physiatry)", category: "ATTENDANT_CARE", isLifetime: true }), [kneeWithLumbarEvidence], [], kase);
+    const a = buildReasoningAssessment(tka({ service: "Attendant / home care (hours per physiatry)", category: "ATTENDANT_CARE", isLifetime: true }), [kneeWithLumbarEvidence], [], kase, [], undefined, [], null);
     expect(a.medicalNecessityRationale).not.toMatch(/L1 burst/i);
     expect(a.evidenceItems.filter((e) => /L1 burst/i.test(e.text) && e.category !== "functional_limitation").length).toBe(0);
   });
@@ -566,7 +561,7 @@ describe("Reliability — anatomy gate (cross-region evidence leakage)", () => {
   it("flags any cross-region evidence that reaches the assessment and never validates it", () => {
     // Chronology carrying lumbar imaging against a knee assessment.
     const lumbarChrono: typeof chronology = [{ eventDate: "2024-08-01", imagingFindings: "CT lumbar spine: L1 burst fracture with retropulsion", diagnosis: "knee pain", sourcePage: 9 }];
-    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], lumbarChrono, kase);
+    const a = buildReasoningAssessment(tka({ physicianStatus: "APPROVED" }), [kneeStrong], lumbarChrono, kase, [], undefined, [], null);
     expect(a.medicalNecessityRationale).not.toMatch(/L1 burst/i);
     expect(a.lifecycleStatus).not.toBe("INVALID"); // knee dx itself is fine
   });
@@ -594,10 +589,7 @@ describe("Reliability — spine level specificity", () => {
       evidenceSources: [{ filename: "ct.pdf", page: 9, quote: "L1 burst fracture with retropulsion" }],
       missingInfo: null, reasoning: "Attributed.", physicianConfirmed: false,
     };
-    const a = buildReasoningAssessment(
-      tka({ service: "Cervical epidural steroid injection", category: "INJECTION" }),
-      [cervicalDx], [], kase,
-    );
+    const a = buildReasoningAssessment(tka({ service: "Cervical epidural steroid injection", category: "INJECTION" }), [cervicalDx], [], kase, [], undefined, [], null);
     expect(a.medicalNecessityRationale).not.toMatch(/L1 burst/i);
     expect(a.evidenceItems.filter((e) => /L1 burst/i.test(e.text) && e.category !== "functional_limitation").length).toBe(0);
   });
@@ -623,7 +615,7 @@ describe("Reliability — laterality across all paired regions", () => {
       objectiveEvidence: "Left knee: high-grade chondral loss on MRI", // wrong side stored upstream
       evidenceSources: [{ filename: "mri.pdf", page: 4, quote: "left knee chondral loss, medial compartment" }],
     };
-    const a = buildReasoningAssessment(tka({ service: "Right total knee arthroplasty" }), [rightKnee], [], kase);
+    const a = buildReasoningAssessment(tka({ service: "Right total knee arthroplasty" }), [rightKnee], [], kase, [], undefined, [], null);
     expect(a.medicalNecessityRationale).not.toMatch(/left knee/i);
     expect(a.evidenceItems.filter((e) => /left knee/i.test(e.text) && e.category !== "functional_limitation").length).toBe(0);
   });
@@ -673,10 +665,7 @@ describe("Reliability — within-joint sub-structure specificity (all joints)", 
       evidenceSources: [{ filename: "mra.pdf", page: 3, quote: "superior labral tear from anterior to posterior" }],
       missingInfo: null, reasoning: "Attributed.", physicianConfirmed: false,
     };
-    const a = buildReasoningAssessment(
-      tka({ service: "Right rotator cuff repair", category: "ORTHOPEDIC_SURGERY" }),
-      [cuffDx], [], kase,
-    );
+    const a = buildReasoningAssessment(tka({ service: "Right rotator cuff repair", category: "ORTHOPEDIC_SURGERY" }), [cuffDx], [], kase, [], undefined, [], null);
     expect(a.medicalNecessityRationale).not.toMatch(/labral|slap/i);
     expect(a.evidenceItems.filter((e) => /labral|slap/i.test(e.text) && e.category !== "functional_limitation").length).toBe(0);
   });
@@ -707,7 +696,7 @@ describe("Reliability — guidelines obey the full anatomy stack", () => {
         { title: "Rotator cuff tear management guideline", year: "2023", quote: "Repair is recommended for full-thickness tears.", relevance: { evidenceLevel: 1, evidenceLabel: "Clinical practice guideline" } },
       ] },
     };
-    const a = buildReasoningAssessment(tka({ service: "Right rotator cuff repair", category: "ORTHOPEDIC_SURGERY" }), [cuffDxWithLabralCpg], [], kase);
+    const a = buildReasoningAssessment(tka({ service: "Right rotator cuff repair", category: "ORTHOPEDIC_SURGERY" }), [cuffDxWithLabralCpg], [], kase, [], undefined, [], null);
     const g = a.supportingGuidelineAssessments.map((x) => x.title).join(" | ");
     expect(g).toMatch(/rotator cuff tear management/i);
     expect(g).not.toMatch(/SLAP labral/i);
@@ -724,7 +713,7 @@ describe("Reliability — guidelines obey the full anatomy stack", () => {
         { title: "Lumbar stenosis surgical guideline", year: "2023", quote: "Decompression is indicated for symptomatic stenosis.", relevance: { evidenceLevel: 1, evidenceLabel: "Clinical practice guideline" } },
       ] },
     };
-    const a = buildReasoningAssessment(tka({ service: "Lumbar decompression / fusion", category: "NEUROSURGERY" }), [lumbarDx], [], kase);
+    const a = buildReasoningAssessment(tka({ service: "Lumbar decompression / fusion", category: "NEUROSURGERY" }), [lumbarDx], [], kase, [], undefined, [], null);
     const g = a.supportingGuidelineAssessments.map((x) => x.title).join(" | ");
     expect(g).toMatch(/lumbar stenosis/i);
     expect(g).not.toMatch(/cervical radiculopathy/i);

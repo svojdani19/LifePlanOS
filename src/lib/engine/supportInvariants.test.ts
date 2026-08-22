@@ -59,20 +59,20 @@ describe("prior treatment does not imply failure, non-resolution or exhaustion",
   const item = { service: "Lumbar fusion", category: "NEUROSURGERY", probability: "PROBABLE", frequencyPerYear: 1, durationYears: 1, isLifetime: false, physicianStatus: "PENDING", origin: "RECORD_RECOMMENDED" } as unknown as ReasoningItem;
 
   it("states no non-resolution anywhere when the record states none", () => {
-    const a = buildReasoningAssessment(item, [cond], treated, kase);
+    const a = buildReasoningAssessment(item, [cond], treated, kase, [], undefined, [], null);
     const surfaces = [a.treatmentResponseSummary ?? "", a.medicalNecessityRationale, a.leastIntensiveRationale, JSON.stringify(a.reasoningChain)].join(" ");
     expect(surfaces).not.toMatch(/has not resolved|did not resolve|not returned .* to baseline|conservative care has not/i);
   });
 
   it("does not mark conservative care exhausted from a non-empty list", () => {
-    const a = buildReasoningAssessment(item, [cond], treated, kase);
+    const a = buildReasoningAssessment(item, [cond], treated, kase, [], undefined, [], null);
     const failedNode = a.reasoningChain.find((n) => n.stage === "Failed conservative care");
     expect(failedNode?.content ?? null).toBeNull();
   });
 
   it("says it plainly once the record does state a response", () => {
     const withResponse = [{ eventDate: new Date("2025-03-14"), treatment: "Lumbar physical therapy completed with no lasting relief", sourcePage: 1 }] as never;
-    const a = buildReasoningAssessment(item, [cond], withResponse, kase);
+    const a = buildReasoningAssessment(item, [cond], withResponse, kase, [], undefined, [], null);
     expect(a.treatmentResponseSummary ?? "").toMatch(/did not resolve/i);
   });
 
@@ -88,7 +88,7 @@ describe("necessity is a determination, never a constant", () => {
     const kase = { subject: "Ms. Trice", pronounPoss: "her", lifeExpectancyYears: 40, adult: true };
     const cond = { id: "c-1", name: "Lumbar radiculopathy", relatedness: "RELATED", evidenceSources: [] } as never;
     const candidate = { service: "Lumbar fusion", category: "NEUROSURGERY", probability: "PROBABLE", frequencyPerYear: 1, physicianStatus: "PENDING", origin: "TEMPLATE_CONDITION", supportClass: "CANDIDATE_REVIEW" } as unknown as ReasoningItem;
-    const a = buildReasoningAssessment(candidate, [cond], [], kase);
+    const a = buildReasoningAssessment(candidate, [cond], [], kase, [], undefined, [], null);
     const necessityNode = a.reasoningChain.find((n) => /necessity/i.test(n.stage));
     // `necessity: true` was hard-coded, so this node asserted medical necessity
     // for every recommendation the engine ever assessed.

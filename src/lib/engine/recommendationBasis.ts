@@ -77,6 +77,24 @@ export interface ClaimBasis {
   statement: string;
 }
 
+/**
+ * The probability determination, as a MATERIAL part of the basis.
+ *
+ * "More likely than not" is a clinical and legal claim, not a rendering choice.
+ * Treating it as presentation would let the classification flip — from a
+ * reasonable possibility to a probability — without invalidating an approval
+ * given on the other reading.
+ *
+ * The `statement` is generated prose ABOUT the classification and factors, so
+ * it is stored for rendering and excluded from the hash: a reworded sentence is
+ * stylistic, a changed classification or a changed factor is not.
+ */
+export interface ProbabilityBasis {
+  classification: string;
+  statement: string;
+  factors: { label: string; present: boolean }[];
+}
+
 export interface BasisRecord {
   futureCareItemId: string;
   lineageId: string | null;
@@ -93,6 +111,8 @@ export interface BasisRecord {
   evidenceProvenance: EvidenceProvenance[];
   /** Frequency, duration and cost, each with its own basis. */
   claimBasis: { frequency: ClaimBasis; duration: ClaimBasis; cost: ClaimBasis };
+  /** The probability determination — material, versioned, hashed. */
+  probabilityBasis: ProbabilityBasis;
   missingPremises: string[];
   necessityNarrative: string;
   producerVersion: string;
@@ -142,6 +162,13 @@ export function basisHash(input: Omit<BasisRecord, "basisHash" | "necessityNarra
     // A quantity moving from RECORD to ASSUMPTION changes what the plan claims
     // about it, so it is material.
     claims: [input.claimBasis.frequency.kind, input.claimBasis.duration.kind, input.claimBasis.cost.kind],
+    // The classification and which factors are present are material. The
+    // statement is prose generated FROM them, so rewording it is stylistic and
+    // must not stale an approval.
+    probability: [
+      input.probabilityBasis.classification,
+      ...input.probabilityBasis.factors.map((f) => `${f.label}=${f.present}`).sort(),
+    ],
     missing: [...input.missingPremises].sort(),
   };
   return `${BASIS_VERSION}:${createHash("sha256").update(JSON.stringify(canonical), "utf8").digest("hex").slice(0, 32)}`;
@@ -199,6 +226,12 @@ export function buildBasis(
       : ({ kind: "ASSUMPTION", statement: `Priced from ${item.pricingSource ?? "the configured pricing source"}; no case-specific cost is documented.` } as ClaimBasis),
   };
 
+  const probabilityBasis: ProbabilityBasis = {
+    classification: dossier.probability.classification,
+    statement: dossier.probability.statement,
+    factors: dossier.probability.factors.map((f) => ({ label: f.label, present: f.present })),
+  };
+
   const core = {
     futureCareItemId: String(item.id ?? ""),
     lineageId: item.lineageId ?? null,
@@ -213,6 +246,7 @@ export function buildBasis(
     acceptedEvidence,
     evidenceProvenance,
     claimBasis,
+    probabilityBasis,
     missingPremises: dossier.unknowns.map((u) => String(u)),
   };
   return {

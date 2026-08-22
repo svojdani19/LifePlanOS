@@ -19,6 +19,9 @@ import {
 } from "./integrity";
 import { validateEvidenceQuality } from "./citationQuality";
 import { buildRecommendationDossier, validateRecommendationCompleteness, type DossierChronoEvent, type DossierCondition } from "./medicalNecessity";
+import { buildBasis, compareBasis } from "@/lib/engine/recommendationBasis";
+import { CHRONOLOGY_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
+import { resolveRecommendationCondition } from "@/lib/engine/recommendationCondition";
 import { reasoningFindings, type ReasoningItem } from "./clinicalReasoning";
 import { baselineLifeExpectancy, lifeExpectancyFindings, parseBasis, type BasisSex } from "./lifeExpectancy";
 import type { CondInput as ReasoningCond } from "./integrity";
@@ -38,17 +41,27 @@ export interface CaseValidation {
 
 /** Run the integrity check over a case's current data (no persistence). */
 export async function validateCase(caseId: string): Promise<CaseValidation> {
-  const [items, conditions, kase, chronology] = await Promise.all([
+  const [items, conditions, kase, chronology, interviews] = await Promise.all([
     prisma.futureCareItem.findMany({ where: { caseId, supersededAt: null }, include: { condition: true } }),
     prisma.condition.findMany({ where: { caseId } }),
     prisma.case.findUnique({
       where: { id: caseId },
       select: { dateOfBirth: true, sex: true, lifeExpectancyYears: true, lifeExpectancyBasis: true, specialty: true, additionalSpecialties: true },
     }),
-    prisma.chronologyEvent.findMany({ where: { caseId } }),
+    // THE SAME chronology the generator recorded the basis from: OUTPUT rows
+    // only, in a deterministic order. This read every row — superseded and
+    // stale included — in whatever order the database returned, so validation
+    // derived a different dossier than the one on file and reported all 34
+    // items BASIS_STALE the instant they were generated. A checker must derive
+    // independently; it must not derive from a different record.
+    prisma.chronologyEvent.findMany({ where: { caseId, ...CHRONOLOGY_OUTPUT_WHERE }, orderBy: [{ eventDate: "asc" }, { id: "asc" }] }),
+    prisma.interviewFinding.findMany({ where: { caseId } }).catch(() => []),
   ]);
   const adult = !kase?.dateOfBirth || (Date.now() - kase.dateOfBirth.getTime()) / (365.25 * 24 * 3600 * 1000) >= 18;
-  const dossierCase = { subject: "the patient", pronounPoss: "the patient's", lifeExpectancyYears: 40, adult };
+  // The narrative differs with the subject's name, and the narrative is not
+  // hashed — but the life expectancy drives lifetime quantities, so a
+  // hard-coded 40 would derive a different dossier from the recorded one.
+  const dossierCase = { subject: "the patient", pronounPoss: "the patient's", lifeExpectancyYears: kase?.lifeExpectancyYears ?? 40, adult };
   const report = runIntegrityCheck({
     recommendations: items as unknown as RecInput[],
     conditions: conditions as unknown as CondInput[],
@@ -58,9 +71,48 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
   const evidenceFindings = validateEvidenceQuality(items as never, adult);
   // Refactor Sprint — each recommendation must be complete (supporting
   // diagnosis, objective evidence, medical-necessity rationale).
+  // Validation DERIVES independently — that is its job. A checker that read the
+  // recorded basis could never notice the basis had drifted from the record.
+  //
+  // What was missing is that nobody was told when the two disagreed. Each item
+  // now also yields a BASIS_MISSING or BASIS_STALE finding, and because those
+  // are export-blocking, the existing lifecycle gate does the rest: draft
+  // export continues with the disclosure and the unresolved-issues appendix,
+  // final expert export is refused until the plan is regenerated or the finding
+  // is explicitly resolved.
+  const recordedBases = new Map<string, { basisHash?: string | null }>(
+    (((await prisma.recommendationBasis?.findMany({ where: { caseId } }).catch(() => [])) ?? []) as { futureCareItemId: string; basisHash: string }[])
+      .map((b) => [b.futureCareItemId, b]),
+  );
+  const basisFindings: { service: string; result: string; issue: string; severity: string; suggestion: string; exportBlocking: boolean }[] = [];
+
   const completenessFindings = items.flatMap((it) => {
-    const cond = (it as { condition?: unknown }).condition as DossierCondition | null;
-    const dossier = buildRecommendationDossier(it as never, cond, chronology as unknown as DossierChronoEvent[], dossierCase);
+    // The CANONICAL resolver, not the raw stored link. `it.condition` is the
+    // persisted conditionId, which the resolver may legitimately remap by
+    // anatomy — so for 8 items on the reference case validation was deriving a
+    // dossier about a different diagnosis than the basis was recorded from, and
+    // reporting the difference as staleness. This is the same defect that had
+    // the panel and the evidence ledger arguing about a cervical versus a
+    // lumbar diagnosis; validation was the last caller still reading the link.
+    const cond = resolveRecommendationCondition(it as never, conditions as never).condition as DossierCondition | null;
+    const dossier = buildRecommendationDossier(it as never, cond, chronology as unknown as DossierChronoEvent[], dossierCase, interviews as never);
+    const id = (it as { id: string }).id;
+    const service = (it as { service: string }).service;
+    const check = compareBasis(recordedBases.get(id) ?? null, buildBasis(it as never, dossier));
+    if (check.state !== "CURRENT") {
+      basisFindings.push({
+        service,
+        result: check.state === "MISSING" ? "BASIS_MISSING" : "BASIS_STALE",
+        issue:
+          check.state === "MISSING"
+            ? "No recommendation basis has been recorded for this item, so the exported report has nothing authoritative to render from."
+            : "The recorded basis for this item no longer matches the current record. The plan and the report would state different things.",
+        severity: "Critical",
+        suggestion: "Regenerate the plan to record a current basis, or resolve this finding explicitly if the recorded basis is the intended one.",
+        // Draft export continues and says so; final expert export is refused.
+        exportBlocking: true,
+      });
+    }
     return validateRecommendationCompleteness(it as never, dossier, !!cond);
   });
   // Clinical Reasoning Engine (Phase D) — reasoning-derived gating: double-count
@@ -174,6 +226,9 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
   }
 
   const findings = [
+    // Basis divergence first: it says the plan and the report would disagree,
+    // which conditions how every other finding should be read.
+    ...basisFindings,
     ...specialtyFindings,
     ...indicationFindings,
     ...claimFindings,
