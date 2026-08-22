@@ -46,3 +46,18 @@ export async function requirePlatformAdmin(ctx: TenantContext): Promise<void> {
     throw new TenantError("Platform administrator authorization required.", "FORBIDDEN", 403);
   }
 }
+
+/**
+ * Guard for platform-operator WRITES.
+ *
+ * Support mode is read-only everywhere else in the product — requireCanonical-
+ * Permission refuses every mutation under it — and a platform write must not be
+ * the one hole in that. An operator viewing a tenant for support may look at
+ * anything and change nothing.
+ */
+export async function requirePlatformAdminWrite(ctx: TenantContext): Promise<void> {
+  await requirePlatformAdmin(ctx);
+  if (ctx.supportMode) {
+    throw new TenantError("Platform support context is read-only.", "FORBIDDEN", 403);
+  }
+}

@@ -67,12 +67,17 @@ const row = (approvalClass: string) => ({
 });
 
 describe("the gate follows the candidate, not the caller", () => {
-  it("an editorial lesson needs learning.approve and no credential", async () => {
+  it("an editorial lesson is refused on the tenant surface entirely", async () => {
+    // learning.approve is platformOnly and authorize() denies those at step 1
+    // for every firm user, so requiring it here could only ever produce a 403
+    // that reads like a misconfiguration. The route says what is true and
+    // points at the surface that can act.
     findFirst.mockResolvedValue(row("STYLE"));
     const res = await approve(req(), params);
-    expect(res.status).toBe(200);
-    expect(requireCanonicalPermission).toHaveBeenCalledWith(ctx, "learning.approve");
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "STYLE_NOT_TENANT_DECIDABLE" });
     expect(enforceReviewCredential).not.toHaveBeenCalled();
+    expect(approveCandidate).not.toHaveBeenCalled();
   });
 
   it("a clinical lesson needs learning.approve_clinical AND a verified physician credential", async () => {
@@ -129,7 +134,9 @@ describe("rejection is gated exactly like approval", () => {
   });
 
   it("refuses a rejection with no reason", async () => {
-    findFirst.mockResolvedValue(row("STYLE"));
+    // A CLINICAL row: STYLE is refused earlier now, so the reason check would
+    // never be reached with one.
+    findFirst.mockResolvedValue(row("CLINICAL"));
     const res = await reject(req({ reason: "  " }), params);
     expect(res.status).toBe(422);
     expect(rejectCandidate).not.toHaveBeenCalled();
@@ -185,7 +192,7 @@ describe("the credential gate is not optional", () => {
 describe("a lost concurrent decision surfaces as a conflict", () => {
   it("409s rather than reporting a success it did not achieve", async () => {
     const { CandidateStateError } = await import("@/lib/learning/candidateService");
-    findFirst.mockResolvedValue(row("STYLE"));
+    findFirst.mockResolvedValue(row("CLINICAL"));
     (approveCandidate as Mock).mockRejectedValue(new CandidateStateError("decided by someone else"));
     const res = await approve(req(), params);
     expect(res.status).toBe(409);

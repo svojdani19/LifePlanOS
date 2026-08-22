@@ -96,9 +96,12 @@ describe("what the interface says matches what the server does", () => {
     expect(src).not.toMatch(/Editorial lessons are adopted here/);
   });
 
-  it("the page still gates rendering on the same keys the routes enforce", async () => {
+  it("the tenant page offers no editorial adoption, and gates clinical on the real key", async () => {
+    // Asking canCanonicalPermission for learning.approve here can only ever
+    // return false — it is platformOnly, denied at step 1 for every firm user —
+    // so a control behind it would be dead code pretending to be a gate.
     const src = await read("src/app/(app)/settings/learning/page.tsx");
-    expect(src).toMatch(/canCanonicalPermission\(ctx, "learning\.approve"\)/);
+    expect(src).toMatch(/const canApproveStyle = false;/);
     expect(src).toMatch(/canCanonicalPermission\(ctx, "learning\.approve_clinical"\)/);
   });
 

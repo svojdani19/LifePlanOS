@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import { PlatformLearningQueue } from "@/components/learning/PlatformLearningQueue";
 import { cookies } from "next/headers";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -48,6 +49,28 @@ export default async function PlatformAdminPage() {
     prisma.validationRun.findFirst({ orderBy: { createdAt: "desc" }, select: { engineVersion: true, createdAt: true } }),
   ]);
 
+  // Editorial lessons awaiting the operator, across every tenant. This is the
+  // ONLY surface that can adopt one: learning.approve is platformOnly and
+  // authorize() denies those for every firm user, so without this the policy
+  // was a rule nobody could satisfy.
+  const styleQueue = await prisma.learningCandidate.findMany({
+    where: { status: "APPROVAL_PENDING", approvalClass: "STYLE" },
+    orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+    take: 50,
+    select: { id: true, firmId: true, guidance: true, mechanism: true, failureCode: true, supportCount: true, safetyClean: true },
+  });
+  const firmNameById = new Map(firms.map((f) => [f.id, f.name]));
+  const styleRows = styleQueue.map((r) => ({
+    id: r.id,
+    firmId: r.firmId,
+    firmName: firmNameById.get(r.firmId) ?? r.firmId,
+    guidance: r.guidance,
+    mechanism: r.mechanism,
+    failureCode: r.failureCode,
+    supportCount: r.supportCount,
+    safetyClean: r.safetyClean ?? null,
+  }));
+
   const demoFirms = firms.filter((f) => f.isDemo);
   const demoEnabled = process.env.ENABLE_DEMO_MODE === "true" || process.env.ENABLE_DEMO_MODE === "1";
   // Feature-detect the demo-reset surfaces (they land with the demo agent):
@@ -58,6 +81,9 @@ export default async function PlatformAdminPage() {
 
   return (
     <div>
+      <div className="mb-6">
+        <PlatformLearningQueue rows={styleRows} />
+      </div>
       {/* ── Privileged-area warning ───────────────────────────────────────────── */}
       <div className="mb-5 flex items-start gap-3 rounded-xl border-2 border-red-300 bg-red-50 p-4">
         <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-red-700" aria-hidden />

@@ -74,7 +74,9 @@ describe("the page reflects the policy it cannot enforce", () => {
   });
 
   it("separates the two authorities rather than using one flag", () => {
-    expect(page).toMatch(/"learning\.approve"/);
+    // Editorial adoption is no longer offered on this surface at all — the key
+    // is platformOnly, so asking for it here could only render a dead control.
+    expect(page).toMatch(/const canApproveStyle = false;/);
     expect(page).toMatch(/"learning\.approve_clinical"/);
     expect(queue).toMatch(/approvalClass === "CLINICAL" \? canApproveClinical : canApproveStyle/);
   });

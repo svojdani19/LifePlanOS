@@ -42,7 +42,11 @@ export default async function LearningPage() {
   //   clinical (FACT)   — a credentialed physician. Holding the seat is not
   //     holding the credential.
   // The routes enforce both again, regardless of what is rendered here.
-  const canApproveStyle = canCanonicalPermission(ctx, "learning.approve");
+  // learning.approve is platformOnly, and authorize() denies platformOnly keys
+  // at step 1 for every firm user — so this can never be true on this surface,
+  // and asking it would only render a control the server refuses. Editorial
+  // lessons are decided by the platform operator on the platform surface.
+  const canApproveStyle = false;
   const canApproveClinical = canCanonicalPermission(ctx, "learning.approve_clinical") && physicianCredentialed;
 
   const rows = candidates.map((c) => ({

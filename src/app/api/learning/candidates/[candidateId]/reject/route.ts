@@ -39,6 +39,22 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
     // TypeScript ApprovalClass and none of which equals "CLINICAL", so the
     // comparison that picks the gate would have picked the weaker one.
     const cls = parseApprovalClass(candidate.approvalClass);
+
+    // EDITORIAL lessons are not decided on the tenant surface. learning.approve
+    // is platformOnly, and authorize() denies platformOnly keys at step 1 for
+    // every firm user — so requiring it here could only ever produce a 403 that
+    // reads like a misconfiguration. Say what is actually true instead, and
+    // point at the surface that can act.
+    if (cls === "STYLE") {
+      return ok(
+        {
+          error:
+            "Adopting an editorial lesson is a standing change to how every future case is processed, and rests with the platform operator rather than with firm administration.",
+          code: "STYLE_NOT_TENANT_DECIDABLE",
+        },
+        409,
+      );
+    }
     requireCanonicalPermission(ctx, requiredApprovalPermission(cls));
 
     const needed = requiredApprovalCredential(cls);
