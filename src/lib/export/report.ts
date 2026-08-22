@@ -30,6 +30,7 @@ import { loadRecordedBases, type BasisStore } from "@/lib/engine/basisStore";
 import { itemIsSupported, supportClassOf, SUPPORT_LABEL, computePlanTotals } from "@/lib/engine/supportClass";
 import { LOW_SCENARIO_MULTIPLIER, HIGH_SCENARIO_MULTIPLIER } from "@/lib/engine/cost";
 import { assessBasisCompleteness } from "@/lib/engine/basisCompleteness";
+import { loadRecordedBases as loadBasesForCsv } from "@/lib/engine/basisStore";
 import { deriveWitnessAssessment, assessmentFromBasis, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningItem, type ReasoningAssessment } from "@/lib/engine/clinicalReasoning";
 import { referencesFor, guidelineSourcesFor } from "@/lib/references/sources";
 import { guidelineStatement } from "@/lib/export/guidelineStatement";
@@ -1845,6 +1846,14 @@ export async function buildCostCsv(caseId: string): Promise<CostCsvPayload> {
     prisma.condition.findMany({ where: { caseId } }),
     prisma.validationFinding.findMany({ where: { caseId, status: "OPEN" }, select: { service: true, result: true, exportBlocking: true } }),
   ]);
+  // Per row: does a complete recorded basis exist for this recommendation?
+  // The worksheet's own figures are current-derived either way; this tells the
+  // reader whether the final report would render the same ones.
+  const csvBasisLoad = await loadBasesForCsv(prisma as unknown as BasisStore, caseId);
+  const basisStateFor = (id: string): string => {
+    if (!csvBasisLoad.readable) return "UNREADABLE";
+    return assessBasisCompleteness(csvBasisLoad.byItem.get(id) ?? null).state;
+  };
   const integrity = runIntegrityCheck({
     recommendations: items as unknown as RecInput[],
     conditions: conditions as unknown as CondInput[],
@@ -1860,7 +1869,7 @@ export async function buildCostCsv(caseId: string): Promise<CostCsvPayload> {
     "Category", "Service", "Specialty", "CPT", "Probability", "Confidence", "Freq/yr", "Duration(yrs)",
     "DurationBasis", "UnitCost", "AnnualCost", "LifetimeCost", "PresentValue", "Low", "High",
     "PricingSource", "EvidenceStrength", "DefenseVulnerability", "PhysicianStatus",
-    "IncludedInFinalTotals", "ValidationWarnings",
+    "IncludedInFinalTotals", "ValidationWarnings", "RecordedBasis",
   ];
   const rows = items.map((i) => {
     const included = includedSet.has(i.id);
@@ -1875,7 +1884,7 @@ export async function buildCostCsv(caseId: string): Promise<CostCsvPayload> {
       i.frequencyPerYear, i.isLifetime ? "lifetime" : i.durationYears ?? "", durationBasis,
       i.unitCost, i.annualCost, i.lifetimeCost, i.presentValue, i.lowCost, i.highCost,
       i.pricingSource ?? "", i.evidenceStrength ?? "", i.defenseVulnerability, i.physicianStatus,
-      included ? "YES" : "NO — excluded from totals", warn,
+      included ? "YES" : "NO — excluded from totals", warn, basisStateFor(i.id),
     ].map(csvCell).join(",");
   });
 
@@ -1887,8 +1896,20 @@ export async function buildCostCsv(caseId: string): Promise<CostCsvPayload> {
     "", "", totalLifetime, totalPresentValue, "", "", "", "", "", "",
     `${included.length} of ${items.length} rows included`, "",
   ].map(csvCell).join(",");
+  // Says on its face what it is derived from.
+  //
+  // This worksheet reads the CURRENT rows, not the recorded basis the DOCX
+  // renders from — deliberately, because it is a working artifact and the
+  // export route refuses a final-mode CSV outright. But "derived from current
+  // values" is a material fact about the numbers in it, and a reader comparing
+  // this against a final report needs to know why they can differ. The
+  // RecordedBasis column below states, per row, whether a complete recorded
+  // basis exists for that recommendation.
   const disclosure = csvCell(
-    "SUPPORTING WORKSHEET — not a final release. Totals cover only rows marked IncludedInFinalTotals=YES; excluded rows are disclosed above and are not in totals.",
+    "SUPPORTING WORKSHEET — not a final release, and NOT the approved record. " +
+      "Every figure here is derived from the case as it stands NOW; the final report renders from each recommendation's recorded basis and may legitimately differ. " +
+      "The RecordedBasis column states whether a complete basis exists for each row. " +
+      "Totals cover only rows marked IncludedInFinalTotals=YES; excluded rows are disclosed above and are not in totals.",
   );
 
   return {
