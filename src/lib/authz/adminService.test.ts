@@ -268,7 +268,11 @@ describe("cloneRole", () => {
     const result = await cloneRole({ ...base, cloneFrom: "PHYSICIAN_REVIEWER" });
 
     const droppedKeys = result.droppedKeys.map((d) => d.key).sort();
-    expect(droppedKeys).toEqual(["physician.review", "report.approve", "report.attest"]);
+    // learning.approve_clinical joins the dropped set: adopting a lesson that
+    // changes what the program asserts about care is credential-gated and not
+    // custom-role assignable, so an administrator cloning the physician
+    // template cannot carry it across.
+    expect(droppedKeys).toEqual(["learning.approve_clinical", "physician.review", "report.approve", "report.attest"]);
     expect(result.permissions.map((p) => p.key)).toContain("case.view");
     expect(result.permissions.map((p) => p.key)).not.toContain("report.attest");
     expect(roleCreate).toHaveBeenCalledWith(

@@ -380,6 +380,38 @@ const DEFINITIONS: PermissionDefinition[] = [
     privileged: true,
   }),
 
+  // ── LEARNING ───────────────────────────────────────────────────────────────
+  // Adopting a learned lesson changes how every future case is processed, so it
+  // is an organization-scoped act, never delegable, and never assignable to an
+  // external collaborator. The two approval keys exist because the two classes
+  // of lesson call for different authority — see lib/learning/approvalClass.ts.
+  def("learning.view", "View learned lessons", "Read the learning queue, evaluations, and adoption history.", "ORGANIZATION", "LOW", {
+    scopes: ORG_ONLY,
+  }),
+  def(
+    "learning.approve",
+    "Approve editorial lessons",
+    "Adopt or reject learned lessons about presentation and structure (task guidance, salience preferences).",
+    "ORGANIZATION",
+    "HIGH",
+    { scopes: ORG_ONLY, delegable: false, externalAssignable: false, privileged: true },
+  ),
+  def(
+    "learning.approve_clinical",
+    "Approve clinical lessons",
+    "Adopt or reject learned lessons that change what the program asserts about care. Requires an ACTIVE verified PHYSICIAN credential at evaluation time.",
+    "ORGANIZATION",
+    "CRITICAL",
+    {
+      scopes: ORG_ONLY,
+      requiresCredential: "PHYSICIAN",
+      delegable: false,
+      externalAssignable: false,
+      customRoleAssignable: false,
+      privileged: true,
+    },
+  ),
+
   // ── PLATFORM (operator-only; step 1 denies these for every firm user) ──────
   def("featureflags.manage", "Manage feature flags", "Change platform/firm feature-flag posture.", "PLATFORM", "CRITICAL", {
     scopes: ORG_ONLY,

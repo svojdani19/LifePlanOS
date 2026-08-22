@@ -21,6 +21,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { prisma } from "@/lib/db";
+import { classifyApproval } from "@/lib/learning/approvalClass";
 import { assertPhiFree, MAX_GUIDANCE_CHARS } from "@/lib/learning/findingService";
 import { profileFor, type FailureCode, type LearningMechanism } from "@/lib/learning/failureTaxonomy";
 
@@ -87,6 +88,9 @@ export async function promoteToCandidate(input: CandidateInput) {
       scope: profile.scope,
       supportCount: Math.max(1, support),
       status: "DRAFT",
+      // Frozen here, not derived at read time: a later mechanism edit must not
+      // be able to reclassify a pending approval into the weaker gate.
+      approvalClass: classifyApproval({ mechanism: profile.mechanism, scope: profile.scope, failureCode: code }),
     },
   });
 
@@ -191,22 +195,129 @@ export async function evaluateCandidate(candidateId: string, firmId: string, car
   if (!candidate) throw new Error("candidate not found in this firm");
 
   const verdict = judgeCandidate(card);
-  const status = verdict.adopt ? "ADOPTED" : "REJECTED_NO_IMPROVEMENT";
+  // Passing evaluation earns the right to be CONSIDERED, not adoption. A metric
+  // cannot hold an opinion, and this one used to write ADOPTED directly — after
+  // which retrieveGuidance served the lesson into live prompts with no person
+  // having approved anything.
+  const status = verdict.adopt ? "APPROVAL_PENDING" : "REJECTED_NO_IMPROVEMENT";
   const updated = await prisma.learningCandidate.update({
     where: { id: candidate.id },
     data: {
       status,
       safetyClean: verdict.safetyClean,
       evaluation: { verdict, card } as unknown as object,
-      adoptedAt: verdict.adopt ? new Date() : null,
+      adoptedAt: null,
     },
   });
 
   await prisma.learningFinding.updateMany({
     where: { candidateId: candidate.id },
-    data: { state: verdict.adopt ? "ADOPTED" : "REJECTED_NO_IMPROVEMENT" },
+    data: { state: verdict.adopt ? "EVALUATED" : "REJECTED_NO_IMPROVEMENT" },
   });
   return { candidate: updated, verdict };
+}
+
+// ── Human approval ───────────────────────────────────────────────────────────
+
+export interface ApprovalActor {
+  userId: string;
+  firmId: string;
+  /** Verified credential label, for attribution. Null for a STYLE approval. */
+  credentialLabel?: string | null;
+}
+
+/**
+ * Adopt an evaluated lesson.
+ *
+ * Authorization lives in the route — permission by class, and for a CLINICAL
+ * class the same verified-credential gate that guards attestation. This
+ * function enforces the STATE rules that must hold no matter who is calling:
+ * only an evaluated candidate can be adopted, only inside its own firm, and the
+ * approval is recorded with the approver and the class they approved under.
+ */
+export async function approveCandidate(candidateId: string, actor: ApprovalActor, note?: string) {
+  const candidate = await prisma.learningCandidate.findFirst({ where: { id: candidateId, firmId: actor.firmId } });
+  if (!candidate) throw new Error("candidate not found in this firm");
+  if (candidate.status !== "APPROVAL_PENDING") {
+    throw new Error(`only an evaluated candidate awaiting approval can be adopted; this one is ${candidate.status}`);
+  }
+  // Never adopt something the evaluation could not clear. The route cannot
+  // reach past this, and neither can a future caller.
+  if (candidate.safetyClean !== true) {
+    throw new Error("a candidate that regressed a safety-critical metric cannot be adopted");
+  }
+
+  const updated = await prisma.learningCandidate.update({
+    where: { id: candidate.id },
+    data: {
+      status: "ADOPTED",
+      adoptedAt: new Date(),
+      approvedById: actor.userId,
+      approvedAt: new Date(),
+      approverCredential: actor.credentialLabel ?? null,
+      approvalNote: note ?? null,
+      rejectedById: null,
+      rejectedAt: null,
+      rejectionReason: null,
+    },
+  });
+  await prisma.learningFinding.updateMany({ where: { candidateId: candidate.id }, data: { state: "ADOPTED" } });
+  return updated;
+}
+
+/**
+ * Refuse a lesson.
+ *
+ * A rejection is a decision, not a deletion: the candidate stays with its
+ * evaluation, its reviewer and their reason, so the record of what the firm
+ * declined to learn survives alongside what it accepted.
+ */
+export async function rejectCandidate(candidateId: string, actor: ApprovalActor, reason: string) {
+  if (!reason.trim()) throw new Error("a rejection must record a reason");
+  const candidate = await prisma.learningCandidate.findFirst({ where: { id: candidateId, firmId: actor.firmId } });
+  if (!candidate) throw new Error("candidate not found in this firm");
+  if (candidate.status !== "APPROVAL_PENDING") {
+    throw new Error(`only a candidate awaiting approval can be rejected; this one is ${candidate.status}`);
+  }
+
+  const updated = await prisma.learningCandidate.update({
+    where: { id: candidate.id },
+    data: {
+      status: "REJECTED_BY_REVIEWER",
+      adoptedAt: null,
+      rejectedById: actor.userId,
+      rejectedAt: new Date(),
+      rejectionReason: reason.trim().slice(0, 1000),
+    },
+  });
+  await prisma.learningFinding.updateMany({ where: { candidateId: candidate.id }, data: { state: "REJECTED_NO_IMPROVEMENT" } });
+  return updated;
+}
+
+/**
+ * The approval queue for a firm, newest first.
+ *
+ * Firm-scoped by parameter for the same reason retrieveGuidance is: the unsafe
+ * query should be impossible to write, not merely discouraged.
+ */
+export async function listCandidates(firmId: string, opts: { status?: string; approvalClass?: string; limit?: number } = {}) {
+  if (!firmId) throw new Error("listing candidates requires a firm");
+  return prisma.learningCandidate.findMany({
+    where: {
+      firmId,
+      ...(opts.status ? { status: opts.status } : {}),
+      ...(opts.approvalClass ? { approvalClass: opts.approvalClass } : {}),
+    },
+    orderBy: [{ createdAt: "desc" }, { id: "asc" }],
+    take: Math.min(opts.limit ?? 50, 200),
+    select: {
+      id: true, mechanism: true, failureCode: true, guidance: true, documentClass: true,
+      sectionType: true, scope: true, supportCount: true, status: true, approvalClass: true,
+      safetyClean: true, evaluation: true, approvedById: true, approvedAt: true,
+      approverCredential: true, rejectedById: true, rejectedAt: true, rejectionReason: true,
+      adoptedAt: true, createdAt: true, version: true,
+    },
+  });
 }
 
 // ── Rollback ─────────────────────────────────────────────────────────────────

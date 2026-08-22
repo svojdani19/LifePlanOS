@@ -141,14 +141,33 @@ export async function fetchExemplarGuidance(firmId: string, documentType: string
 /**
  * Adopted lessons for this firm and document class, with their candidate ids so
  * a caller can record which lessons shaped a given output.
+ *
+ * Both fact-free structural mechanisms are retrieved. TASK_GUIDANCE says what
+ * to capture; SALIENCE_PREFERENCE says what should lead and what is
+ * boilerplate. The second was being produced, evaluated and adopted and then
+ * read by nothing, so approving one changed no output at all — an approval that
+ * cannot change anything is not a control, it is a form.
+ *
+ * Task guidance leads, because it governs whether a fact is captured at all;
+ * salience only orders facts that were. Both are sanitized and budgeted by
+ * retrieveGuidance, and both are served only when ADOPTED.
  */
 export async function fetchAdoptedGuidance(firmId: string, documentType: string | null, limit = 3) {
-  return retrieveGuidance({
+  const task = await retrieveGuidance({
     firmId,
     mechanism: "TASK_GUIDANCE",
     documentClass: documentType ?? undefined,
     limit,
   });
+  const remaining = Math.max(0, limit - task.length);
+  if (remaining === 0) return task;
+  const salience = await retrieveGuidance({
+    firmId,
+    mechanism: "SALIENCE_PREFERENCE",
+    documentClass: documentType ?? undefined,
+    limit: remaining,
+  });
+  return [...task, ...salience];
 }
 
 async function fetchRawExemplarGuidance(firmId: string, documentType: string | null, limit: number): Promise<string[]> {

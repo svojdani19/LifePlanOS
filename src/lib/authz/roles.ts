@@ -101,6 +101,10 @@ export const FIRM_ADMINISTRATOR = template(
     "report.supersede",
     "attestation.view",
     "attestation.invalidate",
+    // Learning: an administrator may adopt editorial lessons. Clinical lessons
+    // need a credentialed physician and are deliberately absent here.
+    "learning.view",
+    "learning.approve",
     // Feature-gated views.
     "vocational.view",
     "economic.view",
@@ -260,6 +264,10 @@ export const PHYSICIAN_REVIEWER_TEMPLATE = template(
     "report.attest",
     "attestation.view",
     "credentials.upload",
+    // Learning: a lesson that changes what the program asserts about care is a
+    // standing medical opinion, so adopting one is a physician act.
+    "learning.view",
+    "learning.approve_clinical",
   ],
   "ORGANIZATION",
   false,

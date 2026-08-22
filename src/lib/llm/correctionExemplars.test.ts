@@ -97,3 +97,47 @@ describe("recording", () => {
     expect(String(data.guidance)).not.toMatch(/\bold\b|\bnew\b/); // fact-free
   });
 });
+
+describe("approved salience lessons reach the prompt", () => {
+  // SALIENCE_PREFERENCE candidates were produced, evaluated and adopted, and
+  // then read by nothing. Approving one changed no output, which makes the
+  // approval a form rather than a control.
+  it("retrieves both fact-free mechanisms, task guidance first", async () => {
+    const calls: string[] = [];
+    vi.resetModules();
+    vi.doMock("@/lib/learning/candidateService", () => ({
+      sanitizeGuidance: (t: string) => t,
+      retrieveGuidance: async (q: { mechanism: string; limit: number }) => {
+        calls.push(q.mechanism);
+        return q.mechanism === "TASK_GUIDANCE"
+          ? [{ id: "c1", version: 1, text: "capture each modality" }]
+          : [{ id: "c2", version: 1, text: "lead with the functional change" }];
+      },
+    }));
+    const { fetchAdoptedGuidance } = await import("./correctionExemplars");
+    const out = await fetchAdoptedGuidance("firm-A", "PROGRESS_NOTE", 3);
+    expect(calls).toEqual(["TASK_GUIDANCE", "SALIENCE_PREFERENCE"]);
+    expect(out.map((o) => o.text)).toEqual(["capture each modality", "lead with the functional change"]);
+    vi.doUnmock("@/lib/learning/candidateService");
+  });
+
+  it("does not exceed the caller's limit once task guidance fills it", async () => {
+    vi.resetModules();
+    const seen: number[] = [];
+    vi.doMock("@/lib/learning/candidateService", () => ({
+      sanitizeGuidance: (t: string) => t,
+      retrieveGuidance: async (q: { mechanism: string; limit: number }) => {
+        seen.push(q.limit);
+        return q.mechanism === "TASK_GUIDANCE"
+          ? [{ id: "a", version: 1, text: "one" }, { id: "b", version: 1, text: "two" }]
+          : [{ id: "c", version: 1, text: "three" }];
+      },
+    }));
+    const { fetchAdoptedGuidance } = await import("./correctionExemplars");
+    const out = await fetchAdoptedGuidance("firm-A", "PROGRESS_NOTE", 2);
+    // Task guidance filled the budget, so salience is never queried.
+    expect(seen).toEqual([2]);
+    expect(out).toHaveLength(2);
+    vi.doUnmock("@/lib/learning/candidateService");
+  });
+});

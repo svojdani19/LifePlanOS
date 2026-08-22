@@ -2537,8 +2537,26 @@ model LearningCandidate {
   supportCount Int @default(1)
 
   version Int    @default(1)
-  /// DRAFT | EVALUATED | ADOPTED | REJECTED_NO_IMPROVEMENT | RETIRED
+  /// DRAFT | EVALUATED | APPROVAL_PENDING | ADOPTED | REJECTED_NO_IMPROVEMENT |
+  /// REJECTED_BY_REVIEWER | RETIRED
   status  String @default("DRAFT")
+
+  /// STYLE | CLINICAL — who is permitted to approve this lesson. Frozen at
+  /// promotion so a later mechanism edit cannot silently reclassify a pending
+  /// approval into the weaker gate.
+  approvalClass String @default("CLINICAL")
+
+  /// Human approval. Passing evaluation earns a candidate the right to be
+  /// CONSIDERED, never adoption itself — a metric cannot hold an opinion.
+  approvedById       String?
+  approvedAt         DateTime?
+  /// The approver's verified credential label, snapshotted for attribution.
+  approverCredential String?
+  approvalNote       String?
+
+  rejectedById    String?
+  rejectedAt      DateTime?
+  rejectionReason String?
 
   /// Held-out scorecard: metric deltas, cases evaluated, safety-critical checks.
   evaluation  Json?
@@ -2559,6 +2577,7 @@ model LearningCandidate {
   findings LearningFinding[]
 
   @@index([firmId, status])
+  @@index([firmId, approvalClass, status])
   @@index([firmId, mechanism, documentClass])
   @@index([supersedesId])
 }
