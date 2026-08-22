@@ -4084,6 +4084,55 @@ function VersionCompareCard({ caseId, embedded = false }: { caseId: string; embe
   );
 }
 
+/** One side of a divergence, in the terms a clinician reads. */
+function BasisSnapshotPanel({ title, snap }: { title: string; snap: AnyRec | null }) {
+  if (!snap) {
+    return (
+      <div className="rounded-md bg-white p-2">
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">{title}</p>
+        <p className="mt-1 text-[11px] text-ink-600">Nothing recorded on this side.</p>
+      </div>
+    );
+  }
+  const money = (v: unknown) => (typeof v === "number" ? `$${v.toLocaleString("en-US")}` : "not recorded");
+  const txt = (v: unknown) => (typeof v === "string" && v.length ? v : "not recorded");
+  const counts = (snap.acceptedEvidenceCounts ?? {}) as Record<string, number>;
+  const rows: [string, string][] = [
+    ["Recommendation", txt(snap.service)],
+    ["Diagnosis", txt(snap.supportingDiagnosis)],
+    ["Specialty", txt(snap.responsibleSpecialty)],
+    ["Frequency", txt(snap.frequencyText)],
+    ["Duration", txt(snap.durationText)],
+    ["CPT", txt(snap.cptCode)],
+    ["Unit cost", money(snap.unitCost)],
+    ["Present value", money(snap.presentValue)],
+    ["Physician review", txt(snap.physicianStatus)],
+    ["Probability", txt(snap.probabilityClassification)],
+    ["Evidence strength", txt(snap.evidenceStrength)],
+    ["Confidence", txt(snap.recommendationConfidence)],
+    ["Accepted evidence", `${Object.values(counts).reduce((a, b) => a + (b ?? 0), 0)} item(s) — ${Object.entries(counts).map(([k, v]) => `${v} ${k.replace(/([A-Z])/g, " $1").toLowerCase()}`).join(", ")}`],
+    ["Contradictions", `${((snap.contradictions ?? []) as unknown[]).length}`],
+    ["Unknowns", `${((snap.missingPremises ?? []) as unknown[]).length}`],
+  ];
+  return (
+    <div className="rounded-md bg-white p-2">
+      <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">{title}</p>
+      <dl className="mt-1 space-y-0.5">
+        {rows.map(([k, v]) => (
+          <div key={k} className="flex gap-1.5 text-[11px]">
+            <dt className="shrink-0 text-ink-500">{k}:</dt>
+            <dd className="min-w-0 break-words text-ink-800">{v}</dd>
+          </div>
+        ))}
+      </dl>
+      {snap.necessityNarrative ? (
+        <p className="mt-1.5 border-t border-ink-100 pt-1.5 text-[11px] italic text-ink-700">{String(snap.necessityNarrative).slice(0, 420)}</p>
+      ) : null}
+      <p className="mt-1.5 break-all font-mono text-[10px] text-ink-400">{String(snap.basisHash ?? "no hash")}</p>
+    </div>
+  );
+}
+
 /**
  * Reconcile one stale recorded basis.
  *
@@ -4161,16 +4210,28 @@ function BasisReconcileAction({ caseId, findingResult, service, onDone }: { case
         </p>
       ) : (
         <>
+          {/* BOTH READINGS, in clinical terms. These panels showed two hashes
+              under these labels, which is an identity and not a reading: a
+              physician cannot judge whether the current record still supports
+              what was recorded by comparing hex strings. The hashes are still
+              here, at the bottom, as audit metadata. */}
           <div className="mt-2 grid gap-2 sm:grid-cols-2">
-            <div className="rounded-md bg-white p-2">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">Basis on file</p>
-              <p className="mt-0.5 break-all font-mono text-[11px] text-ink-700">{String(mine.recordedHash ?? "none")}</p>
-            </div>
-            <div className="rounded-md bg-white p-2">
-              <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">Record derives now</p>
-              <p className="mt-0.5 break-all font-mono text-[11px] text-ink-700">{String(mine.derivedHash)}</p>
-            </div>
+            <BasisSnapshotPanel title="Basis on file (approved)" snap={mine.recorded as AnyRec | null} />
+            <BasisSnapshotPanel title="Record derives now" snap={mine.current as AnyRec | null} />
           </div>
+          {Array.isArray(mine.differences) && (mine.differences as AnyRec[]).length > 0 && (
+            <div className="mt-2 rounded-md bg-white p-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">What changed</p>
+              <ul className="mt-1 space-y-1">
+                {(mine.differences as AnyRec[]).map((d) => (
+                  <li key={String(d.field)} className="text-[11px] text-ink-700">
+                    <span className="font-medium">{String(d.field).replace(/([A-Z])/g, " $1").toLowerCase()}:</span>{" "}
+                    <span className="text-ink-500">approved</span> {String(d.recorded)} <span className="text-ink-500">→ now</span> {String(d.current)}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
           <p className="mt-2 text-xs text-ink-600">
             Reconciling records your judgment that the record as it now stands still supports what was recorded and approved. It
             does not change the recorded basis, and it covers only this pair of readings — if either moves again, the divergence

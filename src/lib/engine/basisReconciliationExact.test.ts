@@ -136,10 +136,14 @@ describe("the workflow is reachable and wired end to end", () => {
     expect(existsSync(join(__dirname, "..", "..", "..", "src/app/api/cases/[caseId]/basis/reconcile/route.ts"))).toBe(true);
   });
 
-  it("it shows BOTH readings, not just a hash pair to sign off", async () => {
+  it("it renders both readings through the snapshot panel, not a hash pair", async () => {
+    // The version of this test that only regex-matched the two column LABELS
+    // was a false positive: the labels were there and the columns underneath
+    // held nothing but hashes.
     const src = await read("src/components/case/CaseWorkspace.tsx");
-    expect(src).toMatch(/Basis on file/);
-    expect(src).toMatch(/Record derives now/);
+    expect(src).toMatch(/<BasisSnapshotPanel title="Basis on file \(approved\)" snap=\{mine\.recorded/);
+    expect(src).toMatch(/<BasisSnapshotPanel title="Record derives now" snap=\{mine\.current/);
+    expect(src).toMatch(/mine\.differences/);
   });
 
   it("it requires a substantive reason before it will submit", async () => {

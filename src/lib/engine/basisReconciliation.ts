@@ -241,3 +241,118 @@ export function statusForFinding(
   }
   return carried ?? { status: "OPEN", resolvedById: null, resolvedAt: null };
 }
+
+
+// ── What a reviewer actually needs to see ───────────────────────────────────
+
+/**
+ * One side of a divergence, in clinical terms.
+ *
+ * The reconciliation UI showed two hashes under the labels "Basis on file" and
+ * "Record derives now". A hash is an identity, not a reading: a physician
+ * cannot form a judgment that the current record still supports what was
+ * recorded by comparing two hex strings, and asking them to sign one is asking
+ * for a signature, not an opinion. Hashes remain, as audit metadata.
+ *
+ * Deliberately narrow. Only fields belonging to THIS recommendation appear —
+ * no case-wide data, no other item's values, nothing about other patients.
+ */
+export interface BasisSnapshot {
+  service: string | null;
+  supportingDiagnosis: string | null;
+  responsibleSpecialty: string | null;
+  frequencyText: string | null;
+  durationText: string | null;
+  lifetimeQuantity: number | null;
+  cptCode: string | null;
+  unitCost: number | null;
+  presentValue: number | null;
+  physicianStatus: string | null;
+  necessityNarrative: string | null;
+  probabilityClassification: string | null;
+  probabilityStatement: string | null;
+  evidenceStrength: string | null;
+  recommendationConfidence: string | null;
+  inclusionRationale: string | null;
+  /** Counts, not the rows: the panel is a comparison, not a second report. */
+  acceptedEvidenceCounts: { diagnoses: number; objectiveFindings: number; functionalLimitations: number; priorTreatment: number; guidelines: number };
+  contradictions: string[];
+  missingPremises: string[];
+  /** Audit metadata, secondary to everything above. */
+  basisHash: string | null;
+}
+
+type BasisLike = {
+  basisHash?: string | null;
+  necessityNarrative?: string | null;
+  specification?: Record<string, unknown> | null;
+  assessmentBasis?: Record<string, unknown> | null;
+  probabilityBasis?: { classification?: string; statement?: string } | null;
+  acceptedEvidence?: Record<string, unknown[]> | null;
+  contradictions?: string[] | null;
+  missingPremises?: string[] | null;
+};
+
+const str = (v: unknown): string | null => (typeof v === "string" && v.length ? v : null);
+const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
+const len = (v: unknown): number => (Array.isArray(v) ? v.length : 0);
+
+/** Project a basis (recorded or witness) into the comparable clinical view. */
+export function snapshotOf(basis: BasisLike | null | undefined): BasisSnapshot | null {
+  if (!basis) return null;
+  const spec = (basis.specification ?? {}) as Record<string, unknown>;
+  const m = (basis.assessmentBasis ?? {}) as Record<string, unknown>;
+  const ev = (basis.acceptedEvidence ?? {}) as Record<string, unknown[]>;
+  return {
+    service: str(spec.service),
+    supportingDiagnosis: str(spec.supportingDiagnosis),
+    responsibleSpecialty: str(spec.responsibleSpecialty),
+    frequencyText: str(spec.frequencyText),
+    durationText: str(spec.durationText),
+    lifetimeQuantity: num(spec.lifetimeQuantity),
+    cptCode: str(spec.cptCode),
+    unitCost: num(spec.unitCost),
+    presentValue: num(spec.presentValue),
+    physicianStatus: str(spec.physicianStatus),
+    necessityNarrative: str(basis.necessityNarrative),
+    probabilityClassification: str(basis.probabilityBasis?.classification) ?? str(m.probabilityClassification),
+    probabilityStatement: str(basis.probabilityBasis?.statement),
+    evidenceStrength: str(m.evidenceStrength),
+    recommendationConfidence: str(m.recommendationConfidence),
+    inclusionRationale: str(m.inclusionRationale),
+    acceptedEvidenceCounts: {
+      diagnoses: len(ev.diagnoses),
+      objectiveFindings: len(ev.objectiveFindings),
+      functionalLimitations: len(ev.functionalLimitations),
+      priorTreatment: len(ev.priorTreatment),
+      guidelines: len(ev.guidelines),
+    },
+    contradictions: Array.isArray(basis.contradictions) ? basis.contradictions.map(String) : [],
+    missingPremises: Array.isArray(basis.missingPremises) ? basis.missingPremises.map(String) : [],
+    basisHash: str(basis.basisHash),
+  };
+}
+
+/** Field-level differences between the two snapshots, for the reviewer. */
+export function snapshotDifferences(a: BasisSnapshot | null, b: BasisSnapshot | null): { field: string; recorded: string; current: string }[] {
+  if (!a || !b) return [];
+  const show = (v: unknown): string => {
+    if (v === null || v === undefined || v === "") return "not recorded";
+    if (typeof v === "object") return JSON.stringify(v);
+    return String(v);
+  };
+  const FIELDS: (keyof BasisSnapshot)[] = [
+    "service", "supportingDiagnosis", "responsibleSpecialty", "frequencyText", "durationText",
+    "lifetimeQuantity", "cptCode", "unitCost", "presentValue", "physicianStatus",
+    "necessityNarrative", "probabilityClassification", "probabilityStatement",
+    "evidenceStrength", "recommendationConfidence", "inclusionRationale",
+    "acceptedEvidenceCounts", "contradictions", "missingPremises",
+  ];
+  const out: { field: string; recorded: string; current: string }[] = [];
+  for (const f of FIELDS) {
+    const x = show(a[f]);
+    const y = show(b[f]);
+    if (x !== y) out.push({ field: String(f), recorded: x, current: y });
+  }
+  return out;
+}

@@ -20,7 +20,7 @@ import {
 import { validateEvidenceQuality } from "./citationQuality";
 import { buildRecommendationDossier, validateRecommendationCompleteness, type DossierChronoEvent, type DossierCondition } from "./medicalNecessity";
 import { compareBasis } from "@/lib/engine/recommendationBasis";
-import { isBasisDivergenceFinding, encodeBasisFinding, decodeBasisFinding, reconciliationCovers, reconcilable, statusForFinding } from "@/lib/engine/basisReconciliation";
+import { isBasisDivergenceFinding, encodeBasisFinding, decodeBasisFinding, reconciliationCovers, reconcilable, statusForFinding, snapshotOf, snapshotDifferences, type BasisSnapshot } from "@/lib/engine/basisReconciliation";
 import { loadRecordedBases, unreadableBasisFinding, type BasisStore } from "@/lib/engine/basisStore";
 import { assembleBasis } from "@/lib/engine/basisAssembly";
 import { CHRONOLOGY_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
@@ -379,6 +379,16 @@ export interface BasisDivergence {
   reconcilable: boolean;
   /** The exact finding result code, so a caller can close THAT finding. */
   findingResult: string;
+  /**
+   * The two readings, in clinical terms. A reviewer cannot judge whether the
+   * current record still supports what was recorded by comparing hex strings —
+   * asking them to sign one is asking for a signature, not an opinion.
+   * Populated only by `basisDivergencesDetailed`; the cheap path leaves them
+   * null so callers that only need blocking counts pay nothing for them.
+   */
+  recorded: BasisSnapshot | null;
+  current: BasisSnapshot | null;
+  differences: { field: string; recorded: string; current: string }[];
 }
 
 /**
@@ -407,7 +417,7 @@ export async function basisDivergences(caseId: string): Promise<BasisDivergence[
     if (!id) {
       // A legacy short-tail code. It cannot be matched to a reconciliation with
       // any confidence, so it counts as unreconciled — the safe direction.
-      out.push({ futureCareItemId: "", service: f.service, state: "STALE", recordedHash: null, derivedHash: "", reconciled: false, reconcilable: false, findingResult: f.result });
+      out.push({ futureCareItemId: "", service: f.service, state: "STALE", recordedHash: null, derivedHash: "", reconciled: false, reconcilable: false, findingResult: f.result, recorded: null, current: null, differences: [] });
       continue;
     }
     out.push({
@@ -420,9 +430,65 @@ export async function basisDivergences(caseId: string): Promise<BasisDivergence[
       reconciled: reconciliations.some((r) => reconciliationCovers(r, id)),
       reconcilable: reconcilable(id.state).ok,
       findingResult: f.result,
+      recorded: null,
+      current: null,
+      differences: [],
     });
   }
   return out;
+}
+
+/**
+ * Divergences WITH both readings, for a reviewer who has to decide.
+ *
+ * Separate from `basisDivergences` because building the witness for every item
+ * is real work, and the gates that only need to know whether anything is
+ * unreconciled must not pay for it.
+ */
+export async function basisDivergencesDetailed(caseId: string): Promise<BasisDivergence[]> {
+  const rows = await basisDivergences(caseId);
+  if (!rows.length) return rows;
+
+  const recordedBases = await prisma.recommendationBasis.findMany({ where: { caseId } });
+  const byItem = new Map(recordedBases.map((b) => [b.futureCareItemId, b as unknown as Parameters<typeof snapshotOf>[0]]));
+
+  // The witness, derived the same way generation and validation derive it.
+  // The same inputs validateCase derives from, loaded the same way: the OUTPUT
+  // chronology in a deterministic order, and the case's own assumptions.
+  // Anything else and the witness would differ from the one that raised the
+  // finding in the first place.
+  const [items, conditions, kase, chronology, interviews] = await Promise.all([
+    prisma.futureCareItem.findMany({ where: { caseId, supersededAt: null }, include: { condition: true } }),
+    prisma.condition.findMany({ where: { caseId } }),
+    prisma.case.findUnique({
+      where: { id: caseId },
+      select: { id: true, dateOfBirth: true, sex: true, lifeExpectancyYears: true, lifeExpectancyBasis: true, specialty: true, additionalSpecialties: true, discountRate: true, medicalInflation: true, geographicFactor: true },
+    }),
+    prisma.chronologyEvent.findMany({ where: { caseId, ...CHRONOLOGY_OUTPUT_WHERE }, orderBy: [{ eventDate: "asc" }, { id: "asc" }] }),
+    prisma.interviewFinding.findMany({ where: { caseId } }).catch(() => []),
+  ]);
+  const adult = !kase?.dateOfBirth || (Date.now() - kase.dateOfBirth.getTime()) / (365.25 * 24 * 3600 * 1000) >= 18;
+  const dossierCase = { subject: "the patient", pronounPoss: "the patient's", lifeExpectancyYears: kase?.lifeExpectancyYears ?? 40, adult };
+  const caseAssumptions = kase ? assumptionsFor(kase as never) : { lifeExpectancyYears: 40, discountRate: 0, medicalInflation: 0, geographicFactor: 1 };
+
+  return rows.map((d) => {
+    const it = items.find((x: { id: string }) => x.id === d.futureCareItemId);
+    if (!it) return d;
+    const cond = resolveRecommendationCondition(it as never, conditions as never).condition as DossierCondition | null;
+    const dossier = buildRecommendationDossier(it as never, cond, chronology as unknown as DossierChronoEvent[], dossierCase, interviews as never);
+    const witness = assembleBasis({
+      item: it as never,
+      dossier,
+      conditions: conditions as never,
+      chronology: chronology as unknown as DossierChronoEvent[],
+      kase: dossierCase,
+      interviews: interviews as never,
+      assumptions: { ...caseAssumptions, pricedAt: (it as { pricedAt?: Date | null }).pricedAt?.toISOString() ?? null, conditionName: cond?.name ?? null },
+    });
+    const recorded = snapshotOf(byItem.get(d.futureCareItemId));
+    const current = snapshotOf(witness as unknown as Parameters<typeof snapshotOf>[0]);
+    return { ...d, recorded, current, differences: snapshotDifferences(recorded, current) };
+  });
 }
 
 /**
