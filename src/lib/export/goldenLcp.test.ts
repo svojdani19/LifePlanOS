@@ -65,6 +65,8 @@ vi.mock("@/lib/db", async () => {
       recommendationBasis: {
         findMany: async () => [],
       },
+      // Every producer's attempt, for the case-wide retrieval-coverage line.
+      retrievalAttempt: { findMany: async () => [], findFirst: async () => null },
       // ── Professional-authority gate lookups (all served from the fixture so
       //    the REAL gate runs and authorizes the golden expert render) ────────
       futureCareItem: {

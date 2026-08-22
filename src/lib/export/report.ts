@@ -31,6 +31,7 @@ import { itemIsSupported, supportClassOf, SUPPORT_LABEL, computePlanTotals } fro
 import { deriveWitnessAssessment, assessmentFromBasis, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningItem, type ReasoningAssessment } from "@/lib/engine/clinicalReasoning";
 import { referencesFor, guidelineSourcesFor } from "@/lib/references/sources";
 import { guidelineStatement } from "@/lib/export/guidelineStatement";
+import { coverageDisclosure, type AttemptRow } from "@/lib/export/retrievalCoverage";
 import { parseBasis, basisNarrative } from "@/lib/engine/lifeExpectancy";
 import { verifyAttestation, type AttestationScopeEntry, type AttestableItem } from "@/lib/engine/attestation";
 import { evaluatePhysicianReportAuthority, type VerifiedExpertAuthority } from "@/lib/reports/professionalAuthority";
@@ -406,10 +407,19 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   // The guideline producer's last outcome for this case. A search that failed
   // or never ran cannot support "guidance applies" OR "no guidance exists", and
   // the report must say which of the two it is in.
-  const socRetrieval = ((await prisma.retrievalAttempt?.findFirst({
-    where: { caseId, producer: "standard-of-care" },
-    select: { status: true, failure: true, failedSources: true },
-  }).catch(() => null)) ?? null) as { status: string; failure: string | null; failedSources?: string[] } | null;
+  // EVERY producer's current attempt, not just the guideline one. The other
+  // producers recorded PARTIAL outcomes as non-blocking findings that no
+  // appendix printed — Appendix F renders the separately computed integrity
+  // findings and Appendix G only blocking rows — so a final report could be
+  // produced with half the citation sources unreachable and say nothing.
+  const retrievalAttempts = (((await prisma.retrievalAttempt?.findMany({
+    where: { caseId },
+    select: { producer: true, status: true, failure: true, failedSources: true, produced: true, considered: true },
+  }).catch(() => [])) ?? []) as AttemptRow[]);
+  const coverage = coverageDisclosure(retrievalAttempts);
+  const socRetrieval = (retrievalAttempts.find((a) => a.producer === "standard-of-care") ?? null) as
+    | { status: string; failure: string | null; failedSources?: string[] }
+    | null;
 
   // One recorded basis per item, loaded once. An unreadable store is kept
   // distinct from an empty one: the document says "no recorded basis exists"
@@ -774,6 +784,11 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   }).catch(() => 0);
   const isDraft = integrity.blocking && openBlockingPersisted > 0;
   if (isDraft) body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 200, after: 200 }, children: [new TextRun({ text: "DRAFT — CONTAINS UNRESOLVED CRITICAL VALIDATION ISSUES · NOT FOR SERVICE", bold: true, size: 24, color: "B91C1C" })] }));
+  // Stated ONCE for the case, wherever the plan's own limitations are set out.
+  if (coverage.text) {
+    body.push(new Paragraph({ spacing: { before: 160, after: 40 }, children: [new TextRun({ text: "Retrieval coverage.", bold: true, size: 21, color: NAVY })] }));
+    body.push(p(coverage.text));
+  }
   if (basisUnreadable) {
     // Louder than the missing-basis banner, because less is known: with a
     // missing basis we at least know what we do not have.

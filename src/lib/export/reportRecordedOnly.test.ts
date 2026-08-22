@@ -165,7 +165,7 @@ vi.mock("@/lib/db", async () => {
       userCredential: { findMany: async () => [{ category: "PHYSICIAN", status: "ORG_VERIFIED", expiresAt: null }] },
       recommendationEvidence: { findMany: async () => [] },
       recommendationBasis: { findMany: async () => deps.bases },
-      retrievalAttempt: { findFirst: async () => null },
+      retrievalAttempt: { findFirst: async () => null, findMany: async () => [] },
       economicAssumption: { findFirst: async () => null },
       vocationalEntry: { findMany: async () => [] },
       economicScenario: { findMany: async () => [] },
