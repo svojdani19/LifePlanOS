@@ -46,6 +46,19 @@ jobs:
         # modules: npx eslint src/lib/authz src/lib/engagements src/lib/demo
         # src/lib/engine --max-warnings 0
         run: npm run lint
+      - name: Rollout backfill — dry run against the clean CI database
+        # Proves the preflight passes on a freshly migrated schema and that a
+        # dry run changes nothing. This is the ONLY environment the script is
+        # exercised in; it is never run against a live database from CI.
+        run: npm run rollout:check
+
+      - name: Rollout backfill — apply, then prove it is idempotent
+        # Apply on a database with nothing to backfill must be a clean no-op,
+        # and running it twice must be indistinguishable from running it once.
+        run: |
+          npm run rollout:apply
+          npm run rollout:apply
+
       - name: Unit tests
         run: npx vitest run
       - name: Build

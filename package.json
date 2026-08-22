@@ -19,6 +19,8 @@
     "db:deploy": "prisma migrate deploy",
     "db:seed": "tsx prisma/seed.ts",
     "citations:refresh": "tsx scripts/refresh-citations.ts",
+    "rollout:check": "tsx scripts/rollout-backfill.ts",
+    "rollout:apply": "tsx scripts/rollout-backfill.ts --apply",
     "records:rebuild": "tsx scripts/rebuild-records.ts",
     "records:corroborate": "tsx scripts/corroborate-records.ts",
     "records:reextract": "tsx scripts/reextract-case.ts",
