@@ -147,6 +147,30 @@ export const SUFFICIENCY_THRESHOLD = 50; // configurable minimum evidence score
 // (duplicates, staged replacements, alternatives) without a second model.
 export interface SetContext { conflicts: ConflictFlag[]; replacedByActive: boolean }
 
+/**
+ * Where a piece of guidance came from, and whether anyone checked it.
+ *
+ * AUTO_RETRIEVED guidance is what a literature search returned for this
+ * diagnosis and service. It is a real, resolvable document and it may well be
+ * on point — but no person has confirmed that the publication says what the
+ * plan is about to claim it says. The report described these as "verified
+ * against its publication", which is a statement about human verification that
+ * nothing in the pipeline performs.
+ *
+ * PHYSICIAN_VERIFIED requires a named person, at a recorded time, who read the
+ * publication and confirmed the pairing.
+ */
+export type GuidanceProvenance = "AUTO_RETRIEVED" | "PHYSICIAN_VERIFIED";
+
+export interface GuidelineAssessment {
+  title: string;
+  claim: string;
+  provenance: GuidanceProvenance;
+  /** Set only for PHYSICIAN_VERIFIED. */
+  verifiedBy?: string | null;
+  verifiedAt?: string | null;
+}
+
 export interface LiteratureAssessment { title: string; pmid?: string; supports: string; applicability: string; evidenceLevel: number; limitations: string | null }
 
 // Human-readable labels for rendering the structured assessment (report / UI).
@@ -204,7 +228,7 @@ export interface ReasoningAssessment {
   weakeningEvidence: WeakeningItem[];
   unknowns: UnknownItem[];
   missingEvidenceRequests: string[];
-  supportingGuidelineAssessments: { title: string; claim: string }[];
+  supportingGuidelineAssessments: GuidelineAssessment[];
   supportingLiteratureAssessments: LiteratureAssessment[];
   rejectedLiterature: RejectedCitation[];
   reasoningChain: ChainNode[];
@@ -1044,7 +1068,15 @@ export function buildReasoningAssessment(
     weakeningEvidence,
     unknowns,
     missingEvidenceRequests: missing,
-    supportingGuidelineAssessments: se.guidelines.map((g) => ({ title: g.text.slice(0, 140), claim: "supports the diagnosis and the intervention" })),
+    // Retrieved, not verified. The claim string used to assert that each of
+    // these "supports the diagnosis and the intervention" — a conclusion no
+    // step in the pipeline reaches. What is actually known is that a search for
+    // this diagnosis and service returned the document.
+    supportingGuidelineAssessments: se.guidelines.map((g) => ({
+      title: g.text.slice(0, 140),
+      claim: "returned by a guidance search for this diagnosis and service",
+      provenance: "AUTO_RETRIEVED" as const,
+    })),
     supportingLiteratureAssessments: literatureAssessments,
     rejectedLiterature,
     reasoningChain,

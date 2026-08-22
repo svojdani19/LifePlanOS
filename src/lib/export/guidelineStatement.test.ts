@@ -14,7 +14,7 @@ import { guidelineStatement, type GuidelineStatementInput } from "@/lib/export/g
 const GENERIC = ["ODG (ODGbyMCG) treatment guidelines", "Orthobullets clinical guidance", "ICSI clinical guidelines"];
 
 const input = (over: Partial<GuidelineStatementInput> = {}): GuidelineStatementInput => ({
-  verifiedItemSpecific: [],
+  itemGuidance: [],
   recordedGuidelineEvidence: [],
   genericSources: GENERIC,
   basisState: "CURRENT",
@@ -24,7 +24,7 @@ const input = (over: Partial<GuidelineStatementInput> = {}): GuidelineStatementI
 
 describe("VERIFIED, item-specific guidance may be called applied", () => {
   const r = guidelineStatement(input({
-    verifiedItemSpecific: [{ title: "NASS lumbar disc herniation with radiculopathy", claim: "discectomy after failed conservative care" }],
+    itemGuidance: [{ title: "NASS lumbar disc herniation with radiculopathy", claim: "discectomy after failed conservative care", provenance: "PHYSICIAN_VERIFIED", verifiedBy: "Dr Reyes, MD", verifiedAt: "2026-05-04T00:00:00.000Z" }],
   }));
 
   it("states it as applied support, naming the guideline and its claim", () => {
@@ -35,7 +35,7 @@ describe("VERIFIED, item-specific guidance may be called applied", () => {
   });
 
   it("says the verification is what earns the claim", () => {
-    expect(r.text).toMatch(/verified against its publication/i);
+    expect(r.text).toMatch(/read against its publication and confirmed/i);
     expect(r.text).toMatch(/recorded in this recommendation's basis/i);
   });
 
@@ -87,7 +87,7 @@ describe("a generic list is never a substitute for item-specific support", () =>
   it("the old sentence appears in no state", () => {
     const states: GuidelineStatementInput[] = [
       input(),
-      input({ verifiedItemSpecific: [{ title: "T", claim: "C" }] }),
+      input({ itemGuidance: [{ title: "T", claim: "C", provenance: "PHYSICIAN_VERIFIED", verifiedBy: "Dr Reyes, MD", verifiedAt: "2026-05-04T00:00:00.000Z" }] }),
       input({ recordedGuidelineEvidence: [{ text: "X", source: null }] }),
       input({ basisState: "STALE" }),
       input({ basisState: "MISSING" }),
@@ -105,7 +105,7 @@ describe("a basis that no longer matches cannot lend its guidance", () => {
     // The verified guidance was verified for a plan that has since moved.
     const r = guidelineStatement(input({
       basisState: "STALE",
-      verifiedItemSpecific: [{ title: "NASS", claim: "discectomy" }],
+      itemGuidance: [{ title: "NASS", claim: "discectomy", provenance: "PHYSICIAN_VERIFIED", verifiedBy: "Dr Reyes, MD", verifiedAt: "2026-05-04T00:00:00.000Z" }],
     }));
     expect(r.state).toBe("STALE_BASIS");
     expect(r.text).toMatch(/no longer matches the record/i);
@@ -113,7 +113,7 @@ describe("a basis that no longer matches cannot lend its guidance", () => {
   });
 
   it("MISSING says there is no basis to cite from", () => {
-    const r = guidelineStatement(input({ basisState: "MISSING", verifiedItemSpecific: [{ title: "NASS", claim: "discectomy" }] }));
+    const r = guidelineStatement(input({ basisState: "MISSING", itemGuidance: [{ title: "NASS", claim: "discectomy", provenance: "PHYSICIAN_VERIFIED", verifiedBy: "Dr Reyes, MD", verifiedAt: "2026-05-04T00:00:00.000Z" }] }));
     expect(r.state).toBe("STALE_BASIS");
     expect(r.text).toMatch(/no recorded basis exists/i);
   });
@@ -137,7 +137,7 @@ describe("an unresolved search supports neither presence nor absence", () => {
   it("outranks verified guidance — the record cannot be trusted to be complete", () => {
     const r = guidelineStatement(input({
       retrieval: { status: "FAILED", failure: "UNREACHABLE" },
-      verifiedItemSpecific: [{ title: "NASS", claim: "discectomy" }],
+      itemGuidance: [{ title: "NASS", claim: "discectomy", provenance: "PHYSICIAN_VERIFIED", verifiedBy: "Dr Reyes, MD", verifiedAt: "2026-05-04T00:00:00.000Z" }],
     }));
     expect(r.state).toBe("RETRIEVAL_UNRESOLVED");
   });
@@ -147,13 +147,13 @@ describe("an unresolved search supports neither presence nor absence", () => {
     // guidance that WAS verified and recorded for this item.
     const r = guidelineStatement(input({
       retrieval: { status: "NO_RESULTS", failure: null },
-      verifiedItemSpecific: [{ title: "NASS", claim: "discectomy" }],
+      itemGuidance: [{ title: "NASS", claim: "discectomy", provenance: "PHYSICIAN_VERIFIED", verifiedBy: "Dr Reyes, MD", verifiedAt: "2026-05-04T00:00:00.000Z" }],
     }));
     expect(r.state).toBe("APPLIED");
   });
 
   it("a case with no retrieval record at all is treated as unremarkable", () => {
-    expect(guidelineStatement(input({ retrieval: null, verifiedItemSpecific: [{ title: "T", claim: "C" }] })).state).toBe("APPLIED");
+    expect(guidelineStatement(input({ retrieval: null, itemGuidance: [{ title: "T", claim: "C", provenance: "PHYSICIAN_VERIFIED", verifiedBy: "Dr Reyes, MD", verifiedAt: "2026-05-04T00:00:00.000Z" }] })).state).toBe("APPLIED");
   });
 });
 
@@ -174,7 +174,7 @@ describe("a partial retrieval is disclosed in the report, not hidden", () => {
   it("keeps verified support AND states the narrower coverage", () => {
     // The results are real. What is unknown is what the unreachable source
     // would have added, and that must not read as a complete search.
-    const r = guidelineStatement(input({ retrieval: partial, verifiedItemSpecific: [{ title: "NASS", claim: "discectomy" }] }));
+    const r = guidelineStatement(input({ retrieval: partial, itemGuidance: [{ title: "NASS", claim: "discectomy", provenance: "PHYSICIAN_VERIFIED", verifiedBy: "Dr Reyes, MD", verifiedAt: "2026-05-04T00:00:00.000Z" }] }));
     expect(r.state).toBe("APPLIED");
     expect(r.text).toContain("NASS");
     expect(r.text).toMatch(/could not be reached/i);
@@ -195,12 +195,97 @@ describe("a partial retrieval is disclosed in the report, not hidden", () => {
   });
 
   it("a clean SUCCEEDED run says nothing about unreachable sources", () => {
-    const r = guidelineStatement(input({ verifiedItemSpecific: [{ title: "NASS", claim: "discectomy" }] }));
+    const r = guidelineStatement(input({ itemGuidance: [{ title: "NASS", claim: "discectomy", provenance: "PHYSICIAN_VERIFIED", verifiedBy: "Dr Reyes, MD", verifiedAt: "2026-05-04T00:00:00.000Z" }] }));
     expect(r.text).not.toMatch(/could not be reached/i);
   });
 
   it("does not downgrade a partial run to an unresolved one", () => {
     // PARTIAL is not FAILED: real guidance was retrieved and may be relied on.
     expect(guidelineStatement(input({ retrieval: partial })).state).not.toBe("RETRIEVAL_UNRESOLVED");
+  });
+});
+
+describe("auto-retrieved guidance can never be called verified", () => {
+  // supportingGuidelineAssessments is built from the standard-of-care search:
+  // real, resolvable documents returned for this diagnosis and service, with a
+  // hardcoded claim string. The report passed them to a parameter named
+  // "verified" and printed "Each was verified against its publication" — a
+  // statement about human verification that nothing in the pipeline performs.
+  const auto = [{ title: "AAOS surgical management of knee osteoarthritis (2021)", claim: "returned by a guidance search for this diagnosis and service", provenance: "AUTO_RETRIEVED" }];
+
+  it("renders as a retrieved candidate, not as applied support", () => {
+    const r = guidelineStatement(input({ itemGuidance: auto }));
+    expect(r.state).toBe("RETRIEVED_CANDIDATE");
+    expect(r.label).toBe("Guidance retrieved for review");
+  });
+
+  it("never says verified, confirmed, or applied", () => {
+    const t = guidelineStatement(input({ itemGuidance: auto })).text;
+    expect(t).not.toMatch(/verified against its publication/i);
+    expect(t).not.toMatch(/read against its publication/i);
+    expect(t).not.toMatch(/\bapplied to determine\b/i);
+  });
+
+  it("says what IS known and what is not", () => {
+    const t = guidelineStatement(input({ itemGuidance: auto })).text;
+    expect(t).toMatch(/returned by a guidance search/i);
+    expect(t).toMatch(/nobody has confirmed/i);
+    expect(t).toMatch(/not cited as support for medical necessity/i);
+  });
+
+  it("still shows the document, because a physician may want to read it", () => {
+    expect(guidelineStatement(input({ itemGuidance: auto })).text).toContain("AAOS surgical management of knee osteoarthritis (2021)");
+  });
+
+  it.each(["AUTO_RETRIEVED", "", "unknown", "RETRIEVED", "verified", "PHYSICIAN_VERIFIED "])(
+    "provenance %o does not earn the verified language",
+    (provenance) => {
+      // Anything that is not exactly PHYSICIAN_VERIFIED fails closed.
+      const r = guidelineStatement(input({ itemGuidance: [{ title: "T", claim: "C", provenance }] }));
+      expect(r.state).not.toBe("APPLIED");
+    },
+  );
+
+  it("a mixed set cites only the verified entry", () => {
+    const r = guidelineStatement(input({
+      itemGuidance: [
+        ...auto,
+        { title: "NASS lumbar disc herniation with radiculopathy", claim: "discectomy after failed conservative care", provenance: "PHYSICIAN_VERIFIED", verifiedBy: "Dr Reyes, MD", verifiedAt: "2026-05-04T00:00:00.000Z" },
+      ],
+    }));
+    expect(r.state).toBe("APPLIED");
+    expect(r.text).toContain("NASS lumbar disc herniation with radiculopathy");
+    expect(r.text).not.toContain("AAOS surgical management");
+  });
+
+  it("names who verified it and when, so the claim is checkable", () => {
+    const r = guidelineStatement(input({
+      itemGuidance: [{ title: "NASS", claim: "discectomy", provenance: "PHYSICIAN_VERIFIED", verifiedBy: "Dr Reyes, MD", verifiedAt: "2026-05-04T00:00:00.000Z" }],
+    }));
+    expect(r.text).toContain("Dr Reyes, MD");
+    expect(r.text).toContain("2026-05-04");
+  });
+});
+
+describe("the engine marks its own guidance as retrieved", () => {
+  it("emits AUTO_RETRIEVED and a claim that only says what happened", async () => {
+    const { readFileSync } = await import("fs");
+    const { join } = await import("path");
+    const src = readFileSync(join(__dirname, "..", "engine", "clinicalReasoning.ts"), "utf8");
+    expect(src).toMatch(/provenance: "AUTO_RETRIEVED" as const/);
+    expect(src).toMatch(/returned by a guidance search for this diagnosis and service/);
+    // The old claim asserted a conclusion nothing reaches.
+    expect(src).not.toMatch(/claim: "supports the diagnosis and the intervention"/);
+  });
+
+  it("literature stays a separate channel from guidelines", async () => {
+    const { readFileSync } = await import("fs");
+    const { join } = await import("path");
+    const src = readFileSync(join(__dirname, "report.ts"), "utf8");
+    // The literature block renders from recordedBasis.literature; the guideline
+    // statement never draws on it.
+    expect(src).toMatch(/const rLiterature = recordedBasis\?\.literature/);
+    const gs = readFileSync(join(__dirname, "guidelineStatement.ts"), "utf8");
+    expect(gs).not.toMatch(/literature/i);
   });
 });

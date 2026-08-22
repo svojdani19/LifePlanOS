@@ -81,7 +81,15 @@ export function materialFrom(a: ReasoningAssessment, dossier: RecommendationDoss
     treatingRecordSupportSummary: a.treatingRecordSupportSummary,
     literatureSynthesis: a.literatureSynthesis,
     alternativesConsidered: a.alternativesConsidered.map((x) => ({ alternative: x.alternative, rationale: x.rationale })),
-    supportingGuidelineAssessments: a.supportingGuidelineAssessments.map((g) => ({ title: g.title, claim: g.claim })),
+    supportingGuidelineAssessments: a.supportingGuidelineAssessments.map((g) => ({
+      title: g.title,
+      claim: g.claim,
+      // Provenance travels with the entry and is hashed with it, so guidance
+      // cannot be promoted to verified without staling the basis.
+      provenance: g.provenance,
+      verifiedBy: g.verifiedBy ?? null,
+      verifiedAt: g.verifiedAt ?? null,
+    })),
     missingEvidenceRequests: [...a.missingEvidenceRequests],
     potentialChallenges: [...dossier.potentialChallenges],
     functionalBasis: dossier.functionalLink

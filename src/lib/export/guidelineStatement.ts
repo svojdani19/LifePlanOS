@@ -21,6 +21,8 @@
 export type GuidelineSupportState =
   /** Verified, item-specific guidance recorded in this item's basis. */
   | "APPLIED"
+  /** Real guidance was retrieved for this item, but nobody has verified it. */
+  | "RETRIEVED_CANDIDATE"
   /** A mapping exists but nobody has verified it against its publication. */
   | "REVIEW_CANDIDATE"
   /** The basis no longer matches the record, so its guidance cannot be cited. */
@@ -31,8 +33,12 @@ export type GuidelineSupportState =
   | "NONE";
 
 export interface GuidelineStatementInput {
-  /** Verified, item-specific guidance from the recorded basis. */
-  verifiedItemSpecific: readonly { title: string; claim: string }[];
+  /**
+   * Guidance recorded for this item, each carrying its provenance. Only
+   * PHYSICIAN_VERIFIED entries may be described as verified; everything else is
+   * a retrieved candidate, however relevant it looks.
+   */
+  itemGuidance: readonly { title: string; claim: string; provenance: string; verifiedBy?: string | null; verifiedAt?: string | null }[];
   /** Guideline rows recorded as accepted evidence for this item. */
   recordedGuidelineEvidence: readonly { text: string; source: string | null }[];
   /** Generic category/region sources. CONTEXT ONLY — never support. */
@@ -93,15 +99,31 @@ export function guidelineStatement(input: GuidelineStatementInput): GuidelineSta
       ? ` Some sources could not be reached during this search (${(r.failedSources ?? []).join(", ") || "one or more sources"}), so coverage here is narrower than a complete run — that is not evidence that no further guidance exists.`
       : "";
 
-  if (input.verifiedItemSpecific.length) {
-    const cited = input.verifiedItemSpecific
+  // Split by PROVENANCE, not by relevance. A retrieval that looks perfect is
+  // still a retrieval, and the difference between "a search returned this" and
+  // "a physician read the publication and confirmed it" is the whole claim.
+  const verified = input.itemGuidance.filter((g) => g.provenance === "PHYSICIAN_VERIFIED");
+  const retrieved = input.itemGuidance.filter((g) => g.provenance !== "PHYSICIAN_VERIFIED");
+
+  if (verified.length) {
+    const cited = verified
       .slice(0, 3)
-      .map((g) => `${g.title} — ${g.claim}`)
+      .map((g) => `${g.title} — ${g.claim}${g.verifiedBy ? ` (verified by ${g.verifiedBy}${g.verifiedAt ? ` on ${g.verifiedAt.slice(0, 10)}` : ""})` : ""}`)
       .join("; ");
     return {
       state: "APPLIED",
       label: "Guideline basis",
-      text: `${cited}. Each was verified against its publication for this diagnosis and intervention, and is recorded in this recommendation's basis.${partialTail}`,
+      text: `${cited}. Each was read against its publication and confirmed for this diagnosis and intervention, and is recorded in this recommendation's basis.${partialTail}`,
+    };
+  }
+
+  if (retrieved.length) {
+    const shown = retrieved.slice(0, 3).map((g) => g.title).join("; ");
+    return {
+      state: "RETRIEVED_CANDIDATE",
+      label: "Guidance retrieved for review",
+      text:
+        `${shown}. These were returned by a guidance search for this diagnosis and service. Nobody has confirmed that they say what this recommendation would rely on them for, so they are offered for review and are not cited as support for medical necessity.${partialTail}${contextTail}`,
     };
   }
 

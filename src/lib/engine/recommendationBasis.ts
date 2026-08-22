@@ -214,7 +214,11 @@ export interface MaterialAssessment {
   treatingRecordSupportSummary: string | null;
   literatureSynthesis: string;
   alternativesConsidered: { alternative: string; rationale: string }[];
-  supportingGuidelineAssessments: { title: string; claim: string }[];
+  /**
+   * Guidance considered for this item, each carrying WHERE it came from.
+   * Auto-retrieved guidance can never be rendered as publication-verified.
+   */
+  supportingGuidelineAssessments: { title: string; claim: string; provenance: string; verifiedBy?: string | null; verifiedAt?: string | null }[];
   missingEvidenceRequests: string[];
   /** Defence challenges the report prints; recorded so they cannot re-derive. */
   potentialChallenges: string[];

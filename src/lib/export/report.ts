@@ -612,7 +612,11 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     const guideline = guidelineStatement({
       // Verified, item-specific guidance only. The recorded assessment carries
       // what the reasoning actually stood on for this item.
-      verifiedItemSpecific: (rMaterial?.supportingGuidelineAssessments ?? []).filter((g) => g.title && g.claim),
+      // Passed WITH provenance. This handed auto-retrieved SoC guidance to a
+      // parameter named "verified", and the renderer then said each entry had
+      // been verified against its publication — a claim about human
+      // verification that no step in the pipeline performs.
+      itemGuidance: (rMaterial?.supportingGuidelineAssessments ?? []).filter((g) => g.title && g.claim),
       recordedGuidelineEvidence: recordedBasis?.acceptedEvidence?.guidelines ?? [],
       genericSources: guidelineSourcesFor(it.category as CareCategory, bodyRegion(`${it.service} ${dxName}`)).slice(0, 3).map((sx) => sx.label),
       basisState: basisCheck.state,
