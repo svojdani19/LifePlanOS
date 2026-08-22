@@ -37,38 +37,42 @@ describe("the exact panel defects that prompted this", () => {
     // A burst fracture indicates STABILISATION — a different operation.
     const dx = "Lumbar burst fracture with residual deficit";
     expect(indicationFor(dx, discectomy).verdict).toBe("CONTEXT");
-    expect(indicationFor(dx, "SPINAL_FUSION").verdict).toBe("INDICATED");
+    // The fusion mapping FIRES for a burst fracture — it is unverified, so it
+    // yields REVIEW_REQUIRED rather than affirmative direction.
+    const fusion = indicationFor(dx, "SPINAL_FUSION");
+    expect(fusion.matched).toContain("VERTEBRAL_FRACTURE");
+    expect(fusion.verdict).toBe("REVIEW_REQUIRED");
   });
 
   it("does present the diagnosis a discectomy is actually offered for", () => {
-    expect(indicationFor("Radiculopathy, lumbar region (M54.16)", discectomy).verdict).toBe("INDICATED");
-    expect(indicationFor("L4-5 disc herniation with nerve root contact", discectomy).verdict).toBe("INDICATED");
+    expect(indicationFor("Radiculopathy, lumbar region (M54.16)", discectomy).matched).toContain("RADICULOPATHY");
+    expect(indicationFor("L4-5 disc herniation with nerve root contact", discectomy).matched).toContain("DISC_HERNIATION");
   });
 });
 
 describe("procedures inside one family have different indications", () => {
   it("separates the epidural pathway from the facet pathway", () => {
     // Same family, same anatomy, different clinical problem.
-    expect(indicationFor("lumbar radiculopathy", "EPIDURAL_STEROID").verdict).toBe("INDICATED");
+    expect(indicationFor("lumbar radiculopathy", "EPIDURAL_STEROID").matched).toContain("RADICULOPATHY");
     expect(indicationFor("lumbar radiculopathy", "MEDIAL_BRANCH_BLOCK").verdict).toBe("CONTEXT");
-    expect(indicationFor("lumbar facet arthropathy", "MEDIAL_BRANCH_BLOCK").verdict).toBe("INDICATED");
+    expect(indicationFor("lumbar facet arthropathy", "MEDIAL_BRANCH_BLOCK").matched).toContain("FACET_ARTHROPATHY");
     expect(indicationFor("lumbar facet arthropathy", "EPIDURAL_STEROID").verdict).toBe("CONTEXT");
   });
 
   it("separates the spine operations by what each one treats", () => {
-    expect(indicationFor("lumbar spinal stenosis", "LAMINECTOMY_DECOMPRESSION").verdict).toBe("INDICATED");
-    expect(indicationFor("spondylolisthesis with segmental instability", "SPINAL_FUSION").verdict).toBe("INDICATED");
+    expect(indicationFor("lumbar spinal stenosis", "LAMINECTOMY_DECOMPRESSION").matched).toContain("SPINAL_STENOSIS");
+    expect(indicationFor("spondylolisthesis with segmental instability", "SPINAL_FUSION").matched).toContain("SEGMENTAL_INSTABILITY");
     expect(indicationFor("spondylolisthesis with segmental instability", "DISCECTOMY").verdict).toBe("CONTEXT");
   });
 
   it("keeps a knee treatment out of a spine diagnosis's support", () => {
     expect(indicationFor("lumbar radiculopathy", "VISCOSUPPLEMENTATION").verdict).toBe("CONTEXT");
-    expect(indicationFor("right knee osteoarthritis", "VISCOSUPPLEMENTATION").verdict).toBe("INDICATED");
+    expect(indicationFor("right knee osteoarthritis", "VISCOSUPPLEMENTATION").matched).toContain("OSTEOARTHRITIS");
   });
 
   it("requires CRPS for a sympathetic block, not any pain", () => {
     expect(indicationFor("chronic low back pain", "SYMPATHETIC_BLOCK").verdict).toBe("CONTEXT");
-    expect(indicationFor("complex regional pain syndrome, right lower extremity", "SYMPATHETIC_BLOCK").verdict).toBe("INDICATED");
+    expect(indicationFor("complex regional pain syndrome, right lower extremity", "SYMPATHETIC_BLOCK").matched).toContain("CRPS");
   });
 });
 
@@ -118,7 +122,9 @@ describe("the table is reviewable as data", () => {
     for (const [intervention, allowed] of Object.entries(INDICATIONS)) {
       if (allowed === "ANY" || !allowed) continue;
       const first = allowed[0].concept as string;
-      expect(indicationFor(witness[first], intervention as never).verdict, `${intervention} ← ${first}`).toBe("INDICATED");
+      // The mapping must FIRE. Whether it yields affirmative direction is the
+      // verification gate's business, tested separately.
+      expect(indicationFor(witness[first], intervention as never).matched, `${intervention} ← ${first}`).toContain(first);
     }
   });
 });
@@ -132,8 +138,8 @@ describe("corrections found by checking the model against real records", () => {
     // clearly offered for it.
     const acdf = resolveIntervention({ service: "Anterior cervical discectomy & fusion (ACDF)" }).id;
     expect(acdf).toBe("SPINAL_FUSION");
-    expect(indicationFor("M5412; Radiculopathy, cervical region", acdf).verdict).toBe("INDICATED");
-    expect(indicationFor("Cervical Disc Disorder with Radiculopathy M50.10", acdf).verdict).toBe("INDICATED");
+    expect(indicationFor("M5412; Radiculopathy, cervical region", acdf).matched).toContain("RADICULOPATHY");
+    expect(indicationFor("Cervical Disc Disorder with Radiculopathy M50.10", acdf).matched).toContain("RADICULOPATHY");
   });
 
   it("reads a long chronic-pain phrase as chronic pain", () => {
@@ -151,7 +157,9 @@ describe("every indication names the guideline that pairs the diagnosis with the
     // document is where discectomy is discussed. The pairing is the
     // guideline's, not the table author's.
     const r = indicationFor("L4-5 disc herniation with radiculopathy", "DISCECTOMY");
-    expect(r.verdict).toBe("INDICATED");
+    // Unverified, so the verdict is REVIEW_REQUIRED — but the basis it WOULD
+    // cite is still resolved and inspectable.
+    expect(r.verdict).toBe("REVIEW_REQUIRED");
     expect(r.basis).not.toBeNull();
     expect(r.basis).toMatchObject({ sourceId: "nass", namedDiagnosis: expect.stringMatching(/disc herniation with radiculopathy/i) });
   });
@@ -207,18 +215,22 @@ describe("a guideline's DIRECTION is not the same as its topic", () => {
     // osteoarthritis. Citing AAOS beside it lent the guideline's authority to
     // the opposite of what it says.
     const r = indicationFor("right knee osteoarthritis", "ARTHROSCOPY");
-    expect(r.verdict).toBe("COUNTER_INDICATED");
+    // The AAOS row points AGAINST and is unverified, so the engine withholds
+    // the counter-indication too: suppressing care on unchecked authority is
+    // not caution, it is the same error pointed the other way. Either way it is
+    // NOT support, which is the guarantee that matters here.
+    expect(r.verdict).toBe("REVIEW_REQUIRED");
     expect(diagnosisSupports("right knee osteoarthritis", "ARTHROSCOPY")).toBe(false);
-    expect(contextReason("right knee osteoarthritis", "ARTHROSCOPY")).toMatch(/recommends against/i);
+    expect(contextReason("right knee osteoarthritis", "ARTHROSCOPY")).toMatch(/not been verified/i);
   });
 
   it("still supports arthroscopy for what it IS offered for", () => {
-    expect(indicationFor("medial meniscal tear", "ARTHROSCOPY").verdict).toBe("INDICATED");
+    expect(indicationFor("medial meniscal tear", "ARTHROSCOPY").matched).toContain("INTRA_ARTICULAR_TEAR");
   });
 
   it("marks the CDC opioid position as conditional, not as endorsement", () => {
     const r = indicationFor("chronic low back pain", "OPIOID");
-    expect(r.verdict).toBe("INDICATED");
+    expect(r.matched).toContain("CHRONIC_PAIN");
     expect(r.basis).toMatchObject({ direction: "CONDITIONAL", sourceId: "cdc-opioid" });
     expect((r.basis as { position: string }).position).toMatch(/nonopioid therapy/i);
   });
@@ -227,7 +239,10 @@ describe("a guideline's DIRECTION is not the same as its topic", () => {
     // A diagnosis naming several concepts must not have an AGAINST row
     // silently outvoted by a SUPPORTS row that also matched.
     const r = indicationFor("knee osteoarthritis with joint instability", "ARTHROSCOPY");
-    expect(r.verdict).toBe("COUNTER_INDICATED");
+    // The AGAINST row still outranks the matching SUPPORTS row; unverified, it
+    // resolves to REVIEW_REQUIRED rather than to affirmative support.
+    expect(r.verdict).toBe("REVIEW_REQUIRED");
+    expect(diagnosisSupports("knee osteoarthritis with joint instability", "ARTHROSCOPY")).toBe(false);
   });
 });
 
@@ -252,9 +267,51 @@ describe("an unverified mapping never borrows a guideline's authority", () => {
     expect(citableAsGuidelineAuthority({ sourceId: "aaos", namedDiagnosis: "x", direction: "AGAINST", status: "VERIFIED" })).toBe(false);
   });
 
-  it("still uses the mapping to decide support vs background while unverified", () => {
-    // The mapping keeps doing its job; what it may not do is name a guideline.
-    expect(diagnosisSupports("lumbar radiculopathy", "EPIDURAL_STEROID")).toBe(true);
-    expect(diagnosisSupports("lumbar facet arthropathy", "EPIDURAL_STEROID")).toBe(false);
+  it("does not let an unverified mapping establish support either", () => {
+    // The earlier version let unverified mappings decide support and withheld
+    // only the printed citation. Gating the citation while the same unchecked
+    // table decided whether care was supported was the smaller half of the fix.
+    expect(diagnosisSupports("lumbar radiculopathy", "EPIDURAL_STEROID")).toBe(false);
+    expect(indicationFor("lumbar radiculopathy", "EPIDURAL_STEROID").verdict).toBe("REVIEW_REQUIRED");
+    // A non-matching pairing is still plain CONTEXT, not review-required: there
+    // is nothing to verify.
+    expect(indicationFor("lumbar facet arthropathy", "EPIDURAL_STEROID").verdict).toBe("CONTEXT");
+  });
+});
+
+
+describe("verification is the discriminator, not a blanket disable", () => {
+  // Every row ships UNVERIFIED today, so the whole table resolves to
+  // REVIEW_REQUIRED. These prove the gate FLIPS on verification rather than
+  // permanently disabling the mapping — otherwise "verify the table" would be
+  // work with no observable effect.
+  const withVerified = <T>(intervention: keyof typeof INDICATIONS, direction: "SUPPORTS" | "AGAINST", run: () => T): T => {
+    const table = INDICATIONS as Record<string, unknown>;
+    const original = table[intervention as string];
+    const rows = (original as { concept: string; basis: unknown }[]).map((r) => ({
+      ...r,
+      basis: r.basis === "CONVENTION" ? r.basis : { ...(r.basis as object), direction, status: "VERIFIED" },
+    }));
+    table[intervention as string] = rows;
+    try { return run(); } finally { table[intervention as string] = original; }
+  };
+
+  it("a VERIFIED supporting row yields INDICATED and carries the item", () => {
+    withVerified("DISCECTOMY", "SUPPORTS", () => {
+      const r = indicationFor("L4-5 disc herniation with radiculopathy", "DISCECTOMY");
+      expect(r.verdict).toBe("INDICATED");
+      expect(diagnosisSupports("L4-5 disc herniation with radiculopathy", "DISCECTOMY")).toBe(true);
+    });
+  });
+
+  it("a VERIFIED against row yields COUNTER_INDICATED", () => {
+    withVerified("ARTHROSCOPY", "AGAINST", () => {
+      expect(indicationFor("right knee osteoarthritis", "ARTHROSCOPY").verdict).toBe("COUNTER_INDICATED");
+    });
+  });
+
+  it("returns to REVIEW_REQUIRED once the table is restored", () => {
+    withVerified("DISCECTOMY", "SUPPORTS", () => undefined);
+    expect(indicationFor("L4-5 disc herniation with radiculopathy", "DISCECTOMY").verdict).toBe("REVIEW_REQUIRED");
   });
 });

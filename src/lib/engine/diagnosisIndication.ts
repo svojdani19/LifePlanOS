@@ -444,6 +444,20 @@ export type IndicationVerdict =
   | "CONTEXT"
   /** A guideline recommends AGAINST this intervention for this diagnosis. */
   | "COUNTER_INDICATED"
+  /**
+   * A mapping exists but has not been checked against its publication.
+   *
+   * The verification gate covered the printed CITATION and not the VERDICT, so
+   * an unchecked row still decided support and, worse, still produced a
+   * counter-indication — a negative clinical claim asserted from a mapping
+   * nobody had opened. I judged that direction "conservative" when I built it;
+   * suppressing care on unverified authority is not conservative, it is the
+   * same error pointed the other way.
+   *
+   * The mapping stays VISIBLE as a review candidate. Nothing is deleted, and
+   * nothing is asserted.
+   */
+  | "REVIEW_REQUIRED"
   /** The intervention is legitimately non-specific. */
   | "NON_SPECIFIC"
   /** Nothing in the text resolved to a clinical concept. */
@@ -473,23 +487,26 @@ export function indicationFor(diagnosisText: string, intervention: InterventionI
   const hits = allowed.filter((r) => concepts.includes(r.concept));
   if (!hits.length) return { verdict: "CONTEXT", concepts, matched: [], basis: null };
 
-  // A guideline that recommends AGAINST this pairing is not support. It is the
-  // strongest thing the table can say, and it must not be silently outvoted by
-  // some other row that happens to match.
+  // A guideline that recommends AGAINST this pairing is the strongest thing the
+  // table can say, and it must not be silently outvoted by another matching
+  // row — but only a VERIFIED row may say it. An unchecked mapping suppressing
+  // care is not caution.
   const against = hits.find((r) => r.basis !== "CONVENTION" && r.basis.direction === "AGAINST");
   if (against && against.basis !== "CONVENTION") {
-    return { verdict: "COUNTER_INDICATED", concepts, matched: [], basis: against.basis };
+    return against.basis.status === "VERIFIED"
+      ? { verdict: "COUNTER_INDICATED", concepts, matched: [], basis: against.basis }
+      : { verdict: "REVIEW_REQUIRED", concepts, matched: [], basis: against.basis };
   }
 
-  // Prefer a guideline-backed row over a convention one, so the panel cites the
-  // strongest basis available for this pairing.
   const cited = hits.find((r) => r.basis !== "CONVENTION") ?? hits[0];
-  return {
-    verdict: "INDICATED",
-    concepts,
-    matched: hits.map((r) => r.concept),
-    basis: cited.basis === "CONVENTION" ? "CONVENTION" : cited.basis,
-  };
+  const basis = cited.basis === "CONVENTION" ? ("CONVENTION" as const) : cited.basis;
+
+  // AFFIRMATIVE direction requires verified authority. CONVENTION rows are
+  // exempt: they claim no guideline, only established practice, and they say so.
+  if (basis !== "CONVENTION" && basis.status !== "VERIFIED") {
+    return { verdict: "REVIEW_REQUIRED", concepts, matched: hits.map((r) => r.concept), basis };
+  }
+  return { verdict: "INDICATED", concepts, matched: hits.map((r) => r.concept), basis };
 }
 
 /** May this diagnosis be presented as SUPPORT for this intervention? */
@@ -507,6 +524,8 @@ export function indicationFor(diagnosisText: string, intervention: InterventionI
  */
 export const diagnosisSupports = (diagnosisText: string, intervention: InterventionId): boolean => {
   const v = indicationFor(diagnosisText, intervention).verdict;
+  // REVIEW_REQUIRED is deliberately absent: an unverified mapping is shown as
+  // context for a reviewer, and does not carry the item.
   return v === "INDICATED" || v === "NON_SPECIFIC";
 };
 
@@ -534,6 +553,10 @@ export function contextReason(diagnosisText: string, intervention: InterventionI
     // the body is safe while unverified: the claim being made is that the
     // pairing is NOT endorsed, which is the conservative direction.
     return r.basis.position ?? "a clinical guideline recommends against this intervention for this diagnosis";
+  }
+  if (r.verdict === "REVIEW_REQUIRED") {
+    const body = r.basis && r.basis !== "CONVENTION" ? `${r.basis.namedDiagnosis}` : "an unpublished mapping";
+    return `a clinical mapping for this pairing (${body}) has not been verified against its publication — shown for review, not counted as support`;
   }
   if (r.verdict === "UNCLASSIFIED") {
     // Say which way the uncertainty runs. A reader must not read "the engine
