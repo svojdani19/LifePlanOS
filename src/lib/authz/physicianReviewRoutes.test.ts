@@ -44,6 +44,9 @@ vi.mock("@/lib/db", () => {
       updateMany: vi.fn(async () => ({ count: 0 })),
     },
     recommendationTransition: { createMany: vi.fn(async () => ({ count: 0 })) },
+    // A failed post-review refresh is now recorded as an export-blocking
+    // obligation rather than a console line, so the review routes write here.
+    validationFinding: { deleteMany: vi.fn(async () => ({ count: 0 })), createMany: vi.fn(async () => ({ count: 0 })) },
     interviewFinding: { create: vi.fn(async () => ({ id: "finding-1" })) },
   };
   prisma.$transaction = vi.fn(async (arg: unknown) =>

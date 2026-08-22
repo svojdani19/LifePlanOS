@@ -1,5 +1,5 @@
 import { prisma } from "@/lib/db";
-import { reviewDecisionFields, refreshAfterReview } from "@/lib/engine/reviewDecision";
+import { reviewDecisionFields, refreshAfterReview, recordRefreshObligation } from "@/lib/engine/reviewDecision";
 import { persistCaseValidation } from "@/lib/engine/validation";
 import { persistCaseReasoning } from "@/lib/engine/clinicalReasoningPersist";
 import { refreshCaseAttestations } from "@/lib/engine/attestationService";
@@ -83,9 +83,15 @@ export async function POST(_req: Request, { params: paramsPromise }: { params: P
       ctx.firm.id,
       { recommendationIds: approved.map((p) => p.id), actorUserId: ctx.user.id },
     );
-    if (refresh.failed.length) console.error(`[accept-all] refresh incomplete: ${refresh.failed.join(", ")}`);
-    await audit(ctx, "physician.review", { type: "case", id: params.caseId, caseId: params.caseId, meta: { action: "accept-all", count: approved.length, refusedStale: pending.length - approved.length } });
-    return ok({ count: approved.length });
+    // Durable and export-blocking, not a console line. Reporting an
+    // unconditional success for a case whose validation, reasoning or
+    // signatures did not refresh is the same defect as never running them.
+    await recordRefreshObligation(prisma as never, params.caseId, ctx.firm.id, refresh.failed);
+    await audit(ctx, "physician.review", { type: "case", id: params.caseId, caseId: params.caseId, meta: { action: "accept-all", count: approved.length, refusedStale: pending.length - approved.length, refreshFailed: refresh.failed } });
+    return ok({
+      count: approved.length,
+      refresh: refresh.failed.length ? { status: "ATTENTION_REQUIRED", failed: refresh.failed } : { status: "COMPLETE" },
+    });
   } catch (err) {
     return handleError(err);
   }

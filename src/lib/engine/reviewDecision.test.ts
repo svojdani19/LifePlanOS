@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { supportClassForDecision, classifyExistingItem, needsReclassification, reviewDecisionFields, refreshAfterReview, type ReviewRefreshDeps } from "@/lib/engine/reviewDecision";
+import { supportClassForDecision, classifyExistingItem, needsReclassification, reviewDecisionFields, refreshAfterReview, recordRefreshObligation, type ReviewRefreshDeps } from "@/lib/engine/reviewDecision";
 import { entersSupportedTotal, computePlanTotals } from "@/lib/engine/supportClass";
 
 describe("a review decision writes the classification, not just the status", () => {
@@ -123,5 +123,68 @@ describe("the safeguards a decision triggers do not depend on which button produ
     await refreshAfterReview(d, "case-1", "firm-1", { recommendationIds: ["i-1"], actorUserId: "u-1" });
     expect(opts.reviewDecision).toBe(true);
     expect(opts.recommendationIds).toEqual(["i-1"]);
+  });
+});
+
+describe("a failed refresh becomes a durable obligation, not a log line", () => {
+  const store = () => {
+    const created: Record<string, unknown>[] = [];
+    const deleted: unknown[] = [];
+    return {
+      created,
+      deleted,
+      db: {
+        validationFinding: {
+          deleteMany: async (a: unknown) => { deleted.push(a); return { count: 0 }; },
+          createMany: async (a: { data: Record<string, unknown>[] }) => { created.push(...a.data); return { count: a.data.length }; },
+        },
+      },
+    };
+  };
+
+  it("writes nothing when every stage succeeded", async () => {
+    const { created, db } = store();
+    await recordRefreshObligation(db, "case-1", "firm-1", []);
+    expect(created).toEqual([]);
+  });
+
+  it("blocks final export when a REQUIRED stage failed", async () => {
+    // Validation, reasoning and attestations are what keep the plan's own
+    // statements true. A decision recorded without them leaves the document
+    // describing the case as it stood beforehand.
+    const { created, db } = store();
+    await recordRefreshObligation(db, "case-1", "firm-1", ["validation"]);
+    expect(created).toHaveLength(1);
+    expect(created[0].exportBlocking).toBe(true);
+    expect(created[0].severity).toBe("Critical");
+    expect(String(created[0].result)).toContain("REFRESH_INCOMPLETE");
+  });
+
+  it("discloses without blocking when only an optional stage failed", async () => {
+    const { created, db } = store();
+    await recordRefreshObligation(db, "case-1", "firm-1", ["generateReviews"]);
+    expect(created[0].exportBlocking).toBe(false);
+  });
+
+  it("names the failed stages in the result, so a partial retry supersedes cleanly", async () => {
+    const { created, db } = store();
+    await recordRefreshObligation(db, "case-1", "firm-1", ["reasoning", "validation"]);
+    // Sorted, so the identity is stable regardless of failure order.
+    expect(created[0].result).toBe("REFRESH_INCOMPLETE:reasoning+validation");
+  });
+
+  it("supersedes any prior obligation rather than stacking them", async () => {
+    // A retry that fixes two of three stages must not leave the old
+    // three-stage finding standing beside the new one.
+    const { deleted, db } = store();
+    await recordRefreshObligation(db, "case-1", "firm-1", ["validation"]);
+    expect(deleted).toHaveLength(1);
+    expect(JSON.stringify(deleted[0])).toContain("REFRESH_INCOMPLETE");
+  });
+
+  it("is scoped to the case, so one tenant's obligation never clears another's", async () => {
+    const { deleted, db } = store();
+    await recordRefreshObligation(db, "case-1", "firm-1", []);
+    expect(JSON.stringify(deleted[0])).toContain("case-1");
   });
 });

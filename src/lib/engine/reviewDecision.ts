@@ -128,6 +128,9 @@ export interface ReviewRefreshDeps {
  * reported rather than swallowed — the previous code used bare `.catch(() => {})`
  * on three of them, so a validation pass could fail silently forever.
  */
+/** Stages whose failure leaves the plan describing something that is no longer true. */
+export const REQUIRED_REFRESH_STAGES = ["validation", "reasoning", "attestations"] as const;
+
 export async function refreshAfterReview(
   deps: ReviewRefreshDeps,
   caseId: string,
@@ -143,4 +146,52 @@ export async function refreshAfterReview(
   await step("reasoning", () => deps.persistCaseReasoning(caseId, firmId, { ...opts, reviewDecision: true }));
   await step("attestations", () => deps.refreshCaseAttestations(caseId));
   return { failed };
+}
+
+
+/**
+ * Record a failed post-review refresh as an obligation, not a log line.
+ *
+ * Both routes called `refreshAfterReview`, and one discarded the result while
+ * the other wrote it to `console.error`. Both then returned success. A refresh
+ * that silently did not run is indistinguishable from one that did, and the
+ * stages that fail are exactly the ones that keep validation, reasoning and
+ * signatures describing the plan as it now stands.
+ *
+ * The obligation is tenant-scoped, export-blocking, and cleared only by a
+ * successful retry — never by a later unrelated pass, because the result code
+ * names the stages that failed.
+ */
+export async function recordRefreshObligation(
+  db: {
+    validationFinding: {
+      deleteMany(args: unknown): Promise<{ count: number }>;
+      createMany(args: unknown): Promise<{ count: number }>;
+    };
+  },
+  caseId: string,
+  firmId: string,
+  failed: readonly string[],
+): Promise<void> {
+  // Supersede any prior obligation for this case first: a retry that fixes two
+  // of three stages must not leave the old three-stage finding standing.
+  await db.validationFinding.deleteMany({ where: { caseId, result: { startsWith: "REFRESH_INCOMPLETE" } } });
+  if (!failed.length) return;
+  const required = failed.filter((f) => (REQUIRED_REFRESH_STAGES as readonly string[]).includes(f));
+  await db.validationFinding.createMany({
+    data: [
+      {
+        caseId,
+        firmId,
+        service: "Case-wide",
+        result: `REFRESH_INCOMPLETE:${[...failed].sort().join("+")}`,
+        issue: `A physician review decision was recorded, but ${failed.join(", ")} did not refresh afterwards. The plan's ${failed.join(", ")} may describe the case as it stood before the decision.`,
+        severity: required.length ? "Critical" : "Moderate",
+        suggestion: "Re-run the review refresh for this case. The decision itself is recorded and does not need repeating.",
+        // Only the stages that keep the plan's own statements true block a
+        // final export. An optional stage failing is disclosed, not blocking.
+        exportBlocking: required.length > 0,
+      },
+    ],
+  });
 }

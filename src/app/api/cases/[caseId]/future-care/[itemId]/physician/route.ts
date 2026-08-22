@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { reviewDecisionFields, refreshAfterReview } from "@/lib/engine/reviewDecision";
+import { reviewDecisionFields, refreshAfterReview, recordRefreshObligation } from "@/lib/engine/reviewDecision";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requireCanonicalPermission, requireCase, audit } from "@/lib/tenant";
 import { enforceReviewCredential } from "@/lib/authz/credentialGate";
@@ -61,7 +61,16 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
       merged.frequencyPerYear !== item.frequencyPerYear ||
       merged.durationYears !== item.durationYears ||
       merged.isLifetime !== item.isLifetime;
-    const updated = await prisma.futureCareItem.update({
+    // THE DECISION AND ITS LEDGER ENTRY IN ONE TRANSACTION.
+    //
+    // Bulk review became atomic; this path did not, so the single-item route
+    // was the weaker one — an item could be approved and the transition row
+    // fail, leaving an approval with no audit entry. Cost recomputation stays
+    // OUTSIDE: it is a safely repeatable derivation, and holding a projection
+    // pass inside the decision transaction would risk losing the decision to a
+    // pricing hiccup.
+    const updated = await prisma.$transaction(async (tx) => {
+      const row = await tx.futureCareItem.update({
       where: { id: item.id },
       data: {
         // Every field a review decision writes, from one place. This route set
@@ -77,14 +86,11 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
         isLifetime: merged.isLifetime,
         physicianSummary: summary,
       },
-    });
-    // A changed frequency/duration/horizon changes the item's quantities and
-    // dollars — recompute the cost projections immediately so totals, the
-    // attestation snapshot, and the printed tables all reflect the decision.
-    if (clinicalChanged) await recomputeCosts(params.caseId);
+      });
 
-    // Ledger the review action (P2.R1 §4).
-    await prisma.recommendationTransition.create({
+      // Ledger the review action (P2.R1 §4) — inside the same transaction, so
+      // an approval can never stand without its audit entry.
+      await tx.recommendationTransition.create({
       data: {
         caseId: params.caseId,
         firmId: ctx.firm.id,
@@ -103,21 +109,40 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
           ...(input.frequencyPerYear !== undefined && input.frequencyPerYear !== item.frequencyPerYear ? [{ field: "frequencyPerYear", from: item.frequencyPerYear, to: input.frequencyPerYear }] : []),
           ...(input.durationYears !== undefined && input.durationYears !== item.durationYears ? [{ field: "durationYears", from: item.durationYears, to: input.durationYears }] : []),
         ],
-      },
+        },
+      });
+      return row;
     });
 
+    // Repeatable derivation, deliberately outside the decision transaction: a
+    // pricing hiccup must not cost us the recorded decision. Its failure is an
+    // obligation, not a lost approval.
+    let costFailed = false;
+    if (clinicalChanged) {
+      try {
+        await recomputeCosts(params.caseId);
+      } catch (e) {
+        costFailed = true;
+        console.error(`[review] cost recomputation failed for case ${params.caseId}:`, e);
+      }
+    }
+
     // The refreshes a review decision obliges, from one place — so bulk
-    // approval cannot trigger a different set. Failures are reported, not
-    // swallowed: three of these used a bare `.catch(() => {})`, so a validation
-    // pass could fail silently forever.
-    await refreshAfterReview(
+    // approval cannot trigger a different set.
+    const refresh = await refreshAfterReview(
       { generateReviews, persistCaseValidation, persistCaseReasoning, refreshCaseAttestations },
       params.caseId,
       ctx.firm.id,
       { recommendationIds: [params.itemId], actorUserId: ctx.user.id },
     );
-    await audit(ctx, "physician.review", { type: "futureCareItem", id: item.id, caseId: params.caseId, meta: { status: input.status } });
-    return ok({ item: updated });
+    const failed = [...refresh.failed, ...(costFailed ? ["costs"] : [])];
+    // Durable and export-blocking, not a log line. This route discarded the
+    // result entirely and returned success regardless.
+    await recordRefreshObligation(prisma as never, params.caseId, ctx.firm.id, failed);
+    await audit(ctx, "physician.review", { type: "futureCareItem", id: item.id, caseId: params.caseId, meta: { status: input.status, refreshFailed: failed } });
+    // The decision succeeded; the case did not fully refresh. Saying only the
+    // first would be a clean success the system cannot vouch for.
+    return ok({ item: updated, refresh: failed.length ? { status: "ATTENTION_REQUIRED", failed } : { status: "COMPLETE" } });
   } catch (err) {
     return handleError(err);
   }
