@@ -41,6 +41,7 @@ export const REQUIRED_OBJECTS: { table: string; column?: string }[] = [
   { table: "LearningCandidate", column: "approvedById" },
   { table: "RecommendationBasis", column: "specification" },
   { table: "RecommendationBasis", column: "assessmentBasis" },
+  { table: "RetrievalAttempt", column: "failedSources" },
 ];
 
 export interface SchemaCheck {
@@ -50,17 +51,25 @@ export interface SchemaCheck {
 
 export async function verifySchema(db: RolloutDb): Promise<SchemaCheck> {
   const missing: string[] = [];
+  // Scoped to the ACTIVE schema. Unqualified, these queries match a table of
+  // the same name in ANY schema the database happens to hold — so on a
+  // multi-schema database (this product runs in a named schema alongside
+  // others) the preflight could pass on the strength of another tenant's or
+  // another product's objects, and the backfill would then run against a schema
+  // that does not have them.
   for (const o of REQUIRED_OBJECTS) {
     if (o.column) {
       const rows = await db.$queryRawUnsafe<{ n: bigint | number }[]>(
-        `SELECT count(*)::int AS n FROM information_schema.columns WHERE table_name = $1 AND column_name = $2`,
+        `SELECT count(*)::int AS n FROM information_schema.columns
+          WHERE table_schema = current_schema() AND table_name = $1 AND column_name = $2`,
         o.table,
         o.column,
       );
       if (Number(rows[0]?.n ?? 0) === 0) missing.push(`${o.table}.${o.column}`);
     } else {
       const rows = await db.$queryRawUnsafe<{ n: bigint | number }[]>(
-        `SELECT count(*)::int AS n FROM information_schema.tables WHERE table_name = $1`,
+        `SELECT count(*)::int AS n FROM information_schema.tables
+          WHERE table_schema = current_schema() AND table_name = $1`,
         o.table,
       );
       if (Number(rows[0]?.n ?? 0) === 0) missing.push(o.table);

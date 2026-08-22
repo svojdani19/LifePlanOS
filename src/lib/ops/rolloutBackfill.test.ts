@@ -204,3 +204,59 @@ describe("the runner", () => {
     expect(src).toMatch(/DRY RUN/);
   });
 });
+
+describe("the preflight is scoped to the active schema", () => {
+  it("qualifies every information_schema lookup with current_schema()", async () => {
+    // Unqualified, these match a table of the same name in ANY schema the
+    // database holds. This product runs in a named schema alongside others, so
+    // the preflight could pass on another schema's objects and the backfill
+    // would then run against one that lacks them.
+    const { readFileSync } = await import("fs");
+    const { join } = await import("path");
+    const src = readFileSync(join(__dirname, "rolloutBackfill.ts"), "utf8");
+    const lookups = [...src.matchAll(/FROM information_schema\.\w+[\s\S]{0,160}?(?=`)/g)].map((m) => m[0]);
+    expect(lookups.length).toBeGreaterThanOrEqual(2);
+    for (const l of lookups) expect(l).toContain("table_schema = current_schema()");
+  });
+
+  it("checks the column added after the first rollout too", () => {
+    expect(REQUIRED_OBJECTS).toContainEqual({ table: "RetrievalAttempt", column: "failedSources" });
+  });
+});
+
+describe("CI proves the backfill mutates, not merely that it is idempotent", () => {
+  it("a verification script exists and is wired into CI", async () => {
+    const { readFileSync, existsSync } = await import("fs");
+    const { join } = await import("path");
+    const root = join(__dirname, "..", "..", "..");
+    expect(existsSync(join(root, "scripts/rollout-ci-verify.ts"))).toBe(true);
+    expect(readFileSync(join(root, ".github/workflows/ci.yml"), "utf8")).toContain("npm run rollout:verify");
+  });
+
+  it("it refuses to run against anything but a disposable host", async () => {
+    const { readFileSync } = await import("fs");
+    const { join } = await import("path");
+    const src = readFileSync(join(__dirname, "..", "..", "..", "scripts/rollout-ci-verify.ts"), "utf8");
+    expect(src).toMatch(/assertDisposable/);
+    expect(src).toMatch(/127\\\.0\\\.0\\\.1\|localhost/);
+    expect(src).toMatch(/Refusing to run/);
+  });
+
+  it("it seeds BOTH machine-adopted and human-approved fixtures", async () => {
+    const { readFileSync } = await import("fs");
+    const { join } = await import("path");
+    const src = readFileSync(join(__dirname, "..", "..", "..", "scripts/rollout-ci-verify.ts"), "utf8");
+    expect(src).toMatch(/'ADOPTED','STYLE',now\(\),3/);          // no approver
+    expect(src).toMatch(/'md-1',now\(\),'MD, verified'/);        // human approved
+    expect(src).toMatch(/'APPROVAL_PENDING'/);                    // already queued
+  });
+
+  it("it asserts preserved provenance and a byte-identical re-run", async () => {
+    const { readFileSync } = await import("fs");
+    const { join } = await import("path");
+    const src = readFileSync(join(__dirname, "..", "..", "..", "scripts/rollout-ci-verify.ts"), "utf8");
+    expect(src).toMatch(/approver, timestamp and credential survive/);
+    expect(src).toMatch(/byte-identical after re-running/);
+    expect(src).toMatch(/exits? .*1|process\.exit\(failures === 0 \? 0 : 1\)/);
+  });
+});

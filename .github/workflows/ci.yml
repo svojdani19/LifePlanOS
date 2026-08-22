@@ -59,6 +59,15 @@ jobs:
           npm run rollout:apply
           npm run rollout:apply
 
+      - name: Rollout backfill — prove it actually mutates the right rows
+        # The two steps above only prove no-op idempotence against an empty
+        # database; a backfill that did nothing at all would pass them. This
+        # seeds machine-adopted and human-approved fixtures, runs the real SQL,
+        # and checks exact counts, preserved provenance, and a byte-identical
+        # second run. Disposable CI database only — the script refuses to start
+        # against any host that is not plainly local or CI.
+        run: npm run rollout:verify
+
       - name: Unit tests
         run: npx vitest run
       - name: Build

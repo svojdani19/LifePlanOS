@@ -21,6 +21,7 @@
     "citations:refresh": "tsx scripts/refresh-citations.ts",
     "rollout:check": "tsx scripts/rollout-backfill.ts",
     "rollout:apply": "tsx scripts/rollout-backfill.ts --apply",
+    "rollout:verify": "tsx scripts/rollout-ci-verify.ts",
     "records:rebuild": "tsx scripts/rebuild-records.ts",
     "records:corroborate": "tsx scripts/corroborate-records.ts",
     "records:reextract": "tsx scripts/reextract-case.ts",
