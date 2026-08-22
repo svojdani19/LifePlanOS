@@ -3,7 +3,7 @@ import { prisma } from "@/lib/db";
 import { requireApiContext, requireCanonicalPermission, requireCase, audit } from "@/lib/tenant";
 import { enforceReviewCredential, verifiedCredentialLabel } from "@/lib/authz/credentialGate";
 import { basisDivergences } from "@/lib/engine/validation";
-import { validateReconciliation } from "@/lib/engine/basisReconciliation";
+import { validateReconciliation, reconcilable, RECONCILED_STATUS } from "@/lib/engine/basisReconciliation";
 import { ok, handleError } from "@/lib/api";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -27,6 +27,9 @@ import { ok, handleError } from "@/lib/api";
 const schema = z.object({
   futureCareItemId: z.string().min(1),
   reason: z.string().min(1),
+  /** What the reviewer was shown. Optional, and checked when supplied. */
+  recordedHash: z.string().nullable().optional(),
+  derivedHash: z.string().optional(),
 });
 
 export async function POST(req: Request, { params: paramsPromise }: { params: Promise<{ caseId: string }> }) {
@@ -47,6 +50,26 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
       return ok({ error: "This recommendation does not currently diverge from its recorded basis.", code: "NO_DIVERGENCE" }, 409);
     }
 
+    // A MISSING basis is not reconcilable. There is nothing recorded for the
+    // reviewer to compare the current record against, so no opinion they could
+    // form would supply the missing record — accepting one would manufacture an
+    // authoritative basis out of a signature, which is the bypass this whole
+    // mechanism exists to remove.
+    const allowed = reconcilable(diverged.state);
+    if (!allowed.ok) {
+      return ok({ error: allowed.reason, code: "BASIS_MISSING_NOT_RECONCILABLE" }, 409);
+    }
+
+    // The reviewer must be looking at the SAME two readings the server is. A
+    // stale browser tab would otherwise reconcile a divergence that has since
+    // been replaced by a different one.
+    if (input.recordedHash !== undefined && input.recordedHash !== (diverged.recordedHash ?? null)) {
+      return ok({ error: "This recommendation has changed since you opened it. Reload and review the current divergence.", code: "STALE_VIEW" }, 409);
+    }
+    if (input.derivedHash !== undefined && input.derivedHash !== diverged.derivedHash) {
+      return ok({ error: "This recommendation has changed since you opened it. Reload and review the current divergence.", code: "STALE_VIEW" }, 409);
+    }
+
     const credentialLabel = (await verifiedCredentialLabel(ctx, "PHYSICIAN")) ?? "verified physician credential on file";
     const problem = validateReconciliation({
       caseId: params.caseId,
@@ -60,10 +83,13 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
     });
     if (problem) return ok({ error: problem, code: "INCOMPLETE_RECONCILIATION" }, 422);
 
-    // The reconciliation and its audit entry commit together: a reconciliation
-    // with no trail is exactly the unattributable override this replaces.
-    const created = await prisma.$transaction(async (tx) =>
-      tx.basisReconciliation.create({
+    // The reconciliation, the closure of the exact finding it answers, and the
+    // audit entry commit together. The comment here previously claimed this and
+    // the audit call sat outside the transaction — a reconciliation with no
+    // trail is the unattributable override this replaces, and a closed finding
+    // with no reconciliation is a silent bypass.
+    const created = await prisma.$transaction(async (tx) => {
+      const row = await tx.basisReconciliation.create({
         data: {
           caseId: params.caseId,
           firmId: ctx.firm.id,
@@ -74,19 +100,29 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
           credentialLabel,
           reason: input.reason.trim().slice(0, 2000),
         },
-      }),
-    );
+      });
 
-    await audit(ctx, "basis.reconcile", {
-      type: "futureCareItem",
-      id: input.futureCareItemId,
-      caseId: params.caseId,
-      meta: {
-        state: diverged.state,
-        recordedHash: diverged.recordedHash,
-        derivedHash: diverged.derivedHash,
-        credential: credentialLabel,
-      },
+      // Close ONLY the finding whose result code carries this exact identity.
+      // Matching on the item alone would close a second, different divergence
+      // on the same recommendation that nobody has looked at.
+      await tx.validationFinding.updateMany({
+        where: { caseId: params.caseId, firmId: ctx.firm.id, result: diverged.findingResult, status: "OPEN" },
+        data: { status: RECONCILED_STATUS, resolvedById: ctx.user.id, resolvedAt: new Date() },
+      });
+
+      await audit(ctx, "basis.reconcile", {
+        type: "futureCareItem",
+        id: input.futureCareItemId,
+        caseId: params.caseId,
+        meta: {
+          state: diverged.state,
+          recordedHash: diverged.recordedHash,
+          derivedHash: diverged.derivedHash,
+          credential: credentialLabel,
+        },
+      }, tx as never);
+
+      return row;
     });
 
     return ok({ reconciliation: created });

@@ -4084,6 +4084,122 @@ function VersionCompareCard({ caseId, embedded = false }: { caseId: string; embe
   );
 }
 
+/**
+ * Reconcile one stale recorded basis.
+ *
+ * Shows the reviewer BOTH readings — what the basis on file says and what the
+ * record now derives — because a reconciliation is a judgment that the second
+ * still supports the first, and that judgment cannot be made from a hash pair
+ * alone. The reason is required, the hashes the reviewer was shown travel with
+ * the submission so a stale tab cannot reconcile a divergence that has since
+ * been replaced, and the control only appears for a reader the server would
+ * actually accept.
+ */
+function BasisReconcileAction({ caseId, findingResult, service, onDone }: { caseId: string; findingResult: string; service: string; onDone: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [state, setState] = useState<AnyRec | null>(null);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    const res = await fetch(`/api/cases/${caseId}/basis/divergences`);
+    if (res.ok) setState(await res.json());
+  }, [caseId]);
+
+  useEffect(() => { if (open) void load(); }, [open, load]);
+
+  const mine = ((state?.divergences ?? []) as AnyRec[]).find((d) => d.findingResult === findingResult);
+  const mayReconcile = !!state?.mayReconcile;
+
+  async function submit() {
+    if (!mine || reason.trim().length < 12) return;
+    setBusy(true); setErr(null);
+    try {
+      const res = await fetch(`/api/cases/${caseId}/basis/reconcile`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          futureCareItemId: mine.futureCareItemId,
+          reason,
+          // Exactly what was displayed. The server refuses if either has moved.
+          recordedHash: mine.recordedHash ?? null,
+          derivedHash: mine.derivedHash,
+        }),
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok || body.error) setErr(body.error ?? "The reconciliation could not be recorded.");
+      else { setOpen(false); setReason(""); onDone(); }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button className="focusable rounded text-xs font-semibold text-brand-700 hover:underline" onClick={() => setOpen(true)}>
+        Reconcile basis
+      </button>
+    );
+  }
+
+  return (
+    <div className="mt-1 w-full rounded-lg border border-amber-200 bg-amber-50/60 p-3">
+      <p className="text-xs font-semibold text-ink-900">Reconcile the recorded basis — {service}</p>
+      {!state ? (
+        <p className="mt-1 text-xs text-ink-500">Loading the two readings…</p>
+      ) : !mine ? (
+        <p className="mt-1 text-xs text-ink-600">This divergence is no longer current. Close and re-run the integrity check.</p>
+      ) : !mine.reconcilable ? (
+        <p className="mt-1 text-xs text-ink-700">
+          This recommendation has no recorded basis at all, so there is nothing to reconcile against. Regenerate the plan so a
+          basis is recorded, then have it approved.
+        </p>
+      ) : !mayReconcile ? (
+        <p className="mt-1 text-xs text-ink-700">
+          Reconciling a recorded basis is a physician act and needs a verified physician credential on this case.
+        </p>
+      ) : (
+        <>
+          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+            <div className="rounded-md bg-white p-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">Basis on file</p>
+              <p className="mt-0.5 break-all font-mono text-[11px] text-ink-700">{String(mine.recordedHash ?? "none")}</p>
+            </div>
+            <div className="rounded-md bg-white p-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-ink-500">Record derives now</p>
+              <p className="mt-0.5 break-all font-mono text-[11px] text-ink-700">{String(mine.derivedHash)}</p>
+            </div>
+          </div>
+          <p className="mt-2 text-xs text-ink-600">
+            Reconciling records your judgment that the record as it now stands still supports what was recorded and approved. It
+            does not change the recorded basis, and it covers only this pair of readings — if either moves again, the divergence
+            reopens.
+          </p>
+          <textarea
+            className="input mt-2 w-full text-xs"
+            rows={3}
+            placeholder="Why does the current record still support the recorded recommendation? (required)"
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+          />
+          {err && <p className="mt-1 text-xs text-red-700">{err}</p>}
+          <div className="mt-2 flex items-center gap-2">
+            <button
+              className="rounded-md bg-brand-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+              disabled={busy || reason.trim().length < 12}
+              onClick={() => void submit()}
+            >
+              {busy ? <Loader2 className="inline h-3 w-3 animate-spin" /> : null} Record reconciliation
+            </button>
+            <button className="rounded-md px-2.5 py-1 text-xs text-ink-500 hover:bg-ink-100" onClick={() => setOpen(false)}>Cancel</button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // Persisted integrity findings for the case (diagnosis mapping, coding/pricing,
 // inclusion eligibility). Critical findings mean the DOCX exports as a DRAFT.
 // Strip dollar amounts from finding text for pricing-restricted viewers.
@@ -4237,6 +4353,12 @@ function ValidationCard({ caseId, scope, redactPricing = false, onReview }: { ca
                     >
                       {actBusy === "refresh" ? <Loader2 className="inline h-3 w-3 animate-spin" /> : null} Retry refresh
                     </button>
+                  )}
+                  {/* A STALE basis is the only divergence a physician can close
+                      without regenerating. The endpoint existed with no caller,
+                      so the credentialed path was unreachable. */}
+                  {String(f.result).startsWith("BASIS_STALE") && (
+                    <BasisReconcileAction caseId={caseId} findingResult={String(f.result)} service={String(f.service)} onDone={() => void load()} />
                   )}
                   {onReview && <button className="focusable rounded text-xs font-semibold text-brand-700 hover:underline" onClick={() => onReview(f)}>Review</button>}
                 </div>

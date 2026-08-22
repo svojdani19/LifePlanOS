@@ -20,7 +20,7 @@ import {
 import { validateEvidenceQuality } from "./citationQuality";
 import { buildRecommendationDossier, validateRecommendationCompleteness, type DossierChronoEvent, type DossierCondition } from "./medicalNecessity";
 import { compareBasis } from "@/lib/engine/recommendationBasis";
-import { isBasisDivergenceFinding } from "@/lib/engine/basisReconciliation";
+import { isBasisDivergenceFinding, encodeBasisFinding, decodeBasisFinding, reconciliationCovers, reconcilable, statusForFinding } from "@/lib/engine/basisReconciliation";
 import { loadRecordedBases, unreadableBasisFinding, type BasisStore } from "@/lib/engine/basisStore";
 import { assembleBasis } from "@/lib/engine/basisAssembly";
 import { CHRONOLOGY_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
@@ -138,7 +138,15 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
         // item, and `openBlockingCount` stopped counting it. Embedding the hash
         // pair means a different divergence is a different finding, and reopens
         // as OPEN.
-        result: `${check.state === "MISSING" ? "BASIS_MISSING" : "BASIS_STALE"}:${(check.storedHash ?? "none").slice(-12)}->${check.derivedHash.slice(-12)}`,
+        // Immutable item id + BOTH full hashes. Twelve trailing hex characters
+        // is not a hash, and recovering the item by service name collided
+        // whenever a case carried two recommendations of the same service.
+        result: encodeBasisFinding({
+          state: check.state === "MISSING" ? "MISSING" : "STALE",
+          futureCareItemId: id,
+          recordedHash: check.storedHash ?? null,
+          derivedHash: check.derivedHash,
+        }),
         issue:
           check.state === "MISSING"
             ? "No recommendation basis has been recorded for this item, so the exported report has nothing authoritative to render from."
@@ -332,18 +340,21 @@ export async function persistCaseValidation(caseId: string, firmId: string): Pro
     select: { service: true, result: true, status: true, resolvedById: true, resolvedAt: true },
   });
   const dispositionByKey = new Map(prior.map((f) => [`${f.service}::${f.result}`, f]));
+
+  // A basis divergence's status DERIVES from the reconciliation record, every
+  // time validation runs. It is not a disposition carried forward on a string
+  // key: carrying it meant the export gate, the report's draft banner and the
+  // independent divergence check could each be reading a different answer. One
+  // source of truth, consulted here, and every gate downstream agrees with it.
+  const reconciliations = await prisma.basisReconciliation.findMany({ where: { caseId } });
+
   await prisma.$transaction([
     prisma.validationFinding.deleteMany({ where: { caseId } }),
     ...(v.findings.length
       ? [prisma.validationFinding.createMany({
           data: v.findings.map((f) => {
             const carried = dispositionByKey.get(`${f.service}::${f.result}`);
-            return {
-              ...f,
-              caseId,
-              firmId,
-              ...(carried ? { status: carried.status, resolvedById: carried.resolvedById, resolvedAt: carried.resolvedAt } : {}),
-            };
+            return { ...f, caseId, firmId, ...statusForFinding(f.result, reconciliations as never, carried as never) };
           }),
         })]
       : []),
@@ -364,6 +375,10 @@ export interface BasisDivergence {
   derivedHash: string;
   /** A credentialed physician has reconciled exactly this divergence. */
   reconciled: boolean;
+  /** MISSING is never reconcilable — see `reconcilable` for why. */
+  reconcilable: boolean;
+  /** The exact finding result code, so a caller can close THAT finding. */
+  findingResult: string;
 }
 
 /**
@@ -384,28 +399,30 @@ export async function basisDivergences(caseId: string): Promise<BasisDivergence[
   const raw = v.findings.filter((f) => isBasisDivergenceFinding(f.result));
   if (!raw.length) return [];
 
-  const items = await prisma.futureCareItem.findMany({
-    where: { caseId, supersededAt: null },
-    select: { id: true, service: true },
-  });
-  const idByService = new Map(items.map((i) => [i.service, i.id]));
   const reconciliations = await prisma.basisReconciliation.findMany({ where: { caseId } });
-  const reconciledKeys = new Set(reconciliations.map((r) => `${r.futureCareItemId}::${r.recordedHash ?? "none"}->${r.derivedHash}`));
 
-  return raw.map((f) => {
-    // The result code carries the hash pair: BASIS_STALE:<stored>-><derived>.
-    const [kind, pair] = String(f.result).split(":");
-    const [recordedTail, derivedTail] = (pair ?? "").split("->");
-    const itemId = idByService.get(f.service) ?? "";
-    return {
-      futureCareItemId: itemId,
+  const out: BasisDivergence[] = [];
+  for (const f of raw) {
+    const id = decodeBasisFinding(f.result);
+    if (!id) {
+      // A legacy short-tail code. It cannot be matched to a reconciliation with
+      // any confidence, so it counts as unreconciled — the safe direction.
+      out.push({ futureCareItemId: "", service: f.service, state: "STALE", recordedHash: null, derivedHash: "", reconciled: false, reconcilable: false, findingResult: f.result });
+      continue;
+    }
+    out.push({
+      futureCareItemId: id.futureCareItemId,
       service: f.service,
-      state: kind === "BASIS_MISSING" ? ("MISSING" as const) : ("STALE" as const),
-      recordedHash: recordedTail && recordedTail !== "none" ? recordedTail : null,
-      derivedHash: derivedTail ?? "",
-      reconciled: [...reconciledKeys].some((k) => k.startsWith(`${itemId}::`) && k.endsWith(`->${derivedTail ?? ""}`)),
-    };
-  });
+      state: id.state,
+      recordedHash: id.recordedHash,
+      derivedHash: id.derivedHash,
+      // Exact: item identity AND both full hashes.
+      reconciled: reconciliations.some((r) => reconciliationCovers(r, id)),
+      reconcilable: reconcilable(id.state).ok,
+      findingResult: f.result,
+    });
+  }
+  return out;
 }
 
 /**

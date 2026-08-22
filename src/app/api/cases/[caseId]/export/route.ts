@@ -54,26 +54,13 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
     // resolved-as-is or ignored (persisted, attributed, and survived the
     // re-run above) no longer blocks — only OPEN blocking findings gate the
     // final. The raw engine flag would re-block dispositioned findings forever.
-    const stillOpenBlocking = validation.blocking ? await openBlockingCount(params.caseId) : 0;
-    if ((format === "DOCX" || format === "PDF") && mode === "final" && stillOpenBlocking > 0) {
-      const openRows = await prisma.validationFinding.findMany({
-        where: { caseId: params.caseId, exportBlocking: true, status: "OPEN" },
-        take: 10,
-        select: { service: true, result: true },
-      });
-      const openKeys = new Set(openRows.map((r) => `${r.service}::${r.result}`));
-      const defects = validation.findings.filter((f) => f.exportBlocking && openKeys.has(`${f.service}::${f.result}`)).slice(0, 10);
-      return ok(
-        {
-          error: "Final export blocked by unresolved critical findings.",
-          blocking: true,
-          defects: defects.map((f) => ({ service: f.service, result: f.result, issue: f.issue, suggestion: f.suggestion })),
-          hint: 'Resolve the findings, or export a draft (mode: "draft") with the DRAFT watermark and unresolved-issues appendix.',
-        },
-        422,
-      );
-    }
-
+    //
+    // A basis divergence reaches this count already carrying the status
+    // persistCaseValidation derived from the reconciliation record, so a
+    // reconciled one is not OPEN and does not block here. This check used to
+    // run BEFORE the divergence check above and read a status nothing had
+    // reconciled, so a reconciled divergence stayed blocked by the generic
+    // gate — the credentialed path existed and could not be completed.
     // ── The record must agree with the document, independently ───────────────
     // Checked against the DATA, not against the finding table. Findings carry a
     // user-editable status and this gate counted only OPEN ones, so
@@ -107,6 +94,26 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
           422,
         );
       }
+    }
+
+    const stillOpenBlocking = validation.blocking ? await openBlockingCount(params.caseId) : 0;
+    if ((format === "DOCX" || format === "PDF") && mode === "final" && stillOpenBlocking > 0) {
+      const openRows = await prisma.validationFinding.findMany({
+        where: { caseId: params.caseId, exportBlocking: true, status: "OPEN" },
+        take: 10,
+        select: { service: true, result: true },
+      });
+      const openKeys = new Set(openRows.map((r) => `${r.service}::${r.result}`));
+      const defects = validation.findings.filter((f) => f.exportBlocking && openKeys.has(`${f.service}::${f.result}`)).slice(0, 10);
+      return ok(
+        {
+          error: "Final export blocked by unresolved critical findings.",
+          blocking: true,
+          defects: defects.map((f) => ({ service: f.service, result: f.result, issue: f.issue, suggestion: f.suggestion })),
+          hint: 'Resolve the findings, or export a draft (mode: "draft") with the DRAFT watermark and unresolved-issues appendix.',
+        },
+        422,
+      );
     }
 
     // ── CSV is a SUPPORTING export only ──────────────────────────────────────

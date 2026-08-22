@@ -30,6 +30,105 @@ export function isBasisDivergenceFinding(result: string | null | undefined): boo
   return BASIS_FINDING_PREFIXES.some((p) => r === p || r.startsWith(`${p}:`));
 }
 
+/**
+ * The identity a basis finding carries, encoded in its result code.
+ *
+ * The first version wrote `BASIS_STALE:<last12>-><last12>` and recovered the
+ * item by looking its SERVICE NAME up in a map. Two defects followed. A case
+ * with two recommendations of the same service resolved both to whichever id
+ * the map happened to keep, so a reconciliation of one silently covered the
+ * other. And twelve trailing hex characters is not a hash: matching on it means
+ * a reconciliation is accepted for any divergence whose derived hash merely
+ * ends the same way, and the RECORDED side was not compared at all.
+ *
+ * The item's immutable id and both full hashes now travel in the code itself.
+ * Nothing downstream has to infer identity, and `persistCaseValidation` still
+ * carries dispositions across re-runs on (service, result) — with the whole
+ * identity in `result`, a different divergence is necessarily a different
+ * finding and reopens as OPEN.
+ */
+export interface BasisFindingIdentity {
+  state: "STALE" | "MISSING";
+  futureCareItemId: string;
+  /** Null only for MISSING, where by definition nothing was recorded. */
+  recordedHash: string | null;
+  derivedHash: string;
+}
+
+const NONE = "none";
+
+export function encodeBasisFinding(id: BasisFindingIdentity): string {
+  return `BASIS_${id.state === "MISSING" ? "MISSING" : "STALE"}:${id.futureCareItemId}:${id.recordedHash ?? NONE}->${id.derivedHash}`;
+}
+
+/**
+ * Recover the identity, or null when the code is not one of ours.
+ *
+ * Returns null for the legacy short-tail codes too. That is deliberate: a
+ * legacy finding cannot be matched to a reconciliation with any confidence, and
+ * treating it as unmatched keeps it blocking, which is the safe direction.
+ */
+export function decodeBasisFinding(result: string | null | undefined): BasisFindingIdentity | null {
+  const r = String(result ?? "");
+  const m = /^BASIS_(STALE|MISSING):([^:]+):(.+)->(.+)$/.exec(r);
+  if (!m) return null;
+  const [, state, futureCareItemId, recorded, derived] = m;
+  if (!futureCareItemId || !derived) return null;
+  return {
+    state: state === "MISSING" ? "MISSING" : "STALE",
+    futureCareItemId,
+    recordedHash: recorded === NONE ? null : recorded,
+    derivedHash: derived,
+  };
+}
+
+/**
+ * Does this reconciliation cover this exact divergence?
+ *
+ * Item identity AND both full hashes. A reconciliation is a judgment about one
+ * specific pair of readings; if either side has moved since, the reviewer has
+ * not seen what the document would now say.
+ */
+export function reconciliationCovers(
+  reconciliation: { futureCareItemId: string; recordedHash: string | null; derivedHash: string },
+  divergence: BasisFindingIdentity,
+): boolean {
+  return (
+    reconciliation.futureCareItemId === divergence.futureCareItemId &&
+    (reconciliation.recordedHash ?? null) === (divergence.recordedHash ?? null) &&
+    reconciliation.derivedHash === divergence.derivedHash
+  );
+}
+
+/**
+ * May this divergence be closed by reconciliation at all?
+ *
+ * Only a STALE one. MISSING means no authoritative basis exists — there is
+ * nothing for a physician to compare the current record against, and no opinion
+ * they could form that would supply the missing record. Letting a
+ * reconciliation close it would manufacture an authoritative basis out of a
+ * signature, which is precisely the bypass this whole mechanism removes. A
+ * missing basis is fixed by generating and approving one.
+ */
+export function reconcilable(state: "STALE" | "MISSING"): { ok: boolean; reason: string | null } {
+  if (state === "STALE") return { ok: true, reason: null };
+  return {
+    ok: false,
+    reason:
+      "This recommendation has no recorded basis at all, so there is nothing to reconcile against. A reconciliation is a judgment that the current record still supports what was recorded; where nothing was recorded, that judgment has no subject. Regenerate the plan so a basis is recorded, then have it approved.",
+  };
+}
+
+/**
+ * The status a reconciled divergence carries.
+ *
+ * Distinct from RESOLVED_AS_IS and IGNORED on purpose: those are the generic
+ * dispositions this mechanism refuses, and a reader scanning statuses must be
+ * able to tell "a physician reconciled this exact pair of readings" from "a
+ * planner clicked ignore".
+ */
+export const RECONCILED_STATUS = "RESOLVED_RECONCILED";
+
 /** Dispositions the generic route offers. None of them may close a divergence. */
 export type GenericDisposition = "resolve_as_is" | "ignore" | "accept_changes" | "reopen";
 
@@ -79,4 +178,46 @@ export function validateReconciliation(input: ReconciliationInput): string | nul
   if (!input.derivedHash) return "A reconciliation needs the current derived basis to reconcile against.";
   if (!input.credentialLabel) return "A reconciliation must be attributed to a verified credential.";
   return null;
+}
+
+
+export interface ReconciliationRow {
+  futureCareItemId: string;
+  recordedHash: string | null;
+  derivedHash: string;
+  reconciledById: string;
+  createdAt: Date;
+}
+
+export interface CarriedDisposition {
+  status: string;
+  resolvedById: string | null;
+  resolvedAt: Date | null;
+}
+
+/**
+ * The status a finding is republished with.
+ *
+ * A basis divergence derives its status from the reconciliation record on every
+ * run, and never from a disposition carried on a string key. Carrying it meant
+ * the export gate, the report's draft banner and the independent divergence
+ * check could each be reading a different answer to the same question.
+ *
+ * Everything that is not a basis divergence keeps the disposition behaviour it
+ * has always had.
+ */
+export function statusForFinding(
+  result: string,
+  reconciliations: readonly ReconciliationRow[],
+  carried: CarriedDisposition | undefined,
+): CarriedDisposition {
+  const identity = decodeBasisFinding(result);
+  if (identity) {
+    if (!reconcilable(identity.state).ok) return { status: "OPEN", resolvedById: null, resolvedAt: null };
+    const match = reconciliations.find((r) => reconciliationCovers(r, identity));
+    return match
+      ? { status: RECONCILED_STATUS, resolvedById: match.reconciledById, resolvedAt: match.createdAt }
+      : { status: "OPEN", resolvedById: null, resolvedAt: null };
+  }
+  return carried ?? { status: "OPEN", resolvedById: null, resolvedAt: null };
 }
