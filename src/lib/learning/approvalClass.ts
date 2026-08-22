@@ -59,6 +59,24 @@ export function classifyApproval(input: ClassifyInput): ApprovalClass {
   return "STYLE";
 }
 
+/**
+ * Read a persisted approvalClass into the union, failing closed.
+ *
+ * The routes cast the column: `candidate.approvalClass as ApprovalClass`. A
+ * cast is a claim about a database string, and the database can hold anything
+ * — an empty string from a partial write, a legacy value, "Style" from a
+ * future import, or a class this build has never heard of. Every one of those
+ * is a TypeScript ApprovalClass and none of them is `"CLINICAL"`, so the
+ * comparison that chooses the gate would have picked the weaker one.
+ *
+ * Only the exact string "STYLE" yields STYLE. Everything else — null,
+ * undefined, unknown, malformed, or a value added after this build shipped —
+ * is CLINICAL, which is the gate that asks for more rather than less.
+ */
+export function parseApprovalClass(value: unknown): ApprovalClass {
+  return value === "STYLE" ? "STYLE" : "CLINICAL";
+}
+
 /** The credential an approver must hold, or null when none is required. */
 export function requiredApprovalCredential(cls: ApprovalClass): "PHYSICIAN" | null {
   return cls === "CLINICAL" ? "PHYSICIAN" : null;

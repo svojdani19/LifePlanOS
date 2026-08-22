@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { redirect } from "next/navigation";
-import { Users, ShieldCheck, Settings, CreditCard, BadgeCheck, ScrollText } from "lucide-react";
+import { Users, ShieldCheck, Settings, CreditCard, BadgeCheck, ScrollText, GraduationCap } from "lucide-react";
 import { requireContext } from "@/lib/tenant";
 import { prisma } from "@/lib/db";
 import { formatDate } from "@/lib/utils";
@@ -46,6 +46,9 @@ export default async function FirmAdminPage() {
     }),
     prisma.userCredential.count({ where: { firmId, status: { in: ["SELF_REPORTED", "PENDING"] } } }),
   ]);
+  // Lessons waiting on a human. The approval API shipped with no way to reach
+  // it, so the queue could grow with nobody able to see it.
+  const pendingLessons = await prisma.learningCandidate.count({ where: { firmId, status: "APPROVAL_PENDING" } });
 
   const cards = [
     { href: "/team", icon: Users, title: "Team", desc: "Seats, invitations, and member status.", metric: `${userCount} member${userCount === 1 ? "" : "s"}` },
@@ -54,6 +57,7 @@ export default async function FirmAdminPage() {
     { href: "/billing", icon: CreditCard, title: "Billing", desc: "Plan, seats, and usage for this firm.", metric: ctx.subscription ? `${ctx.subscription.tier.toLowerCase()} plan` : "no subscription" },
     { href: "/team", icon: BadgeCheck, title: "Credentials", desc: "Professional credentials on file; verification gates expert approvals.", metric: `${unverifiedCount} awaiting verification` },
     { href: "/settings/audit", icon: ScrollText, title: "Audit Log", desc: "The append-only trail of every action in the firm.", metric: "view trail" },
+    { href: "/settings/learning", icon: GraduationCap, title: "Learned Lessons", desc: "Corrections generalised into guidance. Editorial lessons are adopted here; clinical ones need a credentialed physician.", metric: `${pendingLessons} awaiting approval` },
   ];
 
   return (

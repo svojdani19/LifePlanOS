@@ -35,10 +35,14 @@ vi.mock("@/lib/authz/credentialGate", () => ({
   enforceReviewCredential: vi.fn(async () => {}),
   verifiedCredentialLabel: vi.fn(async () => "MD, verified"),
 }));
-vi.mock("@/lib/learning/candidateService", () => ({
-  approveCandidate: vi.fn(async () => ({ id: "cand-1", status: "ADOPTED" })),
-  rejectCandidate: vi.fn(async () => ({ id: "cand-1", status: "REJECTED_BY_REVIEWER" })),
-}));
+vi.mock("@/lib/learning/candidateService", () => {
+  class CandidateStateError extends Error {}
+  return {
+    CandidateStateError,
+    approveCandidate: vi.fn(async () => ({ id: "cand-1", status: "ADOPTED" })),
+    rejectCandidate: vi.fn(async () => ({ id: "cand-1", status: "REJECTED_BY_REVIEWER" })),
+  };
+});
 
 import { prisma } from "@/lib/db";
 import { requireApiContext, requireCanonicalPermission } from "@/lib/tenant";
@@ -129,5 +133,62 @@ describe("rejection is gated exactly like approval", () => {
     const res = await reject(req({ reason: "  " }), params);
     expect(res.status).toBe(422);
     expect(rejectCandidate).not.toHaveBeenCalled();
+  });
+});
+
+
+describe("a malformed persisted class falls to the physician gate", () => {
+  it.each([
+    ["an empty string", ""],
+    ["lower case", "style"],
+    ["a class from a later build", "PRESENTATION"],
+    ["a number", 7],
+  ])("%s is treated as CLINICAL", async (_label, value) => {
+    findFirst.mockResolvedValue({ ...row("STYLE"), approvalClass: value });
+    await approve(req(), params);
+    expect(requireCanonicalPermission).toHaveBeenCalledWith(ctx, "learning.approve_clinical");
+    expect(enforceReviewCredential).toHaveBeenCalledWith(ctx, "PHYSICIAN", expect.anything());
+  });
+});
+
+describe("the credential gate is not optional", () => {
+  it("a physician seat WITHOUT a verified credential is refused", async () => {
+    // Holding the seat is not holding the credential. The gate fails closed and
+    // the decision never reaches the service.
+    findFirst.mockResolvedValue(row("CLINICAL"));
+    (enforceReviewCredential as Mock).mockRejectedValue(new Error("A verified PHYSICIAN credential is required"));
+    const res = await approve(req(), params);
+    expect(res.ok).toBe(false);
+    expect(approveCandidate).not.toHaveBeenCalled();
+  });
+
+  it("the same is true for refusing a clinical lesson", async () => {
+    findFirst.mockResolvedValue(row("CLINICAL"));
+    (enforceReviewCredential as Mock).mockRejectedValue(new Error("A verified PHYSICIAN credential is required"));
+    const res = await reject(req({ reason: "Not consistent with our practice." }), params);
+    expect(res.ok).toBe(false);
+    expect(rejectCandidate).not.toHaveBeenCalled();
+  });
+
+  it("passes the credential label through for attribution", async () => {
+    findFirst.mockResolvedValue(row("CLINICAL"));
+    await approve(req(), params);
+    expect(approveCandidate).toHaveBeenCalledWith(
+      "cand-1",
+      expect.objectContaining({ credentialLabel: "MD, verified" }),
+      undefined,
+      expect.any(Function),
+    );
+  });
+});
+
+describe("a lost concurrent decision surfaces as a conflict", () => {
+  it("409s rather than reporting a success it did not achieve", async () => {
+    const { CandidateStateError } = await import("@/lib/learning/candidateService");
+    findFirst.mockResolvedValue(row("STYLE"));
+    (approveCandidate as Mock).mockRejectedValue(new CandidateStateError("decided by someone else"));
+    const res = await approve(req(), params);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: "CANDIDATE_STATE" });
   });
 });

@@ -1,8 +1,8 @@
 import { prisma } from "@/lib/db";
 import { requireApiContext, requireCanonicalPermission, audit } from "@/lib/tenant";
 import { enforceReviewCredential } from "@/lib/authz/credentialGate";
-import { rejectCandidate } from "@/lib/learning/candidateService";
-import { requiredApprovalCredential, requiredApprovalPermission, type ApprovalClass } from "@/lib/learning/approvalClass";
+import { rejectCandidate, CandidateStateError } from "@/lib/learning/candidateService";
+import { parseApprovalClass, requiredApprovalCredential, requiredApprovalPermission } from "@/lib/learning/approvalClass";
 import { ok, handleError } from "@/lib/api";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -33,7 +33,12 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
     // the row is already firm-scoped, so a miss means it is not this tenant's.
     if (!candidate) return ok({ error: "Learning candidate not found" }, 404);
 
-    const cls = (candidate.approvalClass as ApprovalClass) ?? "CLINICAL";
+    // PARSED, not cast. A cast is a claim about a database string, and the
+    // column can hold an empty value from a partial write, a legacy label, or
+    // a class added after this build shipped — each of which is a valid
+    // TypeScript ApprovalClass and none of which equals "CLINICAL", so the
+    // comparison that picks the gate would have picked the weaker one.
+    const cls = parseApprovalClass(candidate.approvalClass);
     requireCanonicalPermission(ctx, requiredApprovalPermission(cls));
 
     const needed = requiredApprovalCredential(cls);
@@ -43,15 +48,20 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
     const reason = typeof body.reason === "string" ? body.reason : "";
     if (!reason.trim()) return ok({ error: "A rejection must record a reason" }, 422);
 
-    const updated = await rejectCandidate(candidate.id, { userId: ctx.user.id, firmId: ctx.firm.id }, reason);
-
-    await audit(ctx, "learning.reject", {
-      type: "learning_candidate",
-      id: candidate.id,
-      meta: { approvalClass: cls, mechanism: candidate.mechanism, failureCode: candidate.failureCode },
-    });
+    const updated = await rejectCandidate(
+      candidate.id,
+      { userId: ctx.user.id, firmId: ctx.firm.id },
+      reason,
+      (tx, c) =>
+        audit(ctx, "learning.reject", {
+          type: "learning_candidate",
+          id: c.id,
+          meta: { approvalClass: cls, mechanism: c.mechanism, failureCode: c.failureCode },
+        }, tx as never),
+    );
     return ok({ candidate: updated });
   } catch (err) {
+    if (err instanceof CandidateStateError) return ok({ error: err.message, code: "CANDIDATE_STATE" }, 409);
     return handleError(err);
   }
 }

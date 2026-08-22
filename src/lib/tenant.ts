@@ -295,13 +295,25 @@ async function reqMeta() {
   }
 }
 
+/** The slice of the client this writer needs, so a transaction can supply it. */
+export interface AuditSink {
+  auditLog: { create(args: unknown): Promise<unknown> };
+}
+
 export async function audit(
   ctx: Pick<TenantContext, "firm" | "user" | "supportMode" | "actorFirmId">,
   action: string,
   target?: { type?: string; id?: string; caseId?: string; meta?: unknown },
+  /**
+   * Transaction client, for decisions whose record must commit WITH them.
+   * A state change that lands without its audit entry is unattributable, and
+   * an audit entry that lands without its state change describes something
+   * that never happened; for approval decisions neither is acceptable.
+   */
+  db?: AuditSink,
 ): Promise<void> {
   const { ip, userAgent } = await reqMeta();
-  await prisma.auditLog.create({
+  await (db ?? prisma).auditLog.create({
     data: {
       firmId: ctx.firm.id,
       userId: ctx.user.id,

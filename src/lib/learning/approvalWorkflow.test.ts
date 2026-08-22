@@ -10,12 +10,23 @@
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@/lib/db", () => ({
-  prisma: {
+vi.mock("@/lib/db", () => {
+  // A decision is now ONE conditional transition inside a transaction, so the
+  // fake has to model that: a $transaction that runs its callback, an
+  // updateMany that reports how many rows it claimed, and the read-back the
+  // service returns. A fake missing any of these would make the service look
+  // like it wrote nothing.
+  const prisma = {
     learningFinding: { findFirst: vi.fn(), update: vi.fn(), updateMany: vi.fn(), count: vi.fn() },
-    learningCandidate: { create: vi.fn(), findFirst: vi.fn(), findMany: vi.fn(), update: vi.fn() },
-  },
-}));
+    learningCandidate: { create: vi.fn(), findFirst: vi.fn(), findMany: vi.fn(), update: vi.fn(), updateMany: vi.fn(), findFirstOrThrow: vi.fn() },
+    auditLog: { create: vi.fn() },
+    $transaction: vi.fn(),
+  };
+  (prisma.$transaction as unknown as { mockImplementation: (f: unknown) => void }).mockImplementation(
+    async (arg: unknown) => (typeof arg === "function" ? (arg as (tx: unknown) => Promise<unknown>)(prisma) : Promise.all(arg as Promise<unknown>[])),
+  );
+  return { prisma };
+});
 
 import { prisma } from "@/lib/db";
 import {
@@ -31,6 +42,7 @@ import {
 const db = prisma as unknown as {
   learningFinding: Record<string, ReturnType<typeof vi.fn>>;
   learningCandidate: Record<string, ReturnType<typeof vi.fn>>;
+  $transaction: ReturnType<typeof vi.fn>;
 };
 
 const FIRM = "firm-1";
@@ -58,7 +70,18 @@ const candidateRow = (over: Record<string, unknown> = {}) => ({
 
 beforeEach(() => {
   vi.clearAllMocks();
+  db.$transaction.mockImplementation(async (arg: unknown) =>
+    typeof arg === "function" ? (arg as (tx: unknown) => Promise<unknown>)(prisma) : Promise.all(arg as Promise<unknown>[]),
+  );
   db.learningCandidate.update.mockImplementation(async (a: { data: Record<string, unknown> }) => ({ id: "cand-1", ...a.data }));
+  // The conditional write claims the row, and the service reads back what it
+  // wrote — so the fake echoes the data the transition applied.
+  let lastWrite: Record<string, unknown> = {};
+  db.learningCandidate.updateMany.mockImplementation(async (a: { data: Record<string, unknown> }) => {
+    lastWrite = a.data;
+    return { count: 1 };
+  });
+  db.learningCandidate.findFirstOrThrow.mockImplementation(async () => ({ id: "cand-1", ...lastWrite }));
   db.learningFinding.updateMany.mockResolvedValue({ count: 1 });
 });
 

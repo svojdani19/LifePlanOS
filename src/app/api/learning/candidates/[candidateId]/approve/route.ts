@@ -1,8 +1,8 @@
 import { prisma } from "@/lib/db";
 import { requireApiContext, requireCanonicalPermission, audit } from "@/lib/tenant";
 import { enforceReviewCredential, verifiedCredentialLabel } from "@/lib/authz/credentialGate";
-import { approveCandidate } from "@/lib/learning/candidateService";
-import { requiredApprovalCredential, requiredApprovalPermission, type ApprovalClass } from "@/lib/learning/approvalClass";
+import { approveCandidate, CandidateStateError } from "@/lib/learning/candidateService";
+import { parseApprovalClass, requiredApprovalCredential, requiredApprovalPermission } from "@/lib/learning/approvalClass";
 import { ok, handleError } from "@/lib/api";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -37,7 +37,12 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
     // the row is already firm-scoped, so a miss means it is not this tenant's.
     if (!candidate) return ok({ error: "Learning candidate not found" }, 404);
 
-    const cls = (candidate.approvalClass as ApprovalClass) ?? "CLINICAL";
+    // PARSED, not cast. A cast is a claim about a database string, and the
+    // column can hold an empty value from a partial write, a legacy label, or
+    // a class added after this build shipped — each of which is a valid
+    // TypeScript ApprovalClass and none of which equals "CLINICAL", so the
+    // comparison that picks the gate would have picked the weaker one.
+    const cls = parseApprovalClass(candidate.approvalClass);
     requireCanonicalPermission(ctx, requiredApprovalPermission(cls));
 
     const needed = requiredApprovalCredential(cls);
@@ -50,20 +55,23 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
     const body = await req.json().catch(() => ({}) as Record<string, unknown>);
     const note = typeof body.note === "string" ? body.note.slice(0, 1000) : undefined;
 
-    const updated = await approveCandidate(candidate.id, { userId: ctx.user.id, firmId: ctx.firm.id, credentialLabel }, note);
-
-    await audit(ctx, "learning.approve", {
-      type: "learning_candidate",
-      id: candidate.id,
-      meta: {
-        approvalClass: cls,
-        mechanism: candidate.mechanism,
-        failureCode: candidate.failureCode,
-        credential: credentialLabel,
-      },
-    });
+    // The adoption, the finding state and the audit entry commit together.
+    // An adoption with no audit entry is unattributable, and an audit entry
+    // with no adoption describes something that never happened.
+    const updated = await approveCandidate(
+      candidate.id,
+      { userId: ctx.user.id, firmId: ctx.firm.id, credentialLabel },
+      note,
+      (tx, c) =>
+        audit(ctx, "learning.approve", {
+          type: "learning_candidate",
+          id: c.id,
+          meta: { approvalClass: cls, mechanism: c.mechanism, failureCode: c.failureCode, credential: credentialLabel },
+        }, tx as never),
+    );
     return ok({ candidate: updated });
   } catch (err) {
+    if (err instanceof CandidateStateError) return ok({ error: err.message, code: "CANDIDATE_STATE" }, 409);
     return handleError(err);
   }
 }

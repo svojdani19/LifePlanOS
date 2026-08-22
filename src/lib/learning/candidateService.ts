@@ -235,34 +235,94 @@ export interface ApprovalActor {
  * only an evaluated candidate can be adopted, only inside its own firm, and the
  * approval is recorded with the approver and the class they approved under.
  */
-export async function approveCandidate(candidateId: string, actor: ApprovalActor, note?: string) {
-  const candidate = await prisma.learningCandidate.findFirst({ where: { id: candidateId, firmId: actor.firmId } });
-  if (!candidate) throw new Error("candidate not found in this firm");
-  if (candidate.status !== "APPROVAL_PENDING") {
-    throw new Error(`only an evaluated candidate awaiting approval can be adopted; this one is ${candidate.status}`);
+/**
+ * Thrown when the candidate was not in the state the decision assumed.
+ *
+ * Distinguished from a validation error because the caller should re-read and
+ * show the current state, not correct its input.
+ */
+export class CandidateStateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CandidateStateError";
   }
-  // Never adopt something the evaluation could not clear. The route cannot
-  // reach past this, and neither can a future caller.
-  if (candidate.safetyClean !== true) {
-    throw new Error("a candidate that regressed a safety-critical metric cannot be adopted");
-  }
+}
 
-  const updated = await prisma.learningCandidate.update({
-    where: { id: candidate.id },
-    data: {
+/**
+ * Apply one approval decision atomically.
+ *
+ * The state change, the related finding state, and the audit entry commit
+ * together or not at all. Previously the read and the write were separate
+ * statements, so two reviewers clicking at once both saw APPROVAL_PENDING and
+ * both wrote — the second silently overwriting the first's attribution — and
+ * the audit entry was written afterwards by the route, outside any
+ * transaction, so a failure between them left an adoption nobody was recorded
+ * as making.
+ *
+ * The guard is in the WHERE clause, not in a prior read: `updateMany` on
+ * (id, firmId, status) either matches one row or matches none, and the
+ * database decides which caller wins.
+ */
+async function decide(
+  candidateId: string,
+  actor: ApprovalActor,
+  data: Record<string, unknown>,
+  findingState: string,
+  writeAudit?: (db: unknown, candidate: { id: string; mechanism: string; failureCode: string; approvalClass: string }) => Promise<void>,
+) {
+  return prisma.$transaction(async (tx) => {
+    const candidate = await tx.learningCandidate.findFirst({ where: { id: candidateId, firmId: actor.firmId } });
+    if (!candidate) throw new CandidateStateError("candidate not found in this firm");
+    if (candidate.status !== "APPROVAL_PENDING") {
+      throw new CandidateStateError(`only a candidate awaiting approval can be decided; this one is ${candidate.status}`);
+    }
+    // Never adopt something the evaluation could not clear. Approval is a
+    // decision about a lesson that PASSED; it is not an override of the safety
+    // gate, and no reviewer can reach past this.
+    if (data.status === "ADOPTED" && candidate.safetyClean !== true) {
+      throw new CandidateStateError("a candidate that regressed a safety-critical metric cannot be adopted");
+    }
+
+    // Conditional on the state we read. A concurrent decision that landed
+    // first moves the row out of APPROVAL_PENDING and this matches nothing.
+    const claimed = await tx.learningCandidate.updateMany({
+      where: { id: candidateId, firmId: actor.firmId, status: "APPROVAL_PENDING" },
+      data,
+    });
+    if (claimed.count !== 1) {
+      throw new CandidateStateError("this candidate was decided by someone else a moment ago; reload to see the current state");
+    }
+
+    await tx.learningFinding.updateMany({ where: { candidateId }, data: { state: findingState } });
+    if (writeAudit) await writeAudit(tx, candidate as unknown as { id: string; mechanism: string; failureCode: string; approvalClass: string });
+    return tx.learningCandidate.findFirstOrThrow({ where: { id: candidateId } });
+  });
+}
+
+export async function approveCandidate(
+  candidateId: string,
+  actor: ApprovalActor,
+  note?: string,
+  writeAudit?: (db: unknown, candidate: { id: string; mechanism: string; failureCode: string; approvalClass: string }) => Promise<void>,
+) {
+  const now = new Date();
+  return decide(
+    candidateId,
+    actor,
+    {
       status: "ADOPTED",
-      adoptedAt: new Date(),
+      adoptedAt: now,
       approvedById: actor.userId,
-      approvedAt: new Date(),
+      approvedAt: now,
       approverCredential: actor.credentialLabel ?? null,
       approvalNote: note ?? null,
       rejectedById: null,
       rejectedAt: null,
       rejectionReason: null,
     },
-  });
-  await prisma.learningFinding.updateMany({ where: { candidateId: candidate.id }, data: { state: "ADOPTED" } });
-  return updated;
+    "ADOPTED",
+    writeAudit,
+  );
 }
 
 /**
@@ -272,26 +332,26 @@ export async function approveCandidate(candidateId: string, actor: ApprovalActor
  * evaluation, its reviewer and their reason, so the record of what the firm
  * declined to learn survives alongside what it accepted.
  */
-export async function rejectCandidate(candidateId: string, actor: ApprovalActor, reason: string) {
+export async function rejectCandidate(
+  candidateId: string,
+  actor: ApprovalActor,
+  reason: string,
+  writeAudit?: (db: unknown, candidate: { id: string; mechanism: string; failureCode: string; approvalClass: string }) => Promise<void>,
+) {
   if (!reason.trim()) throw new Error("a rejection must record a reason");
-  const candidate = await prisma.learningCandidate.findFirst({ where: { id: candidateId, firmId: actor.firmId } });
-  if (!candidate) throw new Error("candidate not found in this firm");
-  if (candidate.status !== "APPROVAL_PENDING") {
-    throw new Error(`only a candidate awaiting approval can be rejected; this one is ${candidate.status}`);
-  }
-
-  const updated = await prisma.learningCandidate.update({
-    where: { id: candidate.id },
-    data: {
+  return decide(
+    candidateId,
+    actor,
+    {
       status: "REJECTED_BY_REVIEWER",
       adoptedAt: null,
       rejectedById: actor.userId,
       rejectedAt: new Date(),
       rejectionReason: reason.trim().slice(0, 1000),
     },
-  });
-  await prisma.learningFinding.updateMany({ where: { candidateId: candidate.id }, data: { state: "REJECTED_NO_IMPROVEMENT" } });
-  return updated;
+    "REJECTED_NO_IMPROVEMENT",
+    writeAudit,
+  );
 }
 
 /**
