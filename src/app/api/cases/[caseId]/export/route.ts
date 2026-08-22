@@ -3,7 +3,7 @@ import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit, recordUsage } from "@/lib/tenant";
 import { buildReportDocx, buildCostCsv } from "@/lib/export/report";
 import { convertDocxToPdf } from "@/lib/export/pdf";
-import { persistCaseValidation, openBlockingCount } from "@/lib/engine/validation";
+import { persistCaseValidation, openBlockingCount, unreconciledBasisDivergences } from "@/lib/engine/validation";
 import { persistCaseReasoning } from "@/lib/engine/clinicalReasoningPersist";
 import { buildSnapshotPayload } from "@/lib/engine/snapshot";
 import { assumptionsFor } from "@/lib/engine/generate";
@@ -72,6 +72,41 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
         },
         422,
       );
+    }
+
+    // ── The record must agree with the document, independently ───────────────
+    // Checked against the DATA, not against the finding table. Findings carry a
+    // user-editable status and this gate counted only OPEN ones, so
+    // dispositioning a BASIS_STALE finding released a report whose record still
+    // disagreed with it. Re-deriving here means a malformed, legacy, or
+    // mistakenly-applied disposition buys nothing: the only ways through are a
+    // regeneration that makes the hashes agree, or a credentialed physician's
+    // recorded reconciliation of this exact divergence.
+    if ((format === "DOCX" || format === "PDF") && mode === "final") {
+      const diverged = await unreconciledBasisDivergences(params.caseId);
+      if (diverged.length) {
+        await audit(ctx, "export.final_denied", {
+          type: "case",
+          id: params.caseId,
+          caseId: params.caseId,
+          meta: { format, template, reasons: ["BASIS_DIVERGENCE"], diverged: diverged.length },
+        });
+        return ok(
+          {
+            error: "Final export blocked: recommendations do not match their recorded basis.",
+            blocking: true,
+            reasons: ["BASIS_DIVERGENCE"],
+            defects: diverged.slice(0, 10).map((d) => ({
+              service: d.service,
+              result: `BASIS_${d.state}`,
+              issue: "This recommendation and the basis on file describe different plans, so the exported document would assert a combination that was never recorded.",
+              suggestion: "Regenerate the plan so the recorded and current bases agree, or have a credentialed physician reconcile this recommendation.",
+            })),
+            hint: 'Regenerate the plan, or export a draft (mode: "draft"), which discloses the divergence on the face of the document.',
+          },
+          422,
+        );
+      }
     }
 
     // ── CSV is a SUPPORTING export only ──────────────────────────────────────

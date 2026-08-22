@@ -3,6 +3,7 @@ import { prisma } from "@/lib/db";
 import { requireApiContext, requirePermission, requireCase, audit, TenantError, type TenantContext } from "@/lib/tenant";
 import { persistCaseValidation } from "@/lib/engine/validation";
 import { recomputeCosts } from "@/lib/engine/generate";
+import { dispositionAllowed } from "@/lib/engine/basisReconciliation";
 import { ok, handleError } from "@/lib/api";
 import type { Permission } from "@/lib/rbac";
 
@@ -74,6 +75,18 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
       where: { id: params.findingId, caseId: params.caseId, firmId: ctx.firm.id },
     });
     if (!finding) return ok({ error: "Finding not found" }, 404);
+
+    // ── A recorded-basis divergence is not dispositionable ───────────────────
+    // BASIS_STALE / BASIS_MISSING state that this plan and the record it rests
+    // on are different objects. Marking one resolved-as-is or ignored hid the
+    // mismatch and, because the export gate counts only OPEN blocking
+    // findings, released it into a final report. It closes by regeneration or
+    // by credentialed reconciliation, and by nothing else. `reopen` stays
+    // available — it only ever moves a finding back toward blocking.
+    const verdict = dispositionAllowed(finding.result, action);
+    if (!verdict.allowed) {
+      return ok({ error: verdict.reason, code: "BASIS_DIVERGENCE_NOT_DISPOSITIONABLE", findingId: finding.id }, 409);
+    }
 
     let itemsChanged = false;
     if (action === "accept_changes") {

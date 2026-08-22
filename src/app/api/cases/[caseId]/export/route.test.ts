@@ -19,6 +19,7 @@ const deps = vi.hoisted(() => ({
   putObject: vi.fn(),
   buildReportDocx: vi.fn(),
   evaluate: vi.fn(),
+  divergences: vi.fn(),
 }));
 
 vi.mock("@/lib/db", () => ({
@@ -43,6 +44,8 @@ vi.mock("@/lib/export/report", () => ({
 vi.mock("@/lib/export/pdf", () => ({ convertDocxToPdf: vi.fn(async (b: Buffer) => b) }));
 vi.mock("@/lib/engine/validation", () => ({
   persistCaseValidation: vi.fn(async () => ({ blocking: 0, findings: [], counts: {} })),
+  openBlockingCount: vi.fn(async () => 0),
+  unreconciledBasisDivergences: deps.divergences,
 }));
 vi.mock("@/lib/engine/clinicalReasoningPersist", () => ({ persistCaseReasoning: vi.fn(async () => null) }));
 vi.mock("@/lib/engine/snapshot", () => ({ buildSnapshotPayload: vi.fn(() => ({})) }));
@@ -90,6 +93,66 @@ beforeEach(() => {
   db.caseFindUniqueOrThrow.mockRejectedValue(new Error("no snapshot data"));
   deps.putObject.mockResolvedValue("key-1");
   deps.buildReportDocx.mockResolvedValue({ buffer: Buffer.from("docx"), totalLifetime: 2400, totalPresentValue: 2000, itemCount: 2 });
+  deps.divergences.mockResolvedValue([]);
+});
+
+describe("the record must agree with the document", () => {
+  // The bypass this closes: mark the BASIS_STALE finding resolved-as-is, and
+  // the OPEN-only gate lets a final release through with the plan and its
+  // record still describing different objects. This gate re-derives, so no
+  // disposition — malformed, legacy or deliberate — can buy a release.
+  const DIVERGED = [{ futureCareItemId: "i-1", service: "Total knee arthroplasty", state: "STALE" as const, recordedHash: "aaa", derivedHash: "bbb", reconciled: false }];
+
+  it("blocks a final DOCX when a recommendation diverges from its recorded basis", async () => {
+    deps.divergences.mockResolvedValue(DIVERGED);
+    const res = await POST(req({ format: "DOCX", mode: "final" }), params);
+    const body = await res.json();
+    expect(res.status).toBe(422);
+    expect(body.reasons).toContain("BASIS_DIVERGENCE");
+    // Nothing is produced, stored, or advanced.
+    expect(deps.buildReportDocx).not.toHaveBeenCalled();
+    expect(deps.putObject).not.toHaveBeenCalled();
+    expect(db.exportCreate).not.toHaveBeenCalled();
+    expect(db.caseUpdateMany).not.toHaveBeenCalled();
+  });
+
+  it("blocks PDF on the same basis", async () => {
+    deps.divergences.mockResolvedValue(DIVERGED);
+    expect((await POST(req({ format: "PDF", mode: "final" }), params)).status).toBe(422);
+  });
+
+  it("audits the denial with structural, PHI-free metadata", async () => {
+    deps.divergences.mockResolvedValue(DIVERGED);
+    await POST(req({ format: "DOCX", mode: "final" }), params);
+    const call = deps.audit.mock.calls.find((c) => c[1] === "export.final_denied");
+    expect(call).toBeTruthy();
+    expect(call![2].meta).toMatchObject({ reasons: ["BASIS_DIVERGENCE"], diverged: 1 });
+    expect(JSON.stringify(call![2].meta)).not.toMatch(/knee|arthroplasty/i);
+  });
+
+  it("blocks BEFORE the professional-authority gate — a signed attestation does not cure it", async () => {
+    deps.divergences.mockResolvedValue(DIVERGED);
+    deps.evaluate.mockResolvedValue(AUTHORIZED);
+    const res = await POST(req({ format: "DOCX", mode: "final" }), params);
+    expect(res.status).toBe(422);
+    expect((await res.json()).reasons).toContain("BASIS_DIVERGENCE");
+  });
+
+  it("does not block a DRAFT — the divergence is disclosed on its face instead", async () => {
+    deps.divergences.mockResolvedValue(DIVERGED);
+    const res = await POST(req({ format: "DOCX", mode: "draft" }), params);
+    expect(res.status).toBe(200);
+    expect(deps.buildReportDocx).toHaveBeenCalled();
+  });
+
+  it("lets a reconciled divergence through — that is the credentialed path", async () => {
+    // unreconciledBasisDivergences filters these out, so an empty list here IS
+    // the reconciled case.
+    deps.divergences.mockResolvedValue([]);
+    deps.evaluate.mockResolvedValue(AUTHORIZED);
+    const res = await POST(req({ format: "DOCX", mode: "final" }), params);
+    expect(res.status).toBe(200);
+  });
 });
 
 describe("CSV release semantics", () => {

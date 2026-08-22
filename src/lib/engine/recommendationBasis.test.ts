@@ -90,7 +90,7 @@ describe("the hash decides staleness, and decides it on the right things", () =>
       missingPremises: rev(core.missingPremises),
       acceptedEvidence: Object.fromEntries(
         Object.entries(core.acceptedEvidence).map(([k, v]) => [k, rev(v as unknown[])]),
-      ) as typeof core.acceptedEvidence,
+      ) as unknown as typeof core.acceptedEvidence,
       probabilityBasis: { ...core.probabilityBasis, factors: rev(core.probabilityBasis.factors) },
     };
     // The inputs really were reordered — otherwise this proves nothing.

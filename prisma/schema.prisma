@@ -373,6 +373,7 @@ model Case {
   generatorSnapshots        GeneratorSnapshot[]
   recommendationBases       RecommendationBasis[]
   retrievalAttempts         RetrievalAttempt[]
+  basisReconciliations      BasisReconciliation[]
 
   @@unique([firmId, caseNumber])
   @@index([firmId])
@@ -2664,5 +2665,37 @@ model RetrievalAttempt {
 
   @@unique([caseId, producer])
   @@index([caseId, attemptedAt])
+  @@index([firmId])
+}
+
+/// A credentialed physician's explicit reconciliation of a recorded-basis
+/// divergence.
+///
+/// BASIS_STALE / BASIS_MISSING state that a plan and the record it rests on are
+/// different objects. The generic finding route let anyone with report.export
+/// or case.edit mark them resolved-as-is or ignored, and the export gate counts
+/// only OPEN blocking findings — so the mismatch survived, invisible, into a
+/// final report. It can now close only by regeneration or by this row.
+model BasisReconciliation {
+  id     String @id @default(uuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  firmId String
+
+  futureCareItemId String
+  /// The basis that was on file when the reviewer looked. Null when none was.
+  recordedHash     String?
+  /// The basis the current record derives — what they reconciled TO.
+  derivedHash      String
+
+  reconciledById  String
+  /// Snapshotted at the moment of the act, so attribution survives a later
+  /// credential change.
+  credentialLabel String
+  reason          String
+
+  createdAt DateTime @default(now())
+
+  @@index([caseId, futureCareItemId])
   @@index([firmId])
 }

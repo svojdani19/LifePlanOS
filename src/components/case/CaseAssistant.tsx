@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { isBasisDivergenceFinding as isBasisDivergence } from "@/lib/engine/basisReconciliation";
 import { createPortal } from "react-dom";
 import { Loader2, ShieldAlert, ShieldCheck, Send, X, Check, Clock, Ban, ChevronRight, ChevronLeft, CheckCircle2, ArrowUpRight, Undo2, RotateCcw, Keyboard } from "lucide-react";
 
@@ -270,17 +271,29 @@ export function CaseAssistant({ caseId, canEdit, onFocus, reviewFinding = null, 
                   >
                     Go to item
                   </button>
-                  <button className="rounded-md border border-ink-300 bg-white px-2.5 py-1 text-xs font-medium text-ink-700 hover:bg-ink-50" disabled={findingBusy !== null} onClick={() => void actOnFinding("resolve_as_is")}>
-                    {findingBusy === "resolve_as_is" ? <Loader2 className="inline h-3 w-3 animate-spin" /> : null} Resolve As Is
-                  </button>
-                  {canApplyChanges && (
-                    <button className="rounded-md bg-brand-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-brand-700" disabled={findingBusy !== null} onClick={() => void actOnFinding("accept_changes")}>
-                      {findingBusy === "accept_changes" ? <Loader2 className="inline h-3 w-3 animate-spin" /> : null} Accept Changes
-                    </button>
+                  {/* A recorded-basis divergence has no disposition. It says the
+                      plan and its record are different objects; the server
+                      refuses to resolve or ignore it, so offering the buttons
+                      would only produce a 409 the reader cannot act on. */}
+                  {isBasisDivergence(reviewFinding.result) ? (
+                    <p className="text-xs text-ink-600">
+                      This recommendation does not match the basis on file. Regenerate the plan so the two agree, or ask a credentialed physician to reconcile it. It cannot be resolved as-is, and it blocks a final export until then.
+                    </p>
+                  ) : (
+                    <>
+                      <button className="rounded-md border border-ink-300 bg-white px-2.5 py-1 text-xs font-medium text-ink-700 hover:bg-ink-50" disabled={findingBusy !== null} onClick={() => void actOnFinding("resolve_as_is")}>
+                        {findingBusy === "resolve_as_is" ? <Loader2 className="inline h-3 w-3 animate-spin" /> : null} Resolve As Is
+                      </button>
+                      {canApplyChanges && (
+                        <button className="rounded-md bg-brand-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-brand-700" disabled={findingBusy !== null} onClick={() => void actOnFinding("accept_changes")}>
+                          {findingBusy === "accept_changes" ? <Loader2 className="inline h-3 w-3 animate-spin" /> : null} Accept Changes
+                        </button>
+                      )}
+                      <button className="rounded-md px-2.5 py-1 text-xs font-medium text-ink-500 hover:bg-ink-100" disabled={findingBusy !== null} onClick={() => void actOnFinding("ignore")}>
+                        Ignore
+                      </button>
+                    </>
                   )}
-                  <button className="rounded-md px-2.5 py-1 text-xs font-medium text-ink-500 hover:bg-ink-100" disabled={findingBusy !== null} onClick={() => void actOnFinding("ignore")}>
-                    Ignore
-                  </button>
                 </div>
               </div>
             )}

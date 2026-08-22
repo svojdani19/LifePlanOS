@@ -20,6 +20,7 @@ import {
 import { validateEvidenceQuality } from "./citationQuality";
 import { buildRecommendationDossier, validateRecommendationCompleteness, type DossierChronoEvent, type DossierCondition } from "./medicalNecessity";
 import { compareBasis } from "@/lib/engine/recommendationBasis";
+import { isBasisDivergenceFinding } from "@/lib/engine/basisReconciliation";
 import { assembleBasis } from "@/lib/engine/basisAssembly";
 import { CHRONOLOGY_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
 import { resolveRecommendationCondition } from "@/lib/engine/recommendationCondition";
@@ -347,4 +348,66 @@ export async function persistCaseValidation(caseId: string, firmId: string): Pro
 /** Count of findings that still gate a final export: blocking AND undispositioned. */
 export async function openBlockingCount(caseId: string): Promise<number> {
   return prisma.validationFinding.count({ where: { caseId, exportBlocking: true, status: "OPEN" } });
+}
+
+export interface BasisDivergence {
+  futureCareItemId: string;
+  service: string;
+  state: "STALE" | "MISSING";
+  recordedHash: string | null;
+  derivedHash: string;
+  /** A credentialed physician has reconciled exactly this divergence. */
+  reconciled: boolean;
+}
+
+/**
+ * Which recommendations disagree with their recorded basis, RIGHT NOW.
+ *
+ * Deliberately independent of ValidationFinding and of every disposition on
+ * it. The finding table is a projection with a user-editable status column,
+ * and the final-export gate reads only OPEN rows — so dispositioning a
+ * BASIS_STALE finding released a report whose record still disagreed with it.
+ * This re-derives and compares, and answers to nothing but the data.
+ *
+ * A divergence counts as reconciled only when a credentialed physician
+ * reconciled THIS hash pair. A reconciliation of an earlier divergence does
+ * not carry forward: the record moved again, which is a new fact.
+ */
+export async function basisDivergences(caseId: string): Promise<BasisDivergence[]> {
+  const v = await validateCase(caseId);
+  const raw = v.findings.filter((f) => isBasisDivergenceFinding(f.result));
+  if (!raw.length) return [];
+
+  const items = await prisma.futureCareItem.findMany({
+    where: { caseId, supersededAt: null },
+    select: { id: true, service: true },
+  });
+  const idByService = new Map(items.map((i) => [i.service, i.id]));
+  const reconciliations = await prisma.basisReconciliation.findMany({ where: { caseId } });
+  const reconciledKeys = new Set(reconciliations.map((r) => `${r.futureCareItemId}::${r.recordedHash ?? "none"}->${r.derivedHash}`));
+
+  return raw.map((f) => {
+    // The result code carries the hash pair: BASIS_STALE:<stored>-><derived>.
+    const [kind, pair] = String(f.result).split(":");
+    const [recordedTail, derivedTail] = (pair ?? "").split("->");
+    const itemId = idByService.get(f.service) ?? "";
+    return {
+      futureCareItemId: itemId,
+      service: f.service,
+      state: kind === "BASIS_MISSING" ? ("MISSING" as const) : ("STALE" as const),
+      recordedHash: recordedTail && recordedTail !== "none" ? recordedTail : null,
+      derivedHash: derivedTail ?? "",
+      reconciled: [...reconciledKeys].some((k) => k.startsWith(`${itemId}::`) && k.endsWith(`->${derivedTail ?? ""}`)),
+    };
+  });
+}
+
+/**
+ * Divergences that must stop a final export.
+ *
+ * Fail-closed by construction: anything not explicitly reconciled blocks,
+ * whatever the finding table says.
+ */
+export async function unreconciledBasisDivergences(caseId: string): Promise<BasisDivergence[]> {
+  return (await basisDivergences(caseId)).filter((d) => !d.reconciled);
 }
