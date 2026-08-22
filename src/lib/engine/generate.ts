@@ -22,6 +22,7 @@ import { classifySupport } from "@/lib/engine/supportClass";
 import { GENERATOR_ORIGINS } from "@/lib/learning/futureCareAgreement";
 import { EVIDENCE_LEDGER_VERSION } from "@/lib/engine/evidenceLedger";
 import { buildBasis } from "@/lib/engine/recommendationBasis";
+import { assembleBasis } from "@/lib/engine/basisAssembly";
 import { approvedCarePatterns, suggestedInterventions } from "@/lib/learning/carePatterns";
 import { resolveRecommendationCondition } from "@/lib/engine/recommendationCondition";
 import { locateConditionEvidenceInClaims, stateObjectiveEvidence } from "@/lib/engine/conditionEvidence";
@@ -688,7 +689,19 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
       // ledger — so the basis and the ledger cannot describe different evidence.
       // The projection assumptions travel with the basis: a lifetime figure
       // computed at 3% and one computed at 5% are different claims.
-      bases.push(buildBasis(it as never, d, { ...a, pricedAt: (it as { pricedAt?: Date | null }).pricedAt?.toISOString() ?? null }));
+      // Through assembleBasis, so the recorded material conclusions are derived
+      // the SAME way validation and the report derive their witness. Two
+      // derivations of "the same" assessment is how a basis comes to disagree
+      // with every rebuild of itself.
+      bases.push(assembleBasis({
+        item: it as never,
+        dossier: d,
+        conditions: ledgerConditions as never,
+        chronology: ledgerEvents as never,
+        kase: ledgerCase,
+        interviews: ledgerInterviews as never,
+        assumptions: { ...a, pricedAt: (it as { pricedAt?: Date | null }).pricedAt?.toISOString() ?? null, conditionName: cond?.name ?? null },
+      }));
       dropped += d.ledgerDropped;
       return d.ledger;
     });
@@ -737,6 +750,8 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
               claimBasis: b.claimBasis as never,
               probabilityBasis: b.probabilityBasis as never,
               projectionBasis: b.projectionBasis as never,
+              specification: b.specification as never,
+              assessmentBasis: b.assessmentBasis as never,
               contradictions: b.contradictions as never,
               literature: b.literature as never,
               missingPremises: b.missingPremises as never,

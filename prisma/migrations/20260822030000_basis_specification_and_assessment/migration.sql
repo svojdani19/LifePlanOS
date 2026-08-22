@@ -1,0 +1,31 @@
+-- Make the recorded basis able to carry what the report actually prints.
+--
+-- The basis recorded the narrative and the evidence, and the exported document
+-- then built its specification table — service, diagnosis, specialty,
+-- frequency, duration, lifetime quantity, CPT, unit cost, lifetime cost,
+-- present value, review status — from the LIVE row at export time. It set that
+-- beside the recorded narrative. Each half was internally consistent, so
+-- nothing looked wrong; the document as a whole asserted a combination that had
+-- never existed.
+--
+-- The clinical reasoning had the same shape: assessmentFromBasis delegated to a
+-- builder that derived every conclusion from the current dossier, and the
+-- recorded basis only coloured the hash. The panel and the report displayed
+-- freshly re-derived probability, inclusion, confidence and duration verdicts
+-- under an identity that claimed to certify recorded ones.
+--
+-- Both columns are hashed into basisHash, so a change to any recorded
+-- specification value or material conclusion stales the basis and blocks a
+-- final export until the plan is regenerated.
+--
+-- Existing rows get NULL and are NOT backfilled. A basis that cannot be
+-- reconstructed faithfully must fail its own freshness check and be
+-- regenerated — that is what BASIS_STALE is for, and inventing a plausible
+-- specification for a historical record would defeat the entire mechanism.
+--
+-- Additive and reversible:
+--   ALTER TABLE "RecommendationBasis"
+--     DROP COLUMN "specification", DROP COLUMN "assessmentBasis";
+ALTER TABLE "RecommendationBasis"
+  ADD COLUMN IF NOT EXISTS "specification"   JSONB,
+  ADD COLUMN IF NOT EXISTS "assessmentBasis" JSONB;

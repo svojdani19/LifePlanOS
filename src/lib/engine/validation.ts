@@ -19,7 +19,8 @@ import {
 } from "./integrity";
 import { validateEvidenceQuality } from "./citationQuality";
 import { buildRecommendationDossier, validateRecommendationCompleteness, type DossierChronoEvent, type DossierCondition } from "./medicalNecessity";
-import { buildBasis, compareBasis } from "@/lib/engine/recommendationBasis";
+import { compareBasis } from "@/lib/engine/recommendationBasis";
+import { assembleBasis } from "@/lib/engine/basisAssembly";
 import { CHRONOLOGY_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
 import { resolveRecommendationCondition } from "@/lib/engine/recommendationCondition";
 import { assumptionsFor } from "@/lib/engine/generate";
@@ -105,7 +106,20 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
     const service = (it as { service: string }).service;
     // The SAME assumptions the generator recorded from — otherwise the witness
     // differs on the projection inputs alone and every item reads stale.
-    const check = compareBasis(recordedBases.get(id) ?? null, buildBasis(it as never, dossier, { ...caseAssumptions, pricedAt: (it as { pricedAt?: Date | null }).pricedAt?.toISOString() ?? null }));
+    // Through assembleBasis, the same entry point generation records with, so
+    // the witness and the record cannot differ merely in how they were built.
+    const check = compareBasis(
+      recordedBases.get(id) ?? null,
+      assembleBasis({
+        item: it as never,
+        dossier,
+        conditions: conditions as never,
+        chronology: chronology as unknown as DossierChronoEvent[],
+        kase: dossierCase,
+        interviews: interviews as never,
+        assumptions: { ...caseAssumptions, pricedAt: (it as { pricedAt?: Date | null }).pricedAt?.toISOString() ?? null, conditionName: cond?.name ?? null },
+      }),
+    );
     if (check.state !== "CURRENT") {
       basisFindings.push({
         service,

@@ -1101,7 +1101,9 @@ export function reasoningFindings(
     // Set-level coherence only: this helper has no database and exists to
     // compare items against each other, so it states `null` rather than
     // pretending to a recorded basis it cannot see.
-    const a = buildReasoningAssessment(it, conditions, chronology, kase, [], { conflicts: flags.get(id) ?? [], replacedByActive: replacedByActive.has(id) }, [], null);
+    // Explicitly the WITNESS entry point: these findings compare the current
+    // set against itself, they are never displayed as the recorded assessment.
+    const a = deriveWitnessAssessment(it, conditions, chronology, kase, { setContext: { conflicts: flags.get(id) ?? [], replacedByActive: replacedByActive.has(id) } });
     const physicianApproved = it.physicianStatus === "APPROVED" || it.physicianStatus === "MODIFIED";
     const pv = it.presentValue ?? 0;
     // Double-count: totaled alongside its own lower-cost alternative → blocking.
@@ -1182,22 +1184,135 @@ export function reasoningFindings(
 // nothing.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** The assessment shown to a reviewer and persisted, anchored to the record. */
+/**
+ * The assessment shown to a reviewer and persisted — read FROM the record.
+ *
+ * This used to delegate straight to `buildReasoningAssessment`, which derives
+ * every field from the current dossier. The recorded basis only coloured the
+ * hash. So the panel and the report displayed freshly re-derived conclusions
+ * under an identity that claimed to certify recorded ones: an approved
+ * recommendation could show a different probability class, inclusion
+ * rationale, confidence or duration verdict than the physician approved, and
+ * nothing said so.
+ *
+ * Now every material and evidentiary conclusion comes from
+ * `recordedBasis.assessmentBasis`. Nothing is re-derived to fill a gap: a
+ * basis recorded before this field existed returns null rather than a
+ * plausible reconstruction, and the caller must treat that as a basis it
+ * cannot present (which the BASIS_STALE gate already does).
+ *
+ * Live workflow state is supplied by the caller, not read from the record:
+ * conflict flags, physician review position, validation and lifecycle status
+ * describe the case as it stands now. Freezing them would show a stale
+ * workflow; their divergence from the record is caught by the specification
+ * basis and reported as staleness.
+ */
 export function assessmentFromBasis(
-  item: ReasoningItem,
-  conditions: (CondInput & DossierCondition & { id: string })[],
-  chronology: DossierChronoEvent[],
-  kase: DossierCase,
   recordedBasis: BasisRecord,
-  opts: { interviews?: DossierInterview[]; setContext?: SetContext; handEnteredEvidence?: readonly EvidenceRowIdentity[] } = {},
-): ReasoningAssessment {
-  return buildReasoningAssessment(
-    item, conditions, chronology, kase,
-    opts.interviews ?? [],
-    opts.setContext ?? { conflicts: [], replacedByActive: false },
-    opts.handEnteredEvidence ?? [],
-    recordedBasis,
-  );
+  live: {
+    conflictFlags?: ConflictFlag[];
+    physicianReviewStatus?: string;
+    validationStatus?: "ok" | "blocking" | "pending";
+    lifecycleStatus?: AssessmentLifecycleStatus;
+  } = {},
+): ReasoningAssessment | null {
+  const m = recordedBasis.assessmentBasis;
+  if (!m) return null;
+
+  const ev = recordedBasis.acceptedEvidence;
+  const asClassified = (xs: { text: string; source: string | null }[], kind: string): ClassifiedEvidenceItem[] =>
+    xs.map((x) => ({ text: x.text, source: x.source, kind } as unknown as ClassifiedEvidenceItem));
+
+  return {
+    recommendationService: recordedBasis.specification.service,
+    supportingDiagnosisIds: recordedBasis.conditionId ? [recordedBasis.conditionId] : [],
+    bodyRegion: m.bodyRegion,
+    laterality: m.laterality,
+    conditionSeverity: m.conditionSeverity,
+    conditionChronicity: m.conditionChronicity,
+    currentClinicalStatus: m.currentClinicalStatus,
+    responsibleSpecialty: m.responsibleSpecialty,
+    conditionTrajectory: m.conditionTrajectory,
+    causalRelationshipStatus: m.causalRelationshipStatus,
+    clinicalPurpose: m.clinicalPurpose,
+    // The accepted evidence AS RECORDED — the same rows the hash covers.
+    evidenceItems: [
+      ...asClassified(ev.diagnoses, "DIAGNOSIS"),
+      ...asClassified(ev.objectiveFindings, "OBJECTIVE"),
+      ...asClassified(ev.functionalLimitations, "FUNCTIONAL"),
+      ...asClassified(ev.priorTreatment, "PRIOR_TREATMENT"),
+      ...asClassified(ev.guidelines, "GUIDELINE"),
+    ],
+    objectiveEvidenceSummary: m.objectiveEvidenceSummary,
+    subjectiveEvidenceSummary: m.subjectiveEvidenceSummary,
+    functionalBasisSummary: m.functionalBasisSummary,
+    priorTreatmentSummary: m.priorTreatmentSummary,
+    treatmentResponseSummary: m.treatmentResponseSummary,
+    treatingRecordSupportSummary: m.treatingRecordSupportSummary,
+    medicalNecessityRationale: m.medicalNecessityRationale,
+    noTreatmentRisk: m.noTreatmentRisk,
+    leastIntensiveRationale: m.leastIntensiveRationale,
+    timingRationale: m.timingRationale,
+    probabilityClassification: m.probabilityClassification as ProbabilityClassification,
+    clinicalPathwayStage: m.clinicalPathwayStage,
+    clinicalPathway: m.clinicalPathway,
+    // LIVE: the conflict set is a property of the plan right now.
+    conflictFlags: live.conflictFlags ?? [],
+    alternativesConsidered: m.alternativesConsidered,
+    inclusionRationale: m.inclusionRationale,
+    frequencyRationale: m.frequencyRationale,
+    frequencySupported: m.frequencySupported,
+    durationClass: m.durationClass as DurationClass,
+    durationRationale: m.durationRationale,
+    // Reconstructed from the recorded verdict, not recomputed. `bases` and
+    // `uncertaintyNotes` are the narrative expansion of a verdict the hash
+    // already covers; the report prints the verdict and the rationale.
+    durationSupport: {
+      status: (m.durationSupported ? "SUPPORTED" : "UNSUPPORTED") as LifetimeSupportResult["status"],
+      clinicallySupported: m.durationSupported,
+      professionalAdoption: recordedBasis.specification.physicianStatus === "APPROVED" || recordedBasis.specification.physicianStatus === "MODIFIED",
+      bases: m.durationBasisLabel ? ([{ kind: m.durationBasisLabel, detail: m.durationRationale, sourceRef: null }] as unknown as LifetimeSupportResult["bases"]) : [],
+      uncertaintyNotes: [],
+      reviewOutstanding: false,
+      fingerprint: `${m.durationClass}|${m.durationSupported}|${m.durationBasisLabel ?? ""}`,
+    } as unknown as LifetimeSupportResult,
+    weakeningEvidence: recordedBasis.contradictions.map((t) => ({ text: t, why: "Recorded as contradictory evidence." } as unknown as WeakeningItem)),
+    unknowns: recordedBasis.missingPremises.map((t) => ({ text: t } as unknown as UnknownItem)),
+    missingEvidenceRequests: m.missingEvidenceRequests,
+    supportingGuidelineAssessments: m.supportingGuidelineAssessments,
+    supportingLiteratureAssessments: recordedBasis.literature.map((l) => ({
+      title: l.title,
+      pmid: l.pmid ?? undefined,
+      supports: l.supports,
+      applicability: l.studyType,
+      evidenceLevel: 0,
+      limitations: l.limitations,
+    })),
+    rejectedLiterature: [],
+    reasoningChain: [],
+    evidenceSufficiency: { sufficient: m.frequencySupported, gaps: m.missingEvidenceRequests } as unknown as EvidenceSufficiency,
+    selfCritique: { weakestLink: m.residualUncertainty, whatWouldChangeTheOpinion: m.missingEvidenceRequests } as unknown as SelfCritique,
+    confidenceVector: { overall: m.recommendationConfidence } as unknown as ConfidenceVector,
+    alternativeExplanations: [],
+    literatureSynthesis: m.literatureSynthesis,
+    residualUncertainty: m.residualUncertainty,
+    evidenceStrength: m.evidenceStrength as EvidenceStrength,
+    recommendationConfidence: m.recommendationConfidence as RecommendationConfidence,
+    confidenceExplanation: m.confidenceExplanation,
+    costEligibilityStatus: m.costEligibilityStatus,
+    inclusionInTotalsStatus: m.inclusionInTotalsStatus as ReasoningAssessment["inclusionInTotalsStatus"],
+    // LIVE workflow position.
+    physicianReviewStatus: live.physicianReviewStatus ?? recordedBasis.specification.physicianStatus,
+    validationStatus: live.validationStatus ?? "pending",
+    // Defaults to NEEDS_REVIEW, never VALIDATED: a basis read back from the
+    // record has not been re-validated against the case as it stands, and a
+    // reader must not infer that it has.
+    lifecycleStatus: live.lifecycleStatus ?? "NEEDS_REVIEW",
+    // The identity of the RECORD this assessment was read from. Not a fresh
+    // derivation: two readers of the same basis must agree, and a reader must
+    // never be able to move it by re-reading.
+    materialHash: recordedBasis.basisHash,
+  } as ReasoningAssessment;
 }
 
 /**

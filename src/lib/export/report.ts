@@ -24,9 +24,10 @@ import { seriesCitation, seriesMembersOf } from "@/lib/records/seriesCitation";
 import { runIntegrityCheck, reviewLabel, evaluateCitation, functionalFinding, type RecInput, type CondInput, type PerItem, type IntegrityFinding } from "@/lib/engine/integrity";
 import { buildRecommendationDossier, type DossierCondition, type DossierChronoEvent, type DossierCase, type EvidenceItem } from "@/lib/engine/medicalNecessity";
 import { compareEvidenceSets, describeEvidenceSet, type EvidenceRowIdentity } from "@/lib/engine/evidenceSet";
-import { buildBasis, compareBasis } from "@/lib/engine/recommendationBasis";
+import { compareBasis, freqText, durationText, type BasisRecord } from "@/lib/engine/recommendationBasis";
+import { assembleBasis } from "@/lib/engine/basisAssembly";
 import { itemIsSupported, supportClassOf, SUPPORT_LABEL, computePlanTotals } from "@/lib/engine/supportClass";
-import { buildReasoningAssessment, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningItem, type ReasoningAssessment } from "@/lib/engine/clinicalReasoning";
+import { deriveWitnessAssessment, assessmentFromBasis, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningItem, type ReasoningAssessment } from "@/lib/engine/clinicalReasoning";
 import { referencesFor, guidelineSourcesFor } from "@/lib/references/sources";
 import { parseBasis, basisNarrative } from "@/lib/engine/lifeExpectancy";
 import { verifyAttestation, type AttestationScopeEntry, type AttestableItem } from "@/lib/engine/attestation";
@@ -231,15 +232,9 @@ function citationSentence(citation: unknown): string | null {
   return list.map(oneCitation).join("  ");
 }
 
-function freqText(i: { frequencyPerYear: number; isLifetime: boolean; durationYears: number | null }): string {
-  if (!i.isLifetime && (i.durationYears ?? 0) <= 0) return "one-time";
-  return `${i.frequencyPerYear}× per year`;
-}
-function durationText(i: { isLifetime: boolean; durationYears: number | null }, life: number): string {
-  if (i.isLifetime) return `Lifetime (${life.toFixed(1)} yrs)`;
-  if ((i.durationYears ?? 0) <= 0) return "One-time";
-  return `${i.durationYears} year${i.durationYears === 1 ? "" : "s"}`;
-}
+// freqText / durationText now live beside the basis that RECORDS them
+// (lib/engine/recommendationBasis), so the recorder and the renderer cannot
+// format the same numbers two different ways.
 
 export interface ReportOptions {
   /** CRE v1 §18 — draft export: DRAFT watermark + unresolved-issues appendix. */
@@ -429,44 +424,53 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     const out: (Paragraph | Table)[] = [];
     out.push(new Paragraph({ spacing: { before: 260, after: 60 }, keepNext: true, children: [new TextRun({ text: it.service, bold: true, size: 22, color: NAVY })] }));
 
+    // ── The RECORDED basis is what the report prints ──────────────────────
+    // Loaded FIRST, because the specification grid below is rendered from it.
+    // The grid used to be built row-by-row from the live item and set beside a
+    // recorded narrative: each half internally consistent, the document as a
+    // whole asserting a combination that had never existed.
+    const recordedBasis = basisByItem.get(it.id) as BasisRecord | undefined;
+    // The SAME assumptions and the SAME assembly path the generator recorded
+    // from. A witness derived under a different discount rate — or built a
+    // different way — would report every basis stale.
+    const witness = assembleBasis({
+      item: it as never,
+      dossier,
+      conditions: reasoningConds,
+      chronology: c.chronologyEvents as unknown as DossierChronoEvent[],
+      kase: dossierCase,
+      interviews: dossierInterviews as never,
+      setContext: { conflicts: reasoningConflicts.get(it.id) ?? [], replacedByActive: reasoningReplaced.has(it.id) },
+      handEnteredEvidence: ledgerRows.filter((r) => r.futureCareItemId === it.id && r.addedById != null) as never,
+      assumptions: { ...a, pricedAt: it.pricedAt?.toISOString() ?? null, conditionName: cond?.name ?? null },
+    });
+    const basisCheck = compareBasis(recordedBasis ?? null, witness);
+
     // Spec table — frequency, duration, lifetime quantity, cost, coding, status.
+    //
+    // Rendered from the RECORDED specification when one exists. The witness is
+    // used only to detect divergence, never as a silent fallback: when no
+    // basis is recorded the grid falls back to current values AND the document
+    // is a labelled draft that cannot be finally exported, because
+    // BASIS_MISSING is an export-blocking finding.
+    const spec = recordedBasis?.specification ?? null;
     const years = it.isLifetime ? life : it.durationYears ?? 0;
-    const lifetimeQty = Math.round(it.frequencyPerYear * Math.max(0, years)) || (years === 0 ? 1 : 0);
+    const liveLifetimeQty = Math.round(it.frequencyPerYear * Math.max(0, years)) || (years === 0 ? 1 : 0);
+    const lifetimeQty = spec ? spec.lifetimeQuantity : liveLifetimeQty;
     out.push(
       specGrid([
-        ["Supporting diagnosis", dxName],
-        ["Specialty", it.specialty || "—"],
-        ["Frequency", freqText(it)],
-        ["Duration", durationText(it, life)],
+        ["Supporting diagnosis", spec ? spec.supportingDiagnosis ?? dxName : dxName],
+        ["Specialty", (spec ? spec.responsibleSpecialty : it.specialty) || "—"],
+        ["Frequency", spec ? spec.frequencyText : freqText(it)],
+        ["Duration", spec ? spec.durationText : durationText(it, life)],
         ["Lifetime quantity", lifetimeQty > 0 ? `${lifetimeQty}` : "one-time"],
-        ["CPT", it.cptCode || (per.code.status === "Missing code" ? "Pending coding review" : "—")],
-        ["Unit cost", money(it.unitCost)],
-        ["Projected lifetime cost", `${money(it.lifetimeCost)} (inflation-adjusted)`],
-        ["Present value", money(it.presentValue)],
-        ["Physician review", reviewLabel(it.physicianStatus, recordSupport)],
+        ["CPT", (spec ? spec.cptCode : it.cptCode) || (per.code.status === "Missing code" ? "Pending coding review" : "—")],
+        ["Unit cost", money(spec ? spec.unitCost ?? 0 : it.unitCost)],
+        ["Projected lifetime cost", `${money(spec ? spec.lifetimeCost ?? 0 : it.lifetimeCost)} (inflation-adjusted)`],
+        ["Present value", money(spec ? spec.presentValue ?? 0 : it.presentValue)],
+        ["Physician review", spec ? reviewLabel(spec.physicianStatus, spec.recordSupported) : reviewLabel(it.physicianStatus, recordSupport)],
       ]),
     );
-
-    // ── The RECORDED basis is what the report prints ──────────────────────
-    // This rebuilt its own dossier, so the exported document could state a
-    // different necessity narrative than the panel showed and the physician
-    // approved. The recorded narrative wins; a divergence is disclosed, and
-    // final export is blocked by the validation finding rather than by silently
-    // printing either version.
-    const recordedBasis = basisByItem.get(it.id) as
-      | {
-          necessityNarrative?: string | null;
-          basisHash?: string | null;
-          probabilityBasis?: { classification?: string; statement?: string; factors?: { label: string; present: boolean }[] } | null;
-          contradictions?: string[] | null;
-          literature?: { title: string; journal: string | null; year: string | null; authors: string | null; pmid: string | null; doi: string | null; studyType: string; supports: string; limitations: string | null }[] | null;
-          missingPremises?: string[] | null;
-          acceptedEvidence?: Record<string, { text: string; source: string | null }[]> | null;
-        }
-      | undefined;
-    // The SAME assumptions the generator recorded from. A witness derived under
-    // a different discount rate would report every basis stale.
-    const basisCheck = compareBasis(recordedBasis ?? null, buildBasis(it as never, dossier, { ...a, pricedAt: it.pricedAt?.toISOString() ?? null }));
     const necessityText = recordedBasis?.necessityNarrative || dossier.medicalNecessity;
 
     // Medical necessity — the physician narrative (why, patient-specific).
@@ -573,47 +577,73 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     const rUnknowns = recordedBasis?.missingPremises ?? dossier.unknowns;
     if (rContradictions.length) out.push(labeled("Contradictory evidence", rContradictions.slice(0, 3).join(" ")));
     if (rUnknowns.length) out.push(labeled("Unknowns", rUnknowns.slice(0, 3).join(" ")));
-    out.push(labeled("Potential challenges", dossier.potentialChallenges.slice(0, 4).join(" ")));
+    // Recorded, like everything else the document asserts. These were read
+    // from a dossier rebuilt at export time, so a plan approved on one set of
+    // defence challenges and functional findings could print another.
+    const rMaterial = recordedBasis?.assessmentBasis ?? null;
+    const rChallenges = rMaterial?.potentialChallenges ?? dossier.potentialChallenges;
+    if (rChallenges.length) out.push(labeled("Potential challenges", rChallenges.slice(0, 4).join(" ")));
 
     // Functional basis (§12) — the documented limitation this care addresses.
-    if (dossier.functionalLink) {
-      const fl = dossier.functionalLink;
+    const fl = rMaterial ? rMaterial.functionalBasis : dossier.functionalLink;
+    if (fl) {
       out.push(labeled("Functional basis", `${fl.domain} — ${fl.limitation}${fl.source ? ` (${fl.source})` : ""}${fl.quantified ? "; quantified in the record" : ""}. ${fl.relationship}`));
     }
 
     // Staged / conditional (§10) — trigger, prerequisite, timing, and whether it
     // replaces another recommendation or is a contingency only.
+    const sc = spec ?? {
+      startTrigger: it.startTrigger, prerequisite: it.prerequisite, earliestTiming: it.earliestTiming,
+      replacesService: it.replacesService, contingencyOnly: it.contingencyOnly,
+    };
     const staged = [
-      it.startTrigger && `Trigger: ${it.startTrigger}`,
-      it.prerequisite && `Prerequisite: ${it.prerequisite}`,
-      it.earliestTiming && `Earliest expected timing: ${it.earliestTiming}`,
-      it.replacesService && `Replaces if triggered: ${it.replacesService}`,
-      it.contingencyOnly && "Disclosed as a contingency — not entered into the totals",
+      sc.startTrigger && `Trigger: ${sc.startTrigger}`,
+      sc.prerequisite && `Prerequisite: ${sc.prerequisite}`,
+      sc.earliestTiming && `Earliest expected timing: ${sc.earliestTiming}`,
+      sc.replacesService && `Replaces if triggered: ${sc.replacesService}`,
+      sc.contingencyOnly && "Disclosed as a contingency — not entered into the totals",
     ].filter(Boolean) as string[];
     if (staged.length) out.push(labeled("Staged / conditional", staged.join(". ") + "."));
 
-    // Clinical confidence.
-    out.push(labeled("Clinical confidence", `${dossier.confidence.level}. ${dossier.confidence.explanation}`));
+    // Clinical confidence — the recorded level, not a fresh scoring of a record
+    // that may have moved since the plan was approved.
+    out.push(labeled(
+      "Clinical confidence",
+      rMaterial
+        ? `${rMaterial.confidenceLevel}. ${rMaterial.confidenceLevelExplanation}`
+        : `${dossier.confidence.level}. ${dossier.confidence.explanation}`,
+    ));
 
     // Clinical reasoning (Clinical Reasoning Engine) — the structured
     // determination the narrative renders from: probability class, the inclusion
     // decision and why, the strength-vs-confidence distinction, and what remains
     // uncertain. Reasoned and PERSISTED before this prose is written; the
     // in-line computation is only a fallback for unassessed legacy items.
+    // The recorded reasoning. Order of preference, and why:
+    //   1. the persisted assessment row (what the reviewer saw and approved),
+    //   2. the assessment reconstructed FROM the recorded basis,
+    //   3. the witness — reachable only when no basis was ever recorded, which
+    //      is a BASIS_MISSING finding and therefore a labelled draft that
+    //      cannot be finally exported.
+    // The witness was previously step 2, so a report with a perfectly good
+    // recorded basis still printed freshly re-derived conclusions.
     const persisted = assessmentByRec.get(it.id);
-    const assessment = persisted?.inclusionRationale // an ERROR row has no content — fall back to inline computation
+    const fromBasis = recordedBasis ? assessmentFromBasis(recordedBasis, {
+      conflictFlags: reasoningConflicts.get(it.id) ?? [],
+      physicianReviewStatus: it.physicianStatus ?? undefined,
+    }) : null;
+    const assessment = persisted?.inclusionRationale // an ERROR row has no content
       ? (persisted as unknown as Pick<ReasoningAssessment, "probabilityClassification" | "inclusionRationale" | "evidenceStrength" | "recommendationConfidence" | "residualUncertainty" | "alternativesConsidered">)
-      : buildReasoningAssessment(
+      : fromBasis ?? deriveWitnessAssessment(
           it as unknown as ReasoningItem,
           reasoningConds,
           c.chronologyEvents as unknown as DossierChronoEvent[],
           dossierCase,
-          dossierInterviews as never,
-          { conflicts: reasoningConflicts.get(it.id) ?? [], replacedByActive: reasoningReplaced.has(it.id) },
-          ledgerRows.filter((r) => r.futureCareItemId === it.id && r.addedById != null),
-          // The RECORDED basis. The report is the artifact that goes to court;
-          // it must reason from the record, not from its own rebuild.
-          (basisByItem.get(it.id) as never) ?? null,
+          {
+            interviews: dossierInterviews as never,
+            setContext: { conflicts: reasoningConflicts.get(it.id) ?? [], replacedByActive: reasoningReplaced.has(it.id) },
+            handEnteredEvidence: ledgerRows.filter((r) => r.futureCareItemId === it.id && r.addedById != null) as never,
+          },
         );
     out.push(labeled(
       "Clinical reasoning",

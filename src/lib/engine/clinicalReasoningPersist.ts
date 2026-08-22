@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { Prisma } from "@/generated/prisma";
-import { buildReasoningAssessment, detectSetConflicts, type ReasoningAssessment, type ReasoningItem } from "@/lib/engine/clinicalReasoning";
+import { deriveWitnessAssessment, assessmentFromBasis, detectSetConflicts, type ReasoningAssessment, type ReasoningItem } from "@/lib/engine/clinicalReasoning";
+import type { BasisRecord } from "@/lib/engine/recommendationBasis";
 import type { DossierCase, DossierChronoEvent, DossierCondition, DossierInterview } from "@/lib/engine/medicalNecessity";
 import type { CondInput } from "@/lib/engine/integrity";
 import { diffAssessmentFingerprintCategories, type BindingAssessmentRow } from "@/lib/engine/attestationBinding";
@@ -165,7 +166,34 @@ export async function persistCaseReasoning(caseId: string, firmId: string, opts:
     seenRec.add(it.id);
     const lineage = { recommendationLineageId: (it as { lineageId?: string }).lineageId ?? null, recommendationVersion: (it as { version?: number }).version ?? null, caseVersion };
     try {
-      const a = buildReasoningAssessment(it as unknown as ReasoningItem, conds, chronology as unknown as DossierChronoEvent[], dossierCase, interviews as unknown as DossierInterview[], { conflicts: conflictFlags.get(it.id) ?? [], replacedByActive: replacedByActive.has(it.id) }, handEntered.get(it.id) ?? [], (basisByItem.get(it.id) as never) ?? null);
+      // PERSISTED assessments are the ones a reviewer approves and the report
+      // prints, so they are read from the recorded basis. This called the
+      // shared builder, which derives every conclusion from the current
+      // record — the recorded basis only coloured the hash — so what got
+      // persisted under a recorded identity was a fresh re-derivation.
+      //
+      // The witness is used only when NO basis carries the material
+      // conclusions (a legacy row, or a case not yet regenerated). That state
+      // is itself a BASIS_MISSING/BASIS_STALE finding, so it cannot reach a
+      // final export unnoticed.
+      const recorded = (basisByItem.get(it.id) as BasisRecord | undefined) ?? null;
+      const live = {
+        conflictFlags: conflictFlags.get(it.id) ?? [],
+        physicianReviewStatus: (it as { physicianStatus?: string }).physicianStatus ?? undefined,
+      };
+      const a =
+        (recorded ? assessmentFromBasis(recorded, live) : null) ??
+        deriveWitnessAssessment(
+          it as unknown as ReasoningItem,
+          conds,
+          chronology as unknown as DossierChronoEvent[],
+          dossierCase,
+          {
+            interviews: interviews as unknown as DossierInterview[],
+            setContext: { conflicts: conflictFlags.get(it.id) ?? [], replacedByActive: replacedByActive.has(it.id) },
+            handEnteredEvidence: handEntered.get(it.id) ?? [],
+          },
+        );
       const prior = byRec.get(it.id);
       if (!prior) {
         await prisma.clinicalReasoningAssessment.create({ data: { ...toRow(a), ...lineage, caseId, firmId, recommendationId: it.id } });

@@ -108,7 +108,8 @@ const FINDING_SOURCE_LABEL: Record<string, string> = {
   HUMAN_REVIEW: "human review",
 };
 import { buildRecommendationDossier, type DossierCondition, type DossierChronoEvent, type DossierCase, type EvidenceItem, type RecommendationDossier } from "@/lib/engine/medicalNecessity";
-import { buildReasoningAssessment, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningAssessment, type ReasoningItem } from "@/lib/engine/clinicalReasoning";
+import { deriveWitnessAssessment, assessmentFromBasis, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningAssessment, type ReasoningItem } from "@/lib/engine/clinicalReasoning";
+import type { BasisRecord } from "@/lib/engine/recommendationBasis";
 import { filterSortCare, type CareSortKey } from "@/lib/uiFilters";
 import { Icd10Search } from "@/components/Icd10Search";
 import { PreExistingConditionsModal } from "@/components/PreExistingConditionsModal";
@@ -2274,16 +2275,38 @@ function witnessDossierForItem(it: AnyRec, data: AnyRec): RecommendationDossier 
   const output = ((data.chronologyEvents ?? []) as AnyRec[]).filter(isChronologyOutputRow);
   return buildRecommendationDossier(it as never, cond as DossierCondition | null, output as DossierChronoEvent[], kase, interviews as never);
 }
-// Clinical Reasoning Engine — the structured determination, computed client-side
-// from the same inputs (the pure engine has no server dependency).
+/**
+ * The determination the panel DISPLAYS — read from the recorded basis.
+ *
+ * This called the shared builder, which derives every conclusion from the
+ * current record; the recorded basis only coloured the hash. So a physician
+ * looking at an approved recommendation could be shown a probability class,
+ * inclusion rationale, confidence or duration verdict that had been recomputed
+ * since they approved it, presented as the recorded one.
+ *
+ * The witness below is reachable only when no basis carries the material
+ * conclusions. That state is a BASIS_MISSING / BASIS_STALE finding, which the
+ * integrity card surfaces and which blocks a final export.
+ */
 function assessmentForItem(it: AnyRec, data: AnyRec): ReasoningAssessment {
   const { kase, interviews } = caseInputs(it, data);
   const items = (data.futureCareItems ?? []) as ReasoningItem[];
   const { flags, replacedByActive } = detectSetConflicts(items);
-  return buildReasoningAssessment(it as ReasoningItem, (data.conditions ?? []) as never, (data.chronologyEvents ?? []) as DossierChronoEvent[], kase, interviews as never, { conflicts: flags.get(it.id) ?? [], replacedByActive: replacedByActive.has(it.id) }, ((data.physicianEvidence ?? []) as AnyRec[]).filter((e) => e.futureCareItemId === it.id) as never,
-    // The RECORDED basis, so the panel's reasoning and its evidence display
-    // cannot come from different readings of the case.
-    (((data.recommendationBases ?? []) as AnyRec[]).find((b) => b.futureCareItemId === it.id) as never) ?? null);
+  const live = { conflictFlags: flags.get(it.id) ?? [], physicianReviewStatus: (it.physicianStatus as string | undefined) ?? undefined };
+  const recorded = ((data.recommendationBases ?? []) as AnyRec[]).find((b) => b.futureCareItemId === it.id) as BasisRecord | undefined;
+  const fromBasis = recorded ? assessmentFromBasis(recorded, live) : null;
+  if (fromBasis) return fromBasis;
+  return deriveWitnessAssessment(
+    it as ReasoningItem,
+    (data.conditions ?? []) as never,
+    (data.chronologyEvents ?? []) as DossierChronoEvent[],
+    kase,
+    {
+      interviews: interviews as never,
+      setContext: { conflicts: flags.get(it.id) ?? [], replacedByActive: replacedByActive.has(it.id) },
+      handEnteredEvidence: ((data.physicianEvidence ?? []) as AnyRec[]).filter((e) => e.futureCareItemId === it.id) as never,
+    },
+  );
 }
 
 

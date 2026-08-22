@@ -1638,6 +1638,16 @@ model RecommendationBasis {
   /// Chart amounts and market pricing are kept apart — a frequency the record
   /// states is patient evidence; a fee-schedule figure is not.
   projectionBasis    Json?
+  /// The exported specification table exactly as it stood when recorded: the
+  /// report built this from the LIVE row at export time and printed it beside
+  /// a recorded narrative, so the document asserted a combination that had
+  /// never existed as a whole.
+  specification      Json?
+  /// The material/evidentiary conclusions the panel and report display —
+  /// probability class, inclusion, confidence, duration verdict, summaries.
+  /// Re-derived at read time before this, under a hash that claimed to
+  /// certify them.
+  assessmentBasis    Json?
   /// Contradictory evidence and literature identity, recorded so the report
   /// renders them without live re-derivation.
   contradictions     Json?

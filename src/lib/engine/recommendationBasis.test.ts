@@ -70,13 +70,31 @@ describe("the hash decides staleness, and decides it on the right things", () =>
     // the evidence must stale exactly the ones affected.
     const b = basisOf();
     const reworded = { ...b, necessityNarrative: "Entirely different prose about the same evidence." };
-    const core = { ...hashableCore(reworded) };
-    expect(basisHash(core)).toBe(b.basisHash);
+    expect(reworded.necessityNarrative).not.toBe(b.necessityNarrative);
+    expect(basisHash(hashableCore(reworded))).toBe(b.basisHash);
   });
 
   it("is order-independent, so re-persisting is not a change", () => {
+    // This test previously spread hashableCore and shuffled NOTHING, so it
+    // asserted that a value equals itself. Re-persisting genuinely reorders
+    // collections; that is what has to be proved harmless.
     const b = basisOf();
-    const shuffled = { ...hashableCore(b) };
+    const core = hashableCore(b);
+    const rev = <T,>(xs: readonly T[]) => [...xs].reverse();
+    const shuffled = {
+      ...core,
+      spinalLevels: rev(core.spinalLevels),
+      evidenceProvenance: rev(core.evidenceProvenance),
+      contradictions: rev(core.contradictions),
+      literature: rev(core.literature),
+      missingPremises: rev(core.missingPremises),
+      acceptedEvidence: Object.fromEntries(
+        Object.entries(core.acceptedEvidence).map(([k, v]) => [k, rev(v as unknown[])]),
+      ) as typeof core.acceptedEvidence,
+      probabilityBasis: { ...core.probabilityBasis, factors: rev(core.probabilityBasis.factors) },
+    };
+    // The inputs really were reordered — otherwise this proves nothing.
+    expect(shuffled.evidenceProvenance).not.toEqual(core.evidenceProvenance);
     expect(basisHash(shuffled)).toBe(b.basisHash);
   });
 });
@@ -205,8 +223,16 @@ describe("the probability determination is material, not presentation", () => {
   it("does NOT change the hash when only the STATEMENT is reworded", () => {
     // The statement is prose generated from the classification and factors.
     // Rewording it is stylistic and must not stale an approval.
+    //
+    // The earlier version of this test never reworded anything — it hashed an
+    // untouched core and asserted it matched. It would have passed even if the
+    // statement HAD been material.
     const b = basisOf();
-    const core = { ...hashableCore(b) };
-    expect(basisHash(core)).toBe(b.basisHash);
+    const reworded = {
+      ...hashableCore(b),
+      probabilityBasis: { ...b.probabilityBasis, statement: "Entirely different prose about an identical determination." },
+    };
+    expect(reworded.probabilityBasis.statement).not.toBe(b.probabilityBasis.statement);
+    expect(basisHash(reworded)).toBe(b.basisHash);
   });
 });

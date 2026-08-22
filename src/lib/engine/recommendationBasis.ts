@@ -21,7 +21,7 @@
 
 import { createHash } from "crypto";
 import { resolveIntervention } from "@/lib/engine/serviceOntology";
-import { supportClassOf } from "@/lib/engine/supportClass";
+import { supportClassOf, itemIsSupported } from "@/lib/engine/supportClass";
 import type { RecommendationDossier, DossierItem } from "@/lib/engine/medicalNecessity";
 
 export const BASIS_VERSION = "basis-1";
@@ -132,6 +132,99 @@ export interface ProjectionBasis {
   geographicFactor: number | null;
 }
 
+/**
+ * The exported specification table, as recorded.
+ *
+ * The report built this row-by-row from the LIVE item at export time and set it
+ * beside a recorded narrative, so a document could state a recorded medical
+ * necessity next to a frequency, cost and review status that had changed since.
+ * Nothing warned the reader, because each half was internally consistent.
+ */
+export interface SpecificationBasis {
+  service: string;
+  supportingDiagnosis: string | null;
+  responsibleSpecialty: string | null;
+  frequencyText: string;
+  durationText: string;
+  lifetimeQuantity: number;
+  cptCode: string | null;
+  unitCost: number | null;
+  lifetimeCost: number | null;
+  presentValue: number | null;
+  /** The physician-review disposition this basis was recorded under. */
+  physicianStatus: string;
+  recordSupported: boolean;
+  contingencyOnly: boolean;
+  startTrigger: string | null;
+  prerequisite: string | null;
+  earliestTiming: string | null;
+  replacesService: string | null;
+}
+
+/**
+ * The material and evidentiary conclusions of the clinical reasoning.
+ *
+ * Recorded because the panel and the report DISPLAY them. Before this, both
+ * re-derived every one of these from whatever the record said at read time,
+ * under a hash that claimed to certify them — so an approved recommendation
+ * could show a different probability class, inclusion rationale, confidence or
+ * duration verdict than the physician approved, with no divergence reported.
+ *
+ * Deliberately excluded, because they are live workflow state rather than
+ * recorded conclusions: conflict flags (set context), physician review status
+ * as a workflow position, validation status and lifecycle status. Those must
+ * reflect the case as it stands now, and a change in them is caught by the
+ * specification basis above rather than frozen here.
+ */
+export interface MaterialAssessment {
+  probabilityClassification: string;
+  inclusionRationale: string;
+  inclusionInTotalsStatus: string;
+  costEligibilityStatus: string;
+  frequencyRationale: string;
+  frequencySupported: boolean;
+  durationClass: string;
+  durationRationale: string;
+  durationSupported: boolean;
+  durationBasisLabel: string | null;
+  evidenceStrength: string;
+  recommendationConfidence: string;
+  confidenceExplanation: string;
+  residualUncertainty: string;
+  medicalNecessityRationale: string;
+  noTreatmentRisk: string;
+  leastIntensiveRationale: string;
+  timingRationale: string;
+  clinicalPurpose: string;
+  responsibleSpecialty: string;
+  bodyRegion: string;
+  laterality: string;
+  conditionSeverity: string;
+  conditionChronicity: string;
+  currentClinicalStatus: string;
+  conditionTrajectory: string;
+  causalRelationshipStatus: string;
+  clinicalPathway: string;
+  clinicalPathwayStage: string | null;
+  objectiveEvidenceSummary: string | null;
+  subjectiveEvidenceSummary: string | null;
+  functionalBasisSummary: string | null;
+  priorTreatmentSummary: string | null;
+  treatmentResponseSummary: string | null;
+  treatingRecordSupportSummary: string | null;
+  literatureSynthesis: string;
+  alternativesConsidered: { alternative: string; rationale: string }[];
+  supportingGuidelineAssessments: { title: string; claim: string }[];
+  missingEvidenceRequests: string[];
+  /** Defence challenges the report prints; recorded so they cannot re-derive. */
+  potentialChallenges: string[];
+  /** The documented limitation this care addresses, as recorded. */
+  functionalBasis: { domain: string; limitation: string; source: string | null; quantified: boolean; relationship: string } | null;
+  /** Clinical-confidence line the report prints. */
+  confidenceLevel: string;
+  confidenceLevelExplanation: string;
+}
+
 export interface BasisRecord {
   futureCareItemId: string;
   lineageId: string | null;
@@ -152,6 +245,10 @@ export interface BasisRecord {
   probabilityBasis: ProbabilityBasis;
   /** Every quantity and pricing input that can change dollars. */
   projectionBasis: ProjectionBasis;
+  /** The exported specification table exactly as it stood when recorded. */
+  specification: SpecificationBasis;
+  /** The material/evidentiary conclusions the panel and report display. */
+  assessmentBasis: MaterialAssessment | null;
   /** Evidentiary material the report must print without re-deriving it. */
   contradictions: string[];
   /** Citation identity for the literature the report renders. */
@@ -221,6 +318,25 @@ export function basisHash(input: Omit<BasisRecord, "basisHash" | "necessityNarra
       input.projectionBasis.pricedAt, input.projectionBasis.horizonYears,
       input.projectionBasis.discountRate, input.projectionBasis.medicalInflation, input.projectionBasis.geographicFactor,
     ],
+    // The exported specification table. Every one of these prints on the face
+    // of the report as a statement about this recommendation, so a change to
+    // any of them is a change to what the document asserts.
+    specification: [
+      input.specification.service, input.specification.supportingDiagnosis, input.specification.responsibleSpecialty,
+      input.specification.frequencyText, input.specification.durationText, input.specification.lifetimeQuantity,
+      input.specification.cptCode, input.specification.unitCost, input.specification.lifetimeCost,
+      input.specification.presentValue, input.specification.physicianStatus, input.specification.recordSupported,
+      input.specification.contingencyOnly, input.specification.startTrigger, input.specification.prerequisite,
+      input.specification.earliestTiming, input.specification.replacesService,
+    ],
+    // The material conclusions. Key-sorted so a field ADDED to the interface
+    // changes the hash (the old basis genuinely no longer describes the new
+    // claim set) while re-serialising an unchanged one does not.
+    assessment: input.assessmentBasis
+      ? Object.entries(input.assessmentBasis as unknown as Record<string, unknown>)
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+          .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+      : null,
     // Evidentiary material the report prints. Recorded so the report never has
     // to re-derive it, and hashed so it cannot drift unnoticed.
     contradictions: [...input.contradictions].sort(),
@@ -231,6 +347,24 @@ export function basisHash(input: Omit<BasisRecord, "basisHash" | "necessityNarra
 }
 
 /** Assemble the basis for one item from its dossier and its persisted class. */
+/**
+ * Frequency and duration as the report prints them.
+ *
+ * These lived privately in report.ts, so the basis could only have recorded a
+ * second formatting of the same numbers — and two formatters drift. One
+ * definition, used by the recorder and the renderer alike.
+ */
+export function freqText(i: { frequencyPerYear: number; isLifetime: boolean; durationYears: number | null }): string {
+  if (!i.isLifetime && (i.durationYears ?? 0) <= 0) return "one-time";
+  return `${i.frequencyPerYear}× per year`;
+}
+
+export function durationText(i: { isLifetime: boolean; durationYears: number | null }, life: number): string {
+  if (i.isLifetime) return `Lifetime (${life.toFixed(1)} yrs)`;
+  if ((i.durationYears ?? 0) <= 0) return "One-time";
+  return `${i.durationYears} year${i.durationYears === 1 ? "" : "s"}`;
+}
+
 export function buildBasis(
   item: DossierItem & { id?: string | null; lineageId?: string | null; supportClass?: string | null; supportReason?: string | null; pricedAt?: Date | string | null },
   dossier: RecommendationDossier,
@@ -240,7 +374,21 @@ export function buildBasis(
    * every production caller supplies them, because a lifetime figure computed
    * at 3% and one computed at 5% are different claims.
    */
-  assumptions?: { lifeExpectancyYears?: number | null; discountRate?: number | null; medicalInflation?: number | null; geographicFactor?: number | null; pricedAt?: string | null } | null,
+  assumptions?: { lifeExpectancyYears?: number | null; discountRate?: number | null; medicalInflation?: number | null; geographicFactor?: number | null; pricedAt?: string | null; conditionName?: string | null } | null,
+  /**
+   * The material conclusions of the clinical reasoning for this item.
+   *
+   * Supplied by the caller rather than computed here, because the reasoning
+   * engine imports this module and the dependency cannot run both ways. Every
+   * production caller goes through `assembleBasis`, which derives it the one
+   * way — so a witness rebuilt for staleness and the basis recorded at
+   * generation cannot disagree about how it was produced.
+   *
+   * Null is honest, not a default: it records that no assessment was available,
+   * and a consumer that needs one must treat the basis as unusable rather than
+   * quietly re-deriving.
+   */
+  assessment?: MaterialAssessment | null,
 ): BasisRecord {
   const r = resolveIntervention(item as { service: string; category?: string | null });
   const se = dossier.supportingEvidence;
@@ -326,6 +474,37 @@ export function buildBasis(
     factors: dossier.probability.factors.map((f) => ({ label: f.label, present: f.present })),
   };
 
+  // The specification table as it stands at the moment of record. Derived here
+  // rather than at export so the exported grid and the recorded basis are the
+  // same object, not two readings that happen to agree.
+  const years = item.isLifetime ? assumptions?.lifeExpectancyYears ?? 0 : item.durationYears ?? 0;
+  const freq = item.frequencyPerYear ?? 0;
+  const lifetimeQuantity = Math.round(freq * Math.max(0, years)) || (years === 0 ? 1 : 0);
+  const it2 = item as unknown as {
+    service: string; specialty?: string | null; cptCode?: string | null; lifetimeCost?: number | null;
+    presentValue?: number | null; physicianStatus?: string | null; contingencyOnly?: boolean | null;
+    startTrigger?: string | null; prerequisite?: string | null; earliestTiming?: string | null; replacesService?: string | null;
+  };
+  const specification: SpecificationBasis = {
+    service: String(it2.service ?? ""),
+    supportingDiagnosis: assumptions?.conditionName ?? null,
+    responsibleSpecialty: it2.specialty ?? null,
+    frequencyText: freqText({ frequencyPerYear: freq, isLifetime: !!item.isLifetime, durationYears: item.durationYears ?? null }),
+    durationText: durationText({ isLifetime: !!item.isLifetime, durationYears: item.durationYears ?? null }, assumptions?.lifeExpectancyYears ?? 0),
+    lifetimeQuantity,
+    cptCode: it2.cptCode ?? null,
+    unitCost: item.unitCost ?? null,
+    lifetimeCost: it2.lifetimeCost ?? null,
+    presentValue: it2.presentValue ?? null,
+    physicianStatus: String(it2.physicianStatus ?? "PENDING"),
+    recordSupported: itemIsSupported(item as { supportClass?: string | null }),
+    contingencyOnly: !!it2.contingencyOnly,
+    startTrigger: it2.startTrigger ?? null,
+    prerequisite: it2.prerequisite ?? null,
+    earliestTiming: it2.earliestTiming ?? null,
+    replacesService: it2.replacesService ?? null,
+  };
+
   const core = {
     futureCareItemId: String(item.id ?? ""),
     lineageId: item.lineageId ?? null,
@@ -342,6 +521,8 @@ export function buildBasis(
     claimBasis,
     probabilityBasis,
     projectionBasis,
+    specification,
+    assessmentBasis: assessment ?? null,
     contradictions: dossier.contradictoryEvidence.map((c) => String(c).replace(/\s+/g, " ").trim()),
     literature: dossier.literature.map((l) => ({
       title: l.title, journal: l.journal ?? null, year: l.year ?? null, authors: l.authors ?? null,
@@ -380,6 +561,8 @@ export const hashableCore = (b: BasisRecord): Omit<BasisRecord, "basisHash" | "n
   claimBasis: b.claimBasis,
   probabilityBasis: b.probabilityBasis,
   projectionBasis: b.projectionBasis,
+  specification: b.specification,
+  assessmentBasis: b.assessmentBasis,
   contradictions: b.contradictions,
   literature: b.literature,
   missingPremises: b.missingPremises,
