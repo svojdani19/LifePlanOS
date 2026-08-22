@@ -175,20 +175,21 @@ vi.mock("@/lib/db", async () => {
   };
 });
 
+/** Every visible text run in the rendered DOCX. */
+const renderedText = async (): Promise<string> => {
+  const { buildReportDocx } = await import("./report");
+  const { buffer } = await buildReportDocx("case-golden-lcp-0001", "PLAINTIFF");
+  const zip = await JSZip.loadAsync(buffer);
+  const xml = await zip.file("word/document.xml")!.async("string");
+  // Strip every tag rather than matching <w:t> pairs: the run-level regex
+  // swallowed table markup wherever an element nested unexpectedly, so the
+  // "text" it produced was half XML.
+  return xml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+};
+
 beforeEach(() => { deps.bases = []; });
 
 describe("rendered output: A is printed, B is not", () => {
-  /** Every visible text run in the rendered DOCX. */
-  const renderedText = async (): Promise<string> => {
-    const { buildReportDocx } = await import("./report");
-    const { buffer } = await buildReportDocx("case-golden-lcp-0001", "PLAINTIFF");
-    const zip = await JSZip.loadAsync(buffer);
-    const xml = await zip.file("word/document.xml")!.async("string");
-    // Strip every tag rather than matching <w:t> pairs: the run-level regex
-    // swallowed table markup wherever an element nested unexpectedly, so the
-    // "text" it produced was half XML.
-    return xml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-  };
 
   it("prints the RECORDED service and cost after the live row is changed underneath", async () => {
     const { goldenCase } = await import("./goldenFixture");
@@ -259,5 +260,139 @@ describe("rendered output: A is printed, B is not", () => {
     expect(text).toContain("not recorded");
     // The live coding check must not get to speak for the record.
     expect(text).not.toContain("Pending coding review");
+  });
+});
+
+
+describe("the WHOLE document prints A, including totals, schedules and appendices", () => {
+  // The earlier rendered test scoped its negative assertion to the
+  // recommendation block and called the cost schedule's live values
+  // "legitimate". Under the acceptance rule they are not: the plan table, the
+  // totals, the endorsement appendix and the traceability table are all
+  // statements the physician approved, and they were every one of them read
+  // from the mutable row.
+  const A = {
+    service: "RECORDED-SERVICE-ALPHA",
+    supportingDiagnosis: "RECORDED-DIAGNOSIS-ALPHA",
+    responsibleSpecialty: "RECORDED-SPECIALTY-ALPHA",
+    cptCode: "10001",
+    unitCost: 11111,
+    lifetimeCost: 22222,
+    presentValue: 33333,
+    physicianStatus: "APPROVED",
+  };
+
+  const recordFor = (live: Record<string, unknown>, over: Record<string, unknown> = {}) => {
+    const item = { ...live, id: live.id as string };
+    const recorded = assembleBasis({
+      item: item as never,
+      dossier: buildRecommendationDossier(item as never, CONDITION, CHRONO, KASE),
+      conditions: [CONDITION as never],
+      chronology: CHRONO,
+      kase: KASE,
+      assumptions: ASSUMPTIONS,
+    });
+    return {
+      ...recorded,
+      futureCareItemId: live.id,
+      // The narrative is recorded content too, and it is ASSEMBLED from the
+      // item — so leaving the fixture's own narrative in place would quote the
+      // live CPT and service inside genuinely-recorded prose, confounding the
+      // whole-document negative below. Sentinelised so any appearance of a live
+      // value is unambiguously the renderer reaching for the row.
+      necessityNarrative: "RECORDED-NARRATIVE-ALPHA.",
+      // Same reason: the recorded pricing authority is assembled from the item,
+      // and the fixture's own text embeds the live CPT.
+      projectionBasis: { ...recorded.projectionBasis, pricingSourceId: "RECORDED-PRICING-ALPHA" },
+      specification: { ...recorded.specification, ...A, ...over },
+    };
+  };
+
+  it("prints A everywhere and B nowhere, with totals equal to A", async () => {
+    const { goldenCase } = await import("./goldenFixture");
+    const liveItems = goldenCase().futureCareItems as unknown as Record<string, unknown>[];
+    deps.bases = liveItems.map((live) => recordFor(live));
+
+    const text = await renderedText();
+
+    // A appears — and in the plan table and appendices, not only in the
+    // narrative block.
+    expect(text).toContain("RECORDED-SERVICE-ALPHA");
+    expect(text).toContain("RECORDED-DIAGNOSIS-ALPHA");
+    expect(text).toContain("10001");
+    expect(text).toContain("RECORDED-PRICING-ALPHA");
+
+    // B appears in none of the sections that ASSERT things about the plan.
+    //
+    // Scoped deliberately, and not out of convenience: the chronology quotes
+    // the record's own "supports the anticipated <service>" prose, and that is
+    // stored case text, not a report field reaching for the live row. The
+    // sections below are the ones the plan asserts in its own voice — the
+    // schedule, the endorsement appendix a physician signs, and the
+    // traceability table — and every one of them read the mutable row.
+    const planStart = text.indexOf("RECORDED-SERVICE-ALPHA");
+    const assertions = text.slice(planStart);
+    for (const live of liveItems) {
+      if (live.cptCode) expect(assertions, `live CPT ${live.cptCode}`).not.toContain(String(live.cptCode));
+    }
+
+    // The endorsement and traceability appendices specifically.
+    const appx = text.slice(text.indexOf("Appendix C"));
+    expect(appx).toContain("RECORDED-SERVICE-ALPHA");
+    expect(appx).toContain("RECORDED-DIAGNOSIS-ALPHA");
+    expect(appx).toContain("RECORDED-PRICING-ALPHA");
+    for (const live of liveItems) {
+      expect(appx, `live service ${live.service}`).not.toContain(String(live.service));
+      if (live.cptCode) expect(appx, `live CPT ${live.cptCode}`).not.toContain(String(live.cptCode));
+    }
+
+    // Totals are the RECORDED figures. Included items only, so compute the
+    // expected sum from the same inclusion set the document used.
+    // The schedule prints the recorded per-item figures, and the totals are
+    // their sum — not the live rows'.
+    const schedule = text.slice(planStart, text.indexOf("Sensitivity to Economic Assumptions"));
+    expect(schedule).toContain("$33,333");
+    expect(schedule).toContain("$22,222");
+    const expectedPv = 33333 * liveItems.filter((l) => l.physicianStatus === "APPROVED" || l.physicianStatus === "MODIFIED").length;
+    expect(text).toContain(`$${(expectedPv || 33333).toLocaleString("en-US")}`);
+    for (const live of liveItems) {
+      const pv = Number(live.presentValue ?? 0);
+      if (pv > 0) expect(schedule, `live PV ${pv}`).not.toContain(`$${pv.toLocaleString("en-US")}`);
+    }
+    // The sensitivity grid is excluded on purpose: it is an explicit what-if
+    // that RE-PROJECTS under alternative rates, so it cannot read a single
+    // recorded present value. Its inputs are now the recorded projection
+    // figures — asserted directly below rather than through the rendered
+    // number, which in this fixture coincides with the live one.
+    const src = await (async () => {
+      const { readFileSync } = await import("fs");
+      const { join } = await import("path");
+      return readFileSync(join(__dirname, "report.ts"), "utf8");
+    })();
+    expect(src).toMatch(/const pvInputs = \(it: FutureCareItem\)/);
+    expect(src).toMatch(/project\(pvInputs\(it\)/);
+  });
+
+  it("a legacy basis missing a subfield prints 'not recorded' rather than the live value", async () => {
+    const { goldenCase } = await import("./goldenFixture");
+    const liveItems = goldenCase().futureCareItems as unknown as Record<string, unknown>[];
+    deps.bases = liveItems.map((live) => recordFor(live, { cptCode: null, unitCost: null }));
+
+    const text = await renderedText();
+    expect(text).toContain("not recorded");
+    for (const live of liveItems) {
+      if (live.cptCode) expect(text).not.toContain(String(live.cptCode));
+    }
+  });
+
+  it("a stale persisted assessment does not override the record", async () => {
+    // goldenAssessments carries persisted rows whose materialHash belongs to no
+    // basis here, so they must not be preferred over the recorded reasoning.
+    const { goldenCase } = await import("./goldenFixture");
+    const liveItems = goldenCase().futureCareItems as unknown as Record<string, unknown>[];
+    deps.bases = liveItems.map((live) => recordFor(live));
+    const text = await renderedText();
+    // The recorded service still leads every block.
+    expect(text).toContain("RECORDED-SERVICE-ALPHA");
   });
 });

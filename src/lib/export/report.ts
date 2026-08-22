@@ -290,6 +290,84 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     providerName: f.providerId ? providerName.get(f.providerId) ?? null : null,
   }));
 
+  // The guideline producer's last outcome for this case. A search that failed
+  // or never ran cannot support "guidance applies" OR "no guidance exists", and
+  // the report must say which of the two it is in.
+  // EVERY producer's current attempt, not just the guideline one. The other
+  // producers recorded PARTIAL outcomes as non-blocking findings that no
+  // appendix printed — Appendix F renders the separately computed integrity
+  // findings and Appendix G only blocking rows — so a final report could be
+  // produced with half the citation sources unreachable and say nothing.
+  const retrievalAttempts = (((await prisma.retrievalAttempt?.findMany({
+    where: { caseId },
+    select: { producer: true, status: true, failure: true, failedSources: true, produced: true, considered: true },
+  }).catch(() => [])) ?? []) as AttemptRow[]);
+  const coverage = coverageDisclosure(retrievalAttempts);
+  const socRetrieval = (retrievalAttempts.find((a) => a.producer === "standard-of-care") ?? null) as
+    | { status: string; failure: string | null; failedSources?: string[] }
+    | null;
+
+  // One recorded basis per item, loaded once. An unreadable store is kept
+  // distinct from an empty one: the document says "no recorded basis exists"
+  // in the empty case, and that sentence must never be printed on the strength
+  // of a read that failed.
+  const basisLoad = await loadRecordedBases(prisma as unknown as BasisStore, caseId);
+  const basisByItem = basisLoad.readable ? basisLoad.byItem : new Map<string, unknown>();
+  const basisUnreadable = basisLoad.readable ? null : basisLoad.reason;
+
+  // ── One authoritative view of every recommendation ──────────────────────
+  // Built HERE, before inclusion, counts, totals, the plan table, the cost
+  // schedule, the endorsement appendix and the traceability table are computed
+  // — all of which previously read the live row while the narrative section
+  // read the record. Each half was internally consistent; the document as a
+  // whole asserted a combination that had never existed, and the totals at the
+  // front of it belonged to neither reading.
+  //
+  // With a readable recorded basis, the view's values ARE the recorded values.
+  // Where a legacy basis lacks a subfield the view carries null, which renders
+  // as "not recorded" and blocks a final export — it never falls through to the
+  // live row, because the live row is precisely what the approval did not
+  // cover.
+  const viewOf = (it: FutureCareItem) => {
+    const b = basisByItem.get(it.id) as
+      | { specification?: Record<string, unknown> | null; projectionBasis?: Record<string, unknown> | null }
+      | undefined;
+    const spec = (b?.specification ?? null) as Record<string, unknown> | null;
+    const proj = (b?.projectionBasis ?? null) as Record<string, unknown> | null;
+    const num = (v: unknown): number | null => (typeof v === "number" ? v : null);
+    const str = (v: unknown): string | null => (typeof v === "string" && v.length ? v : null);
+    return {
+      /** True when the values below come from the record rather than the row. */
+      authoritative: !!spec,
+      service: spec ? str(spec.service) : it.service,
+      cptCode: spec ? str(spec.cptCode) : it.cptCode,
+      unitCost: spec ? num(spec.unitCost) : it.unitCost,
+      lifetimeCost: spec ? num(spec.lifetimeCost) : it.lifetimeCost,
+      presentValue: spec ? num(spec.presentValue) : it.presentValue,
+      physicianStatus: spec ? str(spec.physicianStatus) ?? it.physicianStatus : it.physicianStatus,
+      frequencyText: spec ? str(spec.frequencyText) : freqText(it),
+      durationText: spec ? str(spec.durationText) : durationText(it, a.lifeExpectancyYears),
+      specialty: spec ? str(spec.responsibleSpecialty) : it.specialty,
+      supportingDiagnosis: spec ? str(spec.supportingDiagnosis) : null,
+      // The pricing authority. Already recorded and hashed on projectionBasis;
+      // the traceability appendix was reading the live column, whose text
+      // embeds the code and so printed the live CPT beside a recorded service.
+      pricingSource: spec ? str(proj?.pricingSourceId) : it.pricingSource,
+    };
+  };
+  const viewCache = new Map<string, ReturnType<typeof viewOf>>();
+  const vw = (it: FutureCareItem) => {
+    const hit = viewCache.get(it.id);
+    if (hit) return hit;
+    const v = viewOf(it);
+    viewCache.set(it.id, v);
+    return v;
+  };
+  /** Money as the document prints it, or the honest absence of a value. */
+  const vMoney = (v: number | null) => (v === null ? "not recorded" : money(v));
+  /** Totals sum the RECORDED figures; a null contributes nothing and is disclosed. */
+  const vNum = (v: number | null) => v ?? 0;
+
   const a = assumptionsFor(c);
   const items = c.futureCareItems;
   const accepted = items.filter((i) => i.physicianStatus === "APPROVED" || i.physicianStatus === "MODIFIED");
@@ -308,8 +386,13 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   const reportItems = items.filter((i) => perItemOf(i).includedInTotal);
   const excludedForReview = items.filter((i) => !perItemOf(i).includedInTotal);
   const reviewStarted = items.length > 0 && items.some((i) => i.physicianStatus !== "PENDING");
-  const totalLifetime = reportItems.reduce((s, i) => s + i.lifetimeCost, 0);
-  const totalPresentValue = reportItems.reduce((s, i) => s + i.presentValue, 0);
+  // Totals sum the RECORDED figures. These summed the live rows, so the number
+  // on the front page could belong to neither the approved plan nor the
+  // narrative beneath it. A recorded null contributes nothing and is disclosed
+  // as "not recorded" in the schedule rather than silently taking the live
+  // value — and the missing-subfield case blocks a final export.
+  const totalLifetime = reportItems.reduce((s, i) => s + vNum(vw(i).lifetimeCost), 0);
+  const totalPresentValue = reportItems.reduce((s, i) => s + vNum(vw(i).presentValue), 0);
   const totalLow = reportItems.reduce((s, i) => s + i.lowCost, 0);
   const totalHigh = reportItems.reduce((s, i) => s + i.highCost, 0);
 
@@ -404,31 +487,6 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     page: number | null;
     verbatim: boolean;
   }[];
-  // The guideline producer's last outcome for this case. A search that failed
-  // or never ran cannot support "guidance applies" OR "no guidance exists", and
-  // the report must say which of the two it is in.
-  // EVERY producer's current attempt, not just the guideline one. The other
-  // producers recorded PARTIAL outcomes as non-blocking findings that no
-  // appendix printed — Appendix F renders the separately computed integrity
-  // findings and Appendix G only blocking rows — so a final report could be
-  // produced with half the citation sources unreachable and say nothing.
-  const retrievalAttempts = (((await prisma.retrievalAttempt?.findMany({
-    where: { caseId },
-    select: { producer: true, status: true, failure: true, failedSources: true, produced: true, considered: true },
-  }).catch(() => [])) ?? []) as AttemptRow[]);
-  const coverage = coverageDisclosure(retrievalAttempts);
-  const socRetrieval = (retrievalAttempts.find((a) => a.producer === "standard-of-care") ?? null) as
-    | { status: string; failure: string | null; failedSources?: string[] }
-    | null;
-
-  // One recorded basis per item, loaded once. An unreadable store is kept
-  // distinct from an empty one: the document says "no recorded basis exists"
-  // in the empty case, and that sentence must never be printed on the strength
-  // of a read that failed.
-  const basisLoad = await loadRecordedBases(prisma as unknown as BasisStore, caseId);
-  const basisByItem = basisLoad.readable ? basisLoad.byItem : new Map<string, unknown>();
-  const basisUnreadable = basisLoad.readable ? null : basisLoad.reason;
-
   const recordedByItem = new Map<string, typeof ledgerRows>();
   for (const r of ledgerRows) if (r.addedById == null) recordedByItem.set(r.futureCareItemId, [...(recordedByItem.get(r.futureCareItemId) ?? []), r]);
   const assessmentByRec = new Map(persistedAssessments.map((r) => [r.recommendationId, r]));
@@ -1269,17 +1327,23 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
       const fill = k % 2 ? ALT : "FFFFFF";
       lcpRows.push(
         rowOf([
-          td(i.service, { fill }),
-          td(i.cptCode || "—", { fill }),
-          td(freqText(i), { fill }),
-          td(money(i.unitCost), { fill, align: AlignmentType.RIGHT }),
-          td(money(i.lifetimeCost), { fill, align: AlignmentType.RIGHT }),
-          td(money(i.presentValue), { fill, align: AlignmentType.RIGHT }),
+          // From the authoritative view, not the live row: this table sat in
+          // the same document as a recorded narrative and printed whatever the
+          // mutable row happened to say at export time.
+          td(vw(i).service ?? "not recorded", { fill }),
+          td(vw(i).cptCode || "not recorded", { fill }),
+          td(vw(i).frequencyText ?? "not recorded", { fill }),
+          td(vMoney(vw(i).unitCost), { fill, align: AlignmentType.RIGHT }),
+          td(vMoney(vw(i).lifetimeCost), { fill, align: AlignmentType.RIGHT }),
+          td(vMoney(vw(i).presentValue), { fill, align: AlignmentType.RIGHT }),
         ]),
       );
     });
-    const subL = groupItems.reduce((s, i) => s + i.lifetimeCost, 0);
-    const subP = groupItems.reduce((s, i) => s + i.presentValue, 0);
+    // Subtotals sum the RECORDED figures, like the rows above them and the
+    // total below. Summing the live rows here put a subtotal in the same table
+    // as recorded line items that did not add up to them.
+    const subL = groupItems.reduce((s, i) => s + vNum(vw(i).lifetimeCost), 0);
+    const subP = groupItems.reduce((s, i) => s + vNum(vw(i).presentValue), 0);
     lcpRows.push(rowOf([td(`Subtotal — ${g.title}`, { bold: true, fill: SOFT }), td("", { fill: SOFT }), td("", { fill: SOFT }), td("", { fill: SOFT }), td(money(subL), { bold: true, fill: SOFT, align: AlignmentType.RIGHT }), td(money(subP), { bold: true, fill: SOFT, align: AlignmentType.RIGHT })]));
   }
   lcpRows.push(rowOf([td("TOTAL FUTURE MEDICAL CARE", { header: true }), td("", { header: true }), td("", { header: true }), td("", { header: true }), td(money(totalLifetime), { header: true, align: AlignmentType.RIGHT }), td(money(totalPresentValue), { header: true, align: AlignmentType.RIGHT })]));
@@ -1306,8 +1370,27 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   body.push(caption(`Present value of the plan under alternative discount and medical-inflation rates. The expected case is shown in bold.`));
   const discs = [a.discountRate - 0.01, a.discountRate, a.discountRate + 0.01];
   const infls = [a.medicalInflation - 0.01, a.medicalInflation, a.medicalInflation + 0.01];
+  // The sensitivity grid re-projects the plan under alternative rates, so it
+  // cannot read a single recorded present value — but its INPUTS must still be
+  // the recorded ones. It read unit cost, frequency, duration and lifetime
+  // status off the live row, so the what-if analysis modelled a plan nobody had
+  // approved, sitting under an expected figure that came from the record.
+  const pvInputs = (it: FutureCareItem) => {
+    const b = basisByItem.get(it.id) as { projectionBasis?: Record<string, unknown> | null } | undefined;
+    const pb = (b?.projectionBasis ?? null) as Record<string, unknown> | null;
+    const n = (v: unknown, fallback: number | null): number | null => (typeof v === "number" ? v : fallback);
+    return pb
+      ? {
+          category: it.category,
+          unitCost: n(pb.unitCost, 0) ?? 0,
+          frequencyPerYear: n(pb.frequencyPerYear, 0) ?? 0,
+          durationYears: n(pb.durationYears, null),
+          isLifetime: pb.isLifetime === true,
+        }
+      : { category: it.category, unitCost: it.unitCost, frequencyPerYear: it.frequencyPerYear, durationYears: it.durationYears, isLifetime: it.isLifetime };
+  };
   const pvUnder = (disc: number, infl: number) =>
-    reportItems.reduce((s, it) => s + project({ category: it.category, unitCost: it.unitCost, frequencyPerYear: it.frequencyPerYear, durationYears: it.durationYears, isLifetime: it.isLifetime }, { lifeExpectancyYears: life, discountRate: disc, medicalInflation: infl, geographicFactor: 1 }).presentValue, 0);
+    reportItems.reduce((s, it) => s + project(pvInputs(it), { lifeExpectancyYears: life, discountRate: disc, medicalInflation: infl, geographicFactor: 1 }).presentValue, 0);
   const sens: TableRow[] = [rowOf([td("Discount ↓ / Inflation →", { header: true, width: 28 }), ...infls.map((inf) => td(`${(inf * 100).toFixed(1)}%`, { header: true, width: 24, align: AlignmentType.RIGHT }))])];
   for (const disc of discs) {
     sens.push(
@@ -1378,8 +1461,8 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
           : `The following contingencies are foreseeable but are not identified by the record-supported analysis as more likely than not to be required. They are disclosed for completeness and are excluded from the totals stated above:`,
       ),
     );
-    for (const i of speculative) body.push(bullet(`${i.service}${i.missingSupport ? ` — ${lc(i.missingSupport)}` : ""}.`));
-    for (const i of excludedForReview) body.push(bullet(`${i.service} — ${i.physicianStatus === "REJECTED" ? "not endorsed on physician review" : "pending physician confirmation"}.`));
+    for (const i of speculative) body.push(bullet(`${vw(i).service ?? "not recorded"}${i.missingSupport ? ` — ${lc(i.missingSupport)}` : ""}.`));
+    for (const i of excludedForReview) body.push(bullet(`${vw(i).service ?? "not recorded"} — ${vw(i).physicianStatus === "REJECTED" ? "not endorsed on physician review" : "pending physician confirmation"}.`));
   }
   body.push(
     p(
@@ -1457,7 +1540,9 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   body.push(h1("Appendix C — Physician Review & Endorsement", { pageBreak: true }));
   body.push(p(`Each recommendation is submitted to the reviewing physician for endorsement, with the option to approve, decline, or modify the frequency, duration, or medical-necessity basis, and to sign.`));
   for (const it of reportItems) {
-    body.push(new Paragraph({ spacing: { before: 200, after: 30 }, keepNext: true, children: [new TextRun({ text: it.service, bold: true, size: 21, color: INK })] }));
+    // The recorded name. A physician endorsing a list must be endorsing the
+    // recommendations that were recorded, not whatever the rows are called now.
+    body.push(new Paragraph({ spacing: { before: 200, after: 30 }, keepNext: true, children: [new TextRun({ text: vw(it).service ?? "not recorded", bold: true, size: 21, color: INK })] }));
     body.push(new Paragraph({ spacing: { after: 30 }, children: [new TextRun({ text: "☐  Approve        ☐  Decline        ☐  Modify", size: 21 })] }));
     body.push(new Paragraph({ spacing: { after: 30 }, children: [new TextRun({ text: "Frequency / duration adjustment: __________________________________________________", size: 20, color: INK })] }));
     body.push(new Paragraph({ spacing: { after: 30 }, children: [new TextRun({ text: "Comment: ________________________________________________________________________", size: 20, color: INK })] }));
@@ -1481,11 +1566,13 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     const fill = i % 2 ? ALT : "FFFFFF";
     traceRows.push(
       rowOf([
-        td(it.service, { fill }),
-        td(cond?.name || c.diagnosis || "—", { fill }),
+        td(vw(it).service ?? "not recorded", { fill }),
+        // The recorded supporting diagnosis; the live condition only where no
+        // basis exists, which is a blocked draft.
+        td(vw(it).supportingDiagnosis ?? (vw(it).authoritative ? "not recorded" : cond?.name || c.diagnosis || "—"), { fill }),
         td(cond?.supportingRecords || "Chronology & records index", { fill }),
         td(it.literatureSupport || it.evidenceStrength || "Case-specific", { fill }),
-        td(it.pricingSource || "UCR benchmark", { fill }),
+        td(vw(it).pricingSource ?? (vw(it).authoritative ? "not recorded" : "UCR benchmark"), { fill }),
       ]),
     );
   });

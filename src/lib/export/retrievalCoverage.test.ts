@@ -52,7 +52,7 @@ describe("one statement, for the whole case", () => {
     ]);
     expect(r.text).toMatch(/did not complete for this plan/i);
     expect(r.text).toMatch(/No statement anywhere in this document about the absence/i);
-    expect(r.degraded.sort()).toEqual(["article-citations", "standard-of-care"]);
+    expect([...r.degraded].sort()).toEqual(["article-citations", "standard-of-care"]);
   });
 
   it("treats NOT_ATTEMPTED as a failure to search, not as an answer", () => {
