@@ -46,10 +46,35 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
     // Reason first, write second: assessments and validation findings are
     // recomputed and PERSISTED before any narrative is generated, and the
     // final-export gate is evaluated against those persisted results.
-    const [, validation] = await Promise.all([
-      persistCaseReasoning(params.caseId, ctx.firm.id, { actorUserId: ctx.user.id }).catch(() => null),
+    // A reasoning failure is not nothing. Swallowed, the run continued with
+    // whatever assessments were already persisted — possibly computed against
+    // an older basis — and a FINAL report printed them as current. The failure
+    // is captured and, below, refuses a final release; a draft still exports
+    // and says so.
+    const [reasoningResult, validation] = await Promise.all([
+      persistCaseReasoning(params.caseId, ctx.firm.id, { actorUserId: ctx.user.id })
+        .then(() => ({ ok: true as const }))
+        .catch((e: unknown) => ({ ok: false as const, reason: e instanceof Error ? `${e.name}: ${e.message}`.slice(0, 240) : "unknown error" })),
       persistCaseValidation(params.caseId, ctx.firm.id),
     ]);
+    if (!reasoningResult.ok && (format === "DOCX" || format === "PDF") && mode === "final") {
+      await audit(ctx, "export.final_denied", {
+        type: "case",
+        id: params.caseId,
+        caseId: params.caseId,
+        meta: { format, template, reasons: ["REASONING_NOT_REFRESHED"] },
+      });
+      return ok(
+        {
+          error: "Final export blocked: the clinical reasoning could not be refreshed, so the assessments on file may not describe the current plan.",
+          blocking: true,
+          reasons: ["REASONING_NOT_REFRESHED"],
+          detail: reasoningResult.reason,
+          hint: 'Resolve the fault and retry, or export a draft (mode: "draft"), which discloses that the reasoning is not current.',
+        },
+        422,
+      );
+    }
     // The gate honors reviewer dispositions: a finding a clinician explicitly
     // resolved-as-is or ignored (persisted, attributed, and survived the
     // re-run above) no longer blocks — only OPEN blocking findings gate the

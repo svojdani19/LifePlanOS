@@ -435,7 +435,6 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     const recordSupport = itemIsSupported(it as unknown as { supportClass?: string | null });
     const dossier = buildRecommendationDossier(it as never, cond as unknown as DossierCondition | null, c.chronologyEvents as unknown as DossierChronoEvent[], dossierCase, dossierInterviews as never);
     const out: (Paragraph | Table)[] = [];
-    out.push(new Paragraph({ spacing: { before: 260, after: 60 }, keepNext: true, children: [new TextRun({ text: it.service, bold: true, size: 22, color: NAVY })] }));
 
     // ── The RECORDED basis is what the report prints ──────────────────────
     // Loaded FIRST, because the specification grid below is rendered from it.
@@ -461,6 +460,17 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     // The recorded material conclusions, used by every assertion below.
     const rMaterial = recordedBasis?.assessmentBasis ?? null;
 
+    // The heading names the recommendation, which is itself an approved
+    // statement. It was rendered from the live row BEFORE the basis was even
+    // loaded, so a renamed service printed under a recorded narrative about the
+    // old one.
+    const spec0 = recordedBasis?.specification ?? null;
+    out.push(new Paragraph({
+      spacing: { before: 260, after: 60 },
+      keepNext: true,
+      children: [new TextRun({ text: spec0 ? spec0.service : it.service, bold: true, size: 22, color: NAVY })],
+    }));
+
     // Spec table — frequency, duration, lifetime quantity, cost, coding, status.
     //
     // Rendered from the RECORDED specification when one exists. The witness is
@@ -468,25 +478,52 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     // basis is recorded the grid falls back to current values AND the document
     // is a labelled draft that cannot be finally exported, because
     // BASIS_MISSING is an export-blocking finding.
-    const spec = recordedBasis?.specification ?? null;
+    const spec = spec0;
     const years = it.isLifetime ? life : it.durationYears ?? 0;
     const liveLifetimeQty = Math.round(it.frequencyPerYear * Math.max(0, years)) || (years === 0 ? 1 : 0);
-    const lifetimeQty = spec ? spec.lifetimeQuantity : liveLifetimeQty;
+    // When a basis exists it supplies EVERY row. A recorded null means the
+    // value was not recorded, and it renders as such — falling through to the
+    // live row on a null was the same defect in miniature, and it fired exactly
+    // where the record was weakest. `NOT_RECORDED` never reads as a value.
+    const NOT_RECORDED = "not recorded";
+    const asRecorded = <T,>(v: T | null | undefined, render: (x: T) => string): string =>
+      v === null || v === undefined ? NOT_RECORDED : render(v);
     out.push(
-      specGrid([
-        ["Supporting diagnosis", spec ? spec.supportingDiagnosis ?? dxName : dxName],
-        ["Specialty", (spec ? spec.responsibleSpecialty : it.specialty) || "—"],
-        ["Frequency", spec ? spec.frequencyText : freqText(it)],
-        ["Duration", spec ? spec.durationText : durationText(it, life)],
-        ["Lifetime quantity", lifetimeQty > 0 ? `${lifetimeQty}` : "one-time"],
-        ["CPT", (spec ? spec.cptCode : it.cptCode) || (per.code.status === "Missing code" ? "Pending coding review" : "—")],
-        ["Unit cost", money(spec ? spec.unitCost ?? 0 : it.unitCost)],
-        ["Projected lifetime cost", `${money(spec ? spec.lifetimeCost ?? 0 : it.lifetimeCost)} (inflation-adjusted)`],
-        ["Present value", money(spec ? spec.presentValue ?? 0 : it.presentValue)],
-        ["Physician review", spec ? reviewLabel(spec.physicianStatus, spec.recordSupported) : reviewLabel(it.physicianStatus, recordSupport)],
-      ]),
+      specGrid(
+        spec
+          ? [
+              ["Supporting diagnosis", asRecorded(spec.supportingDiagnosis, (x) => x)],
+              ["Specialty", asRecorded(spec.responsibleSpecialty, (x) => x)],
+              ["Frequency", spec.frequencyText],
+              ["Duration", spec.durationText],
+              ["Lifetime quantity", spec.lifetimeQuantity > 0 ? `${spec.lifetimeQuantity}` : "one-time"],
+              ["CPT", asRecorded(spec.cptCode, (x) => x)],
+              ["Unit cost", asRecorded(spec.unitCost, money)],
+              ["Projected lifetime cost", asRecorded(spec.lifetimeCost, (x) => `${money(x)} (inflation-adjusted)`)],
+              ["Present value", asRecorded(spec.presentValue, money)],
+              ["Physician review", reviewLabel(spec.physicianStatus, spec.recordSupported)],
+            ]
+          : [
+              // No basis at all. Every value below is the record as it stands
+              // now, and the document is a labelled draft that cannot be
+              // finally exported — BASIS_MISSING is export-blocking.
+              ["Supporting diagnosis", dxName],
+              ["Specialty", it.specialty || "—"],
+              ["Frequency", freqText(it)],
+              ["Duration", durationText(it, life)],
+              ["Lifetime quantity", liveLifetimeQty > 0 ? `${liveLifetimeQty}` : "one-time"],
+              ["CPT", it.cptCode || (per.code.status === "Missing code" ? "Pending coding review" : "—")],
+              ["Unit cost", money(it.unitCost)],
+              ["Projected lifetime cost", `${money(it.lifetimeCost)} (inflation-adjusted)`],
+              ["Present value", money(it.presentValue)],
+              ["Physician review", reviewLabel(it.physicianStatus, recordSupport)],
+            ],
+      ),
     );
-    const necessityText = recordedBasis?.necessityNarrative || dossier.medicalNecessity;
+    // Same rule: with a basis on file the recorded narrative is the narrative,
+    // empty or not. `||` silently replaced a recorded-but-blank narrative with
+    // a freshly derived one.
+    const necessityText = recordedBasis ? recordedBasis.necessityNarrative ?? "" : dossier.medicalNecessity;
 
     // Medical necessity — the physician narrative (why, patient-specific).
     out.push(new Paragraph({ spacing: { before: 120, after: 40 }, children: [new TextRun({ text: "Medical necessity.", bold: true, size: 21, color: NAVY })] }));
@@ -661,7 +698,25 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
       conflictFlags: reasoningConflicts.get(it.id) ?? [],
       physicianReviewStatus: it.physicianStatus ?? undefined,
     }) : null;
-    const assessment = persisted?.inclusionRationale // an ERROR row has no content
+    // A persisted assessment is only authoritative for the basis it was
+    // computed from. It was preferred on the strength of having content, so a
+    // row persisted against an older basis printed under the current one — the
+    // stale-approval problem, reintroduced one layer down. assessmentFromBasis
+    // stamps materialHash with the basis hash, so the two are directly
+    // comparable and a mismatch sends us to the record instead.
+    // Two cases, and only two:
+    //   a basis exists — the persisted row is used ONLY if it was computed from
+    //     that exact basis. Otherwise the record itself is read.
+    //   no basis exists — the persisted row is the only reviewed artifact there
+    //     is, and the document is already a labelled draft that cannot be
+    //     finally exported, because BASIS_MISSING is export-blocking. Falling
+    //     to a fresh witness there would discard a reviewed assessment in
+    //     favour of an unreviewed one.
+    const persistedHash = (persisted as unknown as { materialHash?: string | null } | undefined)?.materialHash;
+    const usePersisted =
+      !!persisted?.inclusionRationale &&
+      (recordedBasis?.basisHash ? persistedHash === recordedBasis.basisHash : true);
+    const assessment = usePersisted
       ? (persisted as unknown as Pick<ReasoningAssessment, "probabilityClassification" | "inclusionRationale" | "evidenceStrength" | "recommendationConfidence" | "residualUncertainty" | "alternativesConsidered">)
       : fromBasis ?? deriveWitnessAssessment(
           it as unknown as ReasoningItem,
