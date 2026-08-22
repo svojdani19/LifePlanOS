@@ -21,8 +21,24 @@ import { ok, handleError } from "@/lib/api";
 // adding to it. Running this on a healthy case is a no-op that clears nothing
 // because there is nothing to clear.
 //
-// No new workflow: same route shape, same permission, same audit action as the
-// review routes it repairs after.
+// ── The permission, stated as it actually is ────────────────────────────────
+// This claimed to require "the same grant the review routes require" and then
+// checked futurecare.edit with no credential gate, while the review routes
+// require physician.review AND a verified PHYSICIAN credential. The comment
+// described a stronger gate than the code enforced, which is worse than a weak
+// gate: a reader auditing the policy would have signed off on the wrong thing.
+//
+// futurecare.edit is the correct requirement, and the reason is that this
+// endpoint records no clinical judgment. It recomputes reviews, validation,
+// reasoning and attestations from state that already exists; the physician's
+// decision was made, recorded transactionally, and is not revisited here.
+// Requiring a physician credential to press retry would leave a planner unable
+// to repair derived artifacts after a transient failure, while adding no
+// safety — there is no decision for a credential to authorise.
+//
+// The audit action is its own (`futurecare.refresh_retry`), not
+// `physician.review`. Filing a recompute under the review action would put
+// entries in the clinical-review trail for something no clinician did.
 // ─────────────────────────────────────────────────────────────────────────────
 
 type Params = { params: Promise<{ caseId: string }> };
@@ -31,8 +47,6 @@ export async function POST(_req: Request, { params: paramsPromise }: Params) {
   const params = await paramsPromise;
   try {
     const ctx = await requireApiContext();
-    // The same grant the review routes require: retrying a refresh is part of
-    // the review act, not a separate privilege.
     requireCanonicalPermission(ctx, "futurecare.edit", { caseId: params.caseId });
     await requireCase(ctx, params.caseId);
 
@@ -42,11 +56,11 @@ export async function POST(_req: Request, { params: paramsPromise }: Params) {
       ctx.firm.id,
     );
     await recordRefreshObligation(prisma as never, params.caseId, ctx.firm.id, refresh.failed);
-    await audit(ctx, "physician.review", {
+    await audit(ctx, "futurecare.refresh_retry", {
       type: "case",
       id: params.caseId,
       caseId: params.caseId,
-      meta: { action: "refresh-retry", refreshFailed: refresh.failed },
+      meta: { refreshFailed: refresh.failed },
     });
     return ok({
       refresh: refresh.failed.length ? { status: "ATTENTION_REQUIRED", failed: refresh.failed } : { status: "COMPLETE" },

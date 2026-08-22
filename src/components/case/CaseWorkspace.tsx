@@ -4106,6 +4106,31 @@ function ValidationCard({ caseId, scope, redactPricing = false, onReview }: { ca
       setActBusy(null);
     }
   }, [caseId]);
+  // Retry the post-review refresh.
+  //
+  // A review decision obliges four recomputes. When one fails the decision
+  // still stands — it is recorded transactionally — but the plan's own
+  // statements may describe the case as it was before, so the obligation is
+  // persisted as an export-blocking finding. The route to discharge it existed
+  // and nothing called it, leaving the only remedy a full regeneration.
+  //
+  // Idempotent: every stage recomputes from current state and the obligation is
+  // replaced rather than added to, so pressing this on a healthy case is a
+  // no-op.
+  const retryRefresh = useCallback(async () => {
+    setActBusy("refresh"); setActErr(null);
+    try {
+      const res = await fetch(`/api/cases/${caseId}/future-care/refresh`, { method: "POST" });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) setActErr(body.error ?? "The refresh could not be retried.");
+      else if (body.refresh?.status === "ATTENTION_REQUIRED") {
+        setActErr(`Still incomplete: ${(body.refresh.failed ?? []).join(", ")}. The finding stays until every stage succeeds.`);
+        await load();
+      } else await load();
+    } finally {
+      setActBusy(null);
+    }
+  }, [caseId, load]);
   // Reload whenever the selected report changes so the card always reflects
   // the CURRENT findings for the document the user is looking at.
   useEffect(() => { void load(); }, [load, scope?.id]);
@@ -4184,9 +4209,18 @@ function ValidationCard({ caseId, scope, redactPricing = false, onReview }: { ca
               <p className="mt-1 text-ink-700">{redactPricing ? redactMoney(f.issue) : f.issue}</p>
               <p className="mt-0.5 text-ink-500"><span className="font-medium">Correction:</span> {redactPricing ? redactMoney(f.suggestion) : f.suggestion}</p>
               {actErr && <p className="mt-1 text-xs text-red-700">{actErr}</p>}
-              {onReview && (
-                <div className="mt-2 border-t border-ink-100 pt-2">
-                  <button className="focusable rounded text-xs font-semibold text-brand-700 hover:underline" onClick={() => onReview(f)}>Review</button>
+              {(onReview || String(f.result).startsWith("REFRESH_INCOMPLETE")) && (
+                <div className="mt-2 flex flex-wrap items-center gap-3 border-t border-ink-100 pt-2">
+                  {String(f.result).startsWith("REFRESH_INCOMPLETE") && (
+                    <button
+                      className="focusable rounded text-xs font-semibold text-brand-700 hover:underline disabled:opacity-50"
+                      disabled={actBusy !== null}
+                      onClick={() => void retryRefresh()}
+                    >
+                      {actBusy === "refresh" ? <Loader2 className="inline h-3 w-3 animate-spin" /> : null} Retry refresh
+                    </button>
+                  )}
+                  {onReview && <button className="focusable rounded text-xs font-semibold text-brand-700 hover:underline" onClick={() => onReview(f)}>Review</button>}
                 </div>
               )}
             </li>
