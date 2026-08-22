@@ -34,9 +34,15 @@ async function main() {
   for (const c of withPlans) {
     process.stdout.write(`• ${c.clientName} (${c._count.futureCareItems} items) … `);
     try {
-      const n = await enrichCitations(c.id);
-      console.log(`cited ${n}/${c._count.futureCareItems}`);
-      ok++;
+      const r = await enrichCitations(c.id);
+      // Print the STATUS, not just the count. "cited 0/14" was the same line
+      // whether the sources were unreachable or genuinely had nothing.
+      console.log(
+        r.status === "SUCCEEDED" || r.status === "NO_RESULTS"
+          ? `cited ${r.produced}/${c._count.futureCareItems}`
+          : `${r.status}${r.failure ? ` (${r.failure})` : ""} — ${r.detail}`,
+      );
+      if (r.status === "SUCCEEDED" || r.status === "NO_RESULTS") ok++;
     } catch (e) {
       console.log(`FAILED: ${(e as Error).message}`);
     }

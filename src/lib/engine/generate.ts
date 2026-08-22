@@ -35,7 +35,17 @@ import { applyPriors, priorProvenanceNote, scopeKeyOf } from "@/lib/engine/learn
 import { rebuildEvidenceGraph } from "@/lib/engine/evidenceGraph";
 import { citationCompatible, evaluateArticle, selectPrimary, isManagementService } from "@/lib/engine/citationQuality";
 import { hasDocumentedChronicity } from "@/lib/engine/lifetimeSupport";
-import { findCandidates, literatureReachable, activeSources, type Article } from "@/lib/literature";
+import { findCandidates, literatureReachability, activeSources, type Article } from "@/lib/literature";
+import {
+  runRetrieval,
+  RETRIEVAL_VERSION,
+  recordRetrievalAttempts,
+  nothingToDo,
+  notAttempted,
+  retrieved,
+  type RecordedAttempt,
+  type RetrievalOutcome,
+} from "@/lib/engine/retrievalStatus";
 import { Prisma } from "@/generated/prisma";
 import type { Case, CareCategory } from "@/generated/prisma";
 
@@ -629,11 +639,18 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
   // Standard-of-care analysis per causation item: locate real clinical practice
   // guidelines, quote their direct language verbatim, and map the documented
   // care against them. Best-effort — never blocks or fabricates.
-  await generateStandardOfCare(caseId).catch(() => {});
+  //
+  // These are best-effort and must not abort generation — but "must not abort"
+  // was implemented as `.catch(() => {})`, which also discarded the fact that
+  // anything went wrong. The plan then printed "no guideline located" whether
+  // the search came back empty or never ran. runRetrieval keeps the
+  // non-blocking behaviour and records which of the two it was.
+  const attempts: RecordedAttempt[] = [];
+  attempts.push(await runRetrieval("standard-of-care", RETRIEVAL_VERSION, () => generateStandardOfCare(caseId)));
 
   // Attach the strongest real supporting article (PubMed) to each item.
   // Best-effort — never blocks or fabricates; skipped when PubMed is unreachable.
-  await enrichCitations(caseId).catch(() => {});
+  attempts.push(await runRetrieval("article-citations", RETRIEVAL_VERSION, () => enrichCitations(caseId)));
 
   // ── Evidence ledger ────────────────────────────────────────────────────────
   // Which sources support WHICH claim about WHICH recommendation, persisted
@@ -778,8 +795,13 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
       suggestedAction: "Review the suppressed services; a physician may add any that clinical judgment supports, attributed as physician-added.",
       validationRuleId: "futurecare.unsupported-template",
     };
-    if (existing) await prisma.attentionItem.update({ where: { id: existing.id }, data: { summary: data.summary } }).catch(() => {});
-    else await prisma.attentionItem.create({ data }).catch(() => {});
+    // A disclosure that fails silently reproduces exactly the state it exists
+    // to prevent: the plan is short by these items and says nothing about why.
+    attempts.push(await runRetrieval("disclosure:unsupported-template", RETRIEVAL_VERSION, async () => {
+      if (existing) await prisma.attentionItem.update({ where: { id: existing.id }, data: { summary: data.summary } });
+      else await prisma.attentionItem.create({ data });
+      return retrieved(1, 1, [], `Disclosed ${suppressed.length} suppressed template item(s).`);
+    }));
   }
 
   // Disclose what TEMPORAL resolution kept out: care already delivered,
@@ -808,15 +830,26 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
       suggestedAction: "Confirm each exclusion against the source note; a physician may add back any item clinical judgment supports, attributed as physician-added.",
       validationRuleId: "futurecare.temporally-excluded",
     };
-    if (existing) await prisma.attentionItem.update({ where: { id: existing.id }, data: { summary: data.summary } }).catch(() => {});
-    else await prisma.attentionItem.create({ data }).catch(() => {});
+    attempts.push(await runRetrieval("disclosure:temporally-excluded", RETRIEVAL_VERSION, async () => {
+      if (existing) await prisma.attentionItem.update({ where: { id: existing.id }, data: { summary: data.summary } });
+      else await prisma.attentionItem.create({ data });
+      return retrieved(1, 1, [], `Disclosed ${support.temporallyExcluded.length} temporally-excluded statement(s).`);
+    }));
   }
 
   await generateReviews(caseId);
 
 
   // Materialize the evidence graph from the structured output above (P2).
-  await rebuildEvidenceGraph(caseId, c.firmId).catch(() => {});
+  attempts.push(await runRetrieval("evidence-graph", RETRIEVAL_VERSION, async () => {
+    const edges = await rebuildEvidenceGraph(caseId, c.firmId);
+    return retrieved(edges, edges, [], `Materialised ${edges} evidence-graph edge(s).`);
+  }));
+
+  // Persist what actually happened on every best-effort step above, and
+  // publish (or clear) the findings those outcomes imply. This is the last
+  // thing generation does, so the record covers the whole run.
+  await recordRetrievalAttempts(prisma, caseId, c.firmId, attempts);
 
   return {
     conditions: conditions.length,
@@ -1061,10 +1094,14 @@ function scoreCandidate(a: Article, ctx: ScoreCtx, tierBonus: number, yearNow: n
   return { art: a, score, strong };
 }
 
-export async function enrichCitations(caseId: string): Promise<number> {
-  if (!(await literatureReachable())) return 0;
+export async function enrichCitations(caseId: string): Promise<RetrievalOutcome> {
   const c = await prisma.case.findUnique({ where: { id: caseId } });
   const items = await prisma.futureCareItem.findMany({ where: { caseId, supersededAt: null }, include: { condition: true } });
+  if (!items.length) return nothingToDo("No active future-care items; nothing to cite.");
+  // The probe runs AFTER the work is known to exist, so "offline" and "nothing
+  // to do" stay separate facts rather than both arriving as a bare zero.
+  const reach = await literatureReachability();
+  if (!reach.reachable) return notAttempted(reach.failure ?? "UNREACHABLE", reach.detail, items.length);
   // Population gate: pediatric literature never supports an adult case.
   const adult = !c?.dateOfBirth || (Date.now() - c.dateOfBirth.getTime()) / (365.25 * 24 * 3600 * 1000) >= 18;
   const yearNow = new Date().getFullYear();
@@ -1178,7 +1215,7 @@ export async function enrichCitations(caseId: string): Promise<number> {
     });
     if (picks.length) n++;
   }
-  return n;
+  return retrieved(n, items.length, activeSources(), `Attached a supporting article to ${n} of ${items.length} item(s).`);
 }
 
 // ── Adversarial reviews (Modules 10 & 11) ────────────────────────────────────

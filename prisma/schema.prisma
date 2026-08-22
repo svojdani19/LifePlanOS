@@ -372,6 +372,7 @@ model Case {
   referencePlanItems        ReferencePlanItem[]
   generatorSnapshots        GeneratorSnapshot[]
   recommendationBases       RecommendationBasis[]
+  retrievalAttempts         RetrievalAttempt[]
 
   @@unique([firmId, caseNumber])
   @@index([firmId])
@@ -2596,4 +2597,43 @@ model DuplicateAdjudication {
 
   @@index([firmId, caseId])
   @@index([caseId, decidedAt])
+}
+
+/// One best-effort external-retrieval pass over one case by one producer.
+///
+/// Generation's enrichment steps were wrapped in `.catch(() => {})`, so a
+/// producer that never ran, one that ran and found nothing, and one that broke
+/// were indistinguishable afterwards. Only the middle case is a statement about
+/// the medicine. This row keeps the latest attempt per (case, producer) so the
+/// plan can say which of the three actually happened.
+model RetrievalAttempt {
+  id     String @id @default(uuid())
+  caseId String
+  case   Case   @relation(fields: [caseId], references: [id], onDelete: Cascade)
+  firmId String
+
+  /// Stable producer key, e.g. "standard-of-care", "article-citations".
+  producer        String
+  /// Code version that made the attempt, so a result is attributable.
+  producerVersion String
+
+  /// NOT_ATTEMPTED | SUCCEEDED | NO_RESULTS | FAILED
+  status  String
+  /// UNREACHABLE | TIMEOUT | RATE_LIMITED | AUTH | MALFORMED | CANCELLED | UNKNOWN
+  failure String?
+  /// One actionable line. Never contains PHI.
+  detail  String
+
+  /// Rows written, and units considered — "0 of 0" is not "0 of 14".
+  produced   Int      @default(0)
+  considered Int      @default(0)
+  /// External sources actually queried.
+  sources    String[] @default([])
+
+  attemptedAt DateTime @default(now())
+  durationMs  Int?
+
+  @@unique([caseId, producer])
+  @@index([caseId, attemptedAt])
+  @@index([firmId])
 }

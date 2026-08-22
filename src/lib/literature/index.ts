@@ -8,6 +8,7 @@ import * as europepmc from "./europepmc";
 import * as crossref from "./crossref";
 import * as semanticscholar from "./semanticscholar";
 import { mergeArticle, type Article, type Source } from "./types";
+import { classifyRetrievalFailure, retrievalDetail, type RetrievalFailure } from "@/lib/engine/retrievalStatus";
 
 export type { Article, Source } from "./types";
 
@@ -41,12 +42,44 @@ export async function findCandidates(query: string, perSource = 12): Promise<Art
   return [...byKey.values()];
 }
 
+export interface Reachability {
+  reachable: boolean;
+  /** Null when reachable. Otherwise why the probe could not confirm a source. */
+  failure: RetrievalFailure | null;
+  detail: string;
+}
+
+/**
+ * Connectivity probe that says WHY, not just no.
+ *
+ * The boolean version could not tell "both sources rejected the request" from
+ * "both sources answered, with nothing for the word medicine". Callers turned
+ * either one into a silent zero, and the report then printed "no guideline
+ * located" — a claim about the literature that an unreachable network cannot
+ * support. The category travels with the answer so the plan can disclose which
+ * of the two it is.
+ */
+export async function literatureReachability(): Promise<Reachability> {
+  const [a, b] = await Promise.allSettled([europepmc.search("medicine", 1), crossref.search("medicine", 1)]);
+  if ((a.status === "fulfilled" && a.value.length > 0) || (b.status === "fulfilled" && b.value.length > 0)) {
+    return { reachable: true, failure: null, detail: "At least one literature source answered the probe." };
+  }
+  const rejections = [a, b].filter((r): r is PromiseRejectedResult => r.status === "rejected");
+  if (!rejections.length) {
+    // Both answered and both were empty. The network is fine; treat the run as
+    // attemptable, and let the producers report NO_RESULTS honestly.
+    return { reachable: true, failure: null, detail: "Sources answered the probe with no results; treating as reachable." };
+  }
+  // Prefer the most specific category among the failures — an auth or rate-limit
+  // answer is a real answer from a reachable host, and is more actionable than
+  // a generic unreachable.
+  const cats = rejections.map((r) => classifyRetrievalFailure(r.reason));
+  const rank: RetrievalFailure[] = ["AUTH", "RATE_LIMITED", "TIMEOUT", "MALFORMED", "CANCELLED", "UNREACHABLE", "UNKNOWN"];
+  const failure = rank.find((c) => cats.includes(c)) ?? "UNKNOWN";
+  return { reachable: false, failure, detail: rejections.map((r) => retrievalDetail(r.reason)).join(" | ").slice(0, 300) };
+}
+
 /** Fast connectivity probe so enrichment fails fast when fully offline. */
 export async function literatureReachable(): Promise<boolean> {
-  try {
-    const [a, b] = await Promise.allSettled([europepmc.search("medicine", 1), crossref.search("medicine", 1)]);
-    return (a.status === "fulfilled" && a.value.length > 0) || (b.status === "fulfilled" && b.value.length > 0);
-  } catch {
-    return false;
-  }
+  return (await literatureReachability()).reachable;
 }

@@ -11,7 +11,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { prisma } from "@/lib/db";
-import { findCandidates, literatureReachable, type Article } from "@/lib/literature";
+import { findCandidates, literatureReachable, literatureReachability, activeSources, type Article } from "@/lib/literature";
+import { notAttempted, nothingToDo, retrieved, type RetrievalOutcome } from "@/lib/engine/retrievalStatus";
 import { hasTerm, sigTerms } from "./chronology";
 import { Prisma } from "@/generated/prisma";
 import { citationCompatible, evaluateArticle, structuredConfidence, EVIDENCE_HIERARCHY, type ConfidenceResult } from "@/lib/engine/citationQuality";
@@ -313,12 +314,15 @@ function rankGuidance(a: Article, conditionName: string, yearNow: number): numbe
 
 /**
  * Build the standard-of-care analysis for every condition on the case.
+ *
  * Best-effort: offline → conditions get an honest "no guideline located"
- * analysis rather than an invented one. Returns conditions analyzed.
+ * analysis rather than an invented one. The returned outcome separates the
+ * three ways this produces nothing — never queried, queried and empty, broke —
+ * because the plan's absence statements are only founded in the second.
  */
-export async function generateStandardOfCare(caseId: string): Promise<number> {
+export async function generateStandardOfCare(caseId: string): Promise<RetrievalOutcome> {
   const conditions = await prisma.condition.findMany({ where: { caseId } });
-  if (!conditions.length) return 0;
+  if (!conditions.length) return nothingToDo("No conditions on the case; nothing to analyse.");
   // Population gate: pediatric/congenital guidance never supports an adult case.
   const kase = await prisma.case.findUnique({ where: { id: caseId }, select: { dateOfBirth: true } });
   const adult = !kase?.dateOfBirth || (Date.now() - kase.dateOfBirth.getTime()) / (365.25 * 24 * 3600 * 1000) >= 18;
@@ -329,10 +333,12 @@ export async function generateStandardOfCare(caseId: string): Promise<number> {
   const careItems = await prisma.futureCareItem.findMany({ where: { caseId }, select: { service: true } });
   const careServices = careItems.map((i) => i.service);
   const primaryConditionId = conditions[0]?.id;
-  const online = await literatureReachable();
+  const reach = await literatureReachability();
+  const online = reach.reachable;
   const yearNow = new Date().getFullYear();
 
   let n = 0;
+  let withGuidance = 0;
   for (const cond of conditions) {
     const queries = guidelineQueries(cond.name);
 
@@ -393,9 +399,22 @@ export async function generateStandardOfCare(caseId: string): Promise<number> {
       physicianConfirmed: cond.physicianConfirmed,
     });
     await prisma.condition.update({ where: { id: cond.id }, data: { socAnalysis: soc as unknown as Prisma.InputJsonValue } });
+    if (located.length) withGuidance++;
     n++;
   }
-  return n;
+  // The loop above still wrote each condition's honest offline analysis; what
+  // changes when the probe failed is what the CALLER may conclude from the
+  // emptiness. Never-queried is not the same fact as queried-and-empty.
+  if (!online) return notAttempted(reach.failure ?? "UNREACHABLE", reach.detail, conditions.length);
+  // `produced` counts conditions that actually got located guidance. Counting
+  // records written would report SUCCEEDED for a run that located nothing —
+  // exactly the silence this mechanism exists to end.
+  return retrieved(
+    withGuidance,
+    conditions.length,
+    activeSources(),
+    `Located guidance for ${withGuidance} of ${conditions.length} condition(s); ${n} analysis record(s) written.`,
+  );
 }
 
 // ── Assembly: turn located guidance + records + planned care + USER INPUTS into
