@@ -29,6 +29,7 @@ import { assembleBasis } from "@/lib/engine/basisAssembly";
 import { itemIsSupported, supportClassOf, SUPPORT_LABEL, computePlanTotals } from "@/lib/engine/supportClass";
 import { deriveWitnessAssessment, assessmentFromBasis, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningItem, type ReasoningAssessment } from "@/lib/engine/clinicalReasoning";
 import { referencesFor, guidelineSourcesFor } from "@/lib/references/sources";
+import { guidelineStatement } from "@/lib/export/guidelineStatement";
 import { parseBasis, basisNarrative } from "@/lib/engine/lifeExpectancy";
 import { verifyAttestation, type AttestationScopeEntry, type AttestableItem } from "@/lib/engine/attestation";
 import { evaluatePhysicianReportAuthority, type VerifiedExpertAuthority } from "@/lib/reports/professionalAuthority";
@@ -401,6 +402,14 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     page: number | null;
     verbatim: boolean;
   }[];
+  // The guideline producer's last outcome for this case. A search that failed
+  // or never ran cannot support "guidance applies" OR "no guidance exists", and
+  // the report must say which of the two it is in.
+  const socRetrieval = ((await prisma.retrievalAttempt?.findFirst({
+    where: { caseId, producer: "standard-of-care" },
+    select: { status: true, failure: true },
+  }).catch(() => null)) ?? null) as { status: string; failure: string | null } | null;
+
   // One recorded basis per item, loaded once.
   const basisByItem = new Map<string, unknown>(
     (((await prisma.recommendationBasis?.findMany({ where: { caseId } }).catch(() => [])) ?? []) as { futureCareItemId: string }[]).map((b) => [b.futureCareItemId, b]),
@@ -445,6 +454,8 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
       assumptions: { ...a, pricedAt: it.pricedAt?.toISOString() ?? null, conditionName: cond?.name ?? null },
     });
     const basisCheck = compareBasis(recordedBasis ?? null, witness);
+    // The recorded material conclusions, used by every assertion below.
+    const rMaterial = recordedBasis?.assessmentBasis ?? null;
 
     // Spec table — frequency, duration, lifetime quantity, cost, coding, status.
     //
@@ -548,10 +559,25 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     if (setNotice) out.push(labeled("Evidence ledger status", setNotice));
     if (basisCheck.notice) out.push(labeled("Recorded basis status", basisCheck.notice));
 
-    // Applicable treatment-guideline sources (ODG first, then specialty-apt) —
-    // the basis on which medical necessity now/in future is assessed (§9).
-    const guideBasis = guidelineSourcesFor(it.category as CareCategory, bodyRegion(`${it.service} ${dxName}`)).slice(0, 3).map((s) => s.label);
-    if (guideBasis.length) out.push(labeled("Guideline basis", `${guideBasis.join("; ")} — applied to determine whether this care is medically necessary now or in the future.`));
+    // ── What may be said about guideline support ─────────────────────────────
+    // This printed a category-and-region lookup — ODG plus whichever specialty
+    // bodies plausibly cover the area — and described them as "applied to
+    // determine whether this care is medically necessary". None of that was
+    // true of THIS recommendation: the list is derived from the service
+    // category, not from the patient, and every row of the mapping table ships
+    // UNVERIFIED. The engine's own position was that it could not vouch for the
+    // pairing, while the exported report named real organisations and said
+    // their guidance had been applied.
+    const guideline = guidelineStatement({
+      // Verified, item-specific guidance only. The recorded assessment carries
+      // what the reasoning actually stood on for this item.
+      verifiedItemSpecific: (rMaterial?.supportingGuidelineAssessments ?? []).filter((g) => g.title && g.claim),
+      recordedGuidelineEvidence: recordedBasis?.acceptedEvidence?.guidelines ?? [],
+      genericSources: guidelineSourcesFor(it.category as CareCategory, bodyRegion(`${it.service} ${dxName}`)).slice(0, 3).map((sx) => sx.label),
+      basisState: basisCheck.state,
+      retrieval: socRetrieval,
+    });
+    out.push(labeled(guideline.label, guideline.text));
 
     // Literature — each article stating exactly what it supports + limitations.
     const rLiterature = recordedBasis?.literature ?? dossier.literature;
@@ -580,7 +606,6 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     // Recorded, like everything else the document asserts. These were read
     // from a dossier rebuilt at export time, so a plan approved on one set of
     // defence challenges and functional findings could print another.
-    const rMaterial = recordedBasis?.assessmentBasis ?? null;
     const rChallenges = rMaterial?.potentialChallenges ?? dossier.potentialChallenges;
     if (rChallenges.length) out.push(labeled("Potential challenges", rChallenges.slice(0, 4).join(" ")));
 
