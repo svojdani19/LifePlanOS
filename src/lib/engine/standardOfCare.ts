@@ -11,8 +11,8 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { prisma } from "@/lib/db";
-import { findCandidates, literatureReachable, literatureReachability, activeSources, type Article } from "@/lib/literature";
-import { notAttempted, nothingToDo, retrieved, type RetrievalOutcome } from "@/lib/engine/retrievalStatus";
+import { searchCandidates, literatureReachable, literatureReachability, type Article, type SourceAttempt } from "@/lib/literature";
+import { notAttempted, nothingToDo, outcomeFromAttempts, type QueryAttempt, type RetrievalOutcome } from "@/lib/engine/retrievalStatus";
 import { hasTerm, sigTerms } from "./chronology";
 import { Prisma } from "@/generated/prisma";
 import { citationCompatible, evaluateArticle, structuredConfidence, EVIDENCE_HIERARCHY, type ConfidenceResult } from "@/lib/engine/citationQuality";
@@ -339,6 +339,9 @@ export async function generateStandardOfCare(caseId: string): Promise<RetrievalO
 
   let n = 0;
   let withGuidance = 0;
+  // Every case-specific source/query outcome. The generic probe above answers
+  // "is the internet up"; only these answer "did we look for THIS condition".
+  const attempts: QueryAttempt[] = [];
   for (const cond of conditions) {
     const queries = guidelineQueries(cond.name);
 
@@ -347,7 +350,9 @@ export async function generateStandardOfCare(caseId: string): Promise<RetrievalO
     if (online && queries.length) {
       // Concept-mapped phrasings widen the guideline pool; results merge &
       // de-dupe in the literature layer, then gate to on-topic practice guidance.
-      const pools = await Promise.all(queries.map((q) => findCandidates(`${q} clinical practice guideline recommendations`, 12)));
+      const searches = await Promise.all(queries.map((q) => searchCandidates(`${q} clinical practice guideline recommendations`, 12)));
+      for (const sr of searches) attempts.push(...(sr.attempts as SourceAttempt[]));
+      const pools = searches.map((sr) => sr.articles);
       const seen = new Set<string>();
       const pool = pools.flat().filter((a) => (seen.has(a.key) ? false : (seen.add(a.key), true)));
       // Extract each on-topic guidance candidate's best verbatim quote, then rank
@@ -408,11 +413,13 @@ export async function generateStandardOfCare(caseId: string): Promise<RetrievalO
   if (!online) return notAttempted(reach.failure ?? "UNREACHABLE", reach.detail, conditions.length);
   // `produced` counts conditions that actually got located guidance. Counting
   // records written would report SUCCEEDED for a run that located nothing —
-  // exactly the silence this mechanism exists to end.
-  return retrieved(
+  // exactly the silence this mechanism exists to end. The verdict comes from
+  // the real query attempts, so a probe that passed and searches that all
+  // failed can no longer read as "no guideline exists".
+  return outcomeFromAttempts(
+    attempts,
     withGuidance,
     conditions.length,
-    activeSources(),
     `Located guidance for ${withGuidance} of ${conditions.length} condition(s); ${n} analysis record(s) written.`,
   );
 }

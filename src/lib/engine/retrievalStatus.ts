@@ -154,6 +154,104 @@ export async function runRetrieval(
   }
 }
 
+// ── Deciding an outcome from the actual query attempts ──────────────────────
+
+/**
+ * One source's fate on one case-specific query. Structurally identical to the
+ * literature layer's SourceAttempt; declared here so this module stays free of
+ * any dependency on the literature layer (which imports FROM here).
+ */
+export interface QueryAttempt {
+  source: string;
+  query: string;
+  status: "FULFILLED" | "REJECTED" | "SKIPPED";
+  failure: RetrievalFailure | null;
+  detail: string | null;
+  results: number;
+}
+
+/** The most actionable failure among several — an auth answer beats an outage. */
+const FAILURE_RANK: RetrievalFailure[] = ["AUTH", "RATE_LIMITED", "TIMEOUT", "MALFORMED", "CANCELLED", "UNREACHABLE", "UNKNOWN"];
+export const dominantFailure = (cats: readonly RetrievalFailure[]): RetrievalFailure =>
+  FAILURE_RANK.find((c) => cats.includes(c)) ?? "UNKNOWN";
+
+/**
+ * Decide a producer's outcome from the CASE-SPECIFIC queries it actually ran.
+ *
+ * The generic reachability probe searches the word "medicine". It answers "is
+ * the internet up", never "did we look for THIS patient's care". A producer
+ * that passed the probe and then had every real query rejected still reported
+ * NO_RESULTS, which reads as "the literature has nothing for this item" — a
+ * claim nobody established.
+ *
+ * The rules, in the order they are checked:
+ *
+ *   nothing attempted            → NOT_ATTEMPTED. No claim of any kind.
+ *   every attempt failed         → FAILED. The emptiness is ours, not the
+ *                                  literature's.
+ *   something was produced       → SUCCEEDED, disclosing any failed source.
+ *                                  Partial retrieval is still retrieval, and
+ *                                  the results deserve to be evaluated.
+ *   produced nothing, all
+ *     relevant queries answered  → NO_RESULTS. The one case where absence is a
+ *                                  finding about the medicine.
+ *   produced nothing, some
+ *     queries never answered     → FAILED. Sources that never replied cannot
+ *                                  support a claim that nothing exists.
+ *
+ * SKIPPED attempts (a source that is not configured) never count as evidence of
+ * absence and never count as failure — they were not asked.
+ */
+export function outcomeFromAttempts(
+  attempts: readonly QueryAttempt[],
+  produced: number,
+  considered: number,
+  summary: string,
+): RetrievalOutcome {
+  const asked = attempts.filter((a) => a.status !== "SKIPPED");
+  if (!asked.length) {
+    const skipped = attempts.length ? " Every configured source was skipped." : "";
+    return notAttempted("UNREACHABLE", `No case-specific query was completed.${skipped}`, considered);
+  }
+
+  const fulfilled = asked.filter((a) => a.status === "FULFILLED");
+  const rejected = asked.filter((a) => a.status === "REJECTED");
+  const sources = [...new Set(fulfilled.map((a) => a.source))];
+  const failedNote = rejected.length
+    ? ` ${rejected.length} of ${asked.length} source-queries failed (${[...new Set(rejected.map((r) => `${r.source}:${r.failure ?? "UNKNOWN"}`))].join(", ")}).`
+    : "";
+
+  if (!fulfilled.length) {
+    return {
+      status: "FAILED",
+      failure: dominantFailure(rejected.map((r) => r.failure ?? "UNKNOWN")),
+      detail: `Every case-specific query failed.${failedNote}`.slice(0, 300),
+      produced: 0,
+      considered,
+      sources: [],
+    };
+  }
+
+  if (produced > 0) {
+    // Partial success. The results stand and the gap is disclosed rather than
+    // hidden behind a clean SUCCEEDED.
+    return { status: "SUCCEEDED", failure: null, detail: `${summary}${failedNote}`.slice(0, 300), produced, considered, sources };
+  }
+
+  if (rejected.length) {
+    return {
+      status: "FAILED",
+      failure: dominantFailure(rejected.map((r) => r.failure ?? "UNKNOWN")),
+      detail: `Nothing was retrieved, and not every source answered, so absence cannot be asserted.${failedNote}`.slice(0, 300),
+      produced: 0,
+      considered,
+      sources,
+    };
+  }
+
+  return { status: "NO_RESULTS", failure: null, detail: `${summary} Every case-specific query completed.`.slice(0, 300), produced: 0, considered, sources };
+}
+
 // ── What the plan is allowed to claim, given what actually happened ─────────
 
 /**

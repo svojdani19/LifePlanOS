@@ -35,7 +35,7 @@ import { applyPriors, priorProvenanceNote, scopeKeyOf } from "@/lib/engine/learn
 import { rebuildEvidenceGraph } from "@/lib/engine/evidenceGraph";
 import { citationCompatible, evaluateArticle, selectPrimary, isManagementService } from "@/lib/engine/citationQuality";
 import { hasDocumentedChronicity } from "@/lib/engine/lifetimeSupport";
-import { findCandidates, literatureReachability, activeSources, type Article } from "@/lib/literature";
+import { searchCandidates, literatureReachability, activeSources, type Article, type SourceAttempt } from "@/lib/literature";
 import {
   runRetrieval,
   RETRIEVAL_VERSION,
@@ -43,6 +43,8 @@ import {
   nothingToDo,
   notAttempted,
   retrieved,
+  outcomeFromAttempts,
+  type QueryAttempt,
   type RecordedAttempt,
   type RetrievalOutcome,
 } from "@/lib/engine/retrievalStatus";
@@ -1106,11 +1108,18 @@ export async function enrichCitations(caseId: string): Promise<RetrievalOutcome>
   const adult = !c?.dateOfBirth || (Date.now() - c.dateOfBirth.getTime()) / (365.25 * 24 * 3600 * 1000) >= 18;
   const yearNow = new Date().getFullYear();
   console.log(`[citations] reviewing sources: ${activeSources().join(", ")}`);
-  // Cache the merged candidate pool per query so repeated lookups cost one fan-out.
+  // Cache the merged candidate pool per query so repeated lookups cost one
+  // fan-out. Attempts are recorded once per distinct query, for the same
+  // reason: a cached hit is not a second piece of evidence about reachability.
   const cache = new Map<string, Article[]>();
+  const attempts: QueryAttempt[] = [];
   const pool = async (query: string): Promise<Article[]> => {
     const key = query.toLowerCase();
-    if (!cache.has(key)) cache.set(key, await findCandidates(query, 12));
+    if (!cache.has(key)) {
+      const sr = await searchCandidates(query, 12);
+      cache.set(key, sr.articles);
+      attempts.push(...(sr.attempts as SourceAttempt[]));
+    }
     return cache.get(key)!;
   };
   let n = 0;
@@ -1215,7 +1224,10 @@ export async function enrichCitations(caseId: string): Promise<RetrievalOutcome>
     });
     if (picks.length) n++;
   }
-  return retrieved(n, items.length, activeSources(), `Attached a supporting article to ${n} of ${items.length} item(s).`);
+  // From the real per-source query outcomes, not from the generic probe: a
+  // probe that passed followed by every case query failing must not read as
+  // "no supporting literature exists for these items".
+  return outcomeFromAttempts(attempts, n, items.length, `Attached a supporting article to ${n} of ${items.length} item(s).`);
 }
 
 // ── Adversarial reviews (Modules 10 & 11) ────────────────────────────────────

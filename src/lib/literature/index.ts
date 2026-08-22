@@ -24,22 +24,89 @@ export function activeSources(): Source[] {
 }
 
 /**
- * Candidate articles for a clinical query, merged & de-duplicated across all
- * sources. A source that errors or times out contributes nothing (best-effort);
- * duplicates found in more than one source are merged into the richest record.
+ * The outcome of ONE source answering ONE query.
+ *
+ * The merged article list could not distinguish "this source answered and had
+ * nothing" from "this source never answered". Both contributed zero articles,
+ * both were invisible afterwards, and a producer that saw an empty pool
+ * reported NO_RESULTS — a claim about the literature that only the first one
+ * supports.
  */
-export async function findCandidates(query: string, perSource = 12): Promise<Article[]> {
-  const settled = await Promise.allSettled(SOURCES.map((s) => s.search(query, perSource)));
+export interface SourceAttempt {
+  source: Source;
+  /** The case-specific query text. Clinical terms only — never patient facts. */
+  query: string;
+  status: "FULFILLED" | "REJECTED" | "SKIPPED";
+  /** Null unless REJECTED. */
+  failure: RetrievalFailure | null;
+  /** Bounded, non-identifying reason. Null on success. */
+  detail: string | null;
+  /** Articles this source returned, before merge and before relevance gating. */
+  results: number;
+}
+
+export interface CandidateSearch {
+  articles: Article[];
+  attempts: SourceAttempt[];
+}
+
+/**
+ * Candidate articles for a clinical query, with the fate of every source.
+ *
+ * A source that errors still contributes no articles — the search stays
+ * best-effort — but its failure is now reported rather than swallowed, so the
+ * caller can tell an empty result set that means something from one that means
+ * nothing.
+ */
+export async function searchCandidates(query: string, perSource = 12): Promise<CandidateSearch> {
+  const active = SOURCES.filter((s) => s.name !== "semanticscholar" || semanticscholar.enabled());
+  const skipped: SourceAttempt[] = SOURCES.filter((s) => !active.includes(s)).map((s) => ({
+    source: s.name,
+    query,
+    // A source that is not configured was never asked. It is not a failure, and
+    // it is not evidence that the literature is empty either.
+    status: "SKIPPED" as const,
+    failure: null,
+    detail: "not configured",
+    results: 0,
+  }));
+
+  const settled = await Promise.allSettled(active.map((s) => s.search(query, perSource)));
   const byKey = new Map<string, Article>();
-  for (const r of settled) {
-    if (r.status !== "fulfilled") continue;
+  const attempts: SourceAttempt[] = [];
+
+  settled.forEach((r, i) => {
+    const source = active[i].name;
+    if (r.status !== "fulfilled") {
+      attempts.push({
+        source,
+        query,
+        status: "REJECTED",
+        failure: classifyRetrievalFailure(r.reason),
+        detail: retrievalDetail(r.reason),
+        results: 0,
+      });
+      return;
+    }
+    attempts.push({ source, query, status: "FULFILLED", failure: null, detail: null, results: r.value.length });
     for (const art of r.value) {
       if (!art.title) continue;
       const existing = byKey.get(art.key);
       byKey.set(art.key, existing ? mergeArticle(existing, art) : art);
     }
-  }
-  return [...byKey.values()];
+  });
+
+  return { articles: [...byKey.values()], attempts: [...attempts, ...skipped] };
+}
+
+/**
+ * Articles only, for callers that genuinely do not need the source outcomes.
+ *
+ * Prefer `searchCandidates`: a caller that will make a claim about ABSENCE
+ * needs the attempts, because an empty array here is silent about why.
+ */
+export async function findCandidates(query: string, perSource = 12): Promise<Article[]> {
+  return (await searchCandidates(query, perSource)).articles;
 }
 
 export interface Reachability {
@@ -64,11 +131,20 @@ export async function literatureReachability(): Promise<Reachability> {
   if ((a.status === "fulfilled" && a.value.length > 0) || (b.status === "fulfilled" && b.value.length > 0)) {
     return { reachable: true, failure: null, detail: "At least one literature source answered the probe." };
   }
+  // A FULFILLED response proves that source was reachable, empty or not. The
+  // earlier version required EVERY source to answer, so one rejecting source
+  // marked the whole producer offline and suppressed a search the other source
+  // would have completed.
+  const fulfilled = [a, b].filter((r) => r.status === "fulfilled");
   const rejections = [a, b].filter((r): r is PromiseRejectedResult => r.status === "rejected");
-  if (!rejections.length) {
-    // Both answered and both were empty. The network is fine; treat the run as
-    // attemptable, and let the producers report NO_RESULTS honestly.
-    return { reachable: true, failure: null, detail: "Sources answered the probe with no results; treating as reachable." };
+  if (fulfilled.length) {
+    return {
+      reachable: true,
+      failure: null,
+      detail: rejections.length
+        ? `${fulfilled.length} source(s) answered the probe; ${rejections.length} rejected. Per-source outcomes are recorded on each query.`
+        : "Sources answered the probe with no results; treating as reachable.",
+    };
   }
   // Prefer the most specific category among the failures — an auth or rate-limit
   // answer is a real answer from a reachable host, and is more actionable than
