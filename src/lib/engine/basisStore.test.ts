@@ -142,3 +142,38 @@ describe("callers that would otherwise assert something false", () => {
     expect(src).toMatch(/could not be read/i);
   });
 });
+
+describe("an unreadable store is not dispositionable either", () => {
+  it("refuses resolve-as-is, ignore and accept-changes", async () => {
+    // It is not a divergence — nothing was compared — so it is not in the
+    // divergence prefix set and slipped past that check. It is the same kind of
+    // statement though: that the plan's agreement with its record is UNKNOWN.
+    const { dispositionAllowed } = await import("@/lib/engine/basisReconciliation");
+    for (const action of ["resolve_as_is", "ignore", "accept_changes"] as const) {
+      const v = dispositionAllowed(BASIS_UNREADABLE, action);
+      expect(v.allowed, action).toBe(false);
+      expect(v.reason).toMatch(/could not be read/i);
+      expect(v.reason).toMatch(/not a judgment a reviewer can make/i);
+    }
+  });
+
+  it("still allows reopen", async () => {
+    const { dispositionAllowed } = await import("@/lib/engine/basisReconciliation");
+    expect(dispositionAllowed(BASIS_UNREADABLE, "reopen").allowed).toBe(true);
+  });
+
+  it("is not reconcilable — there is nothing to compare, let alone judge", async () => {
+    const { isBasisDivergenceFinding } = await import("@/lib/engine/basisReconciliation");
+    expect(isBasisDivergenceFinding(BASIS_UNREADABLE)).toBe(false);
+  });
+
+  it("stays OPEN through a republish, even carrying a legacy disposition", async () => {
+    // There is no independent divergence check that would catch this one —
+    // nothing was compared — so a legacy RESOLVED_AS_IS on this key would be
+    // the whole bypass restored. It is forced OPEN.
+    const { statusForFinding } = await import("@/lib/engine/basisReconciliation");
+    const s = statusForFinding(BASIS_UNREADABLE, [], { status: "RESOLVED_AS_IS", resolvedById: "u", resolvedAt: new Date() });
+    expect(s.status).toBe("OPEN");
+    expect(s.resolvedById).toBeNull();
+  });
+});

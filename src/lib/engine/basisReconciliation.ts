@@ -149,8 +149,22 @@ export interface DispositionVerdict {
  * divergence standing.
  */
 export function dispositionAllowed(result: string | null | undefined, action: GenericDisposition): DispositionVerdict {
-  if (!isBasisDivergenceFinding(result)) return { allowed: true, reason: null };
+  const r = String(result ?? "");
+  // BASIS_UNREADABLE belongs here too. It is not a divergence — nothing was
+  // compared — but it is the same kind of statement: that the plan's agreement
+  // with its record is UNKNOWN. Dispositioning it would close the one signal
+  // saying so, and it is not in the divergence prefix set, so it slipped
+  // through the check below.
+  const unknowable = r === "BASIS_UNREADABLE";
+  if (!isBasisDivergenceFinding(result) && !unknowable) return { allowed: true, reason: null };
   if (action === "reopen") return { allowed: true, reason: null };
+  if (unknowable) {
+    return {
+      allowed: false,
+      reason:
+        "The recorded bases for this case could not be read, so whether this plan matches them is unknown. That is a storage or schema fault, not a judgment a reviewer can make: dispositioning it would close the only signal saying nothing is known. Resolve the fault and re-run the integrity check.",
+    };
+  }
   return {
     allowed: false,
     reason:
@@ -211,6 +225,12 @@ export function statusForFinding(
   reconciliations: readonly ReconciliationRow[],
   carried: CarriedDisposition | undefined,
 ): CarriedDisposition {
+  // "The bases could not be read" cannot be closed by a disposition carried
+  // from an older row either. There is no independent divergence check that
+  // would catch it — nothing was compared — so a legacy RESOLVED_AS_IS on this
+  // key would be the whole bypass, restored.
+  if (result === "BASIS_UNREADABLE") return { status: "OPEN", resolvedById: null, resolvedAt: null };
+
   const identity = decodeBasisFinding(result);
   if (identity) {
     if (!reconcilable(identity.state).ok) return { status: "OPEN", resolvedById: null, resolvedAt: null };
