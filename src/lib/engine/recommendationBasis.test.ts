@@ -74,7 +74,8 @@ describe("the hash decides staleness, and decides it on the right things", () =>
       futureCareItemId: reworded.futureCareItemId, lineageId: reworded.lineageId, interventionId: reworded.interventionId,
       serviceFamily: reworded.serviceFamily, conditionId: reworded.conditionId, bodyRegion: reworded.bodyRegion,
       spinalLevels: reworded.spinalLevels, laterality: reworded.laterality, supportClass: reworded.supportClass,
-      supportReason: reworded.supportReason, acceptedEvidence: reworded.acceptedEvidence, missingPremises: reworded.missingPremises,
+      supportReason: reworded.supportReason, acceptedEvidence: reworded.acceptedEvidence,
+      evidenceProvenance: reworded.evidenceProvenance, claimBasis: reworded.claimBasis, missingPremises: reworded.missingPremises,
     };
     expect(basisHash(core)).toBe(b.basisHash);
   });
@@ -87,6 +88,8 @@ describe("the hash decides staleness, and decides it on the right things", () =>
       spinalLevels: [...b.spinalLevels].reverse(), laterality: b.laterality, supportClass: b.supportClass,
       supportReason: b.supportReason,
       acceptedEvidence: { ...b.acceptedEvidence, objectiveFindings: [...b.acceptedEvidence.objectiveFindings].reverse() },
+      evidenceProvenance: [...b.evidenceProvenance].reverse(),
+      claimBasis: b.claimBasis,
       missingPremises: [...b.missingPremises].reverse(),
     };
     expect(basisHash(shuffled)).toBe(b.basisHash);
@@ -113,5 +116,98 @@ describe("a divergence is disclosed, never resolved", () => {
     // The RECORDED basis is what is shown; the reader is told, and decides.
     expect(c.notice).toMatch(/recorded basis is shown/i);
     expect(c.notice).not.toMatch(/automatically|resolved for you/i);
+  });
+});
+
+describe("citation identity is part of the hash, not just the quote", () => {
+  // The first version hashed the displayed text and dropped everything else, so
+  // the source document, page, provider, stance and extraction fingerprint
+  // could all change while the basis kept reporting CURRENT. A citation whose
+  // attribution silently moves is worse than a missing one: the quote still
+  // reads true and now points somewhere else.
+  const core = (over: Record<string, unknown> = {}) => {
+    const b = basisOf();
+    return {
+      futureCareItemId: b.futureCareItemId, lineageId: b.lineageId, interventionId: b.interventionId,
+      serviceFamily: b.serviceFamily, conditionId: b.conditionId, bodyRegion: b.bodyRegion,
+      spinalLevels: b.spinalLevels, laterality: b.laterality, supportClass: b.supportClass,
+      supportReason: b.supportReason, acceptedEvidence: b.acceptedEvidence,
+      evidenceProvenance: b.evidenceProvenance, claimBasis: b.claimBasis, missingPremises: b.missingPremises,
+      ...over,
+    };
+  };
+
+  it("carries provenance for every accepted row", () => {
+    const b = basisOf();
+    expect(b.evidenceProvenance.length).toBeGreaterThan(0);
+    expect(b.evidenceProvenance[0]).toMatchObject({
+      claim: expect.any(String), stance: expect.any(String), verbatim: expect.any(Boolean), textHash: expect.any(String),
+    });
+  });
+
+  it("changes when the SOURCE DOCUMENT changes and the text does not", () => {
+    const moved = core({ evidenceProvenance: basisOf().evidenceProvenance.map((p, i) => (i === 0 ? { ...p, documentId: "different-doc" } : p)) });
+    expect(basisHash(moved)).not.toBe(basisOf().basisHash);
+  });
+
+  it("changes when the PAGE changes", () => {
+    const repaged = core({ evidenceProvenance: basisOf().evidenceProvenance.map((p, i) => (i === 0 ? { ...p, page: 999 } : p)) });
+    expect(basisHash(repaged)).not.toBe(basisOf().basisHash);
+  });
+
+  it("changes when the STANCE flips", () => {
+    const flipped = core({ evidenceProvenance: basisOf().evidenceProvenance.map((p, i) => (i === 0 ? { ...p, stance: "OPPOSES" } : p)) });
+    expect(basisHash(flipped)).not.toBe(basisOf().basisHash);
+  });
+
+  it("changes when the source fingerprint changes — the document's bytes moved", () => {
+    const refingered = core({ evidenceProvenance: basisOf().evidenceProvenance.map((p, i) => (i === 0 ? { ...p, sourceFingerprint: "abc123" } : p)) });
+    expect(basisHash(refingered)).not.toBe(basisOf().basisHash);
+  });
+
+  it("changes when a quote's displayed SOURCE label changes", () => {
+    const b = basisOf();
+    const relabelled = core({
+      acceptedEvidence: { ...b.acceptedEvidence, objectiveFindings: b.acceptedEvidence.objectiveFindings.map((e, i) => (i === 0 ? { ...e, source: "some other file, p. 99" } : e)) },
+    });
+    expect(basisHash(relabelled)).not.toBe(b.basisHash);
+  });
+
+  it("is still order-independent across provenance rows", () => {
+    expect(basisHash(core({ evidenceProvenance: [...basisOf().evidenceProvenance].reverse() }))).toBe(basisOf().basisHash);
+  });
+});
+
+describe("frequency, duration and cost each carry their own basis", () => {
+  // "Why this service?" and "why this frequency, for this long, at this price?"
+  // are different claims. The column existed and generation left it null, so
+  // the authoritative basis was silent on three of the four things a defence
+  // expert asks about.
+  it("marks a quantity nothing states as a planning assumption", () => {
+    const b = basisOf();
+    expect(b.claimBasis.frequency.kind).toBe("ASSUMPTION");
+    expect(b.claimBasis.frequency.statement).toMatch(/planning assumption/i);
+    expect(b.claimBasis.duration.kind).toBe("ASSUMPTION");
+  });
+
+  it("never calls cost record-based just because the service is supported", () => {
+    const b = basisOf();
+    expect(b.claimBasis.cost.kind).toBe("ASSUMPTION");
+    expect(b.claimBasis.cost.statement).toMatch(/no case-specific cost is documented/i);
+  });
+
+  it("treats a quantity basis as material to the hash", () => {
+    // A frequency moving from RECORD to ASSUMPTION changes what the plan claims
+    // about it, and must invalidate an approval given on the other reading.
+    const b = basisOf();
+    const core = {
+      futureCareItemId: b.futureCareItemId, lineageId: b.lineageId, interventionId: b.interventionId,
+      serviceFamily: b.serviceFamily, conditionId: b.conditionId, bodyRegion: b.bodyRegion,
+      spinalLevels: b.spinalLevels, laterality: b.laterality, supportClass: b.supportClass,
+      supportReason: b.supportReason, acceptedEvidence: b.acceptedEvidence,
+      evidenceProvenance: b.evidenceProvenance, missingPremises: b.missingPremises,
+      claimBasis: { ...b.claimBasis, frequency: { kind: "RECORD" as const, statement: "The record states a cadence for this service." } },
+    };
+    expect(basisHash(core)).not.toBe(b.basisHash);
   });
 });

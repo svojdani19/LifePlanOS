@@ -89,7 +89,16 @@ async function main() {
     console.error("No firm resolved; nothing persisted.");
     return;
   }
-  const heldOut = holdOut ? [holdOut] : [];
+  // Store the immutable case ID, not the human-facing number. The consumer
+  // checks eligibility with a case ID, and storing the number meant the two
+  // never matched — so an approved artifact was silently rejected for every
+  // case, and the learning path could never have fired.
+  const holdOutCase = holdOut ? await prisma.case.findFirst({ where: { caseNumber: holdOut }, select: { id: true } }) : null;
+  if (holdOut && !holdOutCase) {
+    console.error(`--hold-out ${holdOut} does not match a case; refusing to persist an artifact whose hold-out cannot be enforced.`);
+    return;
+  }
+  const heldOut = holdOutCase ? [holdOutCase.id] : [];
   await prisma.learnedArtifact.create({
     data: { firmId, kind: "CARE_PATTERNS", version: CARE_PATTERN_VERSION, payload: patterns as never, sampleSize: included.length, heldOut },
   });

@@ -36,6 +36,47 @@ export interface AcceptedEvidence {
   contrary: string[];
 }
 
+/**
+ * The provenance of one accepted evidence row, as the hash sees it.
+ *
+ * The first version hashed the displayed TEXT and dropped everything else, so
+ * the source document, the page, the provider, the stance and the extraction
+ * fingerprint could all change while the basis kept reporting CURRENT. A
+ * citation whose attribution silently moves is worse than a missing one: the
+ * quote still reads true and now points somewhere else.
+ */
+export interface EvidenceProvenance {
+  claim: string;
+  stance: string;
+  strength: string;
+  sourceKind: string;
+  documentId: string | null;
+  encounterId: string | null;
+  chronologyEventId: string | null;
+  page: number | null;
+  field: string | null;
+  verbatim: boolean;
+  sourceFingerprint: string | null;
+  /** sha256 of the exact accepted excerpt. */
+  textHash: string;
+}
+
+/**
+ * Where a QUANTITY comes from — separately from where the service comes from.
+ *
+ * "Why this service?" and "why this frequency, for this long, at this price?"
+ * are different claims, and a life care plan is challenged on the second at
+ * least as often as the first. The schema had the column and generation left it
+ * null, so the supposedly authoritative basis was silent on three of the four
+ * things a defence expert asks about.
+ */
+export interface ClaimBasis {
+  /** RECORD: the chart states it. GUIDELINE: cited guidance states it.
+   *  PROFESSIONAL: a reviewer set it. ASSUMPTION: a planning convention. */
+  kind: "RECORD" | "GUIDELINE" | "PROFESSIONAL" | "ASSUMPTION";
+  statement: string;
+}
+
 export interface BasisRecord {
   futureCareItemId: string;
   lineageId: string | null;
@@ -48,6 +89,10 @@ export interface BasisRecord {
   supportClass: string;
   supportReason: string | null;
   acceptedEvidence: AcceptedEvidence;
+  /** Full provenance for every accepted row — hashed, not merely displayed. */
+  evidenceProvenance: EvidenceProvenance[];
+  /** Frequency, duration and cost, each with its own basis. */
+  claimBasis: { frequency: ClaimBasis; duration: ClaimBasis; cost: ClaimBasis };
   missingPremises: string[];
   necessityNarrative: string;
   producerVersion: string;
@@ -78,9 +123,25 @@ export function basisHash(input: Omit<BasisRecord, "basisHash" | "necessityNarra
     evidence: Object.fromEntries(
       Object.entries(input.acceptedEvidence).map(([k, v]) => [
         k,
-        (v as { text?: string }[] | string[]).map((x) => (typeof x === "string" ? x : String(x.text))).sort(),
+        // The SOURCE travels with the text. Hashing the quote alone let the
+        // file, page and provider beside it change without invalidating
+        // anything.
+        (v as { text?: string; source?: string | null }[] | string[])
+          .map((x) => (typeof x === "string" ? x : `${x.text}\u0000${x.source ?? ""}`))
+          .sort(),
       ]),
     ),
+    // And the full citation identity of every accepted row: document, encounter,
+    // chronology event, page, field, stance, verbatim status and the
+    // fingerprint of the source text at extraction.
+    provenance: input.evidenceProvenance
+      .map((p) =>
+        [p.claim, p.stance, p.strength, p.sourceKind, p.documentId, p.encounterId, p.chronologyEventId, p.page, p.field, p.verbatim, p.sourceFingerprint, p.textHash].join("|"),
+      )
+      .sort(),
+    // A quantity moving from RECORD to ASSUMPTION changes what the plan claims
+    // about it, so it is material.
+    claims: [input.claimBasis.frequency.kind, input.claimBasis.duration.kind, input.claimBasis.cost.kind],
     missing: [...input.missingPremises].sort(),
   };
   return `${BASIS_VERSION}:${createHash("sha256").update(JSON.stringify(canonical), "utf8").digest("hex").slice(0, 32)}`;
@@ -104,6 +165,40 @@ export function buildBasis(
     guidelines: clean(se.guidelines),
     contrary: dossier.contradictoryEvidence.map((c) => String(c).replace(/\s+/g, " ").trim()),
   };
+  const evidenceProvenance: EvidenceProvenance[] = (dossier.ledger ?? []).map((r) => ({
+    claim: String(r.claim),
+    stance: String(r.stance),
+    strength: String(r.strength),
+    sourceKind: String(r.sourceKind),
+    documentId: r.sourceDocumentId ?? null,
+    encounterId: r.encounterId ?? null,
+    chronologyEventId: r.chronologyEventId ?? null,
+    page: r.page ?? null,
+    field: r.field ?? null,
+    verbatim: !!r.verbatim,
+    sourceFingerprint: r.sourceFingerprint ?? null,
+    textHash: createHash("sha256").update(String(r.quote).replace(/\s+/g, " ").trim(), "utf8").digest("hex").slice(0, 16),
+  }));
+
+  // Each quantity's basis, read from the evidence that actually speaks to it.
+  // A ledger row only carries a FREQUENCY or DURATION claim when its text
+  // stated a cadence or a span — the semantic gate guarantees that — so their
+  // presence is exactly the right test.
+  const claims = new Set((dossier.ledger ?? []).map((r) => String(r.claim)));
+  const quantityBasis = (claim: string, what: string): ClaimBasis =>
+    claims.has(claim)
+      ? { kind: "RECORD", statement: `The record states ${what} for this service.` }
+      : { kind: "ASSUMPTION", statement: `No source states ${what}; the projected value is a planning assumption pending review.` };
+  const claimBasis = {
+    frequency: quantityBasis("FREQUENCY", "a cadence"),
+    duration: quantityBasis("DURATION", "a duration"),
+    // Cost is priced from a fee schedule or a survey, never from the clinical
+    // record — so it is an assumption unless a COST row exists.
+    cost: claims.has("COST")
+      ? ({ kind: "RECORD", statement: "A billed amount or fee-schedule figure is documented for this service." } as ClaimBasis)
+      : ({ kind: "ASSUMPTION", statement: `Priced from ${item.pricingSource ?? "the configured pricing source"}; no case-specific cost is documented.` } as ClaimBasis),
+  };
+
   const core = {
     futureCareItemId: String(item.id ?? ""),
     lineageId: item.lineageId ?? null,
@@ -116,6 +211,8 @@ export function buildBasis(
     supportClass: supportClassOf(item as { supportClass?: string | null }),
     supportReason: item.supportReason ?? null,
     acceptedEvidence,
+    evidenceProvenance,
+    claimBasis,
     missingPremises: dossier.unknowns.map((u) => String(u)),
   };
   return {

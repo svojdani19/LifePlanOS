@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { reviewDecisionFields } from "@/lib/engine/reviewDecision";
+import { reviewDecisionFields, refreshAfterReview } from "@/lib/engine/reviewDecision";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requireCanonicalPermission, requireCase, audit } from "@/lib/tenant";
 import { enforceReviewCredential } from "@/lib/authz/credentialGate";
@@ -106,15 +106,16 @@ export async function POST(req: Request, { params: paramsPromise }: { params: Pr
       },
     });
 
-    await generateReviews(params.caseId);
-    // Review actions change inclusion eligibility — refresh persisted findings
-    // and the clinical reasoning assessment (physician status is a material
-    // field). Incremental: only the reviewed item is reassessed (§19).
-    await persistCaseValidation(params.caseId, ctx.firm.id).catch(() => {});
-    await persistCaseReasoning(params.caseId, ctx.firm.id, { recommendationIds: [params.itemId], actorUserId: ctx.user.id, reviewDecision: true }).catch(() => {});
-    // A review action can materially change a signed-over item — re-verify any
-    // active attestations (EPIC-005; drifted signatures are invalidated).
-    await refreshCaseAttestations(params.caseId).catch(() => {});
+    // The refreshes a review decision obliges, from one place — so bulk
+    // approval cannot trigger a different set. Failures are reported, not
+    // swallowed: three of these used a bare `.catch(() => {})`, so a validation
+    // pass could fail silently forever.
+    await refreshAfterReview(
+      { generateReviews, persistCaseValidation, persistCaseReasoning, refreshCaseAttestations },
+      params.caseId,
+      ctx.firm.id,
+      { recommendationIds: [params.itemId], actorUserId: ctx.user.id },
+    );
     await audit(ctx, "physician.review", { type: "futureCareItem", id: item.id, caseId: params.caseId, meta: { status: input.status } });
     return ok({ item: updated });
   } catch (err) {

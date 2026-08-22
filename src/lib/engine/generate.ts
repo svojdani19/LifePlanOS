@@ -661,38 +661,58 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
           (relink.orphaned ? `; ${relink.orphaned} now reference a recommendation no longer in the plan` : ""),
       );
     }
-    // Persist one basis per item. Replaced wholesale, like the derived ledger:
-    // a basis is a function of the record, and keeping a stale one beside a
-    // fresh one would let two consumers read different answers.
+    // Persist the bases ATOMICALLY. This deleted every existing basis, created
+    // replacements one at a time, and swallowed failures — so a crash after the
+    // delete left the case with a partial or empty basis set while the plan
+    // stayed published, and the log line was the only trace.
+    //
+    // One transaction: either the whole set replaces the previous one, or the
+    // previous one survives untouched. A basis set that is half of two
+    // generations is not a record of anything.
+    const publishable = bases.filter((b) => b.futureCareItemId);
+    if (publishable.length !== bases.length) {
+      console.warn(`[basis] ${bases.length - publishable.length} item(s) had no id and were skipped`);
+    }
     try {
-      await prisma.recommendationBasis?.deleteMany({ where: { caseId } });
-      for (const b of bases) {
-        if (!b.futureCareItemId) continue;
-        await prisma.recommendationBasis.create({
-          data: {
-            firmId: c.firmId,
-            caseId,
-            futureCareItemId: b.futureCareItemId,
-            lineageId: b.lineageId,
-            interventionId: b.interventionId,
-            serviceFamily: b.serviceFamily,
-            conditionId: b.conditionId,
-            bodyRegion: b.bodyRegion,
-            spinalLevels: b.spinalLevels,
-            laterality: b.laterality,
-            supportClass: b.supportClass,
-            supportReason: b.supportReason,
-            acceptedEvidence: b.acceptedEvidence as never,
-            missingPremises: b.missingPremises as never,
-            necessityNarrative: b.necessityNarrative,
-            producerVersion: b.producerVersion,
-            basisHash: b.basisHash,
-          },
-        });
+      await prisma.$transaction([
+        prisma.recommendationBasis.deleteMany({ where: { caseId } }),
+        ...publishable.map((b) =>
+          prisma.recommendationBasis.create({
+            data: {
+              firmId: c.firmId,
+              caseId,
+              futureCareItemId: b.futureCareItemId,
+              lineageId: b.lineageId,
+              interventionId: b.interventionId,
+              serviceFamily: b.serviceFamily,
+              conditionId: b.conditionId,
+              bodyRegion: b.bodyRegion,
+              spinalLevels: b.spinalLevels,
+              laterality: b.laterality,
+              supportClass: b.supportClass,
+              supportReason: b.supportReason,
+              acceptedEvidence: b.acceptedEvidence as never,
+              claimBasis: b.claimBasis as never,
+              missingPremises: b.missingPremises as never,
+              necessityNarrative: b.necessityNarrative,
+              producerVersion: b.producerVersion,
+              basisHash: b.basisHash,
+            },
+          }),
+        ),
+      ]);
+      // Verify what landed. A silent short-write is the failure mode this whole
+      // block exists to prevent.
+      const landed = await prisma.recommendationBasis.count({ where: { caseId } });
+      if (landed !== publishable.length) {
+        console.error(`[basis] case ${caseId}: expected ${publishable.length} bases, found ${landed}`);
+      } else {
+        console.info(`[basis] case ${caseId}: ${landed} recommendation bases published atomically`);
       }
-      console.info(`[basis] case ${caseId}: ${bases.length} recommendation bases persisted`);
     } catch (e) {
-      console.warn(`[basis] could not persist recommendation bases for ${caseId}:`, e);
+      // The prior complete set survives, because the delete was inside the
+      // transaction that failed.
+      console.error(`[basis] case ${caseId}: publication FAILED; the previous basis set is intact:`, e);
     }
 
     const outcome = await persistMachineLedger(prisma as never, { caseId, firmId: c.firmId }, rows);

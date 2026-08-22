@@ -162,7 +162,13 @@ export function assertPatternFactFree(patterns: readonly CarePattern[]): void {
 export async function approvedCarePatterns(
   db: { learnedArtifact?: { findFirst(args: unknown): Promise<{ payload: unknown; heldOut: string[] } | null> } },
   firmId: string,
-  /** Exclude an artifact that learned from the case being evaluated. */
+  /**
+   * The case being generated, as its immutable ID.
+   *
+   * `heldOut` stores case IDs for the same reason: the script once recorded the
+   * human-facing case NUMBER while this compared a UUID, so no artifact ever
+   * matched and the entire learning path was inert without saying so.
+   */
   excludeIfLearnedFrom?: string,
 ): Promise<CarePattern[]> {
   const row = await db.learnedArtifact

@@ -1,5 +1,8 @@
 import { prisma } from "@/lib/db";
-import { reviewDecisionFields } from "@/lib/engine/reviewDecision";
+import { reviewDecisionFields, refreshAfterReview } from "@/lib/engine/reviewDecision";
+import { persistCaseValidation } from "@/lib/engine/validation";
+import { persistCaseReasoning } from "@/lib/engine/clinicalReasoningPersist";
+import { refreshCaseAttestations } from "@/lib/engine/attestationService";
 import { requireApiContext, requireCanonicalPermission, requireCase, audit } from "@/lib/tenant";
 import { enforceReviewCredential } from "@/lib/authz/credentialGate";
 import { generateReviews } from "@/lib/engine/generate";
@@ -32,37 +35,55 @@ export async function POST(_req: Request, { params: paramsPromise }: { params: P
     // covered: an item that was decided, changed, or superseded between the
     // snapshot and the write is REFUSED (skipped), never silently approved —
     // and the ledger records only decisions that actually took effect.
+    // DECISION AND LEDGER IN ONE TRANSACTION. These were separate writes, so a
+    // failure between them could leave an approval standing with no audit entry
+    // — the one record a law firm cannot afford to be missing.
+    //
+    // Each approval stays conditional on the exact item version the
+    // confirmation covered: an item decided, changed or superseded since the
+    // snapshot is refused inside the transaction, and only decisions that
+    // actually took effect are ledgered.
     const approved: typeof pending = [];
-    for (const p of pending) {
-      const res = await prisma.futureCareItem.updateMany({
-        where: { id: p.id, physicianStatus: "PENDING", supersededAt: null },
-        // The same fields an individual approval writes. This route set
-        // `physicianStatus` alone — not the support class, and not even the
-        // lifecycle status — so a bulk approval left the plan in a state no
-        // single-item approval could produce.
-        data: reviewDecisionFields(p as never, "APPROVED", "PHYSICIAN_APPROVED") as never,
-      });
-      if (res.count === 1) approved.push(p);
-    }
-    if (approved.length > 0) {
-      await prisma.recommendationTransition.createMany({
-        data: approved.map((p) => ({
-          caseId: params.caseId,
-          firmId: ctx.firm.id,
-          lineageId: p.lineageId,
-          itemId: p.id,
-          userId: ctx.user.id,
-          role: ctx.user.role,
-          priorStatus: p.lifecycleStatus,
-          newStatus: lifecycleFor("APPROVED"),
-          comment: "Bulk approval (accept-all)",
-          reasonCode: "ACCEPT_ALL",
-        })),
-      });
-    }
+    await prisma.$transaction(async (tx) => {
+      for (const p of pending) {
+        const res = await tx.futureCareItem.updateMany({
+          where: { id: p.id, physicianStatus: "PENDING", supersededAt: null },
+          // The same fields an individual approval writes.
+          data: reviewDecisionFields(p as never, "APPROVED", "PHYSICIAN_APPROVED") as never,
+        });
+        if (res.count === 1) approved.push(p);
+      }
+      if (approved.length > 0) {
+        await tx.recommendationTransition.createMany({
+          data: approved.map((p) => ({
+            caseId: params.caseId,
+            firmId: ctx.firm.id,
+            lineageId: p.lineageId,
+            itemId: p.id,
+            userId: ctx.user.id,
+            role: ctx.user.role,
+            priorStatus: p.lifecycleStatus,
+            newStatus: lifecycleFor("APPROVED"),
+            comment: "Bulk approval (accept-all)",
+            reasonCode: "ACCEPT_ALL",
+          })),
+        });
+      }
+    });
 
-    // Reviews reference physician status, so refresh them once after the batch.
-    await generateReviews(params.caseId);
+    // THE SAME refreshes an individual approval triggers. This ran
+    // `generateReviews` alone, so approving forty items at once left the
+    // reasoning, the validation findings and the signatures describing a plan
+    // that no longer existed — while approving the same forty one at a time did
+    // not. The safeguards a decision triggers cannot depend on which button
+    // produced it.
+    const refresh = await refreshAfterReview(
+      { generateReviews, persistCaseValidation, persistCaseReasoning, refreshCaseAttestations },
+      params.caseId,
+      ctx.firm.id,
+      { recommendationIds: approved.map((p) => p.id), actorUserId: ctx.user.id },
+    );
+    if (refresh.failed.length) console.error(`[accept-all] refresh incomplete: ${refresh.failed.join(", ")}`);
     await audit(ctx, "physician.review", { type: "case", id: params.caseId, caseId: params.caseId, meta: { action: "accept-all", count: approved.length, refusedStale: pending.length - approved.length } });
     return ok({ count: approved.length });
   } catch (err) {

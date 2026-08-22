@@ -493,9 +493,21 @@ export function indicationFor(diagnosisText: string, intervention: InterventionI
 }
 
 /** May this diagnosis be presented as SUPPORT for this intervention? */
+/**
+ * May this diagnosis be presented as SUPPORT for this intervention?
+ *
+ * UNCLASSIFIED is deliberately NOT support. Failing open was meant to avoid
+ * hiding a diagnosis the lexicon could not read, and it went one step too far:
+ * "the engine cannot decide" was rendered as "this supports the care". Those
+ * are different claims, and only one of them is true.
+ *
+ * The diagnosis is still SHOWN — as condition background, with the reason
+ * saying the engine could not classify it. Nothing is hidden; nothing is
+ * asserted either.
+ */
 export const diagnosisSupports = (diagnosisText: string, intervention: InterventionId): boolean => {
   const v = indicationFor(diagnosisText, intervention).verdict;
-  return v === "INDICATED" || v === "NON_SPECIFIC" || v === "UNCLASSIFIED";
+  return v === "INDICATED" || v === "NON_SPECIFIC";
 };
 
 /**
@@ -522,6 +534,11 @@ export function contextReason(diagnosisText: string, intervention: InterventionI
     // the body is safe while unverified: the claim being made is that the
     // pairing is NOT endorsed, which is the conservative direction.
     return r.basis.position ?? "a clinical guideline recommends against this intervention for this diagnosis";
+  }
+  if (r.verdict === "UNCLASSIFIED") {
+    // Say which way the uncertainty runs. A reader must not read "the engine
+    // could not classify this" as "this diagnosis is irrelevant".
+    return "the engine could not classify this diagnosis against this service — shown for review, not counted as support";
   }
   if (r.verdict !== "CONTEXT") return null;
   const names = r.concepts.map((c) => c.replace(/_/g, " ").toLowerCase()).join(", ");

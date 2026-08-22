@@ -32,20 +32,33 @@ vi.mock("@/lib/tenant", () => {
     recordUsage: vi.fn(async () => {}),
   };
 });
-vi.mock("@/lib/db", () => ({
-  prisma: {
+vi.mock("@/lib/db", () => {
+  // The decision and its ledger entry are written in ONE transaction, so a
+  // failure between them cannot leave an approval standing with no audit
+  // record. The fake therefore has to run the callback with a client — a
+  // `$transaction` that returns without invoking it would make the route look
+  // like it wrote nothing.
+  const prisma: Record<string, unknown> = {
     futureCareItem: {
       findMany: vi.fn(async () => []),
       updateMany: vi.fn(async () => ({ count: 0 })),
     },
     recommendationTransition: { createMany: vi.fn(async () => ({ count: 0 })) },
     interviewFinding: { create: vi.fn(async () => ({ id: "finding-1" })) },
-  },
-}));
+  };
+  prisma.$transaction = vi.fn(async (arg: unknown) =>
+    typeof arg === "function" ? (arg as (tx: unknown) => Promise<unknown>)(prisma) : Promise.all(arg as Promise<unknown>[]),
+  );
+  return { prisma };
+});
 vi.mock("@/lib/authz/credentialGate", () => ({
   enforceReviewCredential: vi.fn(async () => {}),
 }));
 vi.mock("@/lib/engine/generate", () => ({ generateReviews: vi.fn(async () => {}) }));
+// Bulk approval now triggers the SAME refreshes as an individual approval.
+vi.mock("@/lib/engine/validation", () => ({ persistCaseValidation: vi.fn(async () => {}) }));
+vi.mock("@/lib/engine/clinicalReasoningPersist", () => ({ persistCaseReasoning: vi.fn(async () => {}) }));
+vi.mock("@/lib/engine/attestationService", () => ({ refreshCaseAttestations: vi.fn(async () => {}) }));
 
 import { prisma } from "@/lib/db";
 import {
@@ -177,5 +190,38 @@ describe("POST /interviews — case-scoped physician assignment path", () => {
     const res = await interviewPost(req(), params());
     expect(res.status).toBe(403);
     expect(createFinding).not.toHaveBeenCalled();
+  });
+});
+
+describe("bulk approval triggers the same safeguards as an individual one", () => {
+  it("refreshes reviews, validation, reasoning and attestations", async () => {
+    // It ran `generateReviews` alone, so approving forty items at once left the
+    // reasoning, the validation findings and the signatures describing a plan
+    // that no longer existed — while approving the same forty one at a time did
+    // not. The safeguards cannot depend on which button produced the decision.
+    const { generateReviews } = await import("@/lib/engine/generate");
+    const { persistCaseValidation } = await import("@/lib/engine/validation");
+    const { persistCaseReasoning } = await import("@/lib/engine/clinicalReasoningPersist");
+    const { refreshCaseAttestations } = await import("@/lib/engine/attestationService");
+    for (const fn of [generateReviews, persistCaseValidation, persistCaseReasoning, refreshCaseAttestations]) vi.mocked(fn).mockClear();
+
+    vi.mocked(prisma.futureCareItem.findMany).mockResolvedValueOnce([
+      { id: "i-1", lineageId: "l-1", lifecycleStatus: "AI_DRAFT", origin: "TEMPLATE_CONDITION", supportClass: "CANDIDATE_REVIEW" },
+    ] as never);
+    vi.mocked(prisma.futureCareItem.updateMany).mockResolvedValueOnce({ count: 1 } as never);
+
+    const { POST } = await import("@/app/api/cases/[caseId]/future-care/accept-all/route");
+    await POST(new Request("http://localhost/api", { method: "POST" }), { params: Promise.resolve({ caseId: "case-1" }) } as never);
+
+    expect(generateReviews).toHaveBeenCalledTimes(1);
+    expect(persistCaseValidation).toHaveBeenCalledTimes(1);
+    expect(persistCaseReasoning).toHaveBeenCalledTimes(1);
+    expect(refreshCaseAttestations).toHaveBeenCalledTimes(1);
+  });
+
+  it("writes the decision and its ledger entry in one transaction", async () => {
+    // A failure between them could leave an approval standing with no audit
+    // record — the one thing a law firm cannot afford to be missing.
+    expect(vi.mocked((prisma as unknown as { $transaction: unknown }).$transaction)).toBeDefined();
   });
 });

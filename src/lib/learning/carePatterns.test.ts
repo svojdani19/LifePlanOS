@@ -125,3 +125,19 @@ describe("only an approved artifact can reach production", () => {
     expect(await approvedCarePatterns({}, "firm-1")).toEqual([]);
   });
 });
+
+describe("hold-out is compared on the identifier it was stored with", () => {
+  it("matches an artifact that held this case out by ID", async () => {
+    // The script stored the human-facing case NUMBER while the consumer passed
+    // a UUID, so the comparison never matched: an approved artifact was
+    // rejected for every case and the learning path was inert without saying so.
+    const { approvedCarePatterns } = await import("@/lib/learning/carePatterns");
+    const db = (heldOut: string[]) => ({
+      learnedArtifact: { findFirst: async () => ({ payload: [{ intervention: "EPIDURAL_STEROID", family: "INJECTION", conditionKey: "LUMBAR_SPINE", observedIn: 3, outOf: 3 }], heldOut }) as never },
+    });
+    const caseId = "ca7885a7-645c-4572-89f4-f2927737c317";
+    expect(await approvedCarePatterns(db([caseId]), "firm-1", caseId)).toHaveLength(1);
+    // A case NUMBER in heldOut cannot satisfy an ID check — the original bug.
+    expect(await approvedCarePatterns(db(["REF-2026-0005"]), "firm-1", caseId)).toEqual([]);
+  });
+});

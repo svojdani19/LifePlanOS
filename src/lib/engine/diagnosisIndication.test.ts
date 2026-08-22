@@ -79,12 +79,15 @@ describe("non-specific services are marked as such rather than faked", () => {
     expect(diagnosisSupports("anything at all", "SPECIALIST_FOLLOWUP")).toBe(true);
   });
 
-  it("admits a diagnosis it cannot classify rather than hiding it", () => {
-    // Failing open here is deliberate: a concept the lexicon does not know is
-    // a gap in the model, and silently dropping the diagnosis would hide
-    // evidence a physician needs to see.
+  it("shows a diagnosis it cannot classify, without counting it as support", () => {
+    // Failing open must mean "display for review because the engine cannot
+    // decide" — not "treat as support". Those are different claims, and the
+    // first version made the second one.
     expect(indicationFor("Sequelae of unspecified injury", "DISCECTOMY").verdict).toBe("UNCLASSIFIED");
-    expect(diagnosisSupports("Sequelae of unspecified injury", "DISCECTOMY")).toBe(true);
+    expect(diagnosisSupports("Sequelae of unspecified injury", "DISCECTOMY")).toBe(false);
+    expect(contextReason("Sequelae of unspecified injury", "DISCECTOMY")).toMatch(/could not classify/i);
+    // …and the reason must not read as irrelevance.
+    expect(contextReason("Sequelae of unspecified injury", "DISCECTOMY")).toMatch(/shown for review/i);
   });
 });
 

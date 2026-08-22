@@ -100,3 +100,47 @@ export function reviewDecisionFields(item: ReviewableItem, status: string, lifec
   const v = supportClassForDecision(item, status);
   return { physicianStatus: status, lifecycleStatus, supportClass: v.supportClass, supportReason: v.reason };
 }
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The refreshes a review decision obliges, wherever it was made.
+//
+// Individual approval refreshed reviews, validation, clinical reasoning and
+// attestations. Bulk approval refreshed reviews and nothing else — so approving
+// forty items at once left the reasoning, the validation findings and the
+// signatures describing a plan that no longer existed, while approving the same
+// forty one at a time did not. The safeguards a decision triggers cannot depend
+// on which button produced it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface ReviewRefreshDeps {
+  generateReviews: (caseId: string) => Promise<unknown>;
+  persistCaseValidation: (caseId: string, firmId: string) => Promise<unknown>;
+  persistCaseReasoning: (caseId: string, firmId: string, opts: { recommendationIds?: string[]; actorUserId?: string; reviewDecision?: boolean }) => Promise<unknown>;
+  refreshCaseAttestations: (caseId: string) => Promise<unknown>;
+}
+
+/**
+ * Run every refresh a review decision obliges.
+ *
+ * Individually caught: one failing refresh must not prevent the others, and
+ * must not roll back a decision that is already durably recorded. Failures are
+ * reported rather than swallowed — the previous code used bare `.catch(() => {})`
+ * on three of them, so a validation pass could fail silently forever.
+ */
+export async function refreshAfterReview(
+  deps: ReviewRefreshDeps,
+  caseId: string,
+  firmId: string,
+  opts: { recommendationIds?: string[]; actorUserId?: string } = {},
+): Promise<{ failed: string[] }> {
+  const failed: string[] = [];
+  const step = async (name: string, run: () => Promise<unknown>) => {
+    try { await run(); } catch (e) { failed.push(name); console.error(`[review] ${name} failed for case ${caseId}:`, e); }
+  };
+  await step("generateReviews", () => deps.generateReviews(caseId));
+  await step("validation", () => deps.persistCaseValidation(caseId, firmId));
+  await step("reasoning", () => deps.persistCaseReasoning(caseId, firmId, { ...opts, reviewDecision: true }));
+  await step("attestations", () => deps.refreshCaseAttestations(caseId));
+  return { failed };
+}

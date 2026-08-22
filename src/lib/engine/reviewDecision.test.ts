@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { supportClassForDecision, classifyExistingItem, needsReclassification, reviewDecisionFields } from "@/lib/engine/reviewDecision";
+import { supportClassForDecision, classifyExistingItem, needsReclassification, reviewDecisionFields, refreshAfterReview } from "@/lib/engine/reviewDecision";
 import { entersSupportedTotal, computePlanTotals } from "@/lib/engine/supportClass";
 
 describe("a review decision writes the classification, not just the status", () => {
@@ -80,5 +80,48 @@ describe("the backfill is deterministic, idempotent, and agrees with the routes"
     const once = { ...item, supportClass: classifyExistingItem(item).supportClass };
     expect(needsReclassification(once)).toBe(false);
     expect(classifyExistingItem(once).supportClass).toBe(classifyExistingItem(item).supportClass);
+  });
+});
+
+describe("the safeguards a decision triggers do not depend on which button produced it", () => {
+  const deps = () => {
+    const calls: string[] = [];
+    return {
+      calls,
+      deps: {
+        generateReviews: async () => { calls.push("generateReviews"); },
+        persistCaseValidation: async () => { calls.push("validation"); },
+        persistCaseReasoning: async () => { calls.push("reasoning"); },
+        refreshCaseAttestations: async () => { calls.push("attestations"); },
+      },
+    };
+  };
+
+  it("runs every refresh, in order", async () => {
+    const { calls, deps: d } = deps();
+    const r = await refreshAfterReview(d, "case-1", "firm-1");
+    expect(calls).toEqual(["generateReviews", "validation", "reasoning", "attestations"]);
+    expect(r.failed).toEqual([]);
+  });
+
+  it("reports a failing refresh instead of swallowing it", async () => {
+    // Three of these used a bare `.catch(() => {})`, so a validation pass could
+    // fail silently forever.
+    const { calls, deps: d } = deps();
+    d.persistCaseValidation = async () => { throw new Error("db down"); };
+    const r = await refreshAfterReview(d, "case-1", "firm-1");
+    expect(r.failed).toEqual(["validation"]);
+    // …and one failure does not prevent the rest, or undo a durable decision.
+    expect(calls).toContain("reasoning");
+    expect(calls).toContain("attestations");
+  });
+
+  it("marks a review decision so the reasoning pass records a fresh verdict", async () => {
+    let opts: Record<string, unknown> = {};
+    const { deps: d } = deps();
+    d.persistCaseReasoning = async (_c: string, _f: string, o: Record<string, unknown>) => { opts = o; };
+    await refreshAfterReview(d, "case-1", "firm-1", { recommendationIds: ["i-1"], actorUserId: "u-1" });
+    expect(opts.reviewDecision).toBe(true);
+    expect(opts.recommendationIds).toEqual(["i-1"]);
   });
 });
