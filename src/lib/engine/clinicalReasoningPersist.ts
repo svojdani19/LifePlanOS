@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db";
 import { Prisma } from "@/generated/prisma";
 import { deriveWitnessAssessment, assessmentFromBasis, detectSetConflicts, type ReasoningAssessment, type ReasoningItem } from "@/lib/engine/clinicalReasoning";
+import { loadRecordedBases, BasisUnreadableError, type BasisStore } from "@/lib/engine/basisStore";
 import type { BasisRecord } from "@/lib/engine/recommendationBasis";
 import type { DossierCase, DossierChronoEvent, DossierCondition, DossierInterview } from "@/lib/engine/medicalNecessity";
 import type { CondInput } from "@/lib/engine/integrity";
@@ -147,9 +148,20 @@ export async function persistCaseReasoning(caseId: string, firmId: string, opts:
 
   // The recorded basis per item. The assessment must reason from the same
   // record the panel and the report render, not from its own rebuild.
-  const basisByItem = new Map<string, unknown>(
-    (((await prisma.recommendationBasis?.findMany({ where: { caseId } }).catch(() => [])) ?? []) as { futureCareItemId: string }[]).map((b) => [b.futureCareItemId, b]),
-  );
+  // If the basis store cannot be read, every item would fall through to the
+  // witness and be PERSISTED as the recorded assessment — re-derived content
+  // written into the role the record is supposed to occupy, on a case where the
+  // record may be perfectly intact. Refuse instead, and leave the existing rows
+  // alone; validation raises BASIS_UNREADABLE, which blocks a final export.
+  const basisLoad = await loadRecordedBases(prisma as unknown as BasisStore, caseId);
+  if (!basisLoad.readable) {
+    // Raise rather than return empty. Callers treat a thrown stage as failed,
+    // which is the truth; returning nothing would look like a clean run that
+    // simply had no work, and the next reader would take the absence of
+    // assessments at face value.
+    throw new BasisUnreadableError(caseId, basisLoad.reason);
+  }
+  const basisByItem = basisLoad.byItem;
 
   const existing = await prisma.clinicalReasoningAssessment.findMany({ where: { caseId, status: { not: "SUPERSEDED" } } });
   const byRec = new Map(existing.map((e) => [e.recommendationId, e]));

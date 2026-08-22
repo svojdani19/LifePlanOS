@@ -26,6 +26,7 @@ import { buildRecommendationDossier, type DossierCondition, type DossierChronoEv
 import { compareEvidenceSets, describeEvidenceSet, type EvidenceRowIdentity } from "@/lib/engine/evidenceSet";
 import { compareBasis, freqText, durationText, type BasisRecord } from "@/lib/engine/recommendationBasis";
 import { assembleBasis } from "@/lib/engine/basisAssembly";
+import { loadRecordedBases, type BasisStore } from "@/lib/engine/basisStore";
 import { itemIsSupported, supportClassOf, SUPPORT_LABEL, computePlanTotals } from "@/lib/engine/supportClass";
 import { deriveWitnessAssessment, assessmentFromBasis, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningItem, type ReasoningAssessment } from "@/lib/engine/clinicalReasoning";
 import { referencesFor, guidelineSourcesFor } from "@/lib/references/sources";
@@ -410,10 +411,13 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     select: { status: true, failure: true },
   }).catch(() => null)) ?? null) as { status: string; failure: string | null } | null;
 
-  // One recorded basis per item, loaded once.
-  const basisByItem = new Map<string, unknown>(
-    (((await prisma.recommendationBasis?.findMany({ where: { caseId } }).catch(() => [])) ?? []) as { futureCareItemId: string }[]).map((b) => [b.futureCareItemId, b]),
-  );
+  // One recorded basis per item, loaded once. An unreadable store is kept
+  // distinct from an empty one: the document says "no recorded basis exists"
+  // in the empty case, and that sentence must never be printed on the strength
+  // of a read that failed.
+  const basisLoad = await loadRecordedBases(prisma as unknown as BasisStore, caseId);
+  const basisByItem = basisLoad.readable ? basisLoad.byItem : new Map<string, unknown>();
+  const basisUnreadable = basisLoad.readable ? null : basisLoad.reason;
 
   const recordedByItem = new Map<string, typeof ledgerRows>();
   for (const r of ledgerRows) if (r.addedById == null) recordedByItem.set(r.futureCareItemId, [...(recordedByItem.get(r.futureCareItemId) ?? []), r]);
@@ -711,6 +715,23 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   }).catch(() => 0);
   const isDraft = integrity.blocking && openBlockingPersisted > 0;
   if (isDraft) body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 200, after: 200 }, children: [new TextRun({ text: "DRAFT — CONTAINS UNRESOLVED CRITICAL VALIDATION ISSUES · NOT FOR SERVICE", bold: true, size: 24, color: "B91C1C" })] }));
+  if (basisUnreadable) {
+    // Louder than the missing-basis banner, because less is known: with a
+    // missing basis we at least know what we do not have.
+    body.push(
+      new Paragraph({
+        spacing: { before: 120, after: 120 },
+        children: [
+          new TextRun({
+            text: "DRAFT — THE RECORDED BASIS FOR THIS PLAN COULD NOT BE READ · NOTHING BELOW IS CONFIRMED AGAINST THE RECORD · DO NOT RELY ON THIS DOCUMENT",
+            bold: true,
+            size: 20,
+            color: "B00020",
+          }),
+        ],
+      }),
+    );
+  }
   if (openBasisFindings > 0) {
     body.push(
       new Paragraph({

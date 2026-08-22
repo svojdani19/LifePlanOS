@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { loadRecordedBases, type BasisStore } from "@/lib/engine/basisStore";
 import { computePlanTotals } from "@/lib/engine/supportClass";
 import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
@@ -99,8 +100,13 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
   // answer to "what does this rest on". The panel compares it against what it
   // would derive now and DISCLOSES a divergence rather than silently preferring
   // either side.
-  const recommendationBases =
-    (await prisma.recommendationBasis?.findMany({ where: { caseId: c.id, firmId: c.firmId } }).catch(() => [])) ?? [];
+  //
+  // A failed read is NOT an empty result. Swallowed, it made the panel render
+  // every recommendation as though no basis had ever been recorded — on a case
+  // whose bases may be perfectly intact — and the reader had no way to tell.
+  const basisLoad = await loadRecordedBases(prisma as unknown as BasisStore, c.id);
+  const recommendationBases = basisLoad.readable ? [...basisLoad.byItem.values()] : [];
+  const basisUnreadable = basisLoad.readable ? null : basisLoad.reason;
 
   const evidenceRows = (await prisma.recommendationEvidence
     ?.findMany({
@@ -170,7 +176,7 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
         <ArrowLeft className="h-4 w-4" /> All Cases
       </Link>
       <CaseWorkspace
-        data={JSON.parse(JSON.stringify({ ...c, physicianEvidence, recordedEvidence, recommendationBases }))}
+        data={JSON.parse(JSON.stringify({ ...c, physicianEvidence, recordedEvidence, recommendationBases, basisUnreadable }))}
         assumptions={assumptions}
         totals={{ totalLifetime, totalPresentValue, planTotals }}
         permissions={caseAccess.platformAdminReadOnly ? [] : attorneyView ? ROLE_PERMISSIONS.ATTORNEY_REVIEWER : effectivePermissions}

@@ -57,6 +57,14 @@ vi.mock("@/lib/db", async () => {
         findMany: async () => [],
         count: async () => 0,
       },
+      // A real client always has this model. Omitting it from the double made
+      // the loader report the store UNREADABLE — which is now a distinct and
+      // much louder state than "this case has no recorded bases", and the right
+      // one for a stub that cannot answer. The golden case genuinely has none,
+      // so the double says so explicitly.
+      recommendationBasis: {
+        findMany: async () => [],
+      },
       // ── Professional-authority gate lookups (all served from the fixture so
       //    the REAL gate runs and authorizes the golden expert render) ────────
       futureCareItem: {

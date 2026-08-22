@@ -320,6 +320,21 @@ export function CaseWorkspace({
 
   return (
     <div>
+      {/* The recorded bases could not be READ — which is not the same as this
+          case having none. Swallowed, it rendered every recommendation as
+          though nothing had ever been recorded, on a case whose bases may be
+          intact, with nothing on screen to say otherwise. */}
+      {data.basisUnreadable ? (
+        <div className="mb-3 rounded-lg border border-red-300 bg-red-50 px-4 py-3">
+          <p className="text-sm font-semibold text-red-800">The recorded basis for this plan could not be read.</p>
+          <p className="mt-1 text-xs text-red-700">
+            Everything below is re-derived from the record as it stands now, and none of it has been checked against what was
+            recorded and approved. This is not a finding that these recommendations lack a recorded basis — that question was
+            never reached. Final export is blocked until the fault is resolved.
+          </p>
+          <p className="mt-1 font-mono text-[11px] text-red-600">{String(data.basisUnreadable)}</p>
+        </div>
+      ) : null}
       {/* ── Clinical workspace header (sticky) ─────────────────────────────── */}
       <div className="sticky top-0 z-30 -mx-6 border-b border-ink-200 bg-white/95 px-6 pt-3 backdrop-blur supports-[backdrop-filter]:bg-white/85">
         {/* Identity + actions */}
@@ -2293,6 +2308,9 @@ function assessmentForItem(it: AnyRec, data: AnyRec): ReasoningAssessment {
   const items = (data.futureCareItems ?? []) as ReasoningItem[];
   const { flags, replacedByActive } = detectSetConflicts(items);
   const live = { conflictFlags: flags.get(it.id) ?? [], physicianReviewStatus: (it.physicianStatus as string | undefined) ?? undefined };
+  // When the store could not be read, there is no basis to consume and the
+  // witness is all that remains — but the panel says so rather than presenting
+  // the fallback as though nothing had ever been recorded.
   const recorded = ((data.recommendationBases ?? []) as AnyRec[]).find((b) => b.futureCareItemId === it.id) as BasisRecord | undefined;
   const fromBasis = recorded ? assessmentFromBasis(recorded, live) : null;
   if (fromBasis) return fromBasis;

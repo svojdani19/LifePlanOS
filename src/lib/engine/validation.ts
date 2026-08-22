@@ -21,6 +21,7 @@ import { validateEvidenceQuality } from "./citationQuality";
 import { buildRecommendationDossier, validateRecommendationCompleteness, type DossierChronoEvent, type DossierCondition } from "./medicalNecessity";
 import { compareBasis } from "@/lib/engine/recommendationBasis";
 import { isBasisDivergenceFinding } from "@/lib/engine/basisReconciliation";
+import { loadRecordedBases, unreadableBasisFinding, type BasisStore } from "@/lib/engine/basisStore";
 import { assembleBasis } from "@/lib/engine/basisAssembly";
 import { CHRONOLOGY_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
 import { resolveRecommendationCondition } from "@/lib/engine/recommendationCondition";
@@ -87,11 +88,16 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
   // is explicitly resolved.
   const caseAssumptions = kase ? assumptionsFor(kase as never) : { lifeExpectancyYears: 40, discountRate: 0, medicalInflation: 0, geographicFactor: 1 };
 
-  const recordedBases = new Map<string, { basisHash?: string | null }>(
-    (((await prisma.recommendationBasis?.findMany({ where: { caseId } }).catch(() => [])) ?? []) as { futureCareItemId: string; basisHash: string }[])
-      .map((b) => [b.futureCareItemId, b]),
-  );
+  // An unreadable store is not an empty one. This loaded the bases with
+  // `.catch(() => [])`, so a failed read produced zero bases and the loop below
+  // emitted BASIS_MISSING for every item on the case — a statement about the
+  // record, made by code that never managed to read the record.
+  const basisLoad = await loadRecordedBases(prisma as unknown as BasisStore, caseId);
+  const recordedBases = basisLoad.readable
+    ? (basisLoad.byItem as Map<string, { basisHash?: string | null }>)
+    : new Map<string, { basisHash?: string | null }>();
   const basisFindings: { service: string; result: string; issue: string; severity: string; suggestion: string; exportBlocking: boolean }[] = [];
+  if (!basisLoad.readable) basisFindings.push(unreadableBasisFinding(basisLoad.reason));
 
   const completenessFindings = items.flatMap((it) => {
     // The CANONICAL resolver, not the raw stored link. `it.condition` is the
@@ -107,9 +113,9 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
     const service = (it as { service: string }).service;
     // The SAME assumptions the generator recorded from — otherwise the witness
     // differs on the projection inputs alone and every item reads stale.
-    // Through assembleBasis, the same entry point generation records with, so
-    // the witness and the record cannot differ merely in how they were built.
-    const check = compareBasis(
+    // Only when the store was readable. Comparing against a map we know is
+    // empty-because-broken would manufacture a divergence per item.
+    const check = !basisLoad.readable ? null : compareBasis(
       recordedBases.get(id) ?? null,
       assembleBasis({
         item: it as never,
@@ -121,7 +127,7 @@ export async function validateCase(caseId: string): Promise<CaseValidation> {
         assumptions: { ...caseAssumptions, pricedAt: (it as { pricedAt?: Date | null }).pricedAt?.toISOString() ?? null, conditionName: cond?.name ?? null },
       }),
     );
-    if (check.state !== "CURRENT") {
+    if (check && check.state !== "CURRENT") {
       basisFindings.push({
         service,
         // The divergence's OWN identity, in the result code.
