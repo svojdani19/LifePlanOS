@@ -24,18 +24,31 @@ const CHRONO: DossierChronoEvent[] = [
 ];
 const ASSUMPTIONS = { lifeExpectancyYears: 30, discountRate: 0.03, medicalInflation: 0.028, geographicFactor: 1.04, pricedAt: "2026-01-15T00:00:00.000Z", conditionName: CONDITION.name };
 
-const deps = vi.hoisted(() => ({ bases: [] as unknown[] }));
+// ONE mutable case, shared by every mocked reader.
+//
+// The previous version of this file called goldenCase() inside each mock, so
+// every read returned a FRESH object — and the tests mutated a throwaway copy.
+// The B sentinels never reached the mocked database, so the negative
+// assertions passed without ever being tested. `assertLiveHas` below exists so
+// that can never silently recur: each test proves the mutation is visible
+// through the mock before it renders anything.
+const deps = vi.hoisted(() => ({ bases: [] as unknown[], db: null as unknown as Record<string, unknown>, basisFindings: [] as { result: string }[] }));
 
 vi.mock("@/lib/db", async () => {
-  const { goldenCase, goldenAssessments, GOLDEN_CASE_ID } = await import("./goldenFixture");
+  const { GOLDEN_CASE_ID } = await import("./goldenFixture");
+  const live = () => deps.db as Record<string, unknown>;
   return {
     prisma: {
-      case: { findUniqueOrThrow: async () => goldenCase(), findFirst: async () => ({ id: GOLDEN_CASE_ID, firmId: "firm-golden" }) },
-      clinicalReasoningAssessment: { findMany: async () => goldenAssessments() },
-      validationFinding: { findMany: async () => [], count: async () => 0 },
-      futureCareItem: { findMany: async () => goldenCase().futureCareItems },
-      condition: { findMany: async () => goldenCase().conditions },
-      attestation: { findMany: async () => goldenCase().attestations },
+      case: { findUniqueOrThrow: async () => live(), findFirst: async () => ({ id: GOLDEN_CASE_ID, firmId: "firm-golden" }) },
+      clinicalReasoningAssessment: { findMany: async () => (live().clinicalReasoningAssessments as unknown[]) ?? [] },
+      validationFinding: {
+        findMany: async (args: { where?: { result?: { startsWith?: string } } }) =>
+          args?.where?.result?.startsWith === "BASIS_" ? deps.basisFindings : [],
+        count: async () => deps.basisFindings.length,
+      },
+      futureCareItem: { findMany: async () => live().futureCareItems as unknown[] },
+      condition: { findMany: async () => live().conditions as unknown[] },
+      attestation: { findMany: async () => live().attestations as unknown[] },
       user: { findFirst: async () => ({ id: "user-golden-md", role: "PHYSICIAN_REVIEWER" }) },
       userRoleAssignment: { findFirst: async () => null },
       userCredential: { findMany: async () => [{ category: "PHYSICIAN", status: "ORG_VERIFIED", expiresAt: null }] },
@@ -97,14 +110,39 @@ const recordA = (live: Record<string, unknown>, over: Record<string, unknown> = 
   return b;
 };
 
-beforeEach(() => { deps.bases = []; });
+/** The one object every mocked reader returns. Mutate THIS. */
+const liveItems = () => deps.db.futureCareItems as unknown as Record<string, unknown>[];
+const liveConditions = () => deps.db.conditions as unknown as Record<string, unknown>[];
+
+/**
+ * Prove the mutation actually reached the mocked database.
+ *
+ * Without this a negative assertion can pass because the sentinel was never
+ * stored — which is exactly how the earlier version of these tests reported
+ * success while testing nothing.
+ */
+async function assertLiveHas(sentinel: string) {
+  const { prisma } = await import("@/lib/db");
+  const rows = await (prisma as unknown as { futureCareItem: { findMany: () => Promise<unknown[]> } }).futureCareItem.findMany();
+  const conds = await (prisma as unknown as { condition: { findMany: () => Promise<unknown[]> } }).condition.findMany();
+  const blob = JSON.stringify([rows, conds, deps.db]);
+  expect(blob, `sentinel ${sentinel} must be visible through the mock before rendering`).toContain(sentinel);
+}
+
+beforeEach(async () => {
+  deps.bases = [];
+  deps.basisFindings = [];
+  const { goldenCase, goldenAssessments } = await import("./goldenFixture");
+  const gc = goldenCase() as unknown as Record<string, unknown>;
+  gc.clinicalReasoningAssessments = goldenAssessments();
+  deps.db = gc;
+});
 
 // ── A ───────────────────────────────────────────────────────────────────────
 
 describe("A: membership, counts and totals follow the RECORD, not the live rows", () => {
   it("an item the record excludes stays out however the live row reads", async () => {
-    const { goldenCase } = await import("./goldenFixture");
-    const live = goldenCase().futureCareItems as unknown as Record<string, unknown>[];
+    const live = liveItems();
     // The live rows are APPROVED and would be counted. The record says one of
     // them is a contingency — the inclusion decision the physician approved.
     deps.bases = live.map((l, i) =>
@@ -120,12 +158,11 @@ describe("A: membership, counts and totals follow the RECORD, not the live rows"
   });
 
   it("flipping every live status does not change what the record includes", async () => {
-    const { goldenCase } = await import("./goldenFixture");
-    const gc = goldenCase();
-    const live = gc.futureCareItems as unknown as Record<string, unknown>[];
+    const live = liveItems();
     deps.bases = live.map((l) => recordA(l));
     // Every live row is now REJECTED. The record still says included.
     for (const l of live) l.physicianStatus = "REJECTED";
+    await assertLiveHas("REJECTED");
     const text = await rendered();
     expect(text).toContain("SERVICE-A");
     // The endorsement column shows the RECORDED disposition.
@@ -133,11 +170,11 @@ describe("A: membership, counts and totals follow the RECORD, not the live rows"
   });
 
   it("the low/high range is derived from the recorded expected value", async () => {
-    const { goldenCase } = await import("./goldenFixture");
-    const live = goldenCase().futureCareItems as unknown as Record<string, unknown>[];
+    const live = liveItems();
     deps.bases = live.map((l) => recordA(l));
     // Live scenario columns are nonsense; the range must ignore them.
     for (const l of live) { l.lowCost = 777777; l.highCost = 888888; }
+    await assertLiveHas("777777");
     const text = await rendered();
     expect(text).not.toContain("$777,777");
     expect(text).not.toContain("$888,888");
@@ -152,9 +189,7 @@ describe("A: membership, counts and totals follow the RECORD, not the live rows"
 
 describe("B: every narrative field follows the record", () => {
   it("prints A's content and none of B's", async () => {
-    const { goldenCase } = await import("./goldenFixture");
-    const gc = goldenCase();
-    const live = gc.futureCareItems as unknown as Record<string, unknown>[];
+    const live = liveItems();
     deps.bases = live.map((l) => recordA(l));
     // Mutate every live field the report used to read.
     for (const l of live) {
@@ -163,9 +198,11 @@ describe("B: every narrative field follows the record", () => {
       l.pricingSource = "SENTINEL-B-PRICING";
       l.category = "MISC";
     }
-    for (const c of gc.conditions as unknown as Record<string, unknown>[]) {
+    for (const c of liveConditions()) {
       c.supportingRecords = "SENTINEL-B-RECORDS";
     }
+    await assertLiveHas("SENTINEL-B-MISSING-SUPPORT");
+    await assertLiveHas("SENTINEL-B-RECORDS");
     const text = await rendered();
 
     for (const s of ["NARRATIVE-A.", "PROBABILITY-A.", "CONTRADICTION-A", "UNKNOWN-A", "CHALLENGE-A", "CONFIDENCE-A", "LITERATURE-A", "EVIDENCE-A", "PRICING-A", "FUNCTION-A"]) {
@@ -187,19 +224,115 @@ describe("C: an incomplete basis says 'not recorded' and never reads the live ro
     ["assessmentBasis", (b: Record<string, unknown>) => { delete b.assessmentBasis; }],
     ["specification.service", (b: Record<string, unknown>) => { delete (b.specification as Record<string, unknown>).service; }],
   ])("removing %s never falls back to the live values", async (_label, mutate) => {
-    const { goldenCase } = await import("./goldenFixture");
-    const gc = goldenCase();
-    const live = gc.futureCareItems as unknown as Record<string, unknown>[];
+    const live = liveItems();
     deps.bases = live.map((l) => {
       const b = recordA(l);
       mutate(b);
       return b;
     });
     for (const l of live) l.service = "SENTINEL-B-SERVICE";
+    await assertLiveHas("SENTINEL-B-SERVICE");
 
     const text = await rendered();
     expect(text).toContain("not recorded");
-    // The live row is never consulted to cover the gap.
-    expect(text).not.toContain("SENTINEL-B-SERVICE");
+    // The live row is never consulted to fill or select report content.
+    //
+    // Appendix F is excluded, and only Appendix F: it is the integrity CHECK
+    // on the current record, it is now labelled as such, and naming the live
+    // recommendation is the whole point of a checker. Everywhere the plan
+    // speaks in its own voice, the live name must not appear.
+    const body = text.slice(0, text.indexOf("Appendix F"));
+    expect(body).not.toContain("SENTINEL-B-SERVICE");
+    // And the appendix says which state it is describing.
+    expect(text).toContain("reports the case as it stands NOW");
+  });
+});
+
+
+// ── Draft rendering under an incomplete basis ───────────────────────────────
+
+describe("the draft says which field is missing, and never prints B", () => {
+  it("a basis with specification removed renders 'not recorded' and no live service", async () => {
+    const live = liveItems();
+    deps.bases = live.map((l) => {
+      const b = recordA(l);
+      delete (b as Record<string, unknown>).specification;
+      return b;
+    });
+    for (const l of live) l.service = "SENTINEL-B-SERVICE";
+    await assertLiveHas("SENTINEL-B-SERVICE");
+
+    const text = await rendered();
+    const body = text.slice(0, text.indexOf("Appendix F"));
+    expect(body).toContain("not recorded");
+    expect(body).not.toContain("SENTINEL-B-SERVICE");
+  });
+
+  it("a basis with assessmentBasis removed prints no live-derived clinical reasoning", async () => {
+    const live = liveItems();
+    deps.bases = live.map((l) => {
+      const b = recordA(l);
+      delete (b as Record<string, unknown>).assessmentBasis;
+      return b;
+    });
+    // The live rows carry a distinctive residual-uncertainty string that the
+    // witness derivation would surface if the report re-derived reasoning.
+    for (const l of live) l.missingSupport = "SENTINEL-B-REASONING";
+    await assertLiveHas("SENTINEL-B-REASONING");
+
+    const text = await rendered();
+    const body = text.slice(0, text.indexOf("Appendix F"));
+    expect(body).not.toContain("SENTINEL-B-REASONING");
+  });
+
+  it("the integrity appendix lists the recorded-basis findings rather than claiming none", async () => {
+    // Appendix F must never announce "no integrity issues" while a basis
+    // finding is open. It is fed from persisted findings, which this mock
+    // returns empty — so the assertion is on the labelling that makes the
+    // distinction visible.
+    deps.bases = liveItems().map((l) => recordA(l));
+    const text = await rendered();
+    expect(text).toContain("Appendix F — Life Care Plan Integrity Check (current record)");
+    expect(text).toContain("reports the case as it stands NOW");
+  });
+});
+
+describe("the draft banner distinguishes the four basis states", () => {
+  const bannerFor = async (results: string[]) => {
+    deps.basisFindings = results.map((r) => ({ result: r }));
+    return rendered();
+  };
+
+  it("says NO RECORDED BASIS only for BASIS_MISSING", async () => {
+    const t = await bannerFor(["BASIS_MISSING:i-1:none->abc"]);
+    expect(t).toContain("WITH NO RECORDED BASIS");
+    expect(t).not.toContain("RECORDED BASIS IS INCOMPLETE");
+  });
+
+  it("says the basis no longer matches for BASIS_STALE", async () => {
+    expect(await bannerFor(["BASIS_STALE:i-1:aaa->bbb"])).toContain("NO LONGER MATCHES THE RECORD");
+  });
+
+  it("says incomplete, and what a reader will see, for BASIS_INCOMPLETE", async () => {
+    const t = await bannerFor(["BASIS_INCOMPLETE:i-1:deadbeef"]);
+    expect(t).toContain("RECORDED BASIS IS INCOMPLETE");
+    expect(t).toContain("NOT RECORDED");
+  });
+
+  it("says nothing was read for BASIS_UNREADABLE", async () => {
+    expect(await bannerFor(["BASIS_UNREADABLE"])).toContain("COULD NOT BE READ AT ALL");
+  });
+
+  it("names each kind when several are open", async () => {
+    const t = await bannerFor(["BASIS_MISSING:i-1:none->a", "BASIS_INCOMPLETE:i-2:beef"]);
+    expect(t).toContain("WITH NO RECORDED BASIS");
+    expect(t).toContain("RECORDED BASIS IS INCOMPLETE");
+  });
+
+  it("an open blocking basis finding alone makes the document a draft", async () => {
+    // isDraft required the live integrity engine to be blocking too, so a
+    // BASIS_INCOMPLETE finding could stand while the document rendered clean.
+    const t = await bannerFor(["BASIS_INCOMPLETE:i-1:deadbeef"]);
+    expect(t).toContain("DRAFT");
   });
 });

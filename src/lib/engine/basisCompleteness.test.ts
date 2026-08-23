@@ -48,8 +48,17 @@ const complete = () =>
 
 describe("the three states are distinguishable", () => {
   it("no basis at all is ABSENT — the only state where live values may render", () => {
-    for (const v of [null, undefined, "", 0]) {
+    for (const v of [null, undefined]) {
       expect(assessBasisCompleteness(v).state).toBe("ABSENT");
+    }
+  });
+
+  it("a malformed value is INCOMPLETE, never ABSENT", () => {
+    // ABSENT licenses the live-row fallback. Calling a malformed record absent
+    // would hand the report back to the live row on the strength of a defect —
+    // the opposite of what a corrupt basis should cause.
+    for (const v of ["", 0, "not-an-object", 42, true]) {
+      expect(assessBasisCompleteness(v).state, JSON.stringify(v)).toBe("INCOMPLETE");
     }
   });
 
@@ -234,5 +243,94 @@ describe("validation emits it, and the export gate acts on it", () => {
     expect(f.exportBlocking).toBe(true);
     expect(statusForFinding(f.result, [], undefined).status).toBe("OPEN");
     expect(statusForFinding(f.result, [], { status: "IGNORED", resolvedById: "u", resolvedAt: new Date() }).status).toBe("OPEN");
+  });
+});
+
+// ── Table-driven, from the schema itself ────────────────────────────────────
+
+describe("every material field, deleted one at a time", () => {
+  const del = (obj: Record<string, unknown>, path: string) => {
+    const parts = path.split(".");
+    let cur: Record<string, unknown> = obj;
+    for (const p of parts.slice(0, -1)) cur = cur[p] as Record<string, unknown>;
+    delete cur[parts[parts.length - 1]];
+  };
+
+  it("the schema covers substantially more than the original hand-written list", () => {
+    // The first version listed 33 dotted keys and omitted most of what the
+    // report and assessmentFromBasis actually dereference.
+    expect(REQUIRED_BASIS_PATHS.length).toBeGreaterThan(90);
+  });
+
+  it.each(REQUIRED_BASIS_PATHS.map((p) => [p]))("deleting %s yields INCOMPLETE with that exact path", (path) => {
+    const b = complete();
+    del(b as Record<string, unknown>, path);
+    const r = assessBasisCompleteness(b);
+    expect(r.state, path).toBe("INCOMPLETE");
+    // The path itself, or its parent when deleting the parent removes children.
+    expect(r.missing, path).toContain(path);
+  });
+
+  it("covers the fields the review named as omitted", () => {
+    for (const p of [
+      "probabilityBasis.statement",
+      "specification.supportingDiagnosis", "specification.responsibleSpecialty", "specification.cptCode",
+      "specification.unitCost", "specification.lifetimeCost", "specification.presentValue",
+      "specification.contingencyOnly", "specification.startTrigger", "specification.prerequisite",
+      "specification.earliestTiming", "specification.replacesService",
+      "projectionBasis.frequencyUnit", "projectionBasis.durationYears", "projectionBasis.pricingSourceId",
+      "projectionBasis.pricedAt", "projectionBasis.horizonYears", "projectionBasis.discountRate",
+      "projectionBasis.medicalInflation", "projectionBasis.geographicFactor",
+      "acceptedEvidence.functionalLimitations", "acceptedEvidence.priorTreatment", "acceptedEvidence.contrary",
+      "assessmentBasis.inclusionRationale", "assessmentBasis.residualUncertainty",
+      "assessmentBasis.confidenceExplanation", "assessmentBasis.functionalBasis",
+      "interventionId", "serviceFamily", "conditionId", "supportClass", "claimBasis", "producerVersion", "basisHash",
+    ]) {
+      expect(REQUIRED_BASIS_PATHS, p).toContain(p);
+    }
+  });
+
+  it("a MISSING nullable field is incomplete; an explicit null is complete", () => {
+    // The original listed nullable paths it never required, so a basis missing
+    // them reported COMPLETE and the report read the live row.
+    const missingIt = complete();
+    del(missingIt as Record<string, unknown>, "specification.cptCode");
+    expect(assessBasisCompleteness(missingIt).missing).toContain("specification.cptCode");
+
+    const explicitNull = complete();
+    explicitNull.specification.cptCode = null;
+    expect(assessBasisCompleteness(explicitNull).state).toBe("COMPLETE");
+  });
+});
+
+describe("wrong types are INCOMPLETE, and say so", () => {
+  it.each([
+    ["specification.service", 42],
+    ["specification.lifetimeQuantity", "twelve"],
+    ["specification.recordSupported", "yes"],
+    ["projectionBasis.isLifetime", "true"],
+    ["probabilityBasis.classification", 7],
+    ["assessmentBasis.frequencySupported", 1],
+  ])("%s of the wrong type", (path, bad) => {
+    const b = complete();
+    const parts = path.split(".");
+    let cur: Record<string, unknown> = b;
+    for (const p of parts.slice(0, -1)) cur = cur[p] as Record<string, unknown>;
+    cur[parts[parts.length - 1]] = bad;
+    const r = assessBasisCompleteness(b);
+    expect(r.state, path).toBe("INCOMPLETE");
+    expect(r.missing, path).toContain(`${path}<type>`);
+  });
+
+  it("an array field holding a non-array is malformed", () => {
+    const b = complete();
+    b.contradictions = "not an array";
+    expect(assessBasisCompleteness(b).missing).toContain("contradictions<type>");
+  });
+
+  it("an object field holding an array is malformed", () => {
+    const b = complete();
+    b.specification = [];
+    expect(assessBasisCompleteness(b).missing).toContain("specification<type>");
   });
 });

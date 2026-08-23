@@ -331,6 +331,24 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   // as "not recorded" and blocks a final export — it never falls through to the
   // live row, because the live row is precisely what the approval did not
   // cover.
+  /**
+   * The presentation category implied by a recorded service family.
+   *
+   * Deterministic and total: every family maps to a CareCategory the report
+   * already groups by and project() already prices. Falls back to the live
+   * category only when the record names no family at all, which the
+   * BASIS_INCOMPLETE finding is already blocking.
+   */
+  const FAMILY_CATEGORY: Record<string, CareCategory> = {
+    EVALUATION: "SPECIALIST_VISIT", IMAGING: "IMAGING", DIAGNOSTIC_PROCEDURE: "IMAGING",
+    THERAPY: "PHYSICAL_THERAPY", MEDICATION: "MEDICATION", INJECTION: "INJECTION",
+    SURGERY: "ORTHOPEDIC_SURGERY", EQUIPMENT: "DME", ATTENDANT_CARE: "ATTENDANT_CARE",
+    HOME_MODIFICATION: "HOME_MODIFICATION", TRANSPORT_COORDINATION: "TRANSPORTATION",
+    LAB_MONITORING: "LABS", COMPLICATION: "COMPLICATION_MANAGEMENT", OTHER: "MISC",
+  } as Record<string, CareCategory>;
+  const categoryForRecorded = (_intervention: string | null, family: string | null): CareCategory | null =>
+    family ? FAMILY_CATEGORY[family] ?? null : null;
+
   const NOT_RECORDED = "not recorded";
   const viewOf = (it: FutureCareItem) => {
     const raw = basisByItem.get(it.id) ?? null;
@@ -382,6 +400,11 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
       durationText: absent ? durationText(it, a.lifeExpectancyYears) : str(spec?.durationText),
       lifetimeQuantity: absent ? null : num(spec?.lifetimeQuantity),
       contingencyOnly: absent ? !!it.contingencyOnly : spec?.contingencyOnly === true,
+      recordSupported: absent ? null : spec?.recordSupported === true,
+      startTrigger: absent ? it.startTrigger : str(spec?.startTrigger),
+      prerequisite: absent ? it.prerequisite : str(spec?.prerequisite),
+      earliestTiming: absent ? it.earliestTiming : str(spec?.earliestTiming),
+      replacesService: absent ? it.replacesService : str(spec?.replacesService),
       pricingSource: absent ? it.pricingSource : str(proj?.pricingSourceId),
 
       /** Recorded projection inputs, for the sensitivity re-projection. */
@@ -415,6 +438,21 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
       evidenceStrength: absent ? null : str(m?.evidenceStrength),
       recommendationConfidence: absent ? null : str(m?.recommendationConfidence),
       inclusionRationale: absent ? null : str(m?.inclusionRationale),
+      /**
+       * Presentation category. Derived from the RECORDED intervention identity
+       * through the ontology, never from the live category column — which
+       * otherwise silently decided section placement, category counts, the
+       * references list and the sensitivity projection.
+       *
+       * project() is keyed on CareCategory, so the mapping goes back through
+       * the same ontology that produced the family, keeping the projection
+       * compatible.
+       */
+      category: absent
+        ? (it.category as CareCategory)
+        : (categoryForRecorded(str(b.interventionId), str(b.serviceFamily)) ?? (it.category as CareCategory)),
+      recordedIntervention: absent ? null : str(b.interventionId),
+      recordedFamily: absent ? null : str(b.serviceFamily),
     };
   };
 
@@ -433,7 +471,6 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
 
   const a = assumptionsFor(c);
   const items = c.futureCareItems;
-  const accepted = items.filter((i) => i.physicianStatus === "APPROVED" || i.physicianStatus === "MODIFIED");
   // ── Integrity / correction layer ───────────────────────────────────────────
   // A deterministic check maps each recommendation to the correct diagnosis by
   // body region, validates its coding/pricing, and decides — honestly — whether
@@ -498,7 +535,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   const templateLabel = template === "DEFENSE" ? "Defense Medical Review" : template === "NEUTRAL" ? "Neutral Medical Evaluation" : "Life Care Plan";
   const docById = new Map(c.documents.map((d) => [d.id, d]));
   const condById = new Map(c.conditions.map((x) => [x.id, x]));
-  const catCount = new Set(reportItems.map((i) => i.category)).size;
+  const catCount = new Set(reportItems.map((i) => vw(i).category)).size;
   // ── Professional voice ──────────────────────────────────────────────────────
   // First-person expert language, professional credentials, and a signature
   // block appear ONLY when the professional-authority gate verifies a current
@@ -618,11 +655,13 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     // statement. It was rendered from the live row BEFORE the basis was even
     // loaded, so a renamed service printed under a recorded narrative about the
     // old one.
-    const spec0 = recordedBasis?.specification ?? null;
+    // Through the view. `spec0 ? … : it.service` printed the live name whenever
+    // a basis existed but carried no specification — the exact fallback-on-a-
+    // subfield this pass removes.
     out.push(new Paragraph({
       spacing: { before: 260, after: 60 },
       keepNext: true,
-      children: [new TextRun({ text: spec0 ? spec0.service : it.service, bold: true, size: 22, color: NAVY })],
+      children: [new TextRun({ text: V.service ?? NOT_RECORDED, bold: true, size: 22, color: NAVY })],
     }));
 
     // Spec table — frequency, duration, lifetime quantity, cost, coding, status.
@@ -632,34 +671,15 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     // basis is recorded the grid falls back to current values AND the document
     // is a labelled draft that cannot be finally exported, because
     // BASIS_MISSING is an export-blocking finding.
-    const spec = spec0;
     const years = it.isLifetime ? life : it.durationYears ?? 0;
     const liveLifetimeQty = Math.round(it.frequencyPerYear * Math.max(0, years)) || (years === 0 ? 1 : 0);
-    // When a basis exists it supplies EVERY row. A recorded null means the
-    // value was not recorded, and it renders as such — falling through to the
-    // live row on a null was the same defect in miniature, and it fired exactly
-    // where the record was weakest. `NOT_RECORDED` never reads as a value.
-    const asRecorded = <T,>(v: T | null | undefined, render: (x: T) => string): string =>
-      v === null || v === undefined ? NOT_RECORDED : render(v);
+    // ONE branch, on basis absence. The two-branch version switched on whether
+    // a specification existed, so a partial basis printed live values in some
+    // cells and `undefined` in others.
     out.push(
       specGrid(
-        spec
+        noBasis
           ? [
-              ["Supporting diagnosis", asRecorded(spec.supportingDiagnosis, (x) => x)],
-              ["Specialty", asRecorded(spec.responsibleSpecialty, (x) => x)],
-              ["Frequency", spec.frequencyText],
-              ["Duration", spec.durationText],
-              ["Lifetime quantity", spec.lifetimeQuantity > 0 ? `${spec.lifetimeQuantity}` : "one-time"],
-              ["CPT", asRecorded(spec.cptCode, (x) => x)],
-              ["Unit cost", asRecorded(spec.unitCost, money)],
-              ["Projected lifetime cost", asRecorded(spec.lifetimeCost, (x) => `${money(x)} (inflation-adjusted)`)],
-              ["Present value", asRecorded(spec.presentValue, money)],
-              ["Physician review", reviewLabel(spec.physicianStatus, spec.recordSupported)],
-            ]
-          : [
-              // No basis at all. Every value below is the record as it stands
-              // now, and the document is a labelled draft that cannot be
-              // finally exported — BASIS_MISSING is export-blocking.
               ["Supporting diagnosis", dxName],
               ["Specialty", it.specialty || "—"],
               ["Frequency", freqText(it)],
@@ -670,12 +690,21 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
               ["Projected lifetime cost", `${money(it.lifetimeCost)} (inflation-adjusted)`],
               ["Present value", money(it.presentValue)],
               ["Physician review", reviewLabel(it.physicianStatus, recordSupport)],
+            ]
+          : [
+              ["Supporting diagnosis", V.supportingDiagnosis ?? NOT_RECORDED],
+              ["Specialty", V.specialty ?? NOT_RECORDED],
+              ["Frequency", V.frequencyText ?? NOT_RECORDED],
+              ["Duration", V.durationText ?? NOT_RECORDED],
+              ["Lifetime quantity", V.lifetimeQuantity === null ? NOT_RECORDED : V.lifetimeQuantity > 0 ? `${V.lifetimeQuantity}` : "one-time"],
+              ["CPT", V.cptCode ?? NOT_RECORDED],
+              ["Unit cost", vMoney(V.unitCost)],
+              ["Projected lifetime cost", V.lifetimeCost === null ? NOT_RECORDED : `${money(V.lifetimeCost)} (inflation-adjusted)`],
+              ["Present value", vMoney(V.presentValue)],
+              ["Physician review", V.physicianStatus === null ? NOT_RECORDED : reviewLabel(V.physicianStatus, V.recordSupported ?? false)],
             ],
       ),
     );
-    // Same rule: with a basis on file the recorded narrative is the narrative,
-    // empty or not. `||` silently replaced a recorded-but-blank narrative with
-    // a freshly derived one.
     const necessityText = noBasis ? dossier.medicalNecessity : V.necessityNarrative ?? NOT_RECORDED;
 
     // Medical necessity — the physician narrative (why, patient-specific).
@@ -814,9 +843,11 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
 
     // Staged / conditional (§10) — trigger, prerequisite, timing, and whether it
     // replaces another recommendation or is a contingency only.
-    const sc = spec ?? {
-      startTrigger: it.startTrigger, prerequisite: it.prerequisite, earliestTiming: it.earliestTiming,
-      replacesService: it.replacesService, contingencyOnly: it.contingencyOnly,
+    // `spec ?? live` reintroduced the fallback for a basis with no
+    // specification. Through the view, keyed on absence.
+    const sc = {
+      startTrigger: V.startTrigger, prerequisite: V.prerequisite, earliestTiming: V.earliestTiming,
+      replacesService: V.replacesService, contingencyOnly: V.contingencyOnly,
     };
     const staged = [
       sc.startTrigger && `Trigger: ${sc.startTrigger}`,
@@ -901,7 +932,16 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
           : cnote.relationship === "sequential" ? "is sequenced with"
           : cnote.relationship === "duplicate" ? "overlaps with"
           : "relates to";
-      const uniq = [...new Set(cnote.conflictsWith)];
+      // conflictsWith holds the OTHER items' live service names. Printed raw,
+      // a recorded recommendation announced a conflict with a name the plan
+      // does not use. Translated through the view, so both sides of the
+      // sentence come from the record.
+      const uniq = [...new Set(cnote.conflictsWith)].map((svc) => {
+        const other = items.find((x) => x.service === svc);
+        if (!other) return svc;
+        const ov = vw(other);
+        return ov.basisState === "ABSENT" ? svc : ov.service ?? NOT_RECORDED;
+      });
       out.push(labeled("Recommendation consistency", `This recommendation ${rel} ${uniq.join(", ")}.${cnote.resolution ? ` ${cnote.resolution}` : ""}`));
     }
     return out;
@@ -921,10 +961,28 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   // A basis problem is not just "an unresolved finding" — it means the document
   // may not describe the plan on file. Counted separately so the cover can say
   // so in those words.
-  const openBasisFindings = await prisma.validationFinding.count({
-    where: { caseId, status: "OPEN", result: { startsWith: "BASIS_" } },
-  }).catch(() => 0);
-  const isDraft = integrity.blocking && openBlockingPersisted > 0;
+  // Counted BY KIND. One banner said every BASIS_* item had "NO CURRENT
+  // RECORDED BASIS", which is true only of BASIS_MISSING — a stale basis has
+  // one that has drifted, an incomplete one has a basis that cannot answer, and
+  // an unreadable store means nothing was compared at all. Three different
+  // things for a reader to do, announced identically.
+  const openBasisRows = (await prisma.validationFinding
+    .findMany({ where: { caseId, status: "OPEN", result: { startsWith: "BASIS_" } }, select: { result: true } })
+    .catch(() => [])) as { result: string }[];
+  const openBasisFindings = openBasisRows.length;
+  const countOf = (prefix: string) => openBasisRows.filter((r) => r.result === prefix || r.result.startsWith(`${prefix}:`)).length;
+  const basisKindCounts = {
+    missing: countOf("BASIS_MISSING"),
+    stale: countOf("BASIS_STALE"),
+    incomplete: countOf("BASIS_INCOMPLETE"),
+    unreadable: countOf("BASIS_UNREADABLE"),
+  };
+  // ANY open export-blocking finding makes this a draft. This required the
+  // live integrity engine to be blocking as well — but a BASIS_INCOMPLETE,
+  // BASIS_STALE or BASIS_UNREADABLE finding can be open and blocking while the
+  // live engine is perfectly clean, so the document skipped its watermark and
+  // rendered in expert voice while an unresolved basis defect stood.
+  const isDraft = openBlockingPersisted > 0;
   if (isDraft) body.push(new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 200, after: 200 }, children: [new TextRun({ text: "DRAFT — CONTAINS UNRESOLVED CRITICAL VALIDATION ISSUES · NOT FOR SERVICE", bold: true, size: 24, color: "B91C1C" })] }));
   // Stated ONCE for the case, wherever the plan's own limitations are set out.
   if (coverage.text) {
@@ -955,7 +1013,15 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
         spacing: { before: 60, after: 200 },
         children: [
           new TextRun({
-            text: `DRAFT — ${openBasisFindings} RECOMMENDATION${openBasisFindings === 1 ? "" : "S"} HAVE NO CURRENT RECORDED BASIS · CONTENT MAY NOT MATCH THE PLAN ON FILE · REGENERATE BEFORE RELIANCE`,
+            text: (() => {
+              const parts: string[] = [];
+              if (basisKindCounts.missing) parts.push(`${basisKindCounts.missing} WITH NO RECORDED BASIS`);
+              if (basisKindCounts.stale) parts.push(`${basisKindCounts.stale} WHOSE RECORDED BASIS NO LONGER MATCHES THE RECORD`);
+              if (basisKindCounts.incomplete) parts.push(`${basisKindCounts.incomplete} WHOSE RECORDED BASIS IS INCOMPLETE — AFFECTED VALUES SHOW AS "NOT RECORDED"`);
+              if (basisKindCounts.unreadable) parts.push("THE RECORDED BASES COULD NOT BE READ AT ALL");
+              const detail = parts.length ? parts.join(" · ") : `${openBasisFindings} RECOMMENDATION(S) WITH AN UNRESOLVED RECORDED-BASIS FINDING`;
+              return `DRAFT — ${detail} · CONTENT MAY NOT MATCH THE PLAN ON FILE · REGENERATE BEFORE RELIANCE`;
+            })(),
             bold: true,
             size: 22,
             color: "B91C1C",
@@ -1027,7 +1093,30 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     ]),
   );
   // §6 — an honest accounting of review status; does not imply universal sign-off.
-  const ic = integrity.counts;
+  // Review counts from the RECORDED views wherever a basis exists. These came
+  // from the live integrity engine, so a status changed after approval moved
+  // the "approved" and "awaiting" counts in an executive summary that sits
+  // above a plan rendered from the record.
+  const basisBacked = items.filter((i) => vw(i).basisState !== "ABSENT");
+  const anyBasis = basisBacked.length > 0;
+  const ic = anyBasis
+    ? {
+        proposed: items.length,
+        recordSupported: items.filter((i) => (vw(i).basisState === "ABSENT" ? itemIsSupported(i as never) : vw(i).recordSupported === true)).length,
+        physicianApproved: items.filter((i) => {
+          const st = vw(i).basisState === "ABSENT" ? i.physicianStatus : vw(i).physicianStatus;
+          return st === "APPROVED" || st === "MODIFIED";
+        }).length,
+        awaitingReview: items.filter((i) => {
+          const st = vw(i).basisState === "ABSENT" ? i.physicianStatus : vw(i).physicianStatus;
+          return st === "PENDING" || st === null;
+        }).length,
+        excluded: items.filter((i) => !includedByRecord(i)).length,
+      }
+    : integrity.counts;
+  // When nothing is basis-backed the counts describe the current record, and
+  // the sentence says so rather than implying an approved position.
+  if (!anyBasis) body.push(p("The counts below describe the case as it currently stands; no recorded basis is on file for these recommendations.", { italics: true, size: BODY }));
   body.push(
     p(
       `Of ${ic.proposed} recommendation${ic.proposed === 1 ? "" : "s"} proposed, ${ic.recordSupported} ${ic.recordSupported === 1 ? "is" : "are"} supported in the treating records and ${ic.physicianApproved} ${ic.physicianApproved === 1 ? "has" : "have"} been formally approved on physician review; ${ic.awaitingReview} ${ic.awaitingReview === 1 ? "remains" : "remain"} awaiting physician confirmation. ${ic.excluded === 0 ? "All proposed items met the threshold for inclusion in the total." : `${ic.excluded} item${ic.excluded === 1 ? " was" : "s were"} not included in the total pending further support, coding correction, or physician review, and ${ic.excluded === 1 ? "is" : "are"} disclosed in the Limitations.`}`,
@@ -1384,7 +1473,10 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   );
   if (!reportItems.length) body.push(p(reviewStarted ? "No future-care items have been endorsed on physician review." : "No future-care recommendations have been generated for this case.", { italics: true }));
   for (const g of CATEGORY_GROUPS) {
-    const groupItems = reportItems.filter((i) => g.cats.includes(i.category));
+    // Grouped by the RECORDED category. The live column decided section
+            // placement, so re-categorising an item after approval moved it to a
+            // different part of the plan than the one that was approved.
+    const groupItems = reportItems.filter((i) => g.cats.includes(vw(i).category));
     if (!groupItems.length) continue;
     body.push(h2(g.title));
     for (const it of groupItems) body.push(...careRecommendation(it));
@@ -1404,7 +1496,10 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     ]),
   ];
   for (const g of CATEGORY_GROUPS) {
-    const groupItems = reportItems.filter((i) => g.cats.includes(i.category));
+    // Grouped by the RECORDED category. The live column decided section
+            // placement, so re-categorising an item after approval moved it to a
+            // different part of the plan than the one that was approved.
+    const groupItems = reportItems.filter((i) => g.cats.includes(vw(i).category));
     if (!groupItems.length) continue;
     lcpRows.push(rowOf([td(g.title, { bold: true, fill: SOFT }), td("", { fill: SOFT }), td("", { fill: SOFT }), td("", { fill: SOFT }), td("", { fill: SOFT }), td("", { fill: SOFT })]));
     groupItems.forEach((i, k) => {
@@ -1464,10 +1559,10 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     // Null only when a basis exists and records no projection — in which case
     // there is nothing honest to re-project, and the BASIS_INCOMPLETE finding
     // is already blocking the export.
-    return pj ?? { category: it.category, unitCost: 0, frequencyPerYear: 0, durationYears: null, isLifetime: false };
+    return pj ?? { unitCost: 0, frequencyPerYear: 0, durationYears: null, isLifetime: false };
   };
   const pvUnder = (disc: number, infl: number) =>
-    reportItems.reduce((s, it) => s + project({ category: it.category, ...pvInputs(it) }, { lifeExpectancyYears: life, discountRate: disc, medicalInflation: infl, geographicFactor: 1 }).presentValue, 0);
+    reportItems.reduce((s, it) => s + project({ category: vw(it).category, ...pvInputs(it) }, { lifeExpectancyYears: life, discountRate: disc, medicalInflation: infl, geographicFactor: 1 }).presentValue, 0);
   const sens: TableRow[] = [rowOf([td("Discount ↓ / Inflation →", { header: true, width: 28 }), ...infls.map((inf) => td(`${(inf * 100).toFixed(1)}%`, { header: true, width: 24, align: AlignmentType.RIGHT }))])];
   for (const disc of discs) {
     sens.push(
@@ -1529,7 +1624,15 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
         : `This report is based upon the records and information available at the time of its preparation. Should additional records, diagnostic studies, examinations, or physician opinions become available, the reviewing professional may supplement or revise the plan accordingly.`,
     ),
   );
-  const speculative = reportItems.filter((i) => i.probability === "SPECULATIVE" || i.probability === "NOT_SUPPORTED");
+  // Recorded probability decides membership. Live `probability` and
+  // `missingSupport` selected and explained these, so an item could be listed
+  // as speculative under a recorded narrative that called it probable.
+  const speculative = reportItems.filter((i) => {
+    const v = vw(i);
+    if (v.basisState === "ABSENT") return i.probability === "SPECULATIVE" || i.probability === "NOT_SUPPORTED";
+    const pc = (v.probabilityClassification ?? "").toUpperCase();
+    return pc.includes("SPECULATIVE") || pc.includes("NOT_SUPPORTED") || pc.includes("INSUFFICIENT");
+  });
   if (speculative.length || excludedForReview.length) {
     body.push(
       p(
@@ -1538,7 +1641,11 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
           : `The following contingencies are foreseeable but are not identified by the record-supported analysis as more likely than not to be required. They are disclosed for completeness and are excluded from the totals stated above:`,
       ),
     );
-    for (const i of speculative) body.push(bullet(`${vw(i).service ?? "not recorded"}${i.missingSupport ? ` — ${lc(i.missingSupport)}` : ""}.`));
+    for (const i of speculative) {
+      const v = vw(i);
+      const why = v.basisState === "ABSENT" ? i.missingSupport : v.missingSupport;
+      body.push(bullet(`${v.service ?? NOT_RECORDED}${why ? ` — ${lc(why)}` : ""}.`));
+    }
     for (const i of excludedForReview) {
       const v = vw(i);
       // An incomplete basis cannot say why the item is out, and guessing
@@ -1617,7 +1724,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   body.push(h1("Appendix A — References Relied Upon", { pageBreak: true }));
   // Only the sources this plan actually relied upon: the guideline/evidence and
   // pricing sources for the care categories present, plus the methodology texts.
-  const planCategories = [...new Set(reportItems.map((i) => i.category as CareCategory))];
+  const planCategories = [...new Set(reportItems.map((i) => vw(i).category))];
   referencesFor(planCategories, { includeGuidelines: true }).forEach((s) => body.push(bullet(s.citation)));
   METHODOLOGY_REFS.forEach((r) => body.push(bullet(r)));
 
@@ -1703,9 +1810,28 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   for (const [q, ans] of daubert) body.push(new Paragraph({ spacing: { after: 90, line: 288 }, alignment: AlignmentType.JUSTIFIED, children: [new TextRun({ text: `${q}.  `, bold: true, size: BODY, color: NAVY }), new TextRun({ text: ans, size: BODY, color: INK })] }));
 
   // ══ APPENDIX F — LIFE CARE PLAN INTEGRITY CHECK ══════════════════════════════
-  body.push(h1("Appendix F — Life Care Plan Integrity Check", { pageBreak: true }));
+  body.push(h1("Appendix F — Life Care Plan Integrity Check (current record)", { pageBreak: true }));
   body.push(p(`Before export, each recommendation is validated for diagnosis/region mapping, coding and pricing consistency, record and physician support, and inclusion in the total. Items with an unresolved critical issue are excluded from the total and, where noted, block final export until corrected.`));
-  if (!integrity.findings.length) {
+  // Says which state it describes. This appendix reports the CURRENT record —
+  // it is a checker, and naming the live recommendation is the point of it —
+  // but the rest of the document renders from the recorded basis, so a reader
+  // comparing the two needs to be told they are different questions.
+  body.push(p(`This appendix reports the case as it stands NOW. The recommendations elsewhere in this report render from each item's recorded basis, so a name or value here may differ from the body above; where it does, the basis findings below say so.`, { italics: true }));
+  // Persisted basis findings belong here too. They are recorded, not
+  // re-derived, so the integrity engine does not produce them — and without
+  // them this appendix could announce "no integrity issues" while a
+  // BASIS_INCOMPLETE, BASIS_STALE or BASIS_UNREADABLE finding was open and
+  // blocking the export.
+  const persistedBasisFindings = (await prisma.validationFinding
+    .findMany({ where: { caseId, status: "OPEN", result: { startsWith: "BASIS_" } }, select: { service: true, result: true, issue: true, severity: true, suggestion: true } })
+    .catch(() => [])) as { service: string; result: string; issue: string; severity: string; suggestion: string }[];
+  if (persistedBasisFindings.length) {
+    body.push(p(`Recorded-basis findings (${persistedBasisFindings.length}) — these concern the relationship between this plan and the basis on file, and each blocks a final export until resolved:`, { bold: true }));
+    for (const f of persistedBasisFindings) {
+      body.push(bullet(`${f.service} — ${f.result}. ${f.issue}`));
+    }
+  }
+  if (!integrity.findings.length && !persistedBasisFindings.length) {
     body.push(p("No integrity issues were identified. Every recommendation is region-matched, consistently coded and priced, and supported for inclusion.", { italics: true }));
   } else {
     const RED = "B91C1C";
@@ -1753,11 +1879,23 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
       });
       body.push(table(gRows));
     }
-    const disclosed = items.filter((i) => !perItemOf(i).includedInTotal);
+    // The RECORDED inclusion state, matching the plan the rest of the document
+    // renders. perItemOf re-derives from the live row, so this appendix could
+    // disclose a different excluded set than the one the totals reflected.
+    const disclosed = items.filter((i) => !includedByRecord(i));
     if (disclosed.length) {
       body.push(h2("Contingency and excluded recommendations"));
       body.push(p("The following recommendations are disclosed but not entered into the totals of this draft (contingent, staged, or insufficiently supported at this time):"));
-      for (const d of disclosed) body.push(bullet(`${d.service} — ${perItemOf(d).classify.status.replace(/_/g, " ").toLowerCase()}`));
+      for (const d of disclosed) {
+        const v = vw(d);
+        const reason =
+          v.basisState === "INCOMPLETE"
+            ? `inclusion ${NOT_RECORDED} — the recorded basis is incomplete`
+            : v.basisState === "ABSENT"
+              ? perItemOf(d).classify.status.replace(/_/g, " ").toLowerCase()
+              : (v.inclusionStatus ?? NOT_RECORDED).replace(/_/g, " ").toLowerCase();
+        body.push(bullet(`${v.service ?? NOT_RECORDED} — ${reason}`));
+      }
     }
   }
 

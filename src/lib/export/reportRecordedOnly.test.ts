@@ -102,7 +102,7 @@ describe("the renderer reads the record, and never falls through to the live row
 
   it("the heading is rendered AFTER the basis loads, from the recorded service", async () => {
     const src = await read();
-    const headingAt = src.indexOf("spec0 ? spec0.service : it.service");
+    const headingAt = src.indexOf("text: V.service ?? NOT_RECORDED, bold: true, size: 22");
     const basisAt = src.indexOf("const recordedBasis = basisByItem.get(it.id)");
     expect(headingAt).toBeGreaterThan(-1);
     expect(basisAt).toBeGreaterThan(-1);
@@ -371,7 +371,8 @@ describe("the WHOLE document prints A, including totals, schedules and appendice
       return readFileSync(join(__dirname, "report.ts"), "utf8");
     })();
     expect(src).toMatch(/const pvInputs = \(it: FutureCareItem\)/);
-    expect(src).toMatch(/project\(\{ category: it\.category, \.\.\.pvInputs\(it\) \}/);
+    // The category comes from the view too now, not the live column.
+    expect(src).toMatch(/project\(\{ category: vw\(it\)\.category, \.\.\.pvInputs\(it\) \}/);
     // And the inputs come from the view, which is keyed on basis existence.
     expect(src).toMatch(/const pj = vw\(it\)\.projection;/);
   });
