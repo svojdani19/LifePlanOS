@@ -1,3 +1,11 @@
+import { SERVICE_FAMILIES } from "@/lib/engine/serviceOntology";
+import { SUPPORT_CLASSES } from "@/lib/engine/supportClass";
+import {
+  PROBABILITY_CLASSIFICATIONS,
+  EVIDENCE_STRENGTHS,
+  RECOMMENDATION_CONFIDENCES,
+  DURATION_CLASSES as REASONING_DURATION_CLASSES,
+} from "@/lib/engine/clinicalReasoning";
 /**
  * Is a persisted basis actually usable as the authority for a report?
  *
@@ -50,18 +58,61 @@ interface FieldSpec {
   type: Prim | "array" | "object";
   /** May the recorded value be null? An ABSENT key is never acceptable. */
   nullable?: boolean;
+  /**
+   * Element schema for arrays.
+   *
+   * The first version validated only that a field WAS an array, on the
+   * reasoning that its elements came from the same builder that produced the
+   * record. That mistook where the data comes from: this validator's input is a
+   * row read back from the database, which can be legacy, hand-edited, or
+   * written by an older producer. `[null]` reached `f.present`, `x.text`,
+   * `l.authors`, `g.title` and `.rationale` — five live crash paths — and a
+   * malformed contradiction printed as [object Object].
+   */
+  element?: FieldSpec;
   /** For objects: the nested shape. */
   shape?: Record<string, FieldSpec>;
+  /**
+   * Allowed values for a material enum.
+   *
+   * A type check cannot see that "maybe" is not an inclusion status. An
+   * arbitrary string here changes membership or makes a label lookup render
+   * undefined, both silently.
+   */
+  values?: readonly string[];
 }
 
 const s_ = (nullable = false): FieldSpec => ({ type: "string", nullable });
 const n_ = (nullable = false): FieldSpec => ({ type: "number", nullable });
 const b_ = (nullable = false): FieldSpec => ({ type: "boolean", nullable });
-// Arrays are checked for presence and array-ness. Element shapes are NOT
-// validated here: the elements this record holds are produced by the same
-// builder that produces the record, so a per-element check would test the
-// builder against itself rather than the persisted row against the reader.
-const arr_ = (): FieldSpec => ({ type: "array" });
+const enum_ = (values: readonly string[], nullable = false): FieldSpec => ({ type: "string", nullable, values });
+const arr_ = (element?: FieldSpec): FieldSpec => ({ type: "array", element });
+const obj_ = (shape: Record<string, FieldSpec>, nullable = false): FieldSpec => ({ type: "object", nullable, shape });
+
+/** An evidence row as the report renders it. */
+const EVIDENCE_ROW = obj_({ text: s_(), source: s_(true) });
+/** A literature citation as the report prints it. */
+const LITERATURE_ROW = obj_({
+  title: s_(), journal: s_(true), year: s_(true), authors: s_(true),
+  pmid: s_(true), doi: s_(true), studyType: s_(), supports: s_(), limitations: s_(true),
+});
+/** Full provenance for one accepted row. */
+const PROVENANCE_ROW = obj_({
+  claim: s_(), stance: s_(), strength: s_(), sourceKind: s_(),
+  documentId: s_(true), encounterId: s_(true), chronologyEventId: s_(true),
+  page: n_(true), field: s_(true), verbatim: b_(), sourceFingerprint: s_(true), textHash: s_(),
+});
+
+// Domain values, imported from the modules that own them so the validator and
+// the producers cannot drift apart.
+const FAMILIES: readonly string[] = SERVICE_FAMILIES;
+const SUPPORT_CLASS_VALUES: readonly string[] = SUPPORT_CLASSES;
+const INCLUSION_VALUES = ["included", "excluded", "contingency"] as const;
+const CLAIM_KINDS = ["RECORD", "GUIDELINE", "PROFESSIONAL", "ASSUMPTION"] as const;
+const DURATION_CLASSES = ["one_time", "defined_course", "lifetime"] as const;
+const PRICING_CATEGORIES = ["FEE_SCHEDULE", "SURVEY", "VENDOR", "CASE_RECORD", "UNKNOWN"] as const;
+const PHYSICIAN_STATUSES = ["PENDING", "APPROVED", "MODIFIED", "REJECTED"] as const;
+const PROBABILITY_STATEMENTS = ["more likely than not", "reasonable possibility", "speculative"] as const;
 
 /** Every field the report, the assessment reader, or the hash depends on. */
 export const BASIS_SCHEMA: Record<string, FieldSpec> = {
@@ -69,13 +120,13 @@ export const BASIS_SCHEMA: Record<string, FieldSpec> = {
   // category is derived from.
   futureCareItemId: s_(),
   interventionId: s_(),
-  serviceFamily: s_(),
+  serviceFamily: enum_(FAMILIES),
   conditionId: s_(true),
   bodyRegion: s_(true),
   laterality: s_(true),
-  supportClass: s_(),
+  supportClass: enum_(SUPPORT_CLASS_VALUES),
   supportReason: s_(true),
-  spinalLevels: arr_(),
+  spinalLevels: arr_(s_()),
   necessityNarrative: s_(),
   producerVersion: s_(),
   basisHash: s_(),
@@ -93,7 +144,7 @@ export const BASIS_SCHEMA: Record<string, FieldSpec> = {
       unitCost: n_(true),
       lifetimeCost: n_(true),
       presentValue: n_(true),
-      physicianStatus: s_(),
+      physicianStatus: enum_(PHYSICIAN_STATUSES),
       recordSupported: b_(),
       contingencyOnly: b_(),
       startTrigger: s_(true),
@@ -109,10 +160,10 @@ export const BASIS_SCHEMA: Record<string, FieldSpec> = {
       frequencyPerYear: n_(true),
       frequencyUnit: s_(),
       durationYears: n_(true),
-      durationClass: s_(),
+      durationClass: enum_(DURATION_CLASSES),
       isLifetime: b_(),
       unitCost: n_(true),
-      pricingSourceCategory: s_(),
+      pricingSourceCategory: enum_(PRICING_CATEGORIES),
       pricingSourceId: s_(true),
       pricedAt: s_(true),
       horizonYears: n_(true),
@@ -125,48 +176,48 @@ export const BASIS_SCHEMA: Record<string, FieldSpec> = {
   probabilityBasis: {
     type: "object",
     shape: {
-      classification: s_(),
+      classification: enum_(PROBABILITY_STATEMENTS),
       statement: s_(),
-      factors: arr_(),
+      factors: arr_(obj_({ label: s_(), present: b_() })),
     },
   },
 
   claimBasis: {
     type: "object",
     shape: {
-      frequency: { type: "object", shape: { kind: s_(), statement: s_() } },
-      duration: { type: "object", shape: { kind: s_(), statement: s_() } },
-      cost: { type: "object", shape: { kind: s_(), statement: s_() } },
+      frequency: obj_({ kind: enum_(CLAIM_KINDS), statement: s_() }),
+      duration: obj_({ kind: enum_(CLAIM_KINDS), statement: s_() }),
+      cost: obj_({ kind: enum_(CLAIM_KINDS), statement: s_() }),
     },
   },
 
   acceptedEvidence: {
     type: "object",
     shape: {
-      diagnoses: arr_(),
-      objectiveFindings: arr_(),
-      functionalLimitations: arr_(),
-      priorTreatment: arr_(),
-      guidelines: arr_(),
-      contrary: arr_(),
+      diagnoses: arr_(EVIDENCE_ROW),
+      objectiveFindings: arr_(EVIDENCE_ROW),
+      functionalLimitations: arr_(EVIDENCE_ROW),
+      priorTreatment: arr_(EVIDENCE_ROW),
+      guidelines: arr_(EVIDENCE_ROW),
+      contrary: arr_(s_()),
     },
   },
 
   assessmentBasis: {
     type: "object",
     shape: {
-      probabilityClassification: s_(),
+      probabilityClassification: enum_(PROBABILITY_CLASSIFICATIONS),
       inclusionRationale: s_(),
-      inclusionInTotalsStatus: s_(),
+      inclusionInTotalsStatus: enum_(INCLUSION_VALUES),
       costEligibilityStatus: s_(),
       frequencyRationale: s_(),
       frequencySupported: b_(),
-      durationClass: s_(),
+      durationClass: enum_(REASONING_DURATION_CLASSES),
       durationRationale: s_(),
       durationSupported: b_(),
       durationBasisLabel: s_(true),
-      evidenceStrength: s_(),
-      recommendationConfidence: s_(),
+      evidenceStrength: enum_(EVIDENCE_STRENGTHS),
+      recommendationConfidence: enum_(RECOMMENDATION_CONFIDENCES),
       confidenceExplanation: s_(),
       residualUncertainty: s_(),
       medicalNecessityRationale: s_(),
@@ -191,20 +242,20 @@ export const BASIS_SCHEMA: Record<string, FieldSpec> = {
       treatmentResponseSummary: s_(true),
       treatingRecordSupportSummary: s_(true),
       literatureSynthesis: s_(),
-      alternativesConsidered: arr_(),
-      supportingGuidelineAssessments: arr_(),
-      missingEvidenceRequests: arr_(),
-      potentialChallenges: arr_(),
-      functionalBasis: { type: "object", nullable: true, shape: {} },
+      alternativesConsidered: arr_(obj_({ alternative: s_(), rationale: s_() })),
+      supportingGuidelineAssessments: arr_(obj_({ title: s_(), claim: s_(), provenance: s_() })),
+      missingEvidenceRequests: arr_(s_()),
+      potentialChallenges: arr_(s_()),
+      functionalBasis: obj_({ domain: s_(), limitation: s_(), source: s_(true), quantified: b_(), relationship: s_() }, true),
       confidenceLevel: s_(),
       confidenceLevelExplanation: s_(),
     },
   },
 
-  evidenceProvenance: arr_(),
-  contradictions: arr_(),
-  literature: arr_(),
-  missingPremises: arr_(),
+  evidenceProvenance: arr_(PROVENANCE_ROW),
+  contradictions: arr_(s_()),
+  literature: arr_(LITERATURE_ROW),
+  missingPremises: arr_(s_()),
 };
 
 /** Flat dotted list, derived from the schema so the two cannot disagree. */
@@ -279,13 +330,42 @@ export function assessBasisCompleteness(basis: unknown): CompletenessResult {
       if (!spec.nullable) missing.push(path);
       return;
     }
-    if (spec.type === "string" && typeof value !== "string") missing.push(`${path}<type>`);
-    else if (spec.type === "number" && typeof value !== "number") missing.push(`${path}<type>`);
-    else if (spec.type === "boolean" && typeof value !== "boolean") missing.push(`${path}<type>`);
-    else if (spec.type === "string" && value === "") missing.push(path);
+    if (spec.type === "string") {
+      if (typeof value !== "string") { missing.push(`${path}<type>`); return; }
+      if (value === "") { missing.push(path); return; }
+      // A type check cannot see that "maybe" is not an inclusion status.
+      if (spec.values && !spec.values.includes(value)) missing.push(`${path}<value>`);
+      return;
+    }
+    if (spec.type === "number") {
+      // NaN and Infinity are typeof "number" and would flow straight into a
+      // total or a projection.
+      if (typeof value !== "number" || !Number.isFinite(value)) missing.push(`${path}<type>`);
+      return;
+    }
+    if (spec.type === "boolean" && typeof value !== "boolean") missing.push(`${path}<type>`);
   };
 
-  const walk = (shape: Record<string, FieldSpec>, node: unknown, prefix: string) => {
+  /** One value against one spec, at one path. Recurses into arrays/objects. */
+  const checkValue = (path: string, spec: FieldSpec, value: unknown) => {
+    if (spec.type === "array") {
+      if (value === null) { if (!spec.nullable) missing.push(path); return; }
+      if (!Array.isArray(value)) { missing.push(`${path}<type>`); return; }
+      // An empty recorded array is an ANSWER; each present element is checked
+      // with its index, so a defect names the row it is in.
+      if (spec.element) value.forEach((el, i) => checkValue(`${path}[${i}]`, spec.element!, el));
+      return;
+    }
+    if (spec.type === "object") {
+      if (value === null) { if (!spec.nullable) missing.push(path); return; }
+      if (typeof value !== "object" || Array.isArray(value)) { missing.push(`${path}<type>`); return; }
+      if (spec.shape && Object.keys(spec.shape).length) walk(spec.shape, value, path);
+      return;
+    }
+    checkPrimitive(path, spec, value);
+  };
+
+  function walk(shape: Record<string, FieldSpec>, node: unknown, prefix: string) {
     for (const [key, spec] of Object.entries(shape)) {
       const path = prefix ? `${prefix}.${key}` : key;
       const container = node as Record<string, unknown> | null;
@@ -293,23 +373,9 @@ export function assessBasisCompleteness(basis: unknown): CompletenessResult {
         missing.push(path);
         continue;
       }
-      const value = container[key];
-      if (spec.type === "array") {
-        // An intentionally empty recorded array is an ANSWER. An absent one is
-        // not, and a non-array is malformed.
-        if (value === null) { if (!spec.nullable) missing.push(path); continue; }
-        if (!Array.isArray(value)) missing.push(`${path}<type>`);
-        continue;
-      }
-      if (spec.type === "object") {
-        if (value === null) { if (!spec.nullable) missing.push(path); continue; }
-        if (typeof value !== "object" || Array.isArray(value)) { missing.push(`${path}<type>`); continue; }
-        if (spec.shape && Object.keys(spec.shape).length) walk(spec.shape, value, path);
-        continue;
-      }
-      checkPrimitive(path, spec, value);
+      checkValue(path, spec, container[key]);
     }
-  };
+  }
 
   walk(BASIS_SCHEMA, basis, "");
 

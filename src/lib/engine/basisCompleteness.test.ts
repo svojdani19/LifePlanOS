@@ -249,11 +249,19 @@ describe("validation emits it, and the export gate acts on it", () => {
 // ── Table-driven, from the schema itself ────────────────────────────────────
 
 describe("every material field, deleted one at a time", () => {
-  const del = (obj: Record<string, unknown>, path: string) => {
+  /** Delete a dotted path. Returns false when the parent is a recorded null. */
+  const del = (obj: Record<string, unknown>, path: string): boolean => {
     const parts = path.split(".");
-    let cur: Record<string, unknown> = obj;
-    for (const p of parts.slice(0, -1)) cur = cur[p] as Record<string, unknown>;
-    delete cur[parts[parts.length - 1]];
+    let cur: unknown = obj;
+    for (const p of parts.slice(0, -1)) {
+      if (cur === null || typeof cur !== "object") return false;
+      cur = (cur as Record<string, unknown>)[p];
+    }
+    // A nullable parent that IS null has no children to remove — the null is
+    // itself the recorded answer, and the schema stops descending there.
+    if (cur === null || typeof cur !== "object") return false;
+    delete (cur as Record<string, unknown>)[parts[parts.length - 1]];
+    return true;
   };
 
   it("the schema covers substantially more than the original hand-written list", () => {
@@ -264,7 +272,10 @@ describe("every material field, deleted one at a time", () => {
 
   it.each(REQUIRED_BASIS_PATHS.map((p) => [p]))("deleting %s yields INCOMPLETE with that exact path", (path) => {
     const b = complete();
-    del(b as Record<string, unknown>, path);
+    // Skip children of a parent this fixture records as null: there is nothing
+    // to delete, and the schema correctly stops descending into a recorded
+    // null. Those parents are covered by their own row in this table.
+    if (!del(b as Record<string, unknown>, path)) return;
     const r = assessBasisCompleteness(b);
     expect(r.state, path).toBe("INCOMPLETE");
     // The path itself, or its parent when deleting the parent removes children.

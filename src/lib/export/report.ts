@@ -30,6 +30,7 @@ import { loadRecordedBases, type BasisStore } from "@/lib/engine/basisStore";
 import { itemIsSupported, supportClassOf, SUPPORT_LABEL, computePlanTotals } from "@/lib/engine/supportClass";
 import { LOW_SCENARIO_MULTIPLIER, HIGH_SCENARIO_MULTIPLIER } from "@/lib/engine/cost";
 import { assessBasisCompleteness } from "@/lib/engine/basisCompleteness";
+import type { ServiceFamily } from "@/lib/engine/serviceOntology";
 import { loadRecordedBases as loadBasesForCsv } from "@/lib/engine/basisStore";
 import { deriveWitnessAssessment, assessmentFromBasis, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningItem, type ReasoningAssessment } from "@/lib/engine/clinicalReasoning";
 import { referencesFor, guidelineSourcesFor } from "@/lib/references/sources";
@@ -339,15 +340,18 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
    * category only when the record names no family at all, which the
    * BASIS_INCOMPLETE finding is already blocking.
    */
-  const FAMILY_CATEGORY: Record<string, CareCategory> = {
+  // EXHAUSTIVE over ServiceFamily. Typed as a total record so a family added to
+  // the ontology without a mapping here fails the build rather than silently
+  // reading the live category.
+  const FAMILY_CATEGORY: Record<ServiceFamily, CareCategory> = {
     EVALUATION: "SPECIALIST_VISIT", IMAGING: "IMAGING", DIAGNOSTIC_PROCEDURE: "IMAGING",
     THERAPY: "PHYSICAL_THERAPY", MEDICATION: "MEDICATION", INJECTION: "INJECTION",
     SURGERY: "ORTHOPEDIC_SURGERY", EQUIPMENT: "DME", ATTENDANT_CARE: "ATTENDANT_CARE",
     HOME_MODIFICATION: "HOME_MODIFICATION", TRANSPORT_COORDINATION: "TRANSPORTATION",
     LAB_MONITORING: "LABS", COMPLICATION: "COMPLICATION_MANAGEMENT", OTHER: "MISC",
-  } as Record<string, CareCategory>;
-  const categoryForRecorded = (_intervention: string | null, family: string | null): CareCategory | null =>
-    family ? FAMILY_CATEGORY[family] ?? null : null;
+  };
+  const categoryForRecorded = (family: string | null): CareCategory | null =>
+    family && family in FAMILY_CATEGORY ? FAMILY_CATEGORY[family as ServiceFamily] : null;
 
   const NOT_RECORDED = "not recorded";
   const viewOf = (it: FutureCareItem) => {
@@ -370,6 +374,21 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     // the export. Reading the live row to cover the gap is what produced a
     // document that mixed recorded and current values.
     const absent = completeness.state === "ABSENT";
+
+    /**
+     * Is this recorded path itself defective?
+     *
+     * A malformed element is not a value the report may print. `literature =
+     * [null]` reached `l.authors` and threw; a malformed contradiction printed
+     * as [object Object]. Rather than cast a malformed array into a trusted
+     * type, every field whose own path is implicated in the completeness
+     * result renders as "not recorded" — the same answer an absent field gets,
+     * for the same reason, and the BASIS_INCOMPLETE finding blocks the export
+     * either way.
+     */
+    const bad = (path: string) => completeness.missing.some((m) => m === path || m.startsWith(`${path}.`) || m.startsWith(`${path}[`) || m.startsWith(`${path}<`));
+    /** Recorded value, or null when the record cannot be trusted for it. */
+    const safe = <T,>(path: string, value: T): T | null => (bad(path) ? null : value);
 
     // Low/high are derived from the RECORDED expected present value with the
     // engine's own multipliers, unless the basis records them. They were summed
@@ -422,15 +441,15 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
       /** Inclusion is a RECORDED decision, not a re-derivation from live state. */
       inclusionStatus: absent ? null : str(m?.inclusionInTotalsStatus),
 
-      probabilityStatement: absent ? null : str(prob?.statement),
-      probabilityFactors: absent ? null : arr<{ label: string; present: boolean }>(prob?.factors),
-      probabilityClassification: absent ? null : str(prob?.classification) ?? str(m?.probabilityClassification),
-      acceptedEvidence: absent ? null : ev,
-      literature: absent ? null : arr<Record<string, unknown>>(b.literature),
-      contradictions: absent ? null : arr<string>(b.contradictions),
-      missingPremises: absent ? null : arr<string>(b.missingPremises),
-      potentialChallenges: absent ? null : arr<string>(m?.potentialChallenges),
-      functionalBasis: absent ? null : ((m?.functionalBasis ?? null) as Record<string, unknown> | null),
+      probabilityStatement: absent ? null : safe("probabilityBasis.statement", str(prob?.statement)),
+      probabilityFactors: absent ? null : safe("probabilityBasis.factors", arr<{ label: string; present: boolean }>(prob?.factors)),
+      probabilityClassification: absent ? null : safe("probabilityBasis.classification", str(prob?.classification)) ?? safe("assessmentBasis.probabilityClassification", str(m?.probabilityClassification)),
+      acceptedEvidence: absent ? null : safe("acceptedEvidence", ev),
+      literature: absent ? null : safe("literature", arr<Record<string, unknown>>(b.literature)),
+      contradictions: absent ? null : safe("contradictions", arr<string>(b.contradictions)),
+      missingPremises: absent ? null : safe("missingPremises", arr<string>(b.missingPremises)),
+      potentialChallenges: absent ? null : safe("assessmentBasis.potentialChallenges", arr<string>(m?.potentialChallenges)),
+      functionalBasis: absent ? null : safe("assessmentBasis.functionalBasis", (m?.functionalBasis ?? null) as Record<string, unknown> | null),
       confidenceLevel: absent ? null : str(m?.confidenceLevel),
       confidenceExplanation: absent ? null : str(m?.confidenceLevelExplanation),
       necessityNarrative: absent ? null : str(b.necessityNarrative),
@@ -450,7 +469,11 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
        */
       category: absent
         ? (it.category as CareCategory)
-        : (categoryForRecorded(str(b.interventionId), str(b.serviceFamily)) ?? (it.category as CareCategory)),
+        // NULL, not the live category. An unknown or malformed recorded family
+        // silently restored the live one here — the last category fallback.
+        // A null category places the item in the unclassified section below
+        // and is already a BASIS_INCOMPLETE finding.
+        : categoryForRecorded(str(b.serviceFamily)),
       recordedIntervention: absent ? null : str(b.interventionId),
       recordedFamily: absent ? null : str(b.serviceFamily),
     };
@@ -799,7 +822,23 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
       // verification that no step in the pipeline performs.
       itemGuidance: (rMaterial?.supportingGuidelineAssessments ?? []).filter((g) => g.title && g.claim),
       recordedGuidelineEvidence: recordedBasis?.acceptedEvidence?.guidelines ?? [],
-      genericSources: guidelineSourcesFor(it.category as CareCategory, bodyRegion(`${it.service} ${dxName}`)).slice(0, 3).map((sx) => sx.label),
+      // Built from RECORDED category, service and diagnosis. This used the live
+      // category, the live service name and the live dxName even for a
+      // basis-backed item, so the candidate-guidance context described a
+      // recommendation the plan does not contain. With a basis whose recorded
+      // fields cannot supply the context, no candidates are offered at all —
+      // an empty list renders as "no verified, item-specific support", which is
+      // the honest answer, rather than context derived from the wrong item.
+      genericSources: (() => {
+        if (noBasis) {
+          return guidelineSourcesFor(it.category as CareCategory, bodyRegion(`${it.service} ${dxName}`)).slice(0, 3).map((sx) => sx.label);
+        }
+        const cat = V.category;
+        const svc = V.service;
+        const dx = V.supportingDiagnosis;
+        if (!cat || !svc) return [];
+        return guidelineSourcesFor(cat, bodyRegion(`${svc} ${dx ?? ""}`)).slice(0, 3).map((sx) => sx.label);
+      })(),
       basisState: basisCheck.state,
       retrieval: socRetrieval,
     });
@@ -881,7 +920,11 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     // The witness was previously step 2, so a report with a perfectly good
     // recorded basis still printed freshly re-derived conclusions.
     const persisted = assessmentByRec.get(it.id);
-    const fromBasis = recordedBasis ? assessmentFromBasis(recordedBasis, {
+    // ONLY on a basis that passed runtime completeness. assessmentFromBasis
+    // dereferences recorded collections — it maps literature to `.title`, and
+    // a persisted `[null]` threw there. It consumes the record as trusted, so
+    // it must only be handed a record that has been validated.
+    const fromBasis = recordedBasis && V.basisState === "COMPLETE" ? assessmentFromBasis(recordedBasis, {
       conflictFlags: reasoningConflicts.get(it.id) ?? [],
       physicianReviewStatus: it.physicianStatus ?? undefined,
     }) : null;
@@ -900,28 +943,47 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     //     to a fresh witness there would discard a reviewed assessment in
     //     favour of an unreviewed one.
     const persistedHash = (persisted as unknown as { materialHash?: string | null } | undefined)?.materialHash;
+    // Selected by BASIS EXISTENCE, not by whether a reader happened to return
+    // something. `fromBasis ?? deriveWitnessAssessment(...)` re-derived and
+    // printed LIVE clinical reasoning whenever assessmentFromBasis returned
+    // null — which it does for any basis missing a specification. The item was
+    // basis-backed, so nothing live may fill the gap.
     const usePersisted =
       !!persisted?.inclusionRationale &&
       (recordedBasis?.basisHash ? persistedHash === recordedBasis.basisHash : true);
     const assessment = usePersisted
       ? (persisted as unknown as Pick<ReasoningAssessment, "probabilityClassification" | "inclusionRationale" | "evidenceStrength" | "recommendationConfidence" | "residualUncertainty" | "alternativesConsidered">)
-      : fromBasis ?? deriveWitnessAssessment(
-          it as unknown as ReasoningItem,
-          reasoningConds,
-          c.chronologyEvents as unknown as DossierChronoEvent[],
-          dossierCase,
-          {
-            interviews: dossierInterviews as never,
-            setContext: { conflicts: reasoningConflicts.get(it.id) ?? [], replacedByActive: reasoningReplaced.has(it.id) },
-            handEnteredEvidence: ledgerRows.filter((r) => r.futureCareItemId === it.id && r.addedById != null) as never,
-          },
-        );
-    out.push(labeled(
-      "Clinical reasoning",
-      `${PROBABILITY_LABEL[assessment.probabilityClassification]}. ${assessment.inclusionRationale} `
-      + `Evidence strength is ${EVIDENCE_STRENGTH_LABEL[assessment.evidenceStrength]} and recommendation confidence is ${CONFIDENCE_LABEL[assessment.recommendationConfidence]} — the two are assessed separately. ${assessment.residualUncertainty}`,
-    ));
-    if (assessment.alternativesConsidered.length) out.push(labeled("Alternative considered", assessment.alternativesConsidered[0].rationale));
+      : noBasis
+        ? deriveWitnessAssessment(
+            it as unknown as ReasoningItem,
+            reasoningConds,
+            c.chronologyEvents as unknown as DossierChronoEvent[],
+            dossierCase,
+            {
+              interviews: dossierInterviews as never,
+              setContext: { conflicts: reasoningConflicts.get(it.id) ?? [], replacedByActive: reasoningReplaced.has(it.id) },
+              handEnteredEvidence: ledgerRows.filter((r) => r.futureCareItemId === it.id && r.addedById != null) as never,
+            },
+          )
+        : fromBasis;
+
+    if (!assessment) {
+      // A basis exists and cannot answer. Say so; derive nothing. The
+      // BASIS_INCOMPLETE finding is already blocking the final export.
+      out.push(labeled("Clinical reasoning", `${NOT_RECORDED} — the recorded basis for this recommendation does not carry a clinical reasoning assessment.`));
+    } else {
+      // Labels are looked up, so an out-of-domain persisted value would print
+      // `undefined`. The schema rejects those, and this is the second belt.
+      const probLabel = PROBABILITY_LABEL[assessment.probabilityClassification] ?? NOT_RECORDED;
+      const strengthLabel = EVIDENCE_STRENGTH_LABEL[assessment.evidenceStrength] ?? NOT_RECORDED;
+      const confLabel = CONFIDENCE_LABEL[assessment.recommendationConfidence] ?? NOT_RECORDED;
+      out.push(labeled(
+        "Clinical reasoning",
+        `${probLabel}. ${assessment.inclusionRationale} `
+        + `Evidence strength is ${strengthLabel} and recommendation confidence is ${confLabel} — the two are assessed separately. ${assessment.residualUncertainty}`,
+      ));
+      if (assessment.alternativesConsidered.length) out.push(labeled("Alternative considered", assessment.alternativesConsidered[0].rationale));
+    }
 
     // Recommendation consistency — whether another recommendation conflicts with
     // this one, and how the conflict was resolved (§16).
@@ -1476,7 +1538,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     // Grouped by the RECORDED category. The live column decided section
             // placement, so re-categorising an item after approval moved it to a
             // different part of the plan than the one that was approved.
-    const groupItems = reportItems.filter((i) => g.cats.includes(vw(i).category));
+    const groupItems = reportItems.filter((i) => { const cat = vw(i).category; return cat !== null && g.cats.includes(cat); });
     if (!groupItems.length) continue;
     body.push(h2(g.title));
     for (const it of groupItems) body.push(...careRecommendation(it));
@@ -1499,7 +1561,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     // Grouped by the RECORDED category. The live column decided section
             // placement, so re-categorising an item after approval moved it to a
             // different part of the plan than the one that was approved.
-    const groupItems = reportItems.filter((i) => g.cats.includes(vw(i).category));
+    const groupItems = reportItems.filter((i) => { const cat = vw(i).category; return cat !== null && g.cats.includes(cat); });
     if (!groupItems.length) continue;
     lcpRows.push(rowOf([td(g.title, { bold: true, fill: SOFT }), td("", { fill: SOFT }), td("", { fill: SOFT }), td("", { fill: SOFT }), td("", { fill: SOFT }), td("", { fill: SOFT })]));
     groupItems.forEach((i, k) => {
@@ -1524,6 +1586,25 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     const subL = groupItems.reduce((s, i) => s + vNum(vw(i).lifetimeCost), 0);
     const subP = groupItems.reduce((s, i) => s + vNum(vw(i).presentValue), 0);
     lcpRows.push(rowOf([td(`Subtotal — ${g.title}`, { bold: true, fill: SOFT }), td("", { fill: SOFT }), td("", { fill: SOFT }), td("", { fill: SOFT }), td(money(subL), { bold: true, fill: SOFT, align: AlignmentType.RIGHT }), td(money(subP), { bold: true, fill: SOFT, align: AlignmentType.RIGHT })]));
+  }
+  // Recorded family did not classify. The item is DISCLOSED here rather than
+  // dropped: hiding an included recommendation because one section cannot place
+  // it is the worse error, and the row still carries its recorded figures.
+  const unplaced = reportItems.filter((i) => vw(i).category === null);
+  if (unplaced.length) {
+    lcpRows.push(rowOf([td("Unclassified — incomplete recorded basis", { bold: true, fill: SOFT }), td("", { fill: SOFT }), td("", { fill: SOFT }), td("", { fill: SOFT }), td("", { fill: SOFT }), td("", { fill: SOFT })]));
+    for (const i of unplaced) {
+      lcpRows.push(
+        rowOf([
+          td(vw(i).service ?? NOT_RECORDED),
+          td(vw(i).cptCode || NOT_RECORDED),
+          td(vw(i).frequencyText ?? NOT_RECORDED),
+          td(vMoney(vw(i).unitCost), { align: AlignmentType.RIGHT }),
+          td(vMoney(vw(i).lifetimeCost), { align: AlignmentType.RIGHT }),
+          td(vMoney(vw(i).presentValue), { align: AlignmentType.RIGHT }),
+        ]),
+      );
+    }
   }
   lcpRows.push(rowOf([td("TOTAL FUTURE MEDICAL CARE", { header: true }), td("", { header: true }), td("", { header: true }), td("", { header: true }), td(money(totalLifetime), { header: true, align: AlignmentType.RIGHT }), td(money(totalPresentValue), { header: true, align: AlignmentType.RIGHT })]));
   body.push(table(lcpRows));
@@ -1561,8 +1642,15 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     // is already blocking the export.
     return pj ?? { unitCost: 0, frequencyPerYear: 0, durationYears: null, isLifetime: false };
   };
+  // An item whose recorded family does not classify is OMITTED from the
+  // sensitivity grid and disclosed below, never priced under a live category.
+  const unclassifiable = reportItems.filter((it) => vw(it).category === null);
   const pvUnder = (disc: number, infl: number) =>
-    reportItems.reduce((s, it) => s + project({ category: vw(it).category, ...pvInputs(it) }, { lifeExpectancyYears: life, discountRate: disc, medicalInflation: infl, geographicFactor: 1 }).presentValue, 0);
+    reportItems.reduce((s, it) => {
+      const cat = vw(it).category;
+      if (cat === null) return s;
+      return s + project({ category: cat, ...pvInputs(it) }, { lifeExpectancyYears: life, discountRate: disc, medicalInflation: infl, geographicFactor: 1 }).presentValue;
+    }, 0);
   const sens: TableRow[] = [rowOf([td("Discount ↓ / Inflation →", { header: true, width: 28 }), ...infls.map((inf) => td(`${(inf * 100).toFixed(1)}%`, { header: true, width: 24, align: AlignmentType.RIGHT }))])];
   for (const disc of discs) {
     sens.push(
@@ -1576,6 +1664,9 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     );
   }
   body.push(table(sens));
+  if (unclassifiable.length) {
+    body.push(p(`${unclassifiable.length} recommendation(s) are omitted from this sensitivity analysis because their recorded basis does not classify them into a care category; they are listed in the plan under "Unclassified — incomplete recorded basis". Their values are therefore not reflected in the ranges above.`, { italics: true }));
+  }
 
   // ══ ASSUMPTIONS ══════════════════════════════════════════════════════════════
   body.push(h1("Assumptions", { pageBreak: true }));
@@ -1724,7 +1815,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
   body.push(h1("Appendix A — References Relied Upon", { pageBreak: true }));
   // Only the sources this plan actually relied upon: the guideline/evidence and
   // pricing sources for the care categories present, plus the methodology texts.
-  const planCategories = [...new Set(reportItems.map((i) => vw(i).category))];
+  const planCategories = [...new Set(reportItems.map((i) => vw(i).category))].filter((x): x is CareCategory => x !== null);
   referencesFor(planCategories, { includeGuidelines: true }).forEach((s) => body.push(bullet(s.citation)));
   METHODOLOGY_REFS.forEach((r) => body.push(bullet(r)));
 

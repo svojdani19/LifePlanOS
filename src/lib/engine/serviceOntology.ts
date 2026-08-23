@@ -43,6 +43,19 @@ export type ServiceFamily =
   | "OTHER";
 
 /**
+ * Every family, as runtime values.
+ *
+ * Exported so a validator can check a persisted serviceFamily against the real
+ * set rather than accepting any string — and so adding a family here is
+ * automatically known to the validator instead of drifting from it.
+ */
+export const SERVICE_FAMILIES = [
+  "EVALUATION", "IMAGING", "DIAGNOSTIC_PROCEDURE", "THERAPY", "MEDICATION", "INJECTION",
+  "SURGERY", "EQUIPMENT", "ATTENDANT_CARE", "HOME_MODIFICATION", "TRANSPORT_COORDINATION",
+  "LAB_MONITORING", "COMPLICATION", "OTHER",
+] as const satisfies readonly ServiceFamily[];
+
+/**
  * Canonical intervention identity. Coarser than a service name, finer than a
  * family — the level at which "is this indicated for this patient" is a
  * well-posed clinical question.

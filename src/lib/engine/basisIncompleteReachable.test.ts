@@ -171,3 +171,59 @@ describe("the export route refuses a final release on it", () => {
     expect(res.status).toBe(200);
   });
 });
+
+
+describe("malformed elements reach validateCase and block the real export", () => {
+  const MALFORMED: [string, (b: Record<string, unknown>) => void, string][] = [
+    ["probabilityBasis.factors=[null]", (b) => { (b.probabilityBasis as Record<string, unknown>).factors = [null]; }, "probabilityBasis.factors[0]"],
+    ["acceptedEvidence.objectiveFindings=[null]", (b) => { (b.acceptedEvidence as Record<string, unknown>).objectiveFindings = [null]; }, "acceptedEvidence.objectiveFindings[0]"],
+    ["literature=[null]", (b) => { b.literature = [null]; }, "literature[0]"],
+    ["contradictions=[object]", (b) => { b.contradictions = [{ x: 1 }]; }, "contradictions[0]"],
+    ["invalid inclusion status", (b) => { (b.assessmentBasis as Record<string, unknown>).inclusionInTotalsStatus = "maybe"; }, "assessmentBasis.inclusionInTotalsStatus<value>"],
+    ["invalid serviceFamily", (b) => { b.serviceFamily = "NOPE"; }, "serviceFamily<value>"],
+    ["NaN unit cost", (b) => { (b.specification as Record<string, unknown>).unitCost = NaN; }, "specification.unitCost<type>"],
+  ];
+
+  it.each(MALFORMED)("validateCase raises blocking BASIS_INCOMPLETE for %s", async (_label, mutate, expectedPath) => {
+    const b = fullBasis();
+    mutate(b);
+    db.bases = [b];
+
+    const v = await validateCase("case-1");
+    const f = v.findings.find((x) => isIncompleteBasisFinding(x.result));
+    expect(f, `no finding for ${_label}`).toBeTruthy();
+    expect(f!.exportBlocking).toBe(true);
+    expect(f!.issue, expectedPath).toContain(expectedPath);
+    expect(v.blocking).toBe(true);
+  });
+});
+
+describe("the export route refuses on a REAL malformed-element result", () => {
+  // Not a hand-constructed finding: validateCase runs for real and its output
+  // drives the gate, with only external authority and storage mocked.
+  it("422s a final DOCX when a persisted basis holds a null literature row", async () => {
+    const b = fullBasis();
+    b.literature = [null];
+    db.bases = [b];
+
+    // Confirm the real validator produces the blocking finding first.
+    const v = await validateCase("case-1");
+    const real = v.findings.filter((f) => f.exportBlocking && isIncompleteBasisFinding(f.result));
+    expect(real.length).toBeGreaterThan(0);
+    expect(real[0].issue).toContain("literature[0]");
+
+    // Feed exactly that through the gate.
+    routeDeps.findings = real.map((f) => ({ service: f.service, result: f.result, issue: f.issue, suggestion: f.suggestion, exportBlocking: true }));
+    routeDeps.openBlocking = real.length;
+
+    const { POST } = await import("@/app/api/cases/[caseId]/export/route");
+    const res = await POST(
+      new Request("http://t/x", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ format: "DOCX", mode: "final" }) }),
+      { params: Promise.resolve({ caseId: "case-1" }) },
+    );
+    expect(res.status).toBe(422);
+    const body = await res.json();
+    expect(JSON.stringify(body.defects)).toContain("BASIS_INCOMPLETE");
+    expect(JSON.stringify(body.defects)).toContain("literature[0]");
+  });
+});

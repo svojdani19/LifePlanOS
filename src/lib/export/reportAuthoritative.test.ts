@@ -336,3 +336,147 @@ describe("the draft banner distinguishes the four basis states", () => {
     expect(t).toContain("DRAFT");
   });
 });
+
+
+describe("clinical reasoning is never re-derived live when a basis exists", () => {
+  it("specification removed, item still INCLUDED, renders — and prints no live reasoning", async () => {
+    // The earlier regression removed assessmentBasis, which also removed
+    // inclusionInTotalsStatus — so the item dropped out of reportItems and
+    // careRecommendation never ran. This keeps the item included so the
+    // reasoning block is actually rendered.
+    const live = liveItems();
+    deps.bases = live.map((l) => {
+      const b = recordA(l);
+      delete (b as Record<string, unknown>).specification;
+      // Inclusion is still recorded, so the item renders.
+      (b.assessmentBasis as Record<string, unknown>).inclusionInTotalsStatus = "included";
+      return b;
+    });
+    // A unique reasoning sentinel only reachable through a live derivation.
+    for (const l of live) {
+      l.service = "SENTINEL-B-SERVICE";
+      l.missingSupport = "SENTINEL-B-REASONING";
+      l.lowerCostAlternative = "SENTINEL-B-ALTERNATIVE";
+      l.startTrigger = "SENTINEL-B-TRIGGER";
+    }
+    await assertLiveHas("SENTINEL-B-REASONING");
+    await assertLiveHas("SENTINEL-B-ALTERNATIVE");
+
+    const text = await rendered();
+    const body = text.slice(0, text.indexOf("Appendix F"));
+
+    // The item really did render.
+    expect(body).toContain("Clinical reasoning");
+    // And nothing live leaked into it.
+    for (const sentinel of ["SENTINEL-B-SERVICE", "SENTINEL-B-REASONING", "SENTINEL-B-ALTERNATIVE", "SENTINEL-B-TRIGGER"]) {
+      expect(body, sentinel).not.toContain(sentinel);
+    }
+    expect(body).toContain("not recorded");
+  });
+
+  it("says clinical reasoning is not recorded rather than deriving one", async () => {
+    const live = liveItems();
+    deps.bases = live.map((l) => {
+      const b = recordA(l);
+      delete (b as Record<string, unknown>).specification;
+      (b.assessmentBasis as Record<string, unknown>).inclusionInTotalsStatus = "included";
+      return b;
+    });
+    for (const l of live) l.missingSupport = "SENTINEL-B-REASONING";
+    await assertLiveHas("SENTINEL-B-REASONING");
+    const text = await rendered();
+    // labeled() renders "Clinical reasoning." then the text, so assert on the
+    // rendered sentence rather than a label-dash form the renderer never emits.
+    expect(text).toContain("Clinical reasoning");
+    expect(text).toContain("does not carry a clinical reasoning assessment");
+  });
+});
+
+
+describe("category and guideline context cannot come from the live row", () => {
+  it("a malformed recorded family does not restore the live category", async () => {
+    // `categoryForRecorded(...) ?? it.category` silently reinstated the live
+    // category whenever the recorded family was unknown.
+    const live = liveItems();
+    deps.bases = live.map((l) => {
+      const b = recordA(l);
+      (b as Record<string, unknown>).serviceFamily = "NOT_A_REAL_FAMILY";
+      return b;
+    });
+    // A live category whose section heading would be unmistakable.
+    for (const l of live) l.category = "ATTENDANT_CARE";
+    await assertLiveHas("ATTENDANT_CARE");
+
+    const text = await rendered();
+    // The item is disclosed, not hidden, and not placed by the live category.
+    expect(text).toContain("Unclassified — incomplete recorded basis");
+    expect(text).toMatch(/omitted from this sensitivity analysis/i);
+  });
+
+  it("guideline context is built from recorded fields, not live ones", async () => {
+    const live = liveItems();
+    deps.bases = live.map((l) => recordA(l));
+    // Live service/diagnosis/category are all sentinels; the recorded ones are
+    // SERVICE-A / DIAGNOSIS-A.
+    for (const l of live) {
+      l.service = "SENTINEL-B-SERVICE";
+      l.category = "ATTENDANT_CARE";
+    }
+    for (const c of liveConditions()) c.name = "SENTINEL-B-DIAGNOSIS";
+    await assertLiveHas("SENTINEL-B-DIAGNOSIS");
+
+    const text = await rendered();
+    // Scoped to the recommendation blocks. The condition's own name legitimately
+    // appears in the causation and condition sections — those describe the
+    // diagnosis, not a future-care claim about it.
+    const firstRec = text.indexOf("SERVICE-A");
+    const recs = text.slice(firstRec, text.indexOf("Appendix F"));
+    expect(recs).not.toContain("SENTINEL-B-SERVICE");
+    expect(recs).not.toContain("SENTINEL-B-DIAGNOSIS");
+  });
+
+  it("offers no candidate guidance at all when the record cannot supply the context", async () => {
+    const live = liveItems();
+    deps.bases = live.map((l) => {
+      const b = recordA(l);
+      delete (b as Record<string, unknown>).specification;
+      (b.assessmentBasis as Record<string, unknown>).inclusionInTotalsStatus = "included";
+      return b;
+    });
+    for (const l of live) l.service = "SENTINEL-B-SERVICE";
+    await assertLiveHas("SENTINEL-B-SERVICE");
+    const text = await rendered();
+    const body = text.slice(0, text.indexOf("Appendix F"));
+    // No live-derived source list leaks in as "context". The recorded guidance
+    // still renders as a retrieved candidate — that part IS recorded — but the
+    // category/region context around it is omitted rather than derived from
+    // the live row, so no "sources consulted for this service category" tail
+    // appears.
+    expect(body).not.toContain("SENTINEL-B-SERVICE");
+    expect(body).not.toMatch(/sources consulted for this service category/i);
+  });
+});
+
+describe("a malformed array element does not crash the draft", () => {
+  it.each([
+    ["probabilityBasis.factors", (b: Record<string, unknown>) => { (b.probabilityBasis as Record<string, unknown>).factors = [null]; }],
+    ["acceptedEvidence.objectiveFindings", (b: Record<string, unknown>) => { (b.acceptedEvidence as Record<string, unknown>).objectiveFindings = [null]; }],
+    ["literature", (b: Record<string, unknown>) => { b.literature = [null]; }],
+    ["contradictions", (b: Record<string, unknown>) => { b.contradictions = [{ nope: true }]; }],
+  ])("renders with %s malformed, prints no [object Object], and leaks no live value", async (_label, mutate) => {
+    const live = liveItems();
+    deps.bases = live.map((l) => {
+      const b = recordA(l);
+      mutate(b as Record<string, unknown>);
+      return b;
+    });
+    for (const l of live) l.service = "SENTINEL-B-SERVICE";
+    await assertLiveHas("SENTINEL-B-SERVICE");
+
+    // It completes rather than throwing.
+    const text = await rendered();
+    const body = text.slice(0, text.indexOf("Appendix F"));
+    expect(body).not.toContain("[object Object]");
+    expect(body).not.toContain("SENTINEL-B-SERVICE");
+  });
+});

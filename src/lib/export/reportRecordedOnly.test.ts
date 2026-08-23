@@ -371,8 +371,10 @@ describe("the WHOLE document prints A, including totals, schedules and appendice
       return readFileSync(join(__dirname, "report.ts"), "utf8");
     })();
     expect(src).toMatch(/const pvInputs = \(it: FutureCareItem\)/);
-    // The category comes from the view too now, not the live column.
-    expect(src).toMatch(/project\(\{ category: vw\(it\)\.category, \.\.\.pvInputs\(it\) \}/);
+    // The category comes from the view, and an item the recorded family cannot
+    // classify is omitted from the grid rather than priced under a live one.
+    expect(src).toMatch(/project\(\{ category: cat, \.\.\.pvInputs\(it\) \}/);
+    expect(src).toMatch(/if \(cat === null\) return s;/);
     // And the inputs come from the view, which is keyed on basis existence.
     expect(src).toMatch(/const pj = vw\(it\)\.projection;/);
   });

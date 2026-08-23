@@ -32,6 +32,14 @@ export type EvidenceStrength = "STRONG" | "MODERATE" | "LIMITED" | "EXPERT_CONSE
 export type RecommendationConfidence = "HIGH" | "MODERATE" | "LOW" | "INDETERMINATE";
 export type DurationClass = "ONE_TIME" | "SHORT_TERM" | "FIXED_COURSE" | "EPISODIC" | "UNTIL_RECOVERY" | "UNTIL_SURGERY" | "MULTI_YEAR" | "LIFETIME" | "CONDITIONAL";
 
+// Runtime value sets for the unions above. Exported so a validator can check a
+// PERSISTED assessment against the real domain instead of accepting any
+// string, and so extending a union here is automatically known to it.
+export const PROBABILITY_CLASSIFICATIONS = ["PROBABLE_INCLUDED", "CONDITIONAL_STAGED", "POSSIBLE_CONTINGENCY_NOT_INCLUDED", "INSUFFICIENTLY_SUPPORTED", "NOT_RECOMMENDED", "REJECTED_BY_REVIEWER"] as const satisfies readonly ProbabilityClassification[];
+export const EVIDENCE_STRENGTHS = ["STRONG", "MODERATE", "LIMITED", "EXPERT_CONSENSUS", "INSUFFICIENT"] as const satisfies readonly EvidenceStrength[];
+export const RECOMMENDATION_CONFIDENCES = ["HIGH", "MODERATE", "LOW", "INDETERMINATE"] as const satisfies readonly RecommendationConfidence[];
+export const DURATION_CLASSES = ["ONE_TIME", "SHORT_TERM", "FIXED_COURSE", "EPISODIC", "UNTIL_RECOVERY", "UNTIL_SURGERY", "MULTI_YEAR", "LIFETIME", "CONDITIONAL"] as const satisfies readonly DurationClass[];
+
 // A future-care row carries staged/conditional metadata beyond the dossier's view.
 export type ReasoningItem = DossierItem & { contingencyOnly?: boolean | null; replacesService?: string | null };
 
