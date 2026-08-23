@@ -47,7 +47,24 @@ const SIGNATURES: Record<string, string[]> = {
   CARDIOLOGY_RECORD: ["cardiology", "ejection fraction", "echocardiogram", "coronary"],
   EMG_NCS_REPORT: ["nerve conduction", "electromyography", "motor latency", "sensory amplitude", "denervation", "emg"],
   NEUROPSYCHOLOGICAL_EVALUATION: ["neuropsychological", "test battery", "wechsler", "cognitive functioning", "validity indicators", "memory index"],
-  BILLING_RECORD: ["cpt", "hcpcs", "date of service", "total charges", "amount billed", "balance due", "explanation of benefits", "eob", "adjustments", "patient responsibility"],
+  // Two vocabularies, because there are two documents. The first set is an EOB
+  // or superbill. The second is a records-custodian BILLING AFFIDAVIT — the
+  // CPRC §18.001 form and its equivalents — which shares almost no phrasing
+  // with an EOB and previously scored ZERO, defaulting to MEDICAL_RECORD at
+  // 0.1 confidence. That put sworn billing testimony into the clinical review
+  // queue and past the chronology exclusion, and had the extractor pulling
+  // dollar figures out of notary boilerplate as if they were clinical facts.
+  //
+  // Every affidavit phrase here is billing-specific on purpose. Bare "affiant"
+  // or "sworn to and subscribed" would also match a MEDICAL-records custodian
+  // affidavit, which is not a billing document and must not be typed as one.
+  BILLING_RECORD: [
+    "cpt", "hcpcs", "date of service", "total charges", "amount billed", "balance due",
+    "explanation of benefits", "eob", "adjustments", "patient responsibility",
+    "total billed", "amount currently owed", "amount adjusted", "custodian of billing records",
+    "billing records affidavit", "affidavit of billing records", "reasonable and necessary charges",
+    "paid for the services", "billed for the services",
+  ],
   PHARMACY_RECORD: ["prescription", "refills", "ndc", "sig:", "dispense", "pharmacy", "days supply", "take one tablet"],
   DEPOSITION: ["deposition of", "being first duly sworn", "court reporter", "examination by", "reporter's certificate", "appearances:", "q.", "a."],
   IME_REPORT: ["independent medical examination", "record review", "maximum medical improvement", "impairment rating", "within a reasonable degree of medical", "history of present"],
