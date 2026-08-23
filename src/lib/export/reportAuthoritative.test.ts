@@ -526,3 +526,144 @@ describe("a draft renders safely for every malformed class", () => {
     expect(body).toContain("not recorded");
   });
 });
+
+
+// ── The persisted assessment is not exempt ──────────────────────────────────
+//
+// I claimed last pass that the exact-hash persisted assessment "reintroduces
+// nothing" because it is a separately persisted, hash-matched row. That was
+// wrong: hash equality says nothing about JSON shape.
+// ClinicalReasoningAssessment.alternativesConsidered is Json?, the report casts
+// it to ReasoningAssessment and then dereferences `[0].rationale`.
+
+/** A persisted assessment whose materialHash matches the recorded basis. */
+const persistedFor = (itemId: string, basisHash: string, over: Record<string, unknown> = {}) => ({
+  id: `cra-${itemId}`,
+  firmId: "firm-golden",
+  caseId: "case-golden-lcp-0001",
+  recommendationId: itemId,
+  status: "VALIDATED",
+  materialHash: basisHash,
+  probabilityClassification: "PROBABLE_INCLUDED",
+  inclusionRationale: "PERSISTED-RATIONALE-A",
+  evidenceStrength: "MODERATE",
+  recommendationConfidence: "HIGH",
+  residualUncertainty: "PERSISTED-UNCERTAINTY-A",
+  alternativesConsidered: [{ alternative: "alt", rationale: "PERSISTED-ALTERNATIVE-A" }],
+  reasoningChain: [],
+  generatedByModel: "deterministic-reasoning-v7",
+  createdAt: new Date("2025-01-15T12:00:00Z"),
+  updatedAt: new Date("2025-01-15T12:00:00Z"),
+  ...over,
+});
+
+describe("a hash-matched persisted assessment must still be runtime-valid", () => {
+  it("malformed alternativesConsidered=[null] does not crash or print junk", async () => {
+    const live = liveItems();
+    deps.bases = live.map((l) => recordA(l));
+    // Hash matches exactly, so the persisted row IS selected.
+    deps.db.clinicalReasoningAssessments = deps.bases.map((b) =>
+      persistedFor((b as Record<string, unknown>).futureCareItemId as string, (b as Record<string, unknown>).basisHash as string, { alternativesConsidered: [null] }),
+    );
+    for (const l of live) l.service = "SENTINEL-B-SERVICE";
+    await assertLiveHas("SENTINEL-B-SERVICE");
+
+    const text = await rendered();
+    const body = text.slice(0, text.indexOf("Appendix F"));
+    expect(body).not.toContain("[object Object]");
+    expect(body).not.toContain("undefined");
+    expect(body).not.toContain("SENTINEL-B-SERVICE");
+    // The basis here is COMPLETE, so rejecting the persisted row falls back to
+    // the RECORD — which can answer. "not recorded" would be wrong.
+    expect(body).toContain("NARRATIVE-A.");
+  });
+
+  it("with an INCOMPLETE basis AND a malformed persisted row, it says not recorded", async () => {
+    // Neither source can answer: the persisted row fails validation and the
+    // basis cannot supply an assessment either.
+    const live = liveItems();
+    deps.bases = live.map((l) => {
+      const b = recordA(l);
+      delete (b as Record<string, unknown>).specification;
+      (b.assessmentBasis as Record<string, unknown>).inclusionInTotalsStatus = "included";
+      return b;
+    });
+    deps.db.clinicalReasoningAssessments = deps.bases.map((b) =>
+      persistedFor((b as Record<string, unknown>).futureCareItemId as string, (b as Record<string, unknown>).basisHash as string, { alternativesConsidered: [null] }),
+    );
+    for (const l of live) l.service = "SENTINEL-B-SERVICE";
+    await assertLiveHas("SENTINEL-B-SERVICE");
+
+    const text = await rendered();
+    const body = text.slice(0, text.indexOf("Appendix F"));
+    expect(body).toContain("does not carry a clinical reasoning assessment");
+    expect(body).not.toContain("[object Object]");
+    expect(body).not.toContain("SENTINEL-B-SERVICE");
+  });
+
+  it.each([
+    ["alternativesConsidered not an array", { alternativesConsidered: "nope" }],
+    ["inclusionRationale wrong type", { inclusionRationale: 42 }],
+    ["residualUncertainty wrong type", { residualUncertainty: { x: 1 } }],
+    ["probabilityClassification out of domain", { probabilityClassification: "MAYBE" }],
+    ["evidenceStrength out of domain", { evidenceStrength: "VIBES" }],
+  ])("%s falls back to the record rather than rendering junk", async (_label, over) => {
+    const live = liveItems();
+    deps.bases = live.map((l) => recordA(l));
+    deps.db.clinicalReasoningAssessments = deps.bases.map((b) =>
+      persistedFor((b as Record<string, unknown>).futureCareItemId as string, (b as Record<string, unknown>).basisHash as string, over),
+    );
+    const text = await rendered();
+    const body = text.slice(0, text.indexOf("Appendix F"));
+    expect(body, "[object Object]").not.toContain("[object Object]");
+    expect(body, "undefined").not.toContain("undefined");
+  });
+
+  it("a valid persisted assessment is still used", async () => {
+    const live = liveItems();
+    deps.bases = live.map((l) => recordA(l));
+    deps.db.clinicalReasoningAssessments = deps.bases.map((b) =>
+      persistedFor((b as Record<string, unknown>).futureCareItemId as string, (b as Record<string, unknown>).basisHash as string),
+    );
+    const text = await rendered();
+    expect(text).toContain("PERSISTED-RATIONALE-A");
+    expect(text).toContain("PERSISTED-ALTERNATIVE-A");
+  });
+});
+
+describe("a rejected staging value stays not-recorded, never false", () => {
+  it("wrong-type contingencyOnly is disclosed, not silently treated as false", async () => {
+    const live = liveItems();
+    deps.bases = live.map((l) => {
+      const b = recordA(l);
+      (b.specification as Record<string, unknown>).contingencyOnly = "sort of";
+      return b;
+    });
+    const text = await rendered();
+    const body = text.slice(0, text.indexOf("Appendix F"));
+    expect(body).toMatch(/contingency .*not recorded|not recorded.*contingency/i);
+  });
+});
+
+describe("unrecorded legacy low/high cannot poison totals", () => {
+  it.each([
+    ["NaN", NaN],
+    ["Infinity", Infinity],
+  ])("%s legacy lowCost/highCost is ignored and derived instead", async (_label, bad) => {
+    const live = liveItems();
+    deps.bases = live.map((l) => {
+      const b = recordA(l);
+      // Not part of the canonical specification — a legacy extra.
+      (b.specification as Record<string, unknown>).lowCost = bad;
+      (b.specification as Record<string, unknown>).highCost = bad;
+      return b;
+    });
+    const text = await rendered();
+    expect(text).not.toContain("NaN");
+    expect(text).not.toContain("Infinity");
+    // Derived from the recorded expected value with the engine multipliers.
+    const n = live.length;
+    expect(text).toContain(`$${(Math.round(33333 * 0.85) * n).toLocaleString("en-US")}`);
+    expect(text).toContain(`$${(Math.round(33333 * 1.25) * n).toLocaleString("en-US")}`);
+  });
+});

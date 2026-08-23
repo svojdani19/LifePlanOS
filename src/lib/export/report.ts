@@ -30,6 +30,7 @@ import { loadRecordedBases, type BasisStore } from "@/lib/engine/basisStore";
 import { itemIsSupported, supportClassOf, SUPPORT_LABEL, computePlanTotals } from "@/lib/engine/supportClass";
 import { LOW_SCENARIO_MULTIPLIER, HIGH_SCENARIO_MULTIPLIER } from "@/lib/engine/cost";
 import { assessBasisCompleteness } from "@/lib/engine/basisCompleteness";
+import { readPersistedAssessment } from "@/lib/engine/persistedAssessment";
 import type { ServiceFamily } from "@/lib/engine/serviceOntology";
 import { loadRecordedBases as loadBasesForCsv } from "@/lib/engine/basisStore";
 import { deriveWitnessAssessment, assessmentFromBasis, detectSetConflicts, PROBABILITY_LABEL, EVIDENCE_STRENGTH_LABEL, CONFIDENCE_LABEL, type ReasoningItem, type ReasoningAssessment } from "@/lib/engine/clinicalReasoning";
@@ -395,8 +396,11 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     // from the live scenario columns, so the range around a recorded expected
     // figure belonged to a different plan.
     const recordedPv = absent ? it.presentValue : safe("specification.presentValue", num(spec?.presentValue));
-    const recLow = num((spec as Record<string, unknown> | null)?.lowCost);
-    const recHigh = num((spec as Record<string, unknown> | null)?.highCost);
+    // lowCost/highCost are NOT part of the canonical specification and are not
+    // in BASIS_SCHEMA, so nothing validates them — a legacy row carrying
+    // lowCost=NaN passed completeness and poisoned the scenario total. They are
+    // no longer read at all: the range is always derived from the sanitized
+    // recorded present value with the engine's own multipliers.
 
     return {
       basisState: completeness.state,
@@ -412,13 +416,16 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
       unitCost: absent ? it.unitCost : safe("specification.unitCost", num(spec?.unitCost)),
       lifetimeCost: absent ? it.lifetimeCost : safe("specification.lifetimeCost", num(spec?.lifetimeCost)),
       presentValue: recordedPv,
-      lowCost: absent ? it.lowCost : recLow ?? (recordedPv === null ? null : Math.round(recordedPv * LOW_SCENARIO_MULTIPLIER)),
-      highCost: absent ? it.highCost : recHigh ?? (recordedPv === null ? null : Math.round(recordedPv * HIGH_SCENARIO_MULTIPLIER)),
+      lowCost: absent ? it.lowCost : recordedPv === null ? null : Math.round(recordedPv * LOW_SCENARIO_MULTIPLIER),
+      highCost: absent ? it.highCost : recordedPv === null ? null : Math.round(recordedPv * HIGH_SCENARIO_MULTIPLIER),
       physicianStatus: absent ? it.physicianStatus : safe("specification.physicianStatus", str(spec?.physicianStatus)),
       frequencyText: absent ? freqText(it) : safe("specification.frequencyText", str(spec?.frequencyText)),
       durationText: absent ? durationText(it, a.lifeExpectancyYears) : safe("specification.durationText", str(spec?.durationText)),
       lifetimeQuantity: absent ? null : safe("specification.lifetimeQuantity", num(spec?.lifetimeQuantity)),
-      contingencyOnly: absent ? !!it.contingencyOnly : safe("specification.contingencyOnly", spec?.contingencyOnly === true) ?? false,
+      // NULL when rejected, never false. `?? false` turned a malformed staging
+      // value into a positive assertion that the item is not a contingency —
+      // exactly the silent substitution this whole pass removes.
+      contingencyOnly: absent ? !!it.contingencyOnly : safe("specification.contingencyOnly", spec?.contingencyOnly === true),
       recordSupported: absent ? null : safe("specification.recordSupported", spec?.recordSupported === true),
       startTrigger: absent ? it.startTrigger : safe("specification.startTrigger", str(spec?.startTrigger)),
       prerequisite: absent ? it.prerequisite : safe("specification.prerequisite", str(spec?.prerequisite)),
@@ -918,7 +925,12 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
       sc.prerequisite && `Prerequisite: ${sc.prerequisite}`,
       sc.earliestTiming && `Earliest expected timing: ${sc.earliestTiming}`,
       sc.replacesService && `Replaces if triggered: ${sc.replacesService}`,
-      sc.contingencyOnly && "Disclosed as a contingency — not entered into the totals",
+      // null means the recorded value was rejected — say so. Rendering nothing
+      // would read as "not a contingency", which is a claim the record does
+      // not support.
+      sc.contingencyOnly === null
+        ? `Contingency status: ${NOT_RECORDED}`
+        : sc.contingencyOnly && "Disclosed as a contingency — not entered into the totals",
     ].filter(Boolean) as string[];
     if (staged.length) out.push(labeled("Staged / conditional", staged.join(". ") + "."));
 
@@ -973,11 +985,17 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     // printed LIVE clinical reasoning whenever assessmentFromBasis returned
     // null — which it does for any basis missing a specification. The item was
     // basis-backed, so nothing live may fill the gap.
+    // VALIDATED, not merely hash-matched. The hash proves the row was computed
+    // from this basis; it says nothing about the shape of the JSON that came
+    // back out of the database. alternativesConsidered is a nullable Json
+    // column, so a stored [null] matches the hash perfectly and threw on
+    // `[0].rationale`.
+    const persistedValid = readPersistedAssessment(persisted);
     const usePersisted =
-      !!persisted?.inclusionRationale &&
+      !!persistedValid &&
       (recordedBasis?.basisHash ? persistedHash === recordedBasis.basisHash : true);
     const assessment = usePersisted
-      ? (persisted as unknown as Pick<ReasoningAssessment, "probabilityClassification" | "inclusionRationale" | "evidenceStrength" | "recommendationConfidence" | "residualUncertainty" | "alternativesConsidered">)
+      ? persistedValid
       : noBasis
         ? deriveWitnessAssessment(
             it as unknown as ReasoningItem,
