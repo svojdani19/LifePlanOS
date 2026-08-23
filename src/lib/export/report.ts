@@ -394,7 +394,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     // engine's own multipliers, unless the basis records them. They were summed
     // from the live scenario columns, so the range around a recorded expected
     // figure belonged to a different plan.
-    const recordedPv = absent ? it.presentValue : num(spec?.presentValue);
+    const recordedPv = absent ? it.presentValue : safe("specification.presentValue", num(spec?.presentValue));
     const recLow = num((spec as Record<string, unknown> | null)?.lowCost);
     const recHigh = num((spec as Record<string, unknown> | null)?.highCost);
 
@@ -405,31 +405,33 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
       /** True only when the record can answer for every material field. */
       authoritative: completeness.state === "COMPLETE",
 
-      service: absent ? it.service : str(spec?.service),
-      supportingDiagnosis: absent ? null : str(spec?.supportingDiagnosis),
-      specialty: absent ? it.specialty : str(spec?.responsibleSpecialty),
-      cptCode: absent ? it.cptCode : str(spec?.cptCode),
-      unitCost: absent ? it.unitCost : num(spec?.unitCost),
-      lifetimeCost: absent ? it.lifetimeCost : num(spec?.lifetimeCost),
+      service: absent ? it.service : safe("specification.service", str(spec?.service)),
+      supportingDiagnosis: absent ? null : safe("specification.supportingDiagnosis", str(spec?.supportingDiagnosis)),
+      specialty: absent ? it.specialty : safe("specification.responsibleSpecialty", str(spec?.responsibleSpecialty)),
+      cptCode: absent ? it.cptCode : safe("specification.cptCode", str(spec?.cptCode)),
+      unitCost: absent ? it.unitCost : safe("specification.unitCost", num(spec?.unitCost)),
+      lifetimeCost: absent ? it.lifetimeCost : safe("specification.lifetimeCost", num(spec?.lifetimeCost)),
       presentValue: recordedPv,
       lowCost: absent ? it.lowCost : recLow ?? (recordedPv === null ? null : Math.round(recordedPv * LOW_SCENARIO_MULTIPLIER)),
       highCost: absent ? it.highCost : recHigh ?? (recordedPv === null ? null : Math.round(recordedPv * HIGH_SCENARIO_MULTIPLIER)),
-      physicianStatus: absent ? it.physicianStatus : str(spec?.physicianStatus),
-      frequencyText: absent ? freqText(it) : str(spec?.frequencyText),
-      durationText: absent ? durationText(it, a.lifeExpectancyYears) : str(spec?.durationText),
-      lifetimeQuantity: absent ? null : num(spec?.lifetimeQuantity),
-      contingencyOnly: absent ? !!it.contingencyOnly : spec?.contingencyOnly === true,
-      recordSupported: absent ? null : spec?.recordSupported === true,
-      startTrigger: absent ? it.startTrigger : str(spec?.startTrigger),
-      prerequisite: absent ? it.prerequisite : str(spec?.prerequisite),
-      earliestTiming: absent ? it.earliestTiming : str(spec?.earliestTiming),
-      replacesService: absent ? it.replacesService : str(spec?.replacesService),
-      pricingSource: absent ? it.pricingSource : str(proj?.pricingSourceId),
+      physicianStatus: absent ? it.physicianStatus : safe("specification.physicianStatus", str(spec?.physicianStatus)),
+      frequencyText: absent ? freqText(it) : safe("specification.frequencyText", str(spec?.frequencyText)),
+      durationText: absent ? durationText(it, a.lifeExpectancyYears) : safe("specification.durationText", str(spec?.durationText)),
+      lifetimeQuantity: absent ? null : safe("specification.lifetimeQuantity", num(spec?.lifetimeQuantity)),
+      contingencyOnly: absent ? !!it.contingencyOnly : safe("specification.contingencyOnly", spec?.contingencyOnly === true) ?? false,
+      recordSupported: absent ? null : safe("specification.recordSupported", spec?.recordSupported === true),
+      startTrigger: absent ? it.startTrigger : safe("specification.startTrigger", str(spec?.startTrigger)),
+      prerequisite: absent ? it.prerequisite : safe("specification.prerequisite", str(spec?.prerequisite)),
+      earliestTiming: absent ? it.earliestTiming : safe("specification.earliestTiming", str(spec?.earliestTiming)),
+      replacesService: absent ? it.replacesService : safe("specification.replacesService", str(spec?.replacesService)),
+      pricingSource: absent ? it.pricingSource : safe("projectionBasis.pricingSourceId", str(proj?.pricingSourceId)),
 
       /** Recorded projection inputs, for the sensitivity re-projection. */
+      // A composite with ANY malformed descendant is unavailable in full: a
+      // projection run on one bad input is not a partially-correct projection.
       projection: absent
         ? { unitCost: it.unitCost, frequencyPerYear: it.frequencyPerYear, durationYears: it.durationYears, isLifetime: it.isLifetime }
-        : proj
+        : proj && !bad("projectionBasis")
           ? {
               unitCost: num(proj.unitCost) ?? 0,
               frequencyPerYear: num(proj.frequencyPerYear) ?? 0,
@@ -439,7 +441,7 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
           : null,
 
       /** Inclusion is a RECORDED decision, not a re-derivation from live state. */
-      inclusionStatus: absent ? null : str(m?.inclusionInTotalsStatus),
+      inclusionStatus: absent ? null : safe("assessmentBasis.inclusionInTotalsStatus", str(m?.inclusionInTotalsStatus)),
 
       probabilityStatement: absent ? null : safe("probabilityBasis.statement", str(prob?.statement)),
       probabilityFactors: absent ? null : safe("probabilityBasis.factors", arr<{ label: string; present: boolean }>(prob?.factors)),
@@ -450,13 +452,26 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
       missingPremises: absent ? null : safe("missingPremises", arr<string>(b.missingPremises)),
       potentialChallenges: absent ? null : safe("assessmentBasis.potentialChallenges", arr<string>(m?.potentialChallenges)),
       functionalBasis: absent ? null : safe("assessmentBasis.functionalBasis", (m?.functionalBasis ?? null) as Record<string, unknown> | null),
-      confidenceLevel: absent ? null : str(m?.confidenceLevel),
-      confidenceExplanation: absent ? null : str(m?.confidenceLevelExplanation),
-      necessityNarrative: absent ? null : str(b.necessityNarrative),
-      missingSupport: absent ? it.missingSupport : str(m?.residualUncertainty),
-      evidenceStrength: absent ? null : str(m?.evidenceStrength),
-      recommendationConfidence: absent ? null : str(m?.recommendationConfidence),
-      inclusionRationale: absent ? null : str(m?.inclusionRationale),
+      confidenceLevel: absent ? null : safe("assessmentBasis.confidenceLevel", str(m?.confidenceLevel)),
+      confidenceExplanation: absent ? null : safe("assessmentBasis.confidenceLevelExplanation", str(m?.confidenceLevelExplanation)),
+      necessityNarrative: absent ? null : safe("necessityNarrative", str(b.necessityNarrative)),
+      missingSupport: absent ? it.missingSupport : safe("assessmentBasis.residualUncertainty", str(m?.residualUncertainty)),
+      evidenceStrength: absent ? null : safe("assessmentBasis.evidenceStrength", str(m?.evidenceStrength)),
+      recommendationConfidence: absent ? null : safe("assessmentBasis.recommendationConfidence", str(m?.recommendationConfidence)),
+      inclusionRationale: absent ? null : safe("assessmentBasis.inclusionRationale", str(m?.inclusionRationale)),
+      // Read RAW off recordedBasis.assessmentBasis before the view existed, so
+      // a persisted [null] threw on g.title in the guideline block.
+      supportingGuidelineAssessments: absent
+        ? null
+        : safe("assessmentBasis.supportingGuidelineAssessments", arr<{ title: string; claim: string; provenance: string; verifiedBy?: string | null; verifiedAt?: string | null }>(m?.supportingGuidelineAssessments)),
+      alternativesConsidered: absent
+        ? null
+        : safe("assessmentBasis.alternativesConsidered", arr<{ alternative: string; rationale: string }>(m?.alternativesConsidered)),
+      // The guideline bucket specifically, so the guideline block never reads
+      // the raw acceptedEvidence after the view marked it unavailable.
+      guidelineEvidence: absent
+        ? null
+        : safe("acceptedEvidence.guidelines", arr<{ text: string; source: string | null }>((ev as Record<string, unknown> | null)?.guidelines)),
       /**
        * Presentation category. Derived from the RECORDED intervention identity
        * through the ontology, never from the live category column — which
@@ -672,7 +687,10 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
     });
     const basisCheck = compareBasis(recordedBasis ?? null, witness);
     // The recorded material conclusions, used by every assertion below.
-    const rMaterial = recordedBasis?.assessmentBasis ?? null;
+    // Retained only for a COMPLETE basis. Every renderer reads the view, which
+    // is path-aware; rMaterial is the raw record and cannot be trusted field by
+    // field once the basis has failed validation.
+    const rMaterial = V.basisState === "COMPLETE" ? recordedBasis?.assessmentBasis ?? null : null;
 
     // The heading names the recommendation, which is itself an approved
     // statement. It was rendered from the live row BEFORE the basis was even
@@ -820,8 +838,15 @@ export async function buildReportDocx(caseId: string, template: CaseSide, report
       // parameter named "verified", and the renderer then said each entry had
       // been verified against its publication — a claim about human
       // verification that no step in the pipeline performs.
-      itemGuidance: (rMaterial?.supportingGuidelineAssessments ?? []).filter((g) => g.title && g.claim),
-      recordedGuidelineEvidence: recordedBasis?.acceptedEvidence?.guidelines ?? [],
+      // From the VIEW. These were the last two raw reads of a persisted array:
+      // supportingGuidelineAssessments off rMaterial (which threw on g.title
+      // for a stored [null]) and acceptedEvidence.guidelines straight off the
+      // basis, handed on even after the view had marked acceptedEvidence
+      // unavailable.
+      itemGuidance: noBasis
+        ? []
+        : (V.supportingGuidelineAssessments ?? []).filter((g) => g && g.title && g.claim),
+      recordedGuidelineEvidence: noBasis ? [] : V.guidelineEvidence ?? [],
       // Built from RECORDED category, service and diagnosis. This used the live
       // category, the live service name and the live dxName even for a
       // basis-backed item, so the candidate-guidance context described a

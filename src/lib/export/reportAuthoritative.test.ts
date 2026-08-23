@@ -480,3 +480,49 @@ describe("a malformed array element does not crash the draft", () => {
     expect(body).not.toContain("SENTINEL-B-SERVICE");
   });
 });
+
+
+// ── Every malformed element class must render safely ────────────────────────
+//
+// The schema flags these, but two saved arrays were still read RAW, before the
+// sanitized view: supportingGuidelineAssessments off `rMaterial`, and
+// acceptedEvidence.guidelines straight off the basis. A persisted [null] threw
+// on g.title, and guidelines=[null] was handed to guidelineStatement even
+// though the view had already marked acceptedEvidence unavailable.
+
+const MALFORMED_CLASSES: [string, (b: Record<string, unknown>) => void][] = [
+  ["assessmentBasis.supportingGuidelineAssessments=[null]", (b) => { (b.assessmentBasis as Record<string, unknown>).supportingGuidelineAssessments = [null]; }],
+  ["acceptedEvidence.guidelines=[null]", (b) => { (b.acceptedEvidence as Record<string, unknown>).guidelines = [null]; }],
+  ["assessmentBasis.alternativesConsidered=[null]", (b) => { (b.assessmentBasis as Record<string, unknown>).alternativesConsidered = [null]; }],
+  ["invalid physicianStatus", (b) => { (b.specification as Record<string, unknown>).physicianStatus = "SORT_OF"; }],
+  ["invalid inclusion status", (b) => { (b.assessmentBasis as Record<string, unknown>).inclusionInTotalsStatus = "maybe"; }],
+  ["NaN unitCost", (b) => { (b.specification as Record<string, unknown>).unitCost = NaN; }],
+  ["Infinity presentValue", (b) => { (b.specification as Record<string, unknown>).presentValue = Infinity; }],
+  ["NaN projection frequency", (b) => { (b.projectionBasis as Record<string, unknown>).frequencyPerYear = NaN; }],
+];
+
+describe("a draft renders safely for every malformed class", () => {
+  it.each(MALFORMED_CLASSES)("%s", async (_label, mutate) => {
+    const live = liveItems();
+    deps.bases = live.map((l) => {
+      const b = recordA(l);
+      mutate(b as Record<string, unknown>);
+      return b;
+    });
+    for (const l of live) l.service = "SENTINEL-B-SERVICE";
+    await assertLiveHas("SENTINEL-B-SERVICE");
+
+    // Completes rather than throwing.
+    const text = await rendered();
+    const body = text.slice(0, text.indexOf("Appendix F"));
+
+    // Nothing unrenderable, nothing live.
+    expect(body, "[object Object]").not.toContain("[object Object]");
+    expect(body, "NaN").not.toContain("NaN");
+    expect(body, "Infinity").not.toContain("Infinity");
+    expect(body, "undefined").not.toContain("undefined");
+    expect(body, "live sentinel").not.toContain("SENTINEL-B-SERVICE");
+    // And it says so.
+    expect(body).toContain("not recorded");
+  });
+});

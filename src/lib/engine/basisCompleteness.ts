@@ -401,8 +401,12 @@ export function incompleteBasisFinding(input: {
     // finding, so resolving one cannot silently close another.
     result: `${BASIS_INCOMPLETE}:${input.futureCareItemId}:${input.fingerprint}`,
     issue:
-      `A recorded basis exists for this recommendation but cannot answer for it: ${input.missing.length} required field(s) are absent — ${shown}${more}. ` +
-      `Nothing is read from the current record to cover the gap, because the current record is precisely what the approval did not cover; the affected values print as "not recorded".`,
+      // "absent" understated it: an indexed element defect, a wrong type and an
+      // out-of-domain value are all present-but-unusable, and a reader told a
+      // field was absent would look for the wrong thing.
+      `A recorded basis exists for this recommendation but cannot answer for it: ${input.missing.length} required field(s) are missing or malformed — ${shown}${more}. ` +
+      `Paths ending in <type> hold a value of the wrong type, and <value> an out-of-domain one; an indexed path such as literature[0] names the element at fault. ` +
+      `Nothing is read from the current record to cover any of them, because the current record is precisely what the approval did not cover; the affected values print as "not recorded".`,
     severity: "Critical",
     suggestion:
       "Regenerate the plan so a complete basis is recorded. This cannot be resolved as-is or ignored: the missing fields are what the report would otherwise assert.",

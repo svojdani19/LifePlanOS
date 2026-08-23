@@ -227,3 +227,57 @@ describe("the export route refuses on a REAL malformed-element result", () => {
     expect(JSON.stringify(body.defects)).toContain("literature[0]");
   });
 });
+
+
+describe("the guideline and scalar classes reach validateCase and the real gate", () => {
+  const CLASSES: [string, (b: Record<string, unknown>) => void, string][] = [
+    ["supportingGuidelineAssessments=[null]", (b) => { (b.assessmentBasis as Record<string, unknown>).supportingGuidelineAssessments = [null]; }, "assessmentBasis.supportingGuidelineAssessments[0]"],
+    ["acceptedEvidence.guidelines=[null]", (b) => { (b.acceptedEvidence as Record<string, unknown>).guidelines = [null]; }, "acceptedEvidence.guidelines[0]"],
+    ["alternativesConsidered=[null]", (b) => { (b.assessmentBasis as Record<string, unknown>).alternativesConsidered = [null]; }, "assessmentBasis.alternativesConsidered[0]"],
+    ["invalid physicianStatus", (b) => { (b.specification as Record<string, unknown>).physicianStatus = "SORT_OF"; }, "specification.physicianStatus<value>"],
+    ["Infinity presentValue", (b) => { (b.specification as Record<string, unknown>).presentValue = Infinity; }, "specification.presentValue<type>"],
+    ["NaN projection frequency", (b) => { (b.projectionBasis as Record<string, unknown>).frequencyPerYear = NaN; }, "projectionBasis.frequencyPerYear<type>"],
+  ];
+
+  it.each(CLASSES)("validateCase names the exact path for %s", async (_label, mutate, expected) => {
+    const b = fullBasis();
+    mutate(b);
+    db.bases = [b];
+    const v = await validateCase("case-1");
+    const f = v.findings.find((x) => isIncompleteBasisFinding(x.result));
+    expect(f, _label).toBeTruthy();
+    expect(f!.exportBlocking).toBe(true);
+    expect(f!.issue, expected).toContain(expected);
+  });
+
+  it("says missing OR malformed, because these are not absent", async () => {
+    const b = fullBasis();
+    (b.specification as Record<string, unknown>).presentValue = NaN;
+    db.bases = [b];
+    const f = (await validateCase("case-1")).findings.find((x) => isIncompleteBasisFinding(x.result))!;
+    expect(f.issue).toMatch(/missing or malformed/i);
+    expect(f.issue).toMatch(/wrong type/i);
+  });
+
+  it("the real gate 422s a final DOCX for a malformed guideline element", async () => {
+    const b = fullBasis();
+    (b.assessmentBasis as Record<string, unknown>).supportingGuidelineAssessments = [null];
+    db.bases = [b];
+
+    const v = await validateCase("case-1");
+    const real = v.findings.filter((f) => f.exportBlocking && isIncompleteBasisFinding(f.result));
+    expect(real.length).toBeGreaterThan(0);
+    expect(real[0].issue).toContain("assessmentBasis.supportingGuidelineAssessments[0]");
+
+    routeDeps.findings = real.map((f) => ({ service: f.service, result: f.result, issue: f.issue, suggestion: f.suggestion, exportBlocking: true }));
+    routeDeps.openBlocking = real.length;
+
+    const { POST } = await import("@/app/api/cases/[caseId]/export/route");
+    const res = await POST(
+      new Request("http://t/x", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ format: "DOCX", mode: "final" }) }),
+      { params: Promise.resolve({ caseId: "case-1" }) },
+    );
+    expect(res.status).toBe(422);
+    expect(JSON.stringify((await res.json()).defects)).toContain("supportingGuidelineAssessments[0]");
+  });
+});
