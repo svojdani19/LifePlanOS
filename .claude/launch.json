@@ -4,8 +4,8 @@
     {
       "name": "lifeplanos",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev:auto"],
-      "autoPort": true
+      "runtimeArgs": ["run", "dev"],
+      "autoPort": false
     }
   ]
 }
