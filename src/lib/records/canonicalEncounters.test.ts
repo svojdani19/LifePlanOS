@@ -663,3 +663,80 @@ describe("the server's compatibility path cannot widen a query", () => {
     });
   }
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+describe("one finding is one obligation, against one CURRENT record", () => {
+  // A stored `canonicalNoteId` is a snapshot of a grouping, and grouping
+  // changes: a finding written while a legacy row was a note of one carries
+  // that singleton id, and once the compatibility path folds the row into a
+  // real encounter the two disagree. Counting both made one problem two — or,
+  // when the row is gone, an obligation against a note nobody can open.
+  const rows = [
+    enc("a", { segmentKey: "note-1" } as never),
+    enc("b", { segmentKey: "note-1" } as never),
+  ];
+  const segments = ingestSegments(["2025-03-14"]);
+  const currentNote = canonicalNoteId("doc-1", ["a", "b"]);
+  const staleNote = canonicalNoteId("doc-1", ["a"]);
+
+  const measure = (findings: Parameters<typeof measureReviewBurden>[0]["findings"]) =>
+    measureReviewBurden({ documents: [{ id: "doc-1", segments }], rows: rows.map(asBurdenRow), findings, pages: [] });
+
+  it("resolves a finding carrying a STALE note id to the row's current encounter, once", () => {
+    const burden = measure([
+      { id: "f", fingerprint: "fp", scope: "ENTRY", type: "CONTRADICTED_DATE", status: "OPEN", blocking: true, encounterId: "a", canonicalNoteId: staleNote },
+    ]);
+    expect(burden.canonicalNotes).toBe(1);
+    // Not two obligations, and not one against a note that no longer exists.
+    expect(burden.notesWithFindings).toBe(1);
+    expect(burden.notesNeedingAttention).toBe(1);
+    expect(burden.requiredDecisions).toBe(1);
+  });
+
+  it("drops a stale note id that names no current encounter rather than inventing one", () => {
+    const burden = measure([
+      { id: "f", fingerprint: "fp", scope: "NOTE", type: "STALE_REVIEW", status: "OPEN", blocking: true, canonicalNoteId: canonicalNoteId("doc-1", ["long-gone"]) },
+    ]);
+    expect(burden.notesWithFindings).toBe(0);
+    expect(burden.requiredDecisions).toBe(0);
+    // The finding is still counted where it is true: by scope and by type.
+    expect(burden.findingsByScope.NOTE).toBe(1);
+  });
+
+  it("accepts a stored note id when it still names a current encounter", () => {
+    const burden = measure([
+      { id: "f", fingerprint: "fp", scope: "NOTE", type: "STALE_REVIEW", status: "OPEN", blocking: true, canonicalNoteId: currentNote },
+    ]);
+    expect(burden.notesWithFindings).toBe(1);
+    expect(burden.requiredDecisions).toBe(1);
+  });
+
+  it("treats a NON-BLOCKING finding as a caution, matching the review surface", () => {
+    const burden = measure([
+      { id: "f", fingerprint: "fp", scope: "ENTRY", type: "NOT_CORROBORATED", status: "OPEN", blocking: false, encounterId: "a" },
+    ]);
+    // Visible…
+    expect(burden.notesWithFindings).toBe(1);
+    expect(burden.findingsByScope.ENTRY).toBe(1);
+    // …but not a decision somebody owes.
+    expect(burden.notesNeedingAttention).toBe(0);
+    expect(burden.notesCarryingCaution).toBe(1);
+    expect(burden.requiredDecisions).toBe(0);
+
+    // …and the review surface says the same thing about the same finding.
+    const note = projectNotes("doc-1", segments, rows, [
+      { id: "f", scope: "ENTRY", type: "NOT_CORROBORATED", severity: "WARNING", blocking: false, source: "CORROBORATION", detail: "one field was not reproduced", status: "OPEN", encounterId: "a" },
+    ])[0];
+    expect(note.needsAttention).toBe(false);
+    expect(note.attention).toBe("CAUTION");
+  });
+
+  it("counts one encounter carrying several blocking findings as ONE decision", () => {
+    const burden = measure([
+      { id: "f1", fingerprint: "fp1", scope: "ENTRY", type: "CONTRADICTED_DATE", status: "OPEN", blocking: true, encounterId: "a", canonicalNoteId: staleNote },
+      { id: "f2", fingerprint: "fp2", scope: "CLAIM", type: "UNSUPPORTED_CLAIM", status: "OPEN", blocking: true, encounterId: "b" },
+    ]);
+    expect(burden.findingsByScope).toEqual({ ENTRY: 1, CLAIM: 1 });
+    expect(burden.requiredDecisions).toBe(1);
+  });
+});

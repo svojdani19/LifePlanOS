@@ -61,6 +61,7 @@ const REFUTED = [
   { id: "canonical-note-review" },
   { id: "finding-disposition" },
   { id: "note-wide-correction" },
+  { id: "batch-factual-confirmation" },
   { id: "finding-lifecycle" },
   { id: "export-gate-visible-findings" },
   { id: "item-evidence-ledger" },
@@ -452,16 +453,121 @@ describe("refuting: 'one decision covers exactly one canonical note'", () => {
   });
 
   it("checks the row's own integrity state, not only the finding table", async () => {
+    // Findings were not being written by normal extraction, so a gate that
+    // consulted only that table was a gate over an empty room. The checks now
+    // live in ONE shared function — the individual endpoint, the batch
+    // confirmation and the final gate must not hold three opinions about
+    // whether a record is sound — so this asserts the BEHAVIOUR of that
+    // function, and that the route runs it behind the non-reject branch.
+    const { attestationBlockers } = await import("@/lib/records/reviewIntegrity");
+    const draft = { id: "r", status: "AI_DRAFT" as const };
+    expect(attestationBlockers({ ...draft, auditResult: "FAILED" }).map((p) => p.code)).toEqual(["AUDIT_FAILED"]);
+    expect(
+      attestationBlockers({ ...draft, auditResult: "SOURCE_CONFLICT", auditVersion: "2026-08-17.scoped-findings" }).map((p) => p.code),
+    ).toEqual(["SOURCE_CONFLICT"]);
+    expect(attestationBlockers({ ...draft, unresolvedDisputes: 2 }).map((p) => p.code)).toEqual(["UNRESOLVED_DISPUTE"]);
+    expect(attestationBlockers({ ...draft, contradictedFields: ["date"] }).map((p) => p.code)).toEqual(["CONTRADICTED_FIELD"]);
+    // A sound draft is not obstructed by any of them.
+    expect(attestationBlockers({ ...draft, auditResult: "PASS" })).toEqual([]);
+
     const src = await import("node:fs/promises").then((fs) =>
       fs.readFile("src/app/api/cases/[caseId]/records/encounters/group/route.ts", "utf8"),
     );
-    // Findings were not being written by normal extraction, so a gate that
-    // consulted only that table was a gate over an empty room.
-    for (const token of ["row.auditResult", "unresolvedDisputes", "contradictedFields"]) {
-      expect(src.includes(token), token).toBe(true);
+    expect(src.includes("attestationBlockers")).toBe(true);
+    // …and it sits behind the non-reject branch: disposing of an unsupportable
+    // entry is how one is resolved, so a REJECT is never obstructed by it.
+    expect(src.indexOf('input.action !== "reject"')).toBeLessThan(src.lastIndexOf("attestationBlockers"));
+  });
+});
+
+describe("refuting: 'one click confirmed the clean records'", () => {
+  const clean = {
+    id: "r1",
+    sourceDocumentId: "doc-1",
+    dateStatus: "DOCUMENTED" as const,
+    encounterDate: "2025-03-14",
+    encounterDateEnd: null,
+    provider: "A. Rivera, MD",
+    providerCredentials: null,
+    facility: null,
+    encounterType: "Clinic visit",
+    factualSummary: "Clinic visit.",
+    synthesis: null,
+    claims: [{ field: "assessment", value: "Lumbar radiculopathy", excerpt: "…", page: 1, confidence: null }],
+    page: 1,
+    pageEnd: 1,
+    ocrConfidence: 0.98,
+    warnings: [],
+    status: "AI_AUDIT_PASSED",
+    substanceClass: "CLINICAL",
+    substanceReason: null,
+    analysisClass: "CLINICAL_ENCOUNTER",
+    attributionName: null,
+    attributionRole: null,
+    reviewedAt: null,
+    verifiedAt: null,
+    staleReason: null,
+    auditResult: "PASS",
+    auditVersion: "2026-08-17.scoped-findings",
+    unresolvedDisputes: 0,
+    contradictedFields: [] as string[],
+    editedFields: [] as string[],
+    contentHash: "r1".padEnd(64, "0"),
+  };
+
+  const planFor = async (over: Record<string, unknown> = {}) => {
+    const { projectNotes } = await import("@/lib/records/noteProjection");
+    const { planBatchConfirmation } = await import("@/lib/records/batchConfirmation");
+    const notes = projectNotes("doc-1", [{ rowIds: ["r1"] }], [{ ...clean, ...over } as never], []);
+    return planBatchConfirmation({ notes, events: [] });
+  };
+
+  it("does not sweep an exception into the clean set", async () => {
+    for (const over of [
+      { auditResult: "FAILED" },
+      { auditResult: "SOURCE_CONFLICT" },
+      { unresolvedDisputes: 1 },
+      { contradictedFields: ["date"] },
+      { status: "STALE" },
+      { status: "GENERATION_LOSS" },
+      { dateStatus: "UNKNOWN", encounterDate: null },
+    ]) {
+      const plan = await planFor(over);
+      expect(plan.rowIds, JSON.stringify(over)).toEqual([]);
+      expect(plan.counts.skippedEncounters, JSON.stringify(over)).toBe(1);
     }
-    // …and every one of those checks sits behind the non-reject branch.
-    expect(src.indexOf('input.action !== "reject"')).toBeLessThan(src.indexOf("row.auditResult"));
+  });
+
+  it("does not claim to have VERIFIED anything", async () => {
+    const src = await import("node:fs/promises").then((fs) =>
+      fs.readFile("src/app/api/cases/[caseId]/records/confirm/route.ts", "utf8"),
+    );
+    // It writes REVIEWED, and never the verification fields.
+    expect(src).toContain('status: "REVIEWED"');
+    expect(src).not.toContain("verifiedContentHash:");
+    expect(src).not.toContain('status: "VERIFIED"');
+  });
+
+  it("does not let the browser name what it covers", async () => {
+    const src = await import("node:fs/promises").then((fs) =>
+      fs.readFile("src/app/api/cases/[caseId]/records/confirm/route.ts", "utf8"),
+    );
+    // The request body has exactly two fields, neither of which is a row id,
+    // an event id, a count, or an eligibility claim.
+    const body = src.slice(src.indexOf("const bodySchema"), src.indexOf("type Params"));
+    expect(body).toContain("expectedManifestHash");
+    expect(body).not.toMatch(/rowIds|encounterId|eventIds|eligible/);
+  });
+
+  it("does not write a content field anywhere", async () => {
+    const src = await import("node:fs/promises").then((fs) =>
+      fs.readFile("src/app/api/cases/[caseId]/records/confirm/route.ts", "utf8"),
+    );
+    // The acceptance property: a confirmation may not improve, condense or
+    // reclassify the extracted record in order to shrink a queue.
+    for (const field of ["factualSummary:", "claims:", "synthesis:", "encounterDate:", "provider:", "facility:", "analysisClass:", "substanceClass:", "summary:"]) {
+      expect(src.includes(field), field).toBe(false);
+    }
   });
 });
 

@@ -5,6 +5,7 @@ import { encounterContentHash } from "@/lib/records/verifiedContent";
 import { REVIEW_VISIBLE_STATES, REVIEW_VISIBLE_WHERE, isCurrentOutput } from "@/lib/records/encounterLifecycle";
 import { parseCanonicalNoteId } from "@/lib/records/reviewBurden";
 import { groupCanonicalEncounters } from "@/lib/records/canonicalEncounters";
+import { attestationBlockers } from "@/lib/records/reviewIntegrity";
 import { makeRecordStore, refreshCaseRecordsWithRecovery } from "@/lib/records/buildRecords";
 import { generatePlan } from "@/lib/engine/generate";
 import { ok, handleError } from "@/lib/api";
@@ -87,14 +88,20 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
     }
 
     const segments = Array.isArray(doc.segments) ? (doc.segments as { rowIds?: unknown }[]) : [];
+    // ── EXACT set, not a subset ─────────────────────────────────────────────
+    // Matching a note id that is merely CONTAINED in a segment let a shortened
+    // identifier resolve to a larger group: a request naming two rows of a
+    // five-row note would be answered with all five, and the audit event would
+    // then record a decision under an identifier that never described it. The
+    // id has to BE the note.
     const owning = segments
       .map((seg) => (Array.isArray(seg?.rowIds) ? (seg.rowIds as unknown[]).filter((x): x is string => typeof x === "string") : []))
-      .find((rowIds) => claimedRowIds.every((id) => rowIds.includes(id)));
+      .find((rowIds) => sameRowSet(rowIds, claimedRowIds));
 
     // Rows of THIS document only, under this case and firm. Loaded before the
     // branch below so the compatibility grouping has something to run over;
     // when a persisted segment owns the note, none of this is consulted.
-    const fallbackOwning = owning?.length
+    const derivedGroups = owning?.length
       ? null
       : await (async () => {
           const docRows = await prisma.extractedEncounter.findMany({
@@ -104,7 +111,7 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
               provider: true, facility: true, page: true, pageEnd: true, substanceClass: true, segmentKey: true, claims: true,
             },
           });
-          const group = groupCanonicalEncounters({
+          const groups = groupCanonicalEncounters({
             documents: [{ id: documentId, segments: doc.segments }],
             rows: docRows.map((r) => ({
               id: r.id,
@@ -120,9 +127,17 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
               segmentKey: r.segmentKey,
               claims: Array.isArray(r.claims) ? (r.claims as { field: string; value: string; excerpt?: string | null; page?: number | null }[]) : [],
             })),
-          }).find((g) => claimedRowIds.every((id) => g.rowIds.includes(id)));
-          return group?.rowIds ?? null;
+          });
+          return {
+            // Same exact-set rule as the persisted path above.
+            exact: groups.find((g) => sameRowSet(g.rowIds, claimedRowIds))?.rowIds ?? null,
+            // …and the group the identifier merely sits INSIDE, so a partial
+            // identifier is refused outright rather than quietly falling
+            // through to the note-of-one path below and being answered there.
+            containing: groups.find((g) => claimedRowIds.every((id) => g.rowIds.includes(id)))?.rowIds ?? null,
+          };
         })();
+    const fallbackOwning = derivedGroups?.exact ?? null;
 
     let ids: string[];
     if (owning?.length) {
@@ -148,6 +163,19 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
         select: { id: true },
       });
       ids = live.map((r) => r.id);
+    } else if (derivedGroups?.containing?.length) {
+      // The identifier names PART of a record. Answering it with the whole
+      // record would sign more than the id described; answering it with the
+      // named rows alone would sign half a note. Neither is a decision, so
+      // this is refused.
+      return ok(
+        {
+          error: "No row was changed: that identifier names part of a canonical note, not a note.",
+          problems: claimedRowIds.map((id) => ({ id, reason: "this note includes rows the identifier did not name" })),
+          applied: 0,
+        },
+        409,
+      );
     } else if (claimedRowIds.length === 1) {
       // A legacy or orphan row no segment claims. It is reviewable — but only
       // ever as a note of ONE. An orphan fallback that accepted a second row
@@ -225,31 +253,15 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
     // unsupported entry is resolved.
     if (input.action !== "reject") {
       for (const row of rows) {
-        const audit = row.auditResult ?? null;
-        if (audit === "FAILED") {
-          problems.push({ id: row.id, reason: "the audit ended as a failure; correct or reject this entry first" });
-        }
-        // A source conflict is refused when the run that graded it RECORDED
-        // what the conflict was — there is a specific thing to correct.
-        //
-        // A conflict from a run predating dispute columns records nothing: no
-        // disputed field, no contradicted value, no excerpt. There is nothing
-        // to correct, only something to check, and checking an entry against
-        // its cited page is exactly what attestation is. Refusing those left
-        // 204 rows on the reference case that no reviewer could ever clear —
-        // half the queue, permanently — which teaches people to ignore the
-        // queue. The card states the caution prominently and re-extraction
-        // remains offered.
-        const conflictEvidenceRecorded = row.auditVersion != null;
-        if (audit === "SOURCE_CONFLICT" && conflictEvidenceRecorded) {
-          problems.push({ id: row.id, reason: "the audit recorded a source conflict for this entry; correct or reject it first" });
-        }
-        if ((row.unresolvedDisputes ?? 0) > 0) {
-          problems.push({ id: row.id, reason: "an extraction disagreement about this entry is unresolved" });
-        }
-        const contradicted = Array.isArray(row.contradictedFields) ? (row.contradictedFields as string[]) : [];
-        if (contradicted.length) {
-          problems.push({ id: row.id, reason: `the source contradicts ${contradicted.join(", ")}; correct it before attesting` });
+        // The same rules the batch confirmation and the final gate apply, from
+        // one definition — three near-copies of "may this be attested?" is how
+        // a corrected record came to be refused here and blocked there for
+        // opposite reasons. `attestationBlockers` carries the reasoning: the
+        // machine's grade governs only while the machine's draft is what the
+        // row still holds, and a live dispute or contradiction is answered by
+        // nobody's status.
+        for (const problem of attestationBlockers(row as never)) {
+          problems.push({ id: row.id, reason: problem.reason });
         }
       }
       const blocking = await prisma.recordFinding.findMany({
@@ -383,4 +395,19 @@ class ConcurrentChange extends Error {
     super("concurrent change");
     this.name = "ConcurrentChange";
   }
+}
+
+/**
+ * Do these name exactly the same rows?
+ *
+ * Set equality, order- and duplicate-insensitive: a canonical note id is the
+ * SET of rows it consolidates, so an identifier that names some of them names
+ * a different note — not a shorter spelling of this one.
+ */
+function sameRowSet(a: readonly string[], b: readonly string[]): boolean {
+  const left = new Set(a);
+  const right = new Set(b);
+  if (left.size !== right.size) return false;
+  for (const id of left) if (!right.has(id)) return false;
+  return true;
 }

@@ -853,6 +853,112 @@ function RecordMeta({ d, compact }: { d: AnyRec; compact?: boolean }) {
   );
 }
 
+/**
+ * "Confirm all clean records and chronology" — the case-level factual review.
+ *
+ * The numbers come from the SERVER, which derives them from the persisted
+ * canonical grouping; nothing here decides what is clean, and nothing here is
+ * sent back except the manifest hash the server itself produced. A stale
+ * manifest can only make the confirmation fail — never widen it.
+ *
+ * Two clicks on purpose. The first shows the sentence the reviewer is putting
+ * their name to; the second is the act.
+ */
+function BatchConfirmPanel({ caseId, onConfirmed }: { caseId: string; onConfirmed: () => void }) {
+  const [plan, setPlan] = useState<AnyRec | null>(null);
+  const [armed, setArmed] = useState(false);
+  const [working, setWorking] = useState(false);
+  const [outcome, setOutcome] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    const res = await fetch(`/api/cases/${caseId}/records/confirm`);
+    setPlan(res.ok ? await res.json() : null);
+  }, [caseId]);
+  useEffect(() => { void load(); }, [load]);
+
+  const counts = (plan?.counts ?? {}) as AnyRec;
+  const eligible = Number(counts.eligibleEncounters ?? 0);
+  const cautions = Number(counts.cautionEncounters ?? 0);
+  const skipped = Number(counts.skippedEncounters ?? 0);
+  const events = Number(counts.events ?? 0);
+  const held = Number(counts.heldEvents ?? 0);
+  const cautionKinds = Object.entries((plan?.cautionsByKind ?? {}) as Record<string, number>);
+  const skippedKinds = Object.entries((plan?.skippedByReason ?? {}) as Record<string, number>);
+
+  async function confirm() {
+    setWorking(true);
+    const res = await fetch(`/api/cases/${caseId}/records/confirm`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // The ONLY thing the browser contributes: the manifest it was shown.
+      body: JSON.stringify({ expectedManifestHash: plan?.manifestHash }),
+    });
+    const out = (await res.json().catch(() => ({}))) as AnyRec;
+    setWorking(false);
+    setArmed(false);
+    setOutcome(
+      res.ok && !out.error
+        ? `Confirmed ${out.rows ?? 0} record${out.rows === 1 ? "" : "s"} and ${out.events ?? 0} chronology entr${out.events === 1 ? "y" : "ies"} as reviewed.`
+        : String(out.error ?? "The confirmation could not be applied."),
+    );
+    await load();
+    onConfirmed();
+  }
+
+  if (!plan) return null;
+  if (!eligible && !events) {
+    // Say so rather than showing a button that would refuse. A case with only
+    // exceptions left is a case whose remaining work is genuinely individual.
+    return outcome ? <div className="card p-3 text-[11px] text-ink-700">{outcome}</div> : null;
+  }
+
+  return (
+    <div className="card border-teal-200 bg-teal-50/40 p-3">
+      <p className="text-xs font-semibold text-teal-900">Factual records review</p>
+      <p className="mt-1 text-[11px] text-ink-700">
+        <strong>{eligible}</strong> canonical encounter{eligible === 1 ? "" : "s"} and <strong>{events}</strong> chronology
+        entr{events === 1 ? "y" : "ies"} are clean and can be confirmed in one review.
+        {cautions > 0 && (
+          <> {cautions} of those encounter{cautions === 1 ? "" : "s"} carr{cautions === 1 ? "ies" : "y"} a caution to read first
+            {cautionKinds.length > 0 && <> ({cautionKinds.map(([k, n]) => `${n} ${k.replace(/_/g, " ").toLowerCase()}`).join(", ")})</>}.</>
+        )}
+      </p>
+      <p className="mt-1 text-[11px] text-ink-600">
+        {skipped > 0 ? (
+          <><strong>{skipped}</strong> exception{skipped === 1 ? "" : "s"} will NOT be covered and stay below for individual
+            correction or rejection
+            {skippedKinds.length > 0 && <> ({skippedKinds.map(([k, n]) => `${n} ${k.replace(/_/g, " ").toLowerCase()}`).join(", ")})</>}.
+            {held > 0 && <> {held} chronology entr{held === 1 ? "y is" : "ies are"} held back on those dates.</>}
+          </>
+        ) : (
+          <>No exceptions remain in this case.</>
+        )}
+      </p>
+      {armed ? (
+        <div className="mt-2 rounded border border-teal-300 bg-white p-2">
+          <p className="text-[11px] text-ink-800">
+            You are recording a <strong>factual records review</strong> of {eligible} encounter{eligible === 1 ? "" : "s"} and{" "}
+            {events} chronology entr{events === 1 ? "y" : "ies"} as you see them now. This is not a verification and not a
+            professional attestation. It changes no extracted fact, citation, date, provider or summary. Document, page and
+            case-level findings continue to block a final export until they are resolved.
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <button className="btn-primary px-2 py-0.5 text-[11px]" disabled={working} onClick={() => void confirm()}>
+              {working ? "Confirming…" : "Confirm as reviewed"}
+            </button>
+            <button className="btn-ghost px-2 py-0.5 text-[11px]" disabled={working} onClick={() => setArmed(false)}>Cancel</button>
+          </div>
+        </div>
+      ) : (
+        <button className="btn-outline mt-2 px-2 py-0.5 text-[11px]" onClick={() => setArmed(true)}>
+          Confirm all clean records and chronology
+        </button>
+      )}
+      {outcome && <p className="mt-1.5 text-[11px] text-ink-700">{outcome}</p>}
+    </div>
+  );
+}
+
 function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, call, busy }: { data: AnyRec; canEdit: boolean; canUpload?: boolean; canVerify?: boolean; call: any; busy: string | null }) {
   const mayUpload = canEdit || canUpload;
   const [filter, setFilter] = useState<string>("All");
@@ -932,6 +1038,17 @@ function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, cal
             ))}
           </ul>
         </div>
+      )}
+
+      {/* ── One human confirmation over the clean part of the case ────────────
+          Grouping cut the number of review UNITS; it did not cut the number of
+          clicks, because the final gate still wanted every machine draft
+          signed one card at a time. This is where a reviewer gives that
+          confirmation once, having been shown exactly what it covers and
+          exactly what it does not. Every exception stays below, individually,
+          in the path it was already in. */}
+      {canVerify && !!extractions && (
+        <BatchConfirmPanel caseId={data.id} onConfirmed={loadExtractions} />
       )}
 
       {docs.length === 0 ? (
@@ -5155,7 +5272,7 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
         // still a human's to give.
         const [lbl, cls] =
           e.status === "AI_AUDIT_PASSED" && e.corroboration?.result === "CORROBORATED"
-            ? ["Machine-corroborated — blind second reading agrees; pending human review", "bg-violet-50 text-violet-700"]
+            ? ["Machine-corroborated — blind second reading agrees; awaiting human confirmation", "bg-violet-50 text-violet-700"]
             : encStatus(e.status, false);
         const [subLbl, subCls] = substanceChip(e.substanceClass ?? null);
         return (
@@ -5507,7 +5624,7 @@ function ExtractionBlock({ caseId, doc, canVerify, onChanged }: { caseId: string
               <p className="mt-2 text-[11px] text-emerald-700">Nothing here needs attention right now.</p>
             )}
             {foldedGroup("caution", "Ready to confirm — read the note on each before signing", groups.caution, "bg-amber-50 text-amber-800")}
-            {foldedGroup("corroborated", "Machine-corroborated — a blind second reading reproduced every fact; pending human review", groups.corroborated, "bg-violet-50 text-violet-700")}
+            {foldedGroup("corroborated", "Machine-corroborated — a blind second reading reproduced every fact; awaiting human confirmation", groups.corroborated, "bg-violet-50 text-violet-700")}
             {foldedGroup("ready", "Audit passed — ready to confirm", groups.ready, "bg-teal-50 text-teal-700")}
             {foldedGroup("copies", "Copies — reviewed with their primary record in another document", groups.copies, "bg-sky-50 text-sky-700")}
             {foldedGroup("paperwork", "Paperwork — administrative & ancillary, not on the chronology", groups.paperwork, "bg-zinc-100 text-zinc-600")}

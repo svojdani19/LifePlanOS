@@ -16,6 +16,7 @@ import { encounterContentHash } from "@/lib/records/verifiedContent";
 import { projectNotes, type ReviewableNote } from "@/lib/records/noteProjection";
 import { CURRENT_OUTPUT_WHERE, REVIEW_BLOCKING_STATES, REVIEW_VISIBLE_WHERE } from "@/lib/records/encounterLifecycle";
 import { requiresDate } from "@/lib/documents/analysisClass";
+import { humanAuthoritative, liveContradictedFields } from "@/lib/records/reviewIntegrity";
 import { detectVerificationDrift } from "@/lib/records/verifiedContent";
 
 export interface StructuredClaim {
@@ -51,6 +52,16 @@ export interface StructuredEncounter {
   substanceReason: string | null;
   /** The KIND of document this row came from; null on legacy rows. */
   analysisClass: string | null;
+  /**
+   * Stable identity of the sub-document this row was extracted from, when the
+   * segmentation knew it.
+   *
+   * Carried because canonical grouping reads it: for a document with no
+   * persisted row membership it is the single strongest evidence that two
+   * fragments are one note, and without it here the compatibility path was
+   * blind to the one signal it should trust most.
+   */
+  segmentKey?: string | null;
   /** Author and role for documents that have one but no treating clinician. */
   attributionName: string | null;
   attributionRole: string | null;
@@ -65,6 +76,12 @@ export interface StructuredEncounter {
   contradictedFields?: string[] | null;
   /** Null on rows graded before dispute state was persisted (legacy). */
   auditVersion?: string | null;
+  /**
+   * Fields a human has corrected on this row. Carried because a contradiction
+   * about a field somebody has since fixed is a contradiction somebody has
+   * answered — see `liveContradictedFields`.
+   */
+  editedFields?: string[];
   /** Findings targeted at THIS entry or its claims — never a neighbour's. */
   findings?: {
     id: string; scope: string; type: string; severity: string; blocking: boolean; source: string;
@@ -278,9 +295,10 @@ export function toStructuredEncounter(e: {
   provider: string | null; providerCredentials: string | null; facility: string | null; encounterType: string | null;
   factualSummary: string; synthesis: string | null; claims: unknown; page: number | null; pageEnd: number | null;
   ocrConfidence: number | null; warnings: unknown; status: string; substanceClass?: string | null; substanceReason?: string | null;
-  analysisClass?: string | null; attributionName?: string | null; attributionRole?: string | null;
+  analysisClass?: string | null; segmentKey?: string | null; attributionName?: string | null; attributionRole?: string | null;
   reviewedAt: Date | null; verifiedAt: Date | null; staleReason: string | null; corroboration?: unknown;
   auditResult?: string | null; unresolvedDisputes?: number | null; contradictedFields?: unknown; auditVersion?: string | null;
+  editedFields?: unknown;
 }): StructuredEncounter {
   return {
     id: e.id,
@@ -303,6 +321,7 @@ export function toStructuredEncounter(e: {
     substanceClass: e.substanceClass ?? null,
     substanceReason: e.substanceReason ?? null,
     analysisClass: e.analysisClass ?? null,
+    segmentKey: e.segmentKey ?? null,
     attributionName: e.attributionName ?? null,
     attributionRole: e.attributionRole ?? null,
     reviewedAt: e.reviewedAt?.toISOString() ?? null,
@@ -311,6 +330,7 @@ export function toStructuredEncounter(e: {
     auditResult: e.auditResult ?? null,
     unresolvedDisputes: e.unresolvedDisputes ?? 0,
     contradictedFields: Array.isArray(e.contradictedFields) ? (e.contradictedFields as string[]) : [],
+    editedFields: Array.isArray(e.editedFields) ? (e.editedFields as string[]) : [],
     auditVersion: e.auditVersion ?? null,
     contentHash: encounterContentHash({
       dateStatus: e.dateStatus,
@@ -567,8 +587,13 @@ export async function factualReviewState(caseId: string, firmId: string): Promis
     prisma.extractedEncounter.findMany({
       where: { caseId, firmId, ...CURRENT_OUTPUT_WHERE },
       select: {
-        status: true, auditResult: true, verifiedContentHash: true, dateStatus: true, encounterDate: true,
-        provider: true, facility: true, encounterType: true, factualSummary: true, synthesis: true, claims: true,
+        id: true, status: true, auditResult: true, auditVersion: true, verifiedContentHash: true, dateStatus: true,
+        encounterDate: true, provider: true, facility: true, encounterType: true, factualSummary: true,
+        synthesis: true, claims: true,
+        // History the CURRENT reading needs: a machine grade, the disputes and
+        // contradictions it recorded, and the corrections a human has made
+        // since. Read, never rewritten.
+        unresolvedDisputes: true, contradictedFields: true, editedFields: true,
       },
     }),
     prisma.sourcePage.findMany({ where: { caseId, firmId }, select: { status: true } }).catch(() => [] as { status: string }[]),
@@ -631,13 +656,38 @@ export async function factualReviewState(caseId: string, firmId: string): Promis
     blockers.push(`${n} unresolved ${scope.toLowerCase()}-level finding(s) must be corrected or dispositioned before a final export.`);
   }
 
-  // Audit outcomes: anything other than PASS is, by definition, not a complete
-  // draft — so it cannot become a final export.
-  const unaudited = encounters.filter((e) => !e.auditResult).length;
-  const failedAudit = encounters.filter((e) => e.auditResult && e.auditResult !== "PASS");
+  // ── Audit outcomes, judged against the CURRENT state of each row ─────────
+  //
+  // Anything other than PASS means the machine's DRAFT was not a complete one,
+  // so it cannot become a final export — while it is still the machine's
+  // draft. The gate applied that to every current row regardless of who now
+  // owns it, so an entry that failed extraction, was corrected by a reviewer
+  // and signed went on blocking the export for ever, citing a failure that had
+  // already been fixed. The only way out was to reject corrected work.
+  //
+  // The grade is preserved as history (nothing here writes) and stops being
+  // the current verdict once a person has edited, reviewed or verified the
+  // row. Live disagreements are NOT cleared by that: they are stated
+  // separately, just below, and block whatever the row's status says.
+  const machineOwned = encounters.filter((e) => !humanAuthoritative(e));
+  const unaudited = machineOwned.filter((e) => !e.auditResult).length;
+  const failedAudit = machineOwned.filter((e) => e.auditResult && e.auditResult !== "PASS");
   if (unaudited > 0) blockers.push(`${unaudited} encounter(s) have not completed the factual audit.`);
   for (const [result, n] of countBy(failedAudit.map((e) => e.auditResult!))) {
     blockers.push(`${n} encounter(s) ended the factual audit as ${result.replace(/_/g, " ").toLowerCase()}.`);
+  }
+
+  // Live disagreements about a record, whoever now owns it. Stated explicitly
+  // so that relaxing the grade above cannot let one through unmentioned: an
+  // unsettled dispute and a field the source still contradicts are facts about
+  // the record, not gradings of a draft.
+  const disputed = encounters.filter((e) => (e.unresolvedDisputes ?? 0) > 0).length;
+  if (disputed > 0) {
+    blockers.push(`${disputed} encounter(s) carry an unresolved extraction disagreement that a human must settle.`);
+  }
+  const contradicted = encounters.filter((e) => liveContradictedFields(e as never).length > 0).length;
+  if (contradicted > 0) {
+    blockers.push(`${contradicted} encounter(s) record a field the source contradicts and that no reviewer has corrected.`);
   }
 
   // Verified content must still be the content that was verified.

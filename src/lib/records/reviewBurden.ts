@@ -146,9 +146,11 @@ export interface ReviewBurden {
   /** Distinct entries named by any open finding. */
   entriesWithFindings: number;
   /**
-   * Distinct canonical notes named by an open finding. STRICTLY the findings
-   * question — `notesNeedingAttention` is the broader one and includes rows
-   * that are unresolved without any finding attached.
+   * Distinct CURRENT canonical notes named by an open finding, blocking or
+   * advisory, each finding resolving to at most one note. STRICTLY the
+   * findings question and a VISIBILITY number — `notesNeedingAttention` is
+   * the obligation one: it is seeded from blocking findings only, and also
+   * includes notes that are unresolved with no finding attached.
    */
   notesWithFindings: number;
   /** Open blockers at DOCUMENT scope, counted once per document finding. */
@@ -330,16 +332,34 @@ export function measureReviewBurden(input: BurdenInput): ReviewBurden {
   // made them aliases that could never disagree — a metric that cannot be
   // wrong about anything is not measuring anything.
 
-  // (1) Notes a finding actually names.
+  // (1) Notes a finding actually names — at most ONE current note each.
+  //
+  // The previous version added BOTH the stored `canonicalNoteId` and the note
+  // its `encounterId` currently belongs to. A stored id is a snapshot of a
+  // grouping, and grouping changes: a finding written while a legacy row was
+  // a note of one carries that singleton id, and once the compatibility path
+  // folds that row into a real encounter the two disagree. One problem then
+  // counted as two obligations — or, when the row is gone entirely, as an
+  // obligation against a note nobody can open.
+  //
+  // So each finding resolves to at most one CURRENT note: the owner of the
+  // row it names, and only failing that a stored id that still exists.
   const noteOfRow = new Map<string, string>();
   for (const n of notes) for (const rid of n.rowIds) noteOfRow.set(rid, n.id);
+  const currentNoteIds = new Set(notes.map((n) => n.id));
+  const currentNoteOf = (f: BurdenFinding): string | null => {
+    const owner = f.encounterId ? noteOfRow.get(f.encounterId) : undefined;
+    if (owner) return owner;
+    // A stored id is accepted only as a fallback, and only when it still names
+    // a note this grouping produced. A stale one names nothing and is dropped
+    // rather than invented — the finding remains counted by scope and type.
+    if (f.canonicalNoteId && currentNoteIds.has(f.canonicalNoteId)) return f.canonicalNoteId;
+    return null;
+  };
   const notesWithFindings = new Set<string>();
   for (const f of distinctOpen) {
-    if (f.canonicalNoteId) notesWithFindings.add(f.canonicalNoteId);
-    if (f.encounterId) {
-      const owner = noteOfRow.get(f.encounterId);
-      if (owner) notesWithFindings.add(owner);
-    }
+    const note = currentNoteOf(f);
+    if (note) notesWithFindings.add(note);
   }
 
   // (2) Notes needing a human: the above, PLUS notes whose own rows cannot be
@@ -362,7 +382,17 @@ export function measureReviewBurden(input: BurdenInput): ReviewBurden {
       r.auditResult === "NEEDS_HUMAN_REVIEW" ||
       (r.auditResult === "SOURCE_CONFLICT" && r.auditVersion == null));
 
-  const notesFlagged = new Set(notesWithFindings);
+  // Seeded from BLOCKING findings only. `notesWithFindings` answers "what has
+  // a finding been raised against?" and counts advisory ones too, because a
+  // reviewer should see them; an obligation is a different question. A
+  // non-blocking finding is a CAUTION — which is exactly what the review
+  // surface calls it, and the metric said otherwise about the same note.
+  const notesFlagged = new Set<string>();
+  for (const f of distinctOpen) {
+    if (!f.blocking) continue;
+    const note = currentNoteOf(f);
+    if (note) notesFlagged.add(note);
+  }
   for (const n of notes) {
     if (n.rowIds.some((id) => { const r = rowsById.get(id); return r ? isException(r) : false; })) notesFlagged.add(n.id);
     // An unresolved assignment question IS an exception about this encounter:
@@ -376,6 +406,13 @@ export function measureReviewBurden(input: BurdenInput): ReviewBurden {
   for (const n of notes) {
     if (notesFlagged.has(n.id)) continue;
     if (n.rowIds.some((id) => { const r = rowsById.get(id); return r ? isCaution(r) : false; })) notesCarryingCaution.add(n.id);
+  }
+  // An advisory finding is something to read before attesting, not something
+  // to correct — the same reading `noteProjection` gives it.
+  for (const f of distinctOpen) {
+    if (f.blocking) continue;
+    const note = currentNoteOf(f);
+    if (note && !notesFlagged.has(note)) notesCarryingCaution.add(note);
   }
 
   // ── Cross-document copies, counted from the persisted linkage ───────────

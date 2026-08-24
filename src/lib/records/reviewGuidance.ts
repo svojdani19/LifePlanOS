@@ -18,6 +18,8 @@
 // sentence nobody can check.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { machineGradeGoverns } from "@/lib/records/reviewIntegrity";
+
 export interface GuidanceInput {
   status: string;
   auditResult: string | null;
@@ -76,6 +78,7 @@ export interface ReviewGuidance {
     | "CONTRADICTED_FIELD"
     | "FRAGMENT_DISAGREEMENT"
     | "AMBIGUOUS_ASSIGNMENT"
+    | "SOURCE_CONFLICT"
     | "UNRESOLVED_DISPUTE"
     | "NOT_CORROBORATED"
     | "DOCUMENT_INCOMPLETE"
@@ -299,6 +302,30 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
     };
   }
 
+  // 5b. A source conflict the audit RECORDED, on content still owned by the
+  //     machine that recorded it.
+  //
+  //     This card said "Automated checks found nothing wrong with this record"
+  //     while the server refused to accept a decision on it, and the burden
+  //     metric counted it as a defect — three modules, three answers, and the
+  //     one the reviewer could see was the wrong one. The grade is only
+  //     applied while the machine's draft is what the row still holds: once a
+  //     person has edited or signed it, they are the authority and the grade
+  //     is history (see `reviewIntegrity`).
+  if (input.auditResult === "SOURCE_CONFLICT" && input.auditVersion && machineGradeGoverns({ status: input.status })) {
+    return {
+      kind: "SOURCE_CONFLICT",
+      requirement: "Check this record against its cited page and correct it, or reject it.",
+      why: "An independent check read the source and disagreed with what was extracted here. The disagreement was recorded against this entry and nothing was changed automatically, because the correct reading was never established.",
+      steps: [
+        "Open the cited page and read the entry against what the record actually says.",
+        "Use Correct to set what the source supports, or Reject the entry if it does not belong here.",
+        "Re-extracting this document will reproduce the disagreement with its reasons, or clear it.",
+      ],
+      canAttest: false,
+    };
+  }
+
   // 6. A conflict whose evidence predates the columns that would record it.
   if (input.auditResult === "SOURCE_CONFLICT" && !input.auditVersion) {
     return {
@@ -328,7 +355,12 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
     };
   }
 
-  if (input.auditResult === "FAILED") {
+  // Applied only while the machine's draft is what the row still holds. A
+  // record that failed extraction, was rewritten by a reviewer and signed is
+  // not an integrity failure — it is a correction, and calling it a failure
+  // trapped the corrected work behind a message about a problem already fixed.
+  // (See `reviewIntegrity`: the grade is kept as history, not as the verdict.)
+  if (input.auditResult === "FAILED" && machineGradeGoverns({ status: input.status })) {
     return {
       kind: "INTEGRITY_FAILURE",
       requirement: "Correct this record so every statement has support, or reject it.",

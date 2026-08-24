@@ -41,4 +41,18 @@ describe("records.verify grants", () => {
       expect(t.permissions, t.key).not.toContain("records.verify");
     }
   });
+
+  it("gates the case-level batch confirmation under the SAME capability", async () => {
+    // A batch of factual review is not a lesser act than one of it, so it must
+    // not sit behind a weaker gate — and in particular a platform or system
+    // administrator, who holds no `records.verify`, must not be able to confirm
+    // a firm's records because the action happens to be case-wide.
+    const src = await import("node:fs/promises").then((fs) =>
+      fs.readFile("src/app/api/cases/[caseId]/records/confirm/route.ts", "utf8"),
+    );
+    // Both the preview and the act, not just the act.
+    expect(src.match(/requireCanonicalPermission\(ctx, "records.verify"/g) ?? []).toHaveLength(2);
+    expect(src).toContain("requireCase(ctx, params.caseId)");
+    expect(PLATFORM_SYSTEM_ADMINISTRATOR.permissions).not.toContain("records.verify");
+  });
 });

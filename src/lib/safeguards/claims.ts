@@ -198,14 +198,18 @@ export const SAFEGUARD_CLAIMS: SafeguardClaim[] = [
           // scoped to this case, this firm and this document.
           "groupCanonicalEncounters",
           "sourceDocumentId: documentId",
-          // The row's own integrity state, checked here.
-          "row.auditResult",
-          "unresolvedDisputes",
-          "contradictedFields",
+          // The row's own integrity state, checked here — through the ONE
+          // shared definition the batch confirmation and the final gate also
+          // use, so a record cannot be sound in one place and unsound in
+          // another.
+          "attestationBlockers",
           "unresolved finding must be dispositioned first",
         ],
       },
-      reachableSymbols: [{ file: "src/lib/records/reviewBurden.ts", symbols: ["parseCanonicalNoteId", "canonicalNoteId"] }],
+      reachableSymbols: [
+        { file: "src/lib/records/reviewBurden.ts", symbols: ["parseCanonicalNoteId", "canonicalNoteId"] },
+        { file: "src/lib/records/reviewIntegrity.ts", symbols: ["attestationBlockers"] },
+      ],
     },
   },
   {
@@ -269,6 +273,54 @@ export const SAFEGUARD_CLAIMS: SafeguardClaim[] = [
           "sourceDocumentId: documentId",
         ],
       },
+    },
+  },
+  {
+    id: "batch-factual-confirmation",
+    module: "src/app/api/cases/[caseId]/records/confirm/route.ts",
+    labels: ["Confirm all clean records and chronology", "Confirm as reviewed"],
+    asserts:
+      "One human click records a FACTUAL REVIEW of exactly the canonical encounters and chronology drafts the server itself found clean, over exactly the content displayed, leaving every exception individually reviewable and changing no extracted fact.",
+    doesNotAssert: [
+      "that any record was verified",
+      "that a physician attested anything",
+      "that the case may be exported",
+      "that a skipped exception was resolved",
+      "that an automated audit is a human review",
+    ],
+    assertsAttestation: true,
+    consequenceIfOverclaimed:
+      "A reviewer could believe they had confirmed a case's records while an exception, a contradicted date or a record that changed after it was displayed had been swept into the same click.",
+    reachability: {
+      surface: { file: "src/components/case/CaseWorkspace.tsx", claimText: ["Confirm all clean records and chronology", "This is not a verification"] },
+      rendered: { entryPoint: "async function confirm", invokedBy: ["void confirm()"] },
+      // The ONLY thing the browser contributes is the manifest it was shown.
+      carries: ["records/confirm", "expectedManifestHash"],
+      server: {
+        file: "src/app/api/cases/[caseId]/records/confirm/route.ts",
+        enforces: [
+          // Eligibility is derived here, from the shared grouping and guidance.
+          "planBatchConfirmation",
+          "getStructuredRecord",
+          // …and every row is re-checked directly, not trusted to the screen.
+          "attestationBlockers",
+          // Exactly the content that was displayed, or nothing at all.
+          "manifestHashOf",
+          "the case changed after these counts were shown",
+          // Review, never verification.
+          'status: "REVIEWED"',
+          // All-or-none, with per-row compare-and-set.
+          "$transaction",
+          "ConcurrentChange",
+          "updatedAt: row.updatedAt",
+          // One detailed record of what was covered and what was not.
+          "records.batch_confirm",
+          "skippedByReason",
+        ],
+      },
+      reachableSymbols: [
+        { file: "src/lib/records/batchConfirmation.ts", symbols: ["planBatchConfirmation", "manifestHashOf"] },
+      ],
     },
   },
   {

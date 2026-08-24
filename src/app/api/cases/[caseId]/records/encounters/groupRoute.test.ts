@@ -359,3 +359,71 @@ describe("what a rejection resolves, and what it does not", () => {
     expect(db.state.findings.map((f) => f.status)).toEqual(["OPEN", "OPEN"]);
   });
 });
+
+describe("a note identifier must BE the note, not a part of one", () => {
+  // Matching an id that was merely CONTAINED in a segment let a shortened
+  // identifier resolve to a larger group: a request naming two rows of a
+  // five-row note would be answered with all five, and the audit event would
+  // record the decision under an identifier that never described it.
+  it("refuses a truncated identifier that names part of a canonical note", async () => {
+    const res = await POST(req({ action: "verify", canonicalNoteId: noteId("doc-1", "a"), rows: withHashes("a") }), params);
+    expect(res.status).toBe(409);
+    expect(db.state.rows.every((r) => r.status !== "VERIFIED")).toBe(true);
+    expect(db.state.audits).toHaveLength(0);
+  });
+
+  it("refuses a lengthened identifier that names more than a canonical note", async () => {
+    const res = await POST(
+      req({ action: "verify", canonicalNoteId: noteId("doc-1", "a", "b", "c"), rows: withHashes("a", "b", "c") }),
+      params,
+    );
+    expect(res.status).toBe(409);
+    expect(db.state.rows.every((r) => r.status !== "VERIFIED")).toBe(true);
+  });
+
+  it("still accepts the exact identifier", async () => {
+    const res = await POST(req({ action: "verify", canonicalNoteId: noteId("doc-1", "a", "b"), rows: withHashes("a", "b") }), params);
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("the machine's grade is history once a human owns the row", () => {
+  // The mirror of the final gate's defect: a record that failed extraction and
+  // was then corrected could never be signed, because the endpoint kept
+  // enforcing the grade of the draft the correction replaced.
+  it("lets a reviewer confirm a record they have already corrected", async () => {
+    db.state.rows = [makeRow("solo", { status: "HUMAN_EDITED", auditResult: "FAILED", editedFields: ["factualSummary"] })];
+    db.state.documents = [{ id: "doc-1", caseId: "case-1", firmId: "firm-1", segments: [{ rowIds: ["solo"] }] }];
+    const res = await POST(req({ action: "review", canonicalNoteId: noteId("doc-1", "solo"), rows: withHashes("solo") }), params);
+    expect(res.status).toBe(200);
+    expect(db.state.rows[0].status).toBe("REVIEWED");
+    // The grade itself is untouched: it is what the extraction found.
+    expect(db.state.rows[0].auditResult).toBe("FAILED");
+  });
+
+  it("still refuses an untouched machine draft whose audit failed", async () => {
+    db.state.rows = [makeRow("solo", { status: "AI_DRAFT", auditResult: "FAILED" })];
+    db.state.documents = [{ id: "doc-1", caseId: "case-1", firmId: "firm-1", segments: [{ rowIds: ["solo"] }] }];
+    const res = await POST(req({ action: "verify", canonicalNoteId: noteId("doc-1", "solo"), rows: withHashes("solo") }), params);
+    expect(res.status).toBe(409);
+    expect(db.state.rows[0].status).toBe("AI_DRAFT");
+  });
+
+  it("still refuses a human-owned row carrying a LIVE contradiction nobody corrected", async () => {
+    db.state.rows = [makeRow("solo", { status: "HUMAN_EDITED", contradictedFields: ["date"], editedFields: ["facility"] })];
+    db.state.documents = [{ id: "doc-1", caseId: "case-1", firmId: "firm-1", segments: [{ rowIds: ["solo"] }] }];
+    const res = await POST(req({ action: "verify", canonicalNoteId: noteId("doc-1", "solo"), rows: withHashes("solo") }), params);
+    expect(res.status).toBe(409);
+    expect(db.state.rows[0].status).toBe("HUMAN_EDITED");
+  });
+
+  it("accepts it once the contradicted field is the one that was corrected", async () => {
+    db.state.rows = [makeRow("solo", { status: "HUMAN_EDITED", contradictedFields: ["date"], editedFields: ["encounterDate"] })];
+    db.state.documents = [{ id: "doc-1", caseId: "case-1", firmId: "firm-1", segments: [{ rowIds: ["solo"] }] }];
+    const res = await POST(req({ action: "verify", canonicalNoteId: noteId("doc-1", "solo"), rows: withHashes("solo") }), params);
+    expect(res.status).toBe(200);
+    expect(db.state.rows[0].status).toBe("VERIFIED");
+    // The history stands: the source DID contradict this field.
+    expect(db.state.rows[0].contradictedFields).toEqual(["date"]);
+  });
+});
