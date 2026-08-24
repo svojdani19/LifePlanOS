@@ -304,9 +304,14 @@ export const SAFEGUARD_CLAIMS: SafeguardClaim[] = [
           "getStructuredRecord",
           // …and every row is re-checked directly, not trusted to the screen.
           "attestationBlockers",
-          // Exactly the content that was displayed, or nothing at all.
+          // Exactly the content that was displayed, or nothing at all — the
+          // WHOLE plan, not just the row set: a regrouping that redistributes
+          // the same rows changes the dialog and must change the hash.
           "manifestHashOf",
           "the case changed after these counts were shown",
+          // Chronology events carry no version column, so their CONTENT is
+          // the version being confirmed.
+          "CHRONOLOGY_CONTENT_SELECT",
           // Review, never verification.
           'status: "REVIEWED"',
           // All-or-none, with per-row compare-and-set.
@@ -320,6 +325,7 @@ export const SAFEGUARD_CLAIMS: SafeguardClaim[] = [
       },
       reachableSymbols: [
         { file: "src/lib/records/batchConfirmation.ts", symbols: ["planBatchConfirmation", "manifestHashOf"] },
+        { file: "src/lib/records/chronologyContent.ts", symbols: ["chronologyEventContentHash", "CHRONOLOGY_CONTENT_SELECT"] },
       ],
     },
   },

@@ -91,11 +91,24 @@ export interface CanonicalEncounterGroup {
   rowIds: string[];
   basis: MembershipBasis;
   /**
-   * True on the ONE group that carries an unresolved assignment question for
-   * its whole cluster. The other groups in the cluster are not separate
-   * obligations — the question is asked once.
+   * True on the ONE group that carries the assignment question for its whole
+   * cluster. The other groups in the cluster are not separate obligations —
+   * the question is asked once — but they are held out of any batch
+   * confirmation until it is answered (`ambiguityClusterId`).
    */
-  ambiguousAssignment: boolean;
+  ambiguityAnchor: boolean;
+  /**
+   * Identity of the ambiguity cluster this group belongs to, on EVERY member —
+   * the anchor and the rest alike.
+   *
+   * The anchor carries the one decision. The others are not decisions, but
+   * they are not clean either: if the open question is whether these four
+   * fragments are one encounter or four, then none of the four is a settled
+   * record until somebody answers it. Marking only the anchor let the other
+   * three be swept into a batch confirmation as "clean", which answers the
+   * question by default and in the direction nobody chose.
+   */
+  ambiguityClusterId: string | null;
   /** Rows this group was neither proven to include nor proven to exclude. */
   ambiguousWith: string[];
 }
@@ -209,7 +222,7 @@ export function groupCanonicalEncounters(input: CanonicalGroupingInput): Canonic
       const live = rowIdsOf(seg).filter((id) => resolves(id) && !claimed.has(id));
       if (!live.length) continue;
       for (const id of live) claimed.add(id);
-      groups.push({ documentId: doc.id, rowIds: live, basis: "PERSISTED_SEGMENT", ambiguousAssignment: false, ambiguousWith: [] });
+      groups.push({ documentId: doc.id, rowIds: live, basis: "PERSISTED_SEGMENT", ambiguityAnchor: false, ambiguityClusterId: null, ambiguousWith: [] });
     }
   }
 
@@ -224,7 +237,7 @@ export function groupCanonicalEncounters(input: CanonicalGroupingInput): Canonic
     // so consolidation can never make a row unreviewable.
     if (enrichedDocuments.has(doc.id)) {
       for (const r of remaining) {
-        groups.push({ documentId: doc.id, rowIds: [r.id], basis: "PERSISTED_SEGMENT_ORPHAN", ambiguousAssignment: false, ambiguousWith: [] });
+        groups.push({ documentId: doc.id, rowIds: [r.id], basis: "PERSISTED_SEGMENT_ORPHAN", ambiguityAnchor: false, ambiguityClusterId: null, ambiguousWith: [] });
       }
       continue;
     }
@@ -245,7 +258,8 @@ export function groupCanonicalEncounters(input: CanonicalGroupingInput): Canonic
       documentId: row.sourceDocumentId,
       rowIds: [row.id],
       basis: "SINGLETON_UNKNOWN_DOCUMENT",
-      ambiguousAssignment: false,
+      ambiguityAnchor: false,
+      ambiguityClusterId: null,
       ambiguousWith: [],
     });
   }
@@ -270,7 +284,8 @@ function fallbackGroups(documentId: string, rows: readonly CanonicalRow[]): Cano
     documentId,
     rowIds: g.members.map((m) => m.id),
     basis: "COMPATIBILITY_FALLBACK" as const,
-    ambiguousAssignment: false,
+    ambiguityAnchor: false,
+    ambiguityClusterId: null as string | null,
     ambiguousWith: [] as string[],
   }));
 
@@ -321,11 +336,55 @@ function fallbackGroups(documentId: string, rows: readonly CanonicalRow[]): Cano
   for (const [root, members] of clusters) {
     if (members.length < 2) continue;
     const anchor = groups[root];
-    anchor.ambiguousAssignment = true;
+    // Deterministic and stable: the anchor is the cluster's lowest-indexed
+    // group, `groupByIdentity` orders deterministically, and the id is built
+    // from the anchor's own rows — so the same cluster keeps the same identity
+    // across runs, and across a reviewer answering it.
+    const clusterId = `${documentId}#${[...anchor.rowIds].sort().join(",")}`;
+    anchor.ambiguityAnchor = true;
     anchor.ambiguousWith = members
       .filter((at) => at !== root)
       .flatMap((at) => groups[at].rowIds)
       .sort();
+    // Marked on EVERY member, anchor included. One decision; several records
+    // waiting on it.
+    for (const at of members) groups[at].ambiguityClusterId = clusterId;
   }
   return groups;
+}
+
+/**
+ * States in which a person has EXPLICITLY decided a record.
+ *
+ * HUMAN_EDITED is deliberately absent. Correcting a record's wording says
+ * something about its content; it says nothing about whether this record and
+ * the fragments beside it are one encounter or several. Letting an edit settle
+ * that would resolve an assignment question nobody was asked.
+ */
+export const EXPLICIT_REVIEW_STATES: readonly string[] = ["REVIEWED", "VERIFIED"];
+
+/**
+ * Which ambiguity clusters a human has actually settled.
+ *
+ * A cluster is settled when the ANCHOR — the group carrying the one decision —
+ * has been explicitly reviewed or verified as it stands. That decision is the
+ * reviewer saying "yes, these are separate records", and it is the only thing
+ * that releases the rest of the cluster.
+ *
+ * Pure: the caller supplies the statuses, so the same function serves the
+ * review projection, the burden metric and the batch planner.
+ */
+export function resolvedAmbiguityClusters(
+  groups: readonly CanonicalEncounterGroup[],
+  statusOf: (rowId: string) => string | null | undefined,
+): Set<string> {
+  const resolved = new Set<string>();
+  for (const group of groups) {
+    if (!group.ambiguityAnchor || !group.ambiguityClusterId) continue;
+    const decided =
+      group.rowIds.length > 0 &&
+      group.rowIds.every((id) => EXPLICIT_REVIEW_STATES.includes(statusOf(id) ?? ""));
+    if (decided) resolved.add(group.ambiguityClusterId);
+  }
+  return resolved;
 }

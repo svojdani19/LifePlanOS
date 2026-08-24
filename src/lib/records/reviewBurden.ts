@@ -25,7 +25,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { requiresDate } from "@/lib/documents/analysisClass";
-import { groupCanonicalEncounters, type CanonicalRow } from "@/lib/records/canonicalEncounters";
+import { groupCanonicalEncounters, resolvedAmbiguityClusters, type CanonicalRow } from "@/lib/records/canonicalEncounters";
 import type { FindingScope } from "@/lib/records/findingScope";
 
 /**
@@ -288,12 +288,16 @@ export function measureReviewBurden(input: BurdenInput): ReviewBurden {
     documents: input.documents.map((d) => ({ id: d.id, segments: d.segments })),
     rows: input.rows as readonly CanonicalRow[],
   });
+  // An assignment question a reviewer has explicitly answered is answered: an
+  // exception nothing can clear is an immortal one, and a queue that can never
+  // drain is a queue people learn to ignore.
+  const settled = resolvedAmbiguityClusters(grouped, (id) => rowsById.get(id)?.status ?? null);
   const notes = grouped.map((g) => ({
     id: canonicalNoteId(g.documentId, g.rowIds),
     documentId: g.documentId,
     rowIds: g.rowIds,
     basis: g.basis,
-    ambiguousAssignment: g.ambiguousAssignment,
+    ambiguousAssignment: g.ambiguityAnchor && Boolean(g.ambiguityClusterId) && !settled.has(g.ambiguityClusterId!),
   }));
   // "No persisted segment" is a fact about the ROWS, so it is still counted
   // from the rows rather than from the groups the fallback then built out of

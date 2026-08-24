@@ -460,8 +460,13 @@ describe("refuting: 'one decision covers exactly one canonical note'", () => {
     // whether a record is sound — so this asserts the BEHAVIOUR of that
     // function, and that the route runs it behind the non-reject branch.
     const { attestationBlockers } = await import("@/lib/records/reviewIntegrity");
-    const draft = { id: "r", status: "AI_DRAFT" as const };
+    // Audited and passed, so each case below isolates ONE defect.
+    const draft = { id: "r", status: "AI_DRAFT" as const, auditResult: "PASS" };
     expect(attestationBlockers({ ...draft, auditResult: "FAILED" }).map((p) => p.code)).toEqual(["AUDIT_FAILED"]);
+    // "Not audited" is not "audited and fine": a batch that treated a missing
+    // grade as clean would delete the required-audit safeguard outright.
+    expect(attestationBlockers({ ...draft, auditResult: null }).map((p) => p.code)).toEqual(["UNAUDITED"]);
+    expect(attestationBlockers({ id: "r", status: "HUMAN_EDITED", auditResult: null })).toEqual([]);
     expect(
       attestationBlockers({ ...draft, auditResult: "SOURCE_CONFLICT", auditVersion: "2026-08-17.scoped-findings" }).map((p) => p.code),
     ).toEqual(["SOURCE_CONFLICT"]);
@@ -521,6 +526,43 @@ describe("refuting: 'one click confirmed the clean records'", () => {
     const notes = projectNotes("doc-1", [{ rowIds: ["r1"] }], [{ ...clean, ...over } as never], []);
     return planBatchConfirmation({ notes, events: [] });
   };
+
+  it("does not treat a MISSING audit as a clean one", async () => {
+    const plan = await planFor({ auditResult: null });
+    expect(plan.rowIds).toEqual([]);
+    expect(plan.skippedByReason).toEqual({ UNAUDITED: 1 });
+  });
+
+  it("does not confirm part of an unresolved ambiguity cluster", async () => {
+    const { projectNotes } = await import("@/lib/records/noteProjection");
+    const { planBatchConfirmation } = await import("@/lib/records/batchConfirmation");
+    const rows = Array.from({ length: 4 }, (_, i) => ({
+      ...clean,
+      id: `u${i}`,
+      contentHash: `u${i}`.padEnd(64, "0"),
+      claims: [{ field: "subjective", value: `Interval note paragraph number ${i} describing the encounter`, excerpt: "…", page: 4, confidence: null }],
+    }));
+    // Ingest-time segments: no rowIds, so the compatibility path decides.
+    const notes = projectNotes("doc-1", [{ date: "2025-03-14", kind: "clinical" }], rows as never, []);
+    const plan = planBatchConfirmation({ notes, events: [] });
+    // One question, four records held, nothing confirmed.
+    expect(plan.counts.skippedEncounters).toBe(1);
+    expect(plan.counts.heldEncounters).toBe(3);
+    expect(plan.rowIds).toEqual([]);
+  });
+
+  it("does not bind only the row set — a regrouping moves the manifest", async () => {
+    const { projectNotes } = await import("@/lib/records/noteProjection");
+    const { planBatchConfirmation } = await import("@/lib/records/batchConfirmation");
+    const rows = [
+      { ...clean, id: "a", contentHash: "a".padEnd(64, "0") },
+      { ...clean, id: "b", contentHash: "b".padEnd(64, "0") },
+    ];
+    const apart = planBatchConfirmation({ notes: projectNotes("doc-1", [{ rowIds: ["a"] }, { rowIds: ["b"] }], rows as never, []), events: [] });
+    const together = planBatchConfirmation({ notes: projectNotes("doc-1", [{ rowIds: ["a", "b"] }], rows as never, []), events: [] });
+    expect(together.rowIds).toEqual(apart.rowIds); // same rows…
+    expect(together.manifestHash).not.toBe(apart.manifestHash); // …different dialog
+  });
 
   it("does not sweep an exception into the clean set", async () => {
     for (const over of [

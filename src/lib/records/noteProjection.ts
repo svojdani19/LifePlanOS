@@ -24,7 +24,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { canonicalNoteId } from "@/lib/records/reviewBurden";
-import { groupCanonicalEncounters, type CanonicalRow, type MembershipBasis } from "@/lib/records/canonicalEncounters";
+import { groupCanonicalEncounters, resolvedAmbiguityClusters, type CanonicalRow, type MembershipBasis } from "@/lib/records/canonicalEncounters";
 import { isOpenFinding, type FindingScope } from "@/lib/records/findingScope";
 import { attentionLevel, guidanceFor, type AttentionLevel, type ReviewGuidance } from "@/lib/records/reviewGuidance";
 import type { StructuredEncounter } from "@/lib/records/structuredRecord";
@@ -133,10 +133,23 @@ export interface ReviewableNote {
    * fragments nor prove it distinct from them. Raised ONCE for the whole
    * cluster of records the question spans, never once per fragment, and the
    * records stay separate — an unproven merge is a deletion.
+   *
+   * Clears when a reviewer explicitly reviews or verifies THIS record, which
+   * is them answering "yes, these are separate". An ambiguity nothing could
+   * clear would be an immortal exception.
    */
   ambiguousAssignment: boolean;
   /** The rows the open assignment question spans, for display before deciding. */
   ambiguousWith: string[];
+  /** The cluster this record belongs to, on the anchor and the rest alike. */
+  ambiguityClusterId: string | null;
+  /**
+   * A record in an unresolved cluster that is NOT the one carrying the
+   * decision. It owes nobody anything — but it is not a settled record
+   * either, so a case-level confirmation passes over it until the cluster's
+   * one decision is made.
+   */
+  ambiguityAwaitingAnchor: boolean;
   /**
    * Does a person OWE a decision on this record?
    *
@@ -291,6 +304,11 @@ export function projectNotes(
     alsoResolvable: (id) => Boolean(caseRows?.get(id)),
   });
 
+  // Which assignment questions a person has already answered. An explicit
+  // review or verification of the ANCHOR is the answer; a content correction
+  // is not, because it says nothing about which records these are.
+  const settled = resolvedAmbiguityClusters(grouped, (id) => resolve(id)?.status ?? null);
+
   const openByEntry = new Map<string, NoteFinding[]>();
   for (const f of findings) {
     if (!f.encounterId) continue;
@@ -307,13 +325,18 @@ export function projectNotes(
     ];
     const openFindings = noteFindings.filter((f) => isOpenFinding(f.status));
 
+    const inUnresolvedCluster = Boolean(group.ambiguityClusterId) && !settled.has(group.ambiguityClusterId!);
+    const unresolvedAnchor = group.ambiguityAnchor && inUnresolvedCluster;
+
     const dated = noteRows.find((r) => r.encounterDate) ?? noteRows[0];
     const status = worst(noteRows.map((r) => r.status), STATUS_RANK, "AI_DRAFT");
-    const auditResult = worst(
-      noteRows.map((r) => (r as { auditResult?: string | null }).auditResult ?? null),
-      AUDIT_RANK,
-      "PASS",
-    );
+    // Worst-first, and an UNGRADED fragment is the worst of all: a note whose
+    // rows the audit never read may not present as PASS because that happened
+    // to be the fallback when none of them carried a result. It reported a
+    // clean audit over a record nothing had audited.
+    const auditResult = noteRows.some((r) => !(r as { auditResult?: string | null }).auditResult)
+      ? null
+      : worst(noteRows.map((r) => (r as { auditResult?: string | null }).auditResult ?? null), AUDIT_RANK, "PASS");
     const pages = noteRows.flatMap((r) => [r.page, r.pageEnd]).filter((p): p is number => typeof p === "number");
     const corroboration = aggregateCorroboration(noteRows);
     const disagreement = fragmentDisagreement(noteRows);
@@ -344,7 +367,7 @@ export function projectNotes(
       fragmentDisagreement: material,
       // Unresolved membership is a fact about THIS record, raised once for the
       // cluster the question spans.
-      ambiguousAssignment: group.ambiguousAssignment,
+      ambiguousAssignment: unresolvedAnchor,
       ambiguousWith: group.ambiguousWith.length,
       corroboration: corroboration as never,
       findings: openFindings as never,
@@ -409,8 +432,10 @@ export function projectNotes(
       attention: level,
       needsAttention,
       membershipBasis: group.basis,
-      ambiguousAssignment: group.ambiguousAssignment,
+      ambiguousAssignment: unresolvedAnchor,
       ambiguousWith: group.ambiguousWith,
+      ambiguityClusterId: group.ambiguityClusterId,
+      ambiguityAwaitingAnchor: inUnresolvedCluster && !group.ambiguityAnchor,
       // A decision is owed only for a material exception. Everything else is
       // visible, inspectable, and covered by the case-level confirmation.
       requiresDecision: needsAttention,

@@ -160,6 +160,27 @@ describe("an untouched machine draft can never pass", () => {
     expect(complete).toBe(false);
   });
 
+  it("cannot have that blocker removed by a batch confirmation", async () => {
+    // The hole: `attestationBlockers` did not treat a missing grade as a
+    // defect, so an ungraded draft was batch-eligible; marking it REVIEWED
+    // then made it human-authoritative and the required-audit blocker
+    // vanished. The row must never reach the batch in the first place.
+    const { planBatchConfirmation } = await import("@/lib/records/batchConfirmation");
+    const { getStructuredRecord } = await import("@/lib/records/structuredRecord");
+    db.state.rows = [row("a", { status: "AI_AUDIT_PASSED", auditResult: null, reviewedAt: null, reviewedById: null })];
+    const record = await getStructuredRecord("case-1", "firm-1", { scope: "review" });
+    const plan = planBatchConfirmation({ notes: record.documents.flatMap((d) => d.notes), events: [] });
+    expect(plan.rowIds).toEqual([]);
+    expect(plan.skippedByReason).toEqual({ UNAUDITED: 1 });
+  });
+
+  it("is cleared only by a human actually correcting the ungraded entry", async () => {
+    db.state.rows = [row("a", { status: "HUMAN_EDITED", auditResult: null, editedFields: ["factualSummary"] })];
+    const { complete, blockers } = await gate();
+    expect(mentions(blockers, /have not completed the factual audit/)).toBe(false);
+    expect(complete).toBe(true);
+  });
+
   it("blocks an audit-passed draft nobody has reviewed", async () => {
     db.state.rows = [row("a", { status: "AI_AUDIT_PASSED", reviewedAt: null, reviewedById: null })];
     const { complete, blockers } = await gate();

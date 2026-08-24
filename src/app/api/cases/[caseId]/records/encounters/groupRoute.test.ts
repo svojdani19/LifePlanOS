@@ -427,3 +427,35 @@ describe("the machine's grade is history once a human owns the row", () => {
     expect(db.state.rows[0].contradictedFields).toEqual(["date"]);
   });
 });
+
+describe("an entry the factual audit never graded", () => {
+  // "No audit" is not "a clean audit". Reviewing one individually would have
+  // made it human-authoritative, at which point the final gate's required-audit
+  // blocker disappears — the same hole the batch path had.
+  it("cannot be reviewed or verified while it is still a machine draft", async () => {
+    db.state.rows = [makeRow("solo", { status: "AI_DRAFT", auditResult: null, auditVersion: null })];
+    db.state.documents = [{ id: "doc-1", caseId: "case-1", firmId: "firm-1", segments: [{ rowIds: ["solo"] }] }];
+    for (const action of ["verify", "review"]) {
+      const res = await POST(req({ action, canonicalNoteId: noteId("doc-1", "solo"), rows: withHashes("solo") }), params);
+      expect(res.status, action).toBe(409);
+      expect((await res.json()).problems.some((p: { reason: string }) => /never graded this entry/.test(p.reason))).toBe(true);
+      expect(db.state.rows[0].status).toBe("AI_DRAFT");
+    }
+  });
+
+  it("can still be REJECTED — disposing of it is how it is resolved", async () => {
+    db.state.rows = [makeRow("solo", { status: "AI_DRAFT", auditResult: null, auditVersion: null })];
+    db.state.documents = [{ id: "doc-1", caseId: "case-1", firmId: "firm-1", segments: [{ rowIds: ["solo"] }] }];
+    const res = await POST(req({ action: "reject", canonicalNoteId: noteId("doc-1", "solo"), rows: withHashes("solo") }), params);
+    expect(res.status).toBe(200);
+    expect(db.state.rows[0].status).toBe("SUPERSEDED");
+  });
+
+  it("can be confirmed once a human has corrected it", async () => {
+    db.state.rows = [makeRow("solo", { status: "HUMAN_EDITED", auditResult: null, auditVersion: null, editedFields: ["factualSummary"] })];
+    db.state.documents = [{ id: "doc-1", caseId: "case-1", firmId: "firm-1", segments: [{ rowIds: ["solo"] }] }];
+    const res = await POST(req({ action: "review", canonicalNoteId: noteId("doc-1", "solo"), rows: withHashes("solo") }), params);
+    expect(res.status).toBe(200);
+    expect(db.state.rows[0].status).toBe("REVIEWED");
+  });
+});

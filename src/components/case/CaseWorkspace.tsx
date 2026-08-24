@@ -878,12 +878,18 @@ function BatchConfirmPanel({ caseId, onConfirmed }: { caseId: string; onConfirme
 
   const counts = (plan?.counts ?? {}) as AnyRec;
   const eligible = Number(counts.eligibleEncounters ?? 0);
+  // Deliberately NOT hidden when the eligible set is empty but work remains:
+  // a panel that vanishes when there is nothing to click reads as "nothing to
+  // do", which is the opposite of the truth.
   const cautions = Number(counts.cautionEncounters ?? 0);
   const skipped = Number(counts.skippedEncounters ?? 0);
+  const heldRecords = Number(counts.heldEncounters ?? 0);
   const events = Number(counts.events ?? 0);
   const held = Number(counts.heldEvents ?? 0);
   const cautionKinds = Object.entries((plan?.cautionsByKind ?? {}) as Record<string, number>);
   const skippedKinds = Object.entries((plan?.skippedByReason ?? {}) as Record<string, number>);
+  const heldKinds = Object.entries((plan?.heldByReason ?? {}) as Record<string, number>);
+  const phrase = (pairs: [string, number][]) => pairs.map(([k, n]) => `${n} ${k.replace(/_/g, " ").toLowerCase()}`).join(", ");
 
   async function confirm() {
     setWorking(true);
@@ -907,9 +913,25 @@ function BatchConfirmPanel({ caseId, onConfirmed }: { caseId: string; onConfirme
 
   if (!plan) return null;
   if (!eligible && !events) {
-    // Say so rather than showing a button that would refuse. A case with only
-    // exceptions left is a case whose remaining work is genuinely individual.
-    return outcome ? <div className="card p-3 text-[11px] text-ink-700">{outcome}</div> : null;
+    // No button, because it would refuse — but say WHY, rather than vanishing.
+    // A case whose remaining work is genuinely individual should look like one.
+    const why =
+      skipped > 0 || heldRecords > 0 || held > 0
+        ? `Nothing is confirmable in one act right now: ${[
+            skipped > 0 && `${skipped} exception${skipped === 1 ? "" : "s"} need${skipped === 1 ? "s" : ""} an individual decision`,
+            heldRecords > 0 && `${heldRecords} record${heldRecords === 1 ? "" : "s"} waiting on ${heldRecords === 1 ? "that decision" : "those decisions"}`,
+            held > 0 && `${held} chronology entr${held === 1 ? "y" : "ies"} for individual review`,
+          ]
+            .filter(Boolean)
+            .join(", ")}.`
+        : null;
+    if (!outcome && !why) return null;
+    return (
+      <div className="card p-3 text-[11px] text-ink-700">
+        {outcome && <p>{outcome}</p>}
+        {why && <p className={outcome ? "mt-1" : ""}>{why}</p>}
+      </div>
+    );
   }
 
   return (
@@ -920,19 +942,27 @@ function BatchConfirmPanel({ caseId, onConfirmed }: { caseId: string; onConfirme
         entr{events === 1 ? "y" : "ies"} are clean and can be confirmed in one review.
         {cautions > 0 && (
           <> {cautions} of those encounter{cautions === 1 ? "" : "s"} carr{cautions === 1 ? "ies" : "y"} a caution to read first
-            {cautionKinds.length > 0 && <> ({cautionKinds.map(([k, n]) => `${n} ${k.replace(/_/g, " ").toLowerCase()}`).join(", ")})</>}.</>
+            {cautionKinds.length > 0 && <> ({phrase(cautionKinds)})</>}.</>
         )}
       </p>
       <p className="mt-1 text-[11px] text-ink-600">
         {skipped > 0 ? (
           <><strong>{skipped}</strong> exception{skipped === 1 ? "" : "s"} will NOT be covered and stay below for individual
             correction or rejection
-            {skippedKinds.length > 0 && <> ({skippedKinds.map(([k, n]) => `${n} ${k.replace(/_/g, " ").toLowerCase()}`).join(", ")})</>}.
-            {held > 0 && <> {held} chronology entr{held === 1 ? "y is" : "ies are"} held back on those dates.</>}
+            {skippedKinds.length > 0 && <> ({phrase(skippedKinds)})</>}.
           </>
         ) : (
           <>No exceptions remain in this case.</>
         )}
+        {/* Records passed over that are nobody's decision: they are waiting on
+            somebody else's. Said separately, so a reviewer does not read them
+            as more work of their own. */}
+        {heldRecords > 0 && (
+          <> A further <strong>{heldRecords}</strong> record{heldRecords === 1 ? " is" : "s are"} passed over until a decision above
+            releases {heldRecords === 1 ? "it" : "them"}{heldKinds.length > 0 && <> ({phrase(heldKinds)})</>} — no separate action
+            is needed on {heldRecords === 1 ? "it" : "them"}.</>
+        )}
+        {held > 0 && <> {held} chronology entr{held === 1 ? "y is" : "ies are"} held back for individual review.</>}
       </p>
       {armed ? (
         <div className="mt-2 rounded border border-teal-300 bg-white p-2">

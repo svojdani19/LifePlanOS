@@ -21,7 +21,7 @@
 
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { groupCanonicalEncounters, hasEnrichedRowMembership, type CanonicalRow } from "@/lib/records/canonicalEncounters";
+import { groupCanonicalEncounters, hasEnrichedRowMembership, resolvedAmbiguityClusters, type CanonicalRow } from "@/lib/records/canonicalEncounters";
 import { projectNotes } from "@/lib/records/noteProjection";
 import { measureReviewBurden, canonicalNoteId, type BurdenRow } from "@/lib/records/reviewBurden";
 import type { StructuredEncounter } from "@/lib/records/structuredRecord";
@@ -86,7 +86,8 @@ describe("fragments of one proven note become one canonical encounter", () => {
     expect(groups).toHaveLength(1);
     expect(groups[0].rowIds.sort()).toEqual(["a", "b", "c"]);
     expect(groups[0].basis).toBe("COMPATIBILITY_FALLBACK");
-    expect(groups[0].ambiguousAssignment).toBe(false);
+    expect(groups[0].ambiguityAnchor).toBe(false);
+    expect(groups[0].ambiguityClusterId).toBeNull();
   });
 
   it("joins fragments that name the same record identifier", () => {
@@ -113,7 +114,7 @@ describe("a date is not an identity", () => {
     const groups = groupCanonicalEncounters({ documents: [{ id: "doc-1", segments: ingestSegments(["2025-03-14"]) }], rows });
     expect(groups).toHaveLength(2);
     // Proven different, so there is nothing unresolved to ask about.
-    expect(groups.every((g) => !g.ambiguousAssignment)).toBe(true);
+    expect(groups.every((g) => !g.ambiguityAnchor && !g.ambiguityClusterId)).toBe(true);
   });
 
   it("keeps two notes of incompatible clinical class on one day apart", () => {
@@ -125,7 +126,7 @@ describe("a date is not an identity", () => {
       ],
     });
     expect(groups).toHaveLength(2);
-    expect(groups.every((g) => !g.ambiguousAssignment)).toBe(true);
+    expect(groups.every((g) => !g.ambiguityAnchor && !g.ambiguityClusterId)).toBe(true);
   });
 
   it("keeps two notes with different stored note identities apart", () => {
@@ -279,10 +280,45 @@ describe("ambiguity is one question, not one per fragment", () => {
     // Not merged — an unproven merge is a deletion.
     expect(groups).toHaveLength(6);
     // …and not six questions either.
-    expect(groups.filter((g) => g.ambiguousAssignment)).toHaveLength(1);
-    const flagged = groups.find((g) => g.ambiguousAssignment)!;
+    expect(groups.filter((g) => g.ambiguityAnchor)).toHaveLength(1);
+    const flagged = groups.find((g) => g.ambiguityAnchor)!;
     expect(flagged.ambiguousWith).toHaveLength(5);
     expect([...flagged.rowIds, ...flagged.ambiguousWith].sort()).toEqual(["u0", "u1", "u2", "u3", "u4", "u5"]);
+    // Every member is MARKED, anchor included, under one cluster identity: the
+    // question is asked once, but none of the six is a settled record until it
+    // is answered.
+    expect(new Set(groups.map((g) => g.ambiguityClusterId)).size).toBe(1);
+    expect(groups.every((g) => g.ambiguityClusterId === flagged.ambiguityClusterId)).toBe(true);
+  });
+
+  it("is settled by an explicit review of the ANCHOR, and by nothing else", () => {
+    const groups = groupCanonicalEncounters({
+      documents: [{ id: "doc-1", segments: ingestSegments(["2025-03-14"]) }],
+      rows: unsure(4),
+    });
+    const anchor = groups.find((g) => g.ambiguityAnchor)!;
+    const other = groups.find((g) => !g.ambiguityAnchor)!;
+    const statuses: Record<string, string> = Object.fromEntries(groups.flatMap((g) => g.rowIds.map((id) => [id, "AI_AUDIT_PASSED"])));
+    const settled = () => resolvedAmbiguityClusters(groups, (id) => statuses[id]);
+
+    expect(settled().size).toBe(0);
+
+    // Reviewing a NON-anchor member answers nothing.
+    for (const id of other.rowIds) statuses[id] = "REVIEWED";
+    expect(settled().size).toBe(0);
+
+    // Nor does correcting the anchor's content: editing what a record SAYS
+    // says nothing about which record it is.
+    for (const id of anchor.rowIds) statuses[id] = "HUMAN_EDITED";
+    expect(settled().size).toBe(0);
+
+    // An explicit review of the anchor is the answer.
+    for (const id of anchor.rowIds) statuses[id] = "REVIEWED";
+    expect(settled()).toEqual(new Set([anchor.ambiguityClusterId]));
+
+    // …and so is a verification.
+    for (const id of anchor.rowIds) statuses[id] = "VERIFIED";
+    expect(settled()).toEqual(new Set([anchor.ambiguityClusterId]));
   });
 
   it("raises nothing when every pair is proven distinct", () => {
@@ -290,7 +326,8 @@ describe("ambiguity is one question, not one per fragment", () => {
       documents: [{ id: "doc-1", segments: ingestSegments(["2025-03-14"]) }],
       rows: [base("a", { segmentKey: "n1" }), base("b", { segmentKey: "n2" }), base("c", { segmentKey: "n3" })],
     });
-    expect(groups.filter((g) => g.ambiguousAssignment)).toHaveLength(0);
+    expect(groups.filter((g) => g.ambiguityAnchor)).toHaveLength(0);
+    expect(groups.every((g) => g.ambiguityClusterId === null)).toBe(true);
   });
 
   it("is deterministic and order-independent", () => {
@@ -299,7 +336,8 @@ describe("ambiguity is one question, not one per fragment", () => {
     const forward = groupCanonicalEncounters({ documents: doc, rows });
     const reversed = groupCanonicalEncounters({ documents: doc, rows: [...rows].reverse() });
     expect(reversed.map((g) => g.rowIds)).toEqual(forward.map((g) => g.rowIds));
-    expect(reversed.find((g) => g.ambiguousAssignment)!.rowIds).toEqual(forward.find((g) => g.ambiguousAssignment)!.rowIds);
+    expect(reversed.find((g) => g.ambiguityAnchor)!.rowIds).toEqual(forward.find((g) => g.ambiguityAnchor)!.rowIds);
+    expect(reversed.map((g) => g.ambiguityClusterId)).toEqual(forward.map((g) => g.ambiguityClusterId));
   });
 });
 

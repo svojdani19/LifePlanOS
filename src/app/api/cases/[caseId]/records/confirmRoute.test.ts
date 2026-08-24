@@ -118,6 +118,7 @@ vi.mock("@/lib/tenant", () => ({
 
 import { GET, POST } from "./confirm/route";
 import { encounterContentHash } from "@/lib/records/verifiedContent";
+import { CHRONOLOGY_CONTENT_FIELDS } from "@/lib/records/chronologyContent";
 
 const params = { params: Promise.resolve({ caseId: "case-1" }) };
 const post = (body: unknown) =>
@@ -302,14 +303,111 @@ describe("an exception is never swept in", () => {
   });
 
   it("holds a chronology draft on a date whose record is still in question", async () => {
-    db.state.rows = [makeRow("bad", { auditResult: "FAILED" })];
-    db.state.documents[0].segments = [{ rowIds: ["bad"] }];
+    db.state.rows = [
+      makeRow("bad", { auditResult: "FAILED" }),
+      makeRow("good", { encounterDate: new Date("2025-06-02T00:00:00Z") }),
+    ];
+    db.state.documents[0].segments = [{ rowIds: ["bad"] }, { rowIds: ["good"] }];
     db.state.events = [makeEvent("contested"), makeEvent("clear", { eventDate: new Date("2025-06-02T00:00:00Z") })];
     const plan = await preview();
     expect(plan.counts).toMatchObject({ events: 1, heldEvents: 1 });
+    expect(plan.heldEventsByReason).toEqual({ RECORD_IN_QUESTION: 1 });
     await post({ expectedManifestHash: plan.manifestHash });
     expect(db.state.events.find((e) => e.id === "contested")!.reviewStatus).toBe("AI_DRAFT");
     expect(db.state.events.find((e) => e.id === "clear")!.reviewStatus).toBe("REVIEWED");
+  });
+
+  it("holds a chronology draft nothing in the records supports", async () => {
+    db.state.events = [
+      makeEvent("supported"),
+      makeEvent("orphan", { sourceDocumentId: null }),
+      makeEvent("floating", { eventDate: new Date("2031-01-01T00:00:00Z") }),
+    ];
+    const plan = await preview();
+    expect(plan.counts).toMatchObject({ events: 1, heldEvents: 2 });
+    expect(plan.heldEventsByReason).toEqual({ NO_SOURCE_CITATION: 1, NO_CONFIRMED_RECORD: 1 });
+    await post({ expectedManifestHash: plan.manifestHash });
+    expect(db.state.events.find((e) => e.id === "supported")!.reviewStatus).toBe("REVIEWED");
+    expect(db.state.events.find((e) => e.id === "orphan")!.reviewStatus).toBe("AI_DRAFT");
+    expect(db.state.events.find((e) => e.id === "floating")!.reviewStatus).toBe("AI_DRAFT");
+  });
+
+  it("leaves an entry the factual audit never graded for individual review", async () => {
+    db.state.rows = [makeRow("a"), makeRow("ungraded", { auditResult: null, auditVersion: null })];
+    db.state.documents[0].segments = [{ rowIds: ["a"] }, { rowIds: ["ungraded"] }];
+    const plan = await preview();
+    expect(plan.counts).toMatchObject({ eligibleEncounters: 1, skippedEncounters: 1 });
+    expect(plan.skippedByReason).toEqual({ UNAUDITED: 1 });
+    await post({ expectedManifestHash: plan.manifestHash });
+    expect(db.state.rows.find((r) => r.id === "ungraded")!.status).toBe("AI_AUDIT_PASSED");
+    expect(db.state.rows.find((r) => r.id === "a")!.status).toBe("REVIEWED");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+describe("an ambiguity cluster is held whole, and released by one decision", () => {
+  /** Four fragments the identity rules can neither join nor separate. */
+  const seedCluster = () => {
+    db.state.rows = Array.from({ length: 4 }, (_, i) =>
+      makeRow(`u${i}`, {
+        claims: [{ field: "subjective", value: `Interval note paragraph number ${i} describing the encounter`, excerpt: "…", page: 4 }],
+      }),
+    );
+    // Ingest-time segments: no rowIds, so the compatibility path decides.
+    db.state.documents[0].segments = [
+      { date: "2025-03-14", label: "03/14/2025", pageStart: 1, pageEnd: 1, offsetStart: 0, offsetEnd: 900, kind: "clinical", type: "CLINICAL_ENCOUNTER", category: null, bearsOnCare: true, provider: "A. Rivera, MD", facility: null, summary: "Clinic visit." },
+    ];
+    db.state.events = [];
+  };
+
+  it("confirms none of the four while the one question is open", async () => {
+    seedCluster();
+    const plan = await preview();
+    expect(plan.counts).toMatchObject({ canonicalEncounters: 4, eligibleEncounters: 0, skippedEncounters: 1, heldEncounters: 3 });
+    expect(plan.skippedByReason).toEqual({ AMBIGUOUS_ASSIGNMENT: 1 });
+    expect(plan.heldByReason).toEqual({ AWAITING_ASSIGNMENT_DECISION: 3 });
+    const res = await post({ expectedManifestHash: plan.manifestHash });
+    expect(res.status).toBe(409);
+    expect(db.state.rows.every((r) => r.status === "AI_AUDIT_PASSED")).toBe(true);
+  });
+
+  it("releases the other three once the anchor is explicitly reviewed as separate", async () => {
+    seedCluster();
+    // The reviewer answers the one question through the individual path.
+    // (`u0` anchors: `groupByIdentity` orders by id when no span is known.)
+    db.state.rows.find((r) => r.id === "u0")!.status = "REVIEWED";
+
+    const plan = await preview();
+    expect(plan.counts).toMatchObject({ eligibleEncounters: 3, skippedEncounters: 0, heldEncounters: 0, alreadyReviewedEncounters: 1 });
+    const res = await post({ expectedManifestHash: plan.manifestHash });
+    expect(res.status).toBe(200);
+    expect((await res.json()).rows).toBe(3);
+    expect(db.state.rows.map((r) => r.status)).toEqual(["REVIEWED", "REVIEWED", "REVIEWED", "REVIEWED"]);
+  });
+
+  it("is NOT released by a correction to the anchor", async () => {
+    seedCluster();
+    db.state.rows.find((r) => r.id === "u0")!.status = "HUMAN_EDITED";
+    const plan = await preview();
+    expect(plan.counts).toMatchObject({ eligibleEncounters: 0, skippedEncounters: 1 });
+    expect(plan.skippedByReason).toEqual({ AMBIGUOUS_ASSIGNMENT: 1 });
+  });
+
+  it("keeps the final gate shut until the decision is made, then opens with the batch", async () => {
+    const { factualReviewState } = await import("@/lib/records/structuredRecord");
+    seedCluster();
+    // Unresolved: four machine drafts nobody has reviewed.
+    expect((await factualReviewState("case-1", "firm-1")).complete).toBe(false);
+
+    // The one decision, through the individual path…
+    db.state.rows.find((r) => r.id === "u0")!.status = "REVIEWED";
+    // …still shut, because three records remain unreviewed…
+    expect((await factualReviewState("case-1", "firm-1")).complete).toBe(false);
+
+    // …and the batch, now unblocked, closes them in one act.
+    const plan = await preview();
+    expect((await post({ expectedManifestHash: plan.manifestHash })).status).toBe(200);
+    expect((await factualReviewState("case-1", "firm-1")).complete).toBe(true);
   });
 
   it("refuses when nothing at all is eligible, and changes nothing", async () => {
@@ -361,6 +459,38 @@ describe("drift aborts the whole batch", () => {
     expect((await res.json()).error).toMatch(/changed after these counts were shown/);
     expect(db.state.rows.every((r) => r.status === "AI_AUDIT_PASSED")).toBe(true);
     expect(db.state.audits).toHaveLength(0);
+  });
+
+  it("refuses when a chronology entry's PROSE changed and its status did not", async () => {
+    // The case the id/status/date manifest could not see: an event has no
+    // `updatedAt` to compare against, and `sourceFingerprint` fingerprints the
+    // claims it was generated from, not the sentence a reader sees.
+    const plan = await preview();
+    db.state.events[0].summary = "A materially different sentence about this visit.";
+    const res = await post({ expectedManifestHash: plan.manifestHash });
+    expect(res.status).toBe(409);
+    expect(db.state.rows.every((r) => r.status === "AI_AUDIT_PASSED")).toBe(true);
+    expect(db.state.events.every((e) => e.reviewStatus === "AI_DRAFT")).toBe(true);
+    expect(db.state.audits).toHaveLength(0);
+  });
+
+  it("refuses when the GROUPING changed but the row set did not", async () => {
+    // Same rows, same content, same statuses — one canonical encounter instead
+    // of three. A completely different dialog.
+    const plan = await preview();
+    db.state.documents[0].segments = [{ rowIds: ["a", "b", "c"] }];
+    const res = await post({ expectedManifestHash: plan.manifestHash });
+    expect(res.status).toBe(409);
+    expect((await res.json()).error).toMatch(/changed after these counts were shown/);
+    expect(db.state.rows.every((r) => r.status === "AI_AUDIT_PASSED")).toBe(true);
+  });
+
+  it("refuses when a record moved from eligible to skipped", async () => {
+    const plan = await preview();
+    db.state.rows[1].auditResult = "FAILED";
+    const res = await post({ expectedManifestHash: plan.manifestHash });
+    expect(res.status).toBe(409);
+    expect(db.state.rows.every((r) => r.status === "AI_AUDIT_PASSED")).toBe(true);
   });
 
   it("refuses a manifest that was never this case's", async () => {
@@ -439,15 +569,54 @@ describe("confirming does not change the extracted record", () => {
     });
   });
 
-  it("changes only review status on chronology entries — no prose, no dates", async () => {
+  it("changes only review status on chronology entries — every rendered field intact", async () => {
+    // Seeded with real content in every field the Medical Chronology renders,
+    // so "unchanged" means unchanged, not "the three fields the fixture had".
+    db.state.events = [
+      makeEvent("e1", {
+        eventDateEnd: new Date("2025-05-01T00:00:00Z"),
+        dateInferred: false,
+        eventType: "CLINIC_VISIT",
+        recordType: "CLINICAL_ENCOUNTER",
+        specialty: "Orthopaedics",
+        provider: "A. Rivera, MD",
+        facility: "Northgate Clinic",
+        summary: "Follow-up for lumbar radiculopathy; conservative care continued.",
+        subjective: "Reports low back pain radiating to the left leg.",
+        pastMedicalHistory: "Hypertension.",
+        objectiveFindings: "Straight leg raise positive at forty degrees.",
+        diagnosis: "Lumbar radiculopathy",
+        treatment: "Continue physical therapy.",
+        procedure: null,
+        disposition: "Return in four weeks.",
+        imagingFindings: null,
+        medications: "Gabapentin 300mg.",
+        restrictions: "No lifting over ten pounds.",
+        workStatus: "Light duty.",
+        functionalStatus: "Ambulates independently.",
+        impairmentRating: null,
+        clinicalSignificance: "Grounds the future-care recommendation.",
+        sourcePage: 4,
+        sourceQuote: "straight leg raise positive on the right",
+        extractionId: "run-1",
+        relevanceScore: 50,
+        relatedness: "UNCLEAR",
+        seriesMembers: [{ date: "2025-03-14", documentId: "doc-1", page: 4 }],
+      }),
+    ];
     const before = JSON.parse(JSON.stringify(db.state.events));
     const plan = await preview();
     await post({ expectedManifestHash: plan.manifestHash });
+
     expect(db.state.events).toHaveLength(before.length);
+    // Everything the hash covers except the two review fields the act writes.
+    const content = CHRONOLOGY_CONTENT_FIELDS.filter((f) => f !== "reviewStatus" && f !== "edited");
     db.state.events.forEach((event, i) => {
-      for (const field of ["eventDate", "sourceDocumentId", "sourceFingerprint", "edited"]) {
+      for (const field of content) {
         expect(JSON.stringify(event[field]), `${event.id}.${field}`).toBe(JSON.stringify(before[i][field]));
       }
+      expect(event.reviewStatus).toBe("REVIEWED");
+      expect(event.edited).toBe(false);
     });
   });
 
@@ -567,5 +736,44 @@ describe("the final export gate, before and after", () => {
     const { complete, blockers } = await gate();
     expect(complete).toBe(false);
     expect(blockers.filter((b) => /document-level finding/.test(b))).toHaveLength(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+describe("a shared row is vetoed by ANY exception appearance of it", () => {
+  it("does not confirm a cross-document row through its clean appearance", async () => {
+    db.state.rows = [makeRow("r-primary", { sourceDocumentId: "doc-primary" }), makeRow("r-copy", { sourceDocumentId: "doc-copy" })];
+    db.state.documents = [
+      { ...db.state.documents[0], id: "doc-primary", segments: [{ rowIds: ["r-primary", "r-copy"] }] },
+      { ...db.state.documents[0], id: "doc-copy", segments: [{ rowIds: ["r-copy"] }] },
+    ];
+    // The COPY's own card carries a blocking finding; the primary's does not.
+    db.state.findings = [
+      { id: "f1", scope: "ENTRY", type: "UNSUPPORTED_CLAIM", severity: "BLOCKING", blocking: true, source: "DETERMINISTIC_VALIDATOR", detail: "no supporting excerpt", excerpt: null, field: null, pageStart: null, pageEnd: null, claimIndex: null, status: "OPEN", encounterId: "r-copy", sourceDocumentId: "doc-copy", canonicalNoteId: null, fingerprint: "fp1", sourceFingerprint: null },
+    ];
+    db.state.events = [];
+
+    const plan = await preview();
+    expect(plan.counts).toMatchObject({ eligibleEncounters: 0, skippedEncounters: 1, heldEncounters: 1 });
+    expect(plan.heldByReason).toEqual({ ROW_BLOCKED_ELSEWHERE: 1 });
+
+    const res = await post({ expectedManifestHash: plan.manifestHash });
+    expect(res.status).toBe(409);
+    expect(db.state.rows.every((r) => r.status === "AI_AUDIT_PASSED")).toBe(true);
+  });
+
+  it("confirms it once every appearance is clean", async () => {
+    db.state.rows = [makeRow("r-primary", { sourceDocumentId: "doc-primary" }), makeRow("r-copy", { sourceDocumentId: "doc-copy" })];
+    db.state.documents = [
+      { ...db.state.documents[0], id: "doc-primary", segments: [{ rowIds: ["r-primary", "r-copy"] }] },
+      { ...db.state.documents[0], id: "doc-copy", segments: [{ rowIds: ["r-copy"] }] },
+    ];
+    db.state.events = [];
+    const plan = await preview();
+    const res = await post({ expectedManifestHash: plan.manifestHash });
+    expect(res.status).toBe(200);
+    // One decision, both rows, no row named twice.
+    expect((await res.json()).rows).toBe(2);
+    expect(db.state.rows.every((r) => r.status === "REVIEWED")).toBe(true);
   });
 });

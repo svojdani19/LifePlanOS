@@ -79,6 +79,7 @@ export interface ReviewGuidance {
     | "FRAGMENT_DISAGREEMENT"
     | "AMBIGUOUS_ASSIGNMENT"
     | "SOURCE_CONFLICT"
+    | "UNAUDITED"
     | "UNRESOLVED_DISPUTE"
     | "NOT_CORROBORATED"
     | "DOCUMENT_INCOMPLETE"
@@ -218,15 +219,18 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
         `This document carries no stored note membership, so this record's extent was worked out from what the ` +
         `extracts themselves state. ${n === 1 ? "One further extract" : `${n} further extracts`} could be neither ` +
         `joined to it nor shown to be a different encounter, so ${n === 1 ? "it was" : "they were"} left separate ` +
-        `rather than merged on a guess.`,
+        `rather than merged on a guess. Until you answer, none of them is a settled record, so a case-level ` +
+        `confirmation passes over all of them — this one decision releases the rest.`,
       steps: [
         "Open the cited pages and read whether these extracts are one signed note or separate encounters.",
-        "If they are separate, Verify each on its own — that settles the question.",
-        "If they are one record, Reject the duplicates and keep the copy that carries the full note, or re-extract the document so its membership is stored.",
+        "If they ARE separate records: Verify (or Review) this one. That decision records your answer for the whole group, and the others become confirmable.",
+        "If they are ONE record: Reject the duplicates and keep the copy carrying the full note, or re-extract the document so its membership is stored.",
       ],
       // Confirming the records AS SEPARATE is a legitimate answer, so the
       // decision must not be refused. It is still an EXCEPTION: someone has to
-      // give that answer before the record's extent is settled.
+      // give that answer before the record's extent is settled — and it is the
+      // ONLY thing that settles it. A content correction does not, because
+      // editing what a record says answers nothing about which record it is.
       canAttest: true,
     };
   }
@@ -299,6 +303,33 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
         "If this material carries no service date at all — a fee schedule, a letter — reclassify it so it is not expected to have one.",
       ],
       canAttest: true,
+    };
+  }
+
+  // 5a. Never graded at all.
+  //
+  //     The card said "Automated checks found nothing wrong with this record"
+  //     — of a record no automated check had ever read. `guidanceFor` had no
+  //     branch for a missing grade, so a null `auditResult` fell all the way
+  //     through to CLEAN, and `projectNotes` reported the note's audit as
+  //     "PASS" because that was the fallback when no row carried one. A batch
+  //     confirmation over those would have marked them REVIEWED, at which
+  //     point the human-authority rule hides the gap for ever.
+  //
+  //     "Not audited" is not "audited and fine".
+  if (!input.auditResult && machineGradeGoverns({ status: input.status })) {
+    return {
+      kind: "UNAUDITED",
+      requirement: "This entry was never checked against its source. Read it against the cited page and correct it, or reject it.",
+      why: "The factual audit did not grade this entry, so nothing — machine or human — has yet compared what it says with what the record says.",
+      steps: [
+        "Open the cited page and read the entry against the source.",
+        "Use Correct to record your reading; a correction is a human decision and supersedes the missing machine grade.",
+        "Reject it if the source does not support it.",
+        "Re-extracting this document produces an audited draft of it.",
+      ],
+      // A clean attestation may not stand in for a check nobody performed.
+      canAttest: false,
     };
   }
 

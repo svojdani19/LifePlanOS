@@ -6,6 +6,7 @@ import { CHRONOLOGY_REVIEW_WHERE, REVIEW_VISIBLE_WHERE } from "@/lib/records/enc
 import { encounterContentHash } from "@/lib/records/verifiedContent";
 import { attestationBlockers } from "@/lib/records/reviewIntegrity";
 import { manifestHashOf, planBatchConfirmation, CONFIRMABLE_ROW_STATES, type ConfirmableEvent } from "@/lib/records/batchConfirmation";
+import { CHRONOLOGY_CONTENT_SELECT } from "@/lib/records/chronologyContent";
 import { ok, handleError } from "@/lib/api";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -80,7 +81,11 @@ async function derivePlan(caseId: string, firmId: string) {
     getStructuredRecord(caseId, firmId, { scope: "review" }),
     prisma.chronologyEvent.findMany({
       where: { caseId, ...CHRONOLOGY_REVIEW_WHERE },
-      select: { id: true, reviewStatus: true, edited: true, sourceDocumentId: true, eventDate: true, sourceFingerprint: true },
+      // Every field the manifest hashes. An event has no `updatedAt` to
+      // compare-and-set against, so its CONTENT is the version being
+      // confirmed — and a narrower selection here than in the re-check below
+      // would differ for a reason that is not a change.
+      select: CHRONOLOGY_CONTENT_SELECT,
     }),
   ]);
   const notes = record.documents.flatMap((d) => d.notes);
@@ -103,6 +108,8 @@ export async function GET(_req: Request, { params: paramsPromise }: Params) {
       manifestHash: plan.manifestHash,
       counts: plan.counts,
       skippedByReason: plan.skippedByReason,
+      heldByReason: plan.heldByReason,
+      heldEventsByReason: plan.heldEventsByReason,
       cautionsByKind: plan.cautionsByKind,
       basisCounts: plan.basisCounts,
     });
@@ -173,9 +180,24 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
     const manifestRows = rows.map((r) => ({ id: r.id, contentHash: encounterContentHash(r), status: r.status }));
     const events = await prisma.chronologyEvent.findMany({
       where: { id: { in: plan.eventIds }, caseId: params.caseId },
-      select: { id: true, reviewStatus: true, edited: true, sourceDocumentId: true, eventDate: true, sourceFingerprint: true },
+      select: CHRONOLOGY_CONTENT_SELECT,
     });
-    if (manifestHashOf(manifestRows, events as ConfirmableEvent[]) !== input.expectedManifestHash) {
+    // The SAME complete manifest, recomputed over the rows and events as they
+    // are at this instant. The plan check above proves the decision set has
+    // not moved; this proves the content behind it has not either — including
+    // chronology prose, which carries no version column of its own.
+    const recheck = manifestHashOf({
+      encounters: plan.encounters,
+      rows: manifestRows,
+      events: events as ConfirmableEvent[],
+      counts: plan.counts,
+      cautionsByKind: plan.cautionsByKind,
+      skippedByReason: plan.skippedByReason,
+      heldByReason: plan.heldByReason,
+      heldEventsByReason: plan.heldEventsByReason,
+      basisCounts: plan.basisCounts,
+    });
+    if (recheck !== input.expectedManifestHash) {
       problems.push({ id: "", reason: "the displayed content changed before the confirmation was applied" });
     }
     if (problems.length) {
@@ -260,7 +282,13 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
             // What this act did NOT cover, and why.
             skippedEncounters: plan.counts.skippedEncounters,
             skippedByReason: plan.skippedByReason,
+            // …and what it passed over without that being anybody's decision:
+            // records waiting on an assignment decision elsewhere, or on
+            // another appearance of one of their rows.
+            heldEncounters: plan.counts.heldEncounters,
+            heldByReason: plan.heldByReason,
             heldChronologyEvents: plan.counts.heldEvents,
+            heldChronologyByReason: plan.heldEventsByReason,
             note: input.note ?? null,
           },
         },
@@ -276,6 +304,7 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
       events: result.confirmedEvents,
       counts: plan.counts,
       skippedByReason: plan.skippedByReason,
+      heldByReason: plan.heldByReason,
       cautionsByKind: plan.cautionsByKind,
     });
   } catch (err) {

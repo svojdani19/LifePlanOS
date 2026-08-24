@@ -22,6 +22,11 @@
 // The correction is NOT "trust the human about everything". A live
 // disagreement is not answered by anyone's status:
 //
+//   • a row the factual audit never graded at all still blocks. "No audit" is
+//     not "a clean audit", and a batch that treated it as one would delete the
+//     required-audit safeguard: mark the row REVIEWED and the human-authority
+//     rule above then hides the fact that nobody, machine or person, ever
+//     checked it against its source;
 //   • an unresolved extraction dispute still blocks;
 //   • a field the source contradicts still blocks — until a human corrects
 //     THAT FIELD, which is exactly what the card's own instructions tell them
@@ -136,6 +141,17 @@ export function attestationBlockers(row: IntegrityRow): IntegrityProblem[] {
   // The machine's grade, applied only while the machine's draft is what the
   // row still holds.
   if (machineGradeGoverns(row)) {
+    // NO grade at all. Distinguished from every graded outcome, including the
+    // ones a reviewer is deliberately allowed to attest over: a document that
+    // is incomplete around a sound entry, an old conflict whose reason was
+    // never recorded, a low-confidence page, a review flag — those were all
+    // checked and reported. This row was not checked.
+    if (!row.auditResult) {
+      problems.push({
+        code: "UNAUDITED",
+        reason: "the factual audit never graded this entry; correct it from its cited page, reject it, or re-extract the document",
+      });
+    }
     if (row.auditResult === "FAILED") {
       problems.push({ code: "AUDIT_FAILED", reason: "the audit ended as a failure; correct or reject this entry first" });
     }
