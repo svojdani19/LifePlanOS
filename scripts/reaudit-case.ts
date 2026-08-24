@@ -46,6 +46,9 @@ async function main() {
         id: true, sourceDocumentId: true, status: true, auditResult: true, auditVersion: true, dateStatus: true,
         encounterDate: true, provider: true, encounterType: true, factualSummary: true, synthesis: true,
         claims: true, page: true, unresolvedDisputes: true, contradictedFields: true,
+        // Identity-bearing, so a NOTE-scoped finding this pass writes names the
+        // same canonical encounter the Records page shows.
+        facility: true, pageEnd: true, substanceClass: true, segmentKey: true, analysisClass: true,
       },
     });
     // A document with no active rows is audited, not skipped — see planReaudit.

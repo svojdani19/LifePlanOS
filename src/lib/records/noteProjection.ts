@@ -15,9 +15,16 @@
 // Two rules keep consolidation honest:
 //   • a note shows the WORST status among its rows, so nothing is laundered;
 //   • a note carrying any open entry/claim finding is an exception, not clean.
+//
+// Membership is NOT decided here. It comes from `groupCanonicalEncounters` —
+// the same mechanism the burden metric and the server's own membership
+// derivation use — so the surface a reviewer signs, the number that says how
+// much work is left, and the set of rows the signature actually covers are
+// one answer rather than three.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { canonicalNoteId } from "@/lib/records/reviewBurden";
+import { groupCanonicalEncounters, type CanonicalRow, type MembershipBasis } from "@/lib/records/canonicalEncounters";
 import { isOpenFinding, type FindingScope } from "@/lib/records/findingScope";
 import { attentionLevel, guidanceFor, type AttentionLevel, type ReviewGuidance } from "@/lib/records/reviewGuidance";
 import type { StructuredEncounter } from "@/lib/records/structuredRecord";
@@ -113,6 +120,38 @@ export interface ReviewableNote {
   needsAttention: boolean;
   /** Clean, and awaiting one human attestation. */
   awaitingAttestation: boolean;
+
+  // ── Visible and auditable vs. a decision someone owes ────────────────────
+  /**
+   * Where this record's membership came from, so a reviewer can see whether
+   * they are looking at the records builder's own answer or at a
+   * compatibility grouping derived for a document that never got one.
+   */
+  membershipBasis: MembershipBasis;
+  /**
+   * Set when the identity rules could neither join this record to nearby
+   * fragments nor prove it distinct from them. Raised ONCE for the whole
+   * cluster of records the question spans, never once per fragment, and the
+   * records stay separate — an unproven merge is a deletion.
+   */
+  ambiguousAssignment: boolean;
+  /** The rows the open assignment question spans, for display before deciding. */
+  ambiguousWith: string[];
+  /**
+   * Does a person OWE a decision on this record?
+   *
+   * True only for a material exception. A clean record and a record carrying a
+   * caution are both visible, auditable and still short of a human signature —
+   * but neither is an item in a queue somebody is being asked to clear, and
+   * treating every sound record as one is what buried the few that were not.
+   */
+  requiresDecision: boolean;
+  /**
+   * The other half of that sentence, said explicitly rather than left implied:
+   * this record is sound, it has NOT been human-reviewed or attested, and the
+   * confirmation it still needs is the case-level one at final release.
+   */
+  coveredByCaseConfirmation: boolean;
 }
 
 /**
@@ -240,18 +279,17 @@ export function projectNotes(
 ): ReviewableNote[] {
   const byId = new Map(rows.map((r) => [r.id, r]));
   const resolve = (id: string): StructuredEncounter | undefined => byId.get(id) ?? caseRows?.get(id);
-  const claimed = new Set<string>();
-  const groups: string[][] = [];
 
-  const segs = Array.isArray(segments) ? (segments as { rowIds?: unknown }[]) : [];
-  for (const seg of segs) {
-    const ids = Array.isArray(seg?.rowIds) ? (seg.rowIds as unknown[]).filter((x): x is string => typeof x === "string") : [];
-    const live = ids.filter((id) => !!resolve(id) && !claimed.has(id));
-    if (!live.length) continue;
-    for (const id of live) claimed.add(id);
-    groups.push(live);
-  }
-  for (const r of rows) if (!claimed.has(r.id)) groups.push([r.id]);
+  // Membership from the shared mechanism, over THIS document's rows only.
+  // `alsoResolvable` lets a persisted segment name a copy that lives in
+  // another production — the linkage the builder proved — without making that
+  // copy a candidate for the compatibility fallback, which never leaves the
+  // document it was called for.
+  const grouped = groupCanonicalEncounters({
+    documents: [{ id: documentId, segments }],
+    rows: rows as readonly CanonicalRow[],
+    alsoResolvable: (id) => Boolean(caseRows?.get(id)),
+  });
 
   const openByEntry = new Map<string, NoteFinding[]>();
   for (const f of findings) {
@@ -259,8 +297,9 @@ export function projectNotes(
     openByEntry.set(f.encounterId, [...(openByEntry.get(f.encounterId) ?? []), f]);
   }
 
-  return groups.map((rowIds) => {
-    const noteRows = rowIds.map((id) => resolve(id)!).filter(Boolean);
+  return grouped.map((group) => {
+    const rowIds = group.rowIds;
+    const noteRows = rowIds.map((id) => resolve(id)).filter((r): r is StructuredEncounter => Boolean(r));
     const id = canonicalNoteId(documentId, rowIds);
     const noteFindings = [
       ...findings.filter((f) => f.scope === "NOTE" && (f as { canonicalNoteId?: string }).canonicalNoteId === id),
@@ -303,6 +342,10 @@ export function projectNotes(
       contradictedFields: [...new Set(noteRows.flatMap((r) => (r as { contradictedFields?: string[] | null }).contradictedFields ?? []))],
       staleReason: noteRows.find((r) => r.staleReason)?.staleReason ?? null,
       fragmentDisagreement: material,
+      // Unresolved membership is a fact about THIS record, raised once for the
+      // cluster the question spans.
+      ambiguousAssignment: group.ambiguousAssignment,
+      ambiguousWith: group.ambiguousWith.length,
       corroboration: corroboration as never,
       findings: openFindings as never,
       // The extractor's own per-claim warnings, carrying the field and page.
@@ -365,6 +408,14 @@ export function projectNotes(
       guidance,
       attention: level,
       needsAttention,
+      membershipBasis: group.basis,
+      ambiguousAssignment: group.ambiguousAssignment,
+      ambiguousWith: group.ambiguousWith,
+      // A decision is owed only for a material exception. Everything else is
+      // visible, inspectable, and covered by the case-level confirmation.
+      requiresDecision: needsAttention,
+      coveredByCaseConfirmation:
+        !needsAttention && noteRows.every((r) => r.status === "AI_DRAFT" || r.status === "AI_AUDIT_PASSED"),
       // Awaiting attestation means: nothing blocks it, and every row is still
       // a machine draft awaiting the one human decision this note deserves.
       // A note carrying a caution qualifies — reading the caution IS part of

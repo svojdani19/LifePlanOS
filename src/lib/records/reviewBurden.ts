@@ -10,16 +10,22 @@
 // The rules this module exists to enforce:
 //   • a finding is counted by its identity, never by its text;
 //   • a document/page problem is counted once at its own scope;
-//   • the review UNIT is the canonical note the records builder persisted,
-//     not the extraction fragments it was assembled from;
+//   • the review UNIT is the canonical encounter — resolved by the ONE shared
+//     grouping mechanism the review surface uses, never by a second
+//     approximation of it that can drift;
 //   • superseded rows and older runs are history and are never current;
-//   • a cross-document copy is not a second obligation.
+//   • a cross-document copy is not a second obligation;
+//   • a REQUIRED decision is an EXCEPTION. A clean, well-supported encounter
+//     stays visible and auditable and is covered by the case-level final
+//     confirmation; counting it as a mandatory click made a case of hundreds
+//     of sound records look like hundreds of unanswered questions.
 //
 // Pure and synchronous: callers supply persisted data, so the same function
 // serves a live case, a test with synthetic rows, and the re-audit report.
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { requiresDate } from "@/lib/documents/analysisClass";
+import { groupCanonicalEncounters, type CanonicalRow } from "@/lib/records/canonicalEncounters";
 import type { FindingScope } from "@/lib/records/findingScope";
 
 /**
@@ -55,6 +61,21 @@ export interface BurdenRow {
   auditVersion?: string | null;
   /** Machine-corroboration verdict, when one was recorded. */
   corroborationResult?: string | null;
+
+  // ── Identity-bearing fields ───────────────────────────────────────────────
+  // Supplied so this measurement and the review surface resolve membership
+  // from the SAME facts. All optional: a caller that supplies less gets fewer
+  // merges, never different ones — but a caller comparing its numbers against
+  // the Records page must supply them, or the two are counting different
+  // groupings of the same rows.
+  encounterDate?: string | Date | null;
+  provider?: string | null;
+  facility?: string | null;
+  segmentKey?: string | null;
+  page?: number | null;
+  pageEnd?: number | null;
+  substanceClass?: string | null;
+  claims?: readonly { field: string; value: string; excerpt?: string | null; page?: number | null }[];
 }
 
 /** A persisted canonical segment: the note the records builder actually built. */
@@ -87,12 +108,26 @@ export interface BurdenInput {
 export interface ReviewBurden {
   /** Rows that still describe the case (the caller supplies current rows only). */
   activeRows: number;
-  /** Canonical notes assembled from persisted segments. */
+  /**
+   * Canonical encounters, from the shared grouping mechanism. A VISIBILITY
+   * number: this is how many real records the case contains, not how many
+   * decisions it demands.
+   */
   canonicalNotes: number;
   /** Notes built from more than one extraction row. */
   multiRowNotes: number;
   /** Rows with no persisted segment — each becomes its own one-row note. */
   rowsWithoutSegment: number;
+  /**
+   * Encounters whose membership the compatibility fallback derived, because
+   * their document carries no enriched row membership at all.
+   */
+  fallbackNotes: number;
+  /**
+   * Encounters carrying an unresolved assignment question — counted ONCE per
+   * ambiguity cluster, never once per fragment inside it.
+   */
+  ambiguousAssignments: number;
 
   aiDraft: number;
   aiAuditPassed: number;
@@ -124,8 +159,9 @@ export interface ReviewBurden {
   caseBlockers: number;
 
   /**
-   * Notes needing a human: those with a finding, plus those whose own rows are
-   * stale, generation-loss, non-PASS, or undated where a date is required.
+   * Encounters needing a human: those with a finding, those whose own rows are
+   * stale, generation-loss, non-PASS or undated where a date is required, and
+   * those whose membership could not be resolved.
    */
   notesNeedingAttention: number;
   /**
@@ -134,17 +170,52 @@ export interface ReviewBurden {
    * or an old grade whose reason was never recorded.
    */
   notesCarryingCaution: number;
-  /** Notes with nothing open: one attestation each, still required. */
+  /**
+   * Encounters with nothing open.
+   *
+   * They remain visible and auditable, and the case-level final gate still
+   * requires a human before a final export — but each of them is NOT a
+   * separate mandatory obligation, and this number is deliberately absent from
+   * `requiredDecisions`.
+   */
   cleanNotesAwaitingAttestation: number;
+
+  /**
+   * The number this module exists to get right: MATERIAL EXCEPTIONS a person
+   * must answer, each counted once at its own scope.
+   *
+   *   • encounters that cannot be attested as they stand — including those
+   *     whose assignment is unresolved, counted once per ambiguity cluster;
+   *   • blocking CASE, DOCUMENT and PAGE findings, once each at their scope.
+   *
+   * Clean encounters and cautions are excluded: a caution is read, not
+   * corrected, and a clean record is covered by the case-level confirmation.
+   */
+  requiredDecisions: number;
+  /**
+   * The obligations above, broken out. `ambiguousAssignments` is a SUBSET of
+   * `encounterExceptions`, not an addend — the total is the encounter
+   * exceptions plus the three scoped blocker counts.
+   */
+  requiredDecisionsByKind: {
+    encounterExceptions: number;
+    ambiguousAssignments: number;
+    caseBlockers: number;
+    documentBlockers: number;
+    pageBlockers: number;
+  };
 
   /**
    * Rows a canonical note consolidates from ANOTHER document — the copies one
    * decision now covers instead of each demanding its own.
    */
   crossDocumentCopies: number;
-  /** Decisions a fragment-level surface would have demanded. */
+  /**
+   * Review UNITS before and after consolidation — the fragment-level surface
+   * against the canonical-encounter one. A consolidation-savings comparison,
+   * NOT the obligation count: `requiredDecisions` is that.
+   */
   decisionsBeforeConsolidation: number;
-  /** Decisions the canonical-note surface demands. */
   decisionsAfterConsolidation: number;
 }
 
@@ -202,25 +273,37 @@ export function parseCanonicalNoteId(noteId: string): { documentId: string | nul
 export function measureReviewBurden(input: BurdenInput): ReviewBurden {
   const rowsById = new Map(input.rows.map((r) => [r.id, r]));
 
-  // ── Canonical notes ─────────────────────────────────────────────────────
-  // Only rows that are still current count toward a note; a segment whose
-  // rows were all superseded is history, not a review obligation.
-  const notes: { id: string; documentId: string; rowIds: string[] }[] = [];
-  const claimedRows = new Set<string>();
+  // ── Canonical encounters, from the ONE shared mechanism ─────────────────
+  // Not re-derived here. This measurement and the Records surface must agree
+  // about what a record IS before they can disagree usefully about anything
+  // else, and two implementations of "which rows are one note" would have
+  // drifted apart the first time either was corrected.
+  //
+  // Only rows that are still current are passed in (the caller applies the
+  // lifecycle filter), so a segment whose rows were all superseded resolves to
+  // nothing and is history rather than a review obligation.
+  const grouped = groupCanonicalEncounters({
+    documents: input.documents.map((d) => ({ id: d.id, segments: d.segments })),
+    rows: input.rows as readonly CanonicalRow[],
+  });
+  const notes = grouped.map((g) => ({
+    id: canonicalNoteId(g.documentId, g.rowIds),
+    documentId: g.documentId,
+    rowIds: g.rowIds,
+    basis: g.basis,
+    ambiguousAssignment: g.ambiguousAssignment,
+  }));
+  // "No persisted segment" is a fact about the ROWS, so it is still counted
+  // from the rows rather than from the groups the fallback then built out of
+  // them — otherwise consolidating legacy rows would make the gap that caused
+  // the consolidation disappear from the report.
+  const claimedByPersistedSegment = new Set<string>();
   for (const doc of input.documents) {
     for (const seg of segmentsOf(doc)) {
-      const live = rowIdsOf(seg).filter((id) => rowsById.has(id) && !claimedRows.has(id));
-      if (!live.length) continue;
-      for (const id of live) claimedRows.add(id);
-      notes.push({ id: canonicalNoteId(doc.id, live), documentId: doc.id, rowIds: live });
+      for (const id of rowIdsOf(seg)) if (rowsById.has(id)) claimedByPersistedSegment.add(id);
     }
   }
-  // A row no segment claims still needs a decision: it becomes its own note,
-  // so consolidation can never make a row unreviewable.
-  const orphanRows = input.rows.filter((r) => !claimedRows.has(r.id));
-  for (const row of orphanRows) {
-    notes.push({ id: canonicalNoteId(row.sourceDocumentId, [row.id]), documentId: row.sourceDocumentId, rowIds: [row.id] });
-  }
+  const orphanRows = input.rows.filter((r) => !claimedByPersistedSegment.has(r.id));
 
   // ── Findings, counted by identity ───────────────────────────────────────
   const open = input.findings.filter((f) => !RESOLVED_STATUSES.has(f.status));
@@ -282,6 +365,12 @@ export function measureReviewBurden(input: BurdenInput): ReviewBurden {
   const notesFlagged = new Set(notesWithFindings);
   for (const n of notes) {
     if (n.rowIds.some((id) => { const r = rowsById.get(id); return r ? isException(r) : false; })) notesFlagged.add(n.id);
+    // An unresolved assignment question IS an exception about this encounter:
+    // its membership was neither proven nor disproven, so a person has to
+    // settle it. It is raised once per ambiguity cluster, not once per
+    // fragment, and it joins the same set so an encounter that is ALSO stale
+    // or contradicted is still one obligation rather than two.
+    if (n.ambiguousAssignment) notesFlagged.add(n.id);
   }
   const notesCarryingCaution = new Set<string>();
   for (const n of notes) {
@@ -301,11 +390,40 @@ export function measureReviewBurden(input: BurdenInput): ReviewBurden {
 
   const countRows = (predicate: (r: BurdenRow) => boolean) => input.rows.filter(predicate).length;
 
+  // ── Required decisions: EXCEPTIONS ONLY, each at its own scope ───────────
+  // A clean encounter is not here. It stays visible, it stays auditable, and
+  // the case-level final gate still refuses to release a report over an
+  // unreviewed record — but it is not an item in a queue a person is being
+  // asked to work through, and counting it as one is what made a well-extracted
+  // case read as hundreds of unanswered questions.
+  //
+  // Nor is a CAUTION here: a caution is something to read before attesting,
+  // not something to correct. It has its own number.
+  //
+  // A document- or page-scoped blocker appears ONCE, at its own scope — never
+  // once per encounter that happens to sit inside it. That is the same rule
+  // the finding model already enforces, applied to the obligation count.
+  const documentBlockers = distinctOpen.filter((f) => f.scope === "DOCUMENT" && f.blocking).length;
+  const pageBlockers = distinctOpen.filter((f) => f.scope === "PAGE" && f.blocking).length;
+  const caseBlockers = distinctOpen.filter((f) => f.scope === "CASE" && f.blocking).length;
+  // Ambiguous assignments are already inside `notesFlagged`; reported here as
+  // a BREAKDOWN of that set, so the parts never double-count the whole.
+  const ambiguousAssignments = notes.filter((n) => n.ambiguousAssignment).length;
+  const requiredDecisionsByKind = {
+    encounterExceptions: notesFlagged.size,
+    ambiguousAssignments,
+    caseBlockers,
+    documentBlockers,
+    pageBlockers,
+  };
+
   return {
     activeRows: input.rows.length,
     canonicalNotes: notes.length,
     multiRowNotes: notes.filter((n) => n.rowIds.length > 1).length,
     rowsWithoutSegment: orphanRows.length,
+    fallbackNotes: notes.filter((n) => n.basis === "COMPATIBILITY_FALLBACK").length,
+    ambiguousAssignments,
 
     aiDraft: countRows((r) => r.status === "AI_DRAFT"),
     aiAuditPassed: countRows((r) => r.status === "AI_AUDIT_PASSED"),
@@ -323,13 +441,22 @@ export function measureReviewBurden(input: BurdenInput): ReviewBurden {
     findingsByType: byType,
     entriesWithFindings: entriesWithFindings.size,
     notesWithFindings: notesWithFindings.size,
-    documentBlockers: distinctOpen.filter((f) => f.scope === "DOCUMENT" && f.blocking).length,
-    pageBlockers: distinctOpen.filter((f) => f.scope === "PAGE" && f.blocking).length,
-    caseBlockers: distinctOpen.filter((f) => f.scope === "CASE" && f.blocking).length,
+    documentBlockers,
+    pageBlockers,
+    caseBlockers,
 
     notesNeedingAttention: notesFlagged.size,
     notesCarryingCaution: notesCarryingCaution.size,
     cleanNotesAwaitingAttestation: notes.filter((n) => !notesFlagged.has(n.id) && n.rowIds.every((id) => CLEAN_STATUSES.has(rowsById.get(id)?.status ?? ""))).length,
+
+    // `ambiguousAssignments` is deliberately NOT added: it is a subset of
+    // `encounterExceptions`, and adding it would count the same question twice.
+    requiredDecisions:
+      requiredDecisionsByKind.encounterExceptions +
+      requiredDecisionsByKind.caseBlockers +
+      requiredDecisionsByKind.documentBlockers +
+      requiredDecisionsByKind.pageBlockers,
+    requiredDecisionsByKind,
 
     crossDocumentCopies,
     decisionsBeforeConsolidation: input.rows.length,

@@ -29,6 +29,14 @@ export interface GuidanceInput {
   staleReason?: string | null;
   /** Fields this note's own fragments disagree about. */
   fragmentDisagreement?: string[] | null;
+  /**
+   * The identity rules could neither join this record to nearby fragments nor
+   * prove it distinct from them. Reported rather than guessed: a merge nobody
+   * can support is a deletion, and a split nobody can support is a duplicate.
+   */
+  ambiguousAssignment?: boolean;
+  /** How many rows the open assignment question spans, for the sentence. */
+  ambiguousWith?: number;
   corroboration?: { result?: string; unreproducedFields?: string[] } | null;
   findings?: { type: string; detail: string; blocking: boolean; field?: string | null; status: string }[];
   /**
@@ -67,6 +75,7 @@ export interface ReviewGuidance {
     | "GENERATION_LOSS"
     | "CONTRADICTED_FIELD"
     | "FRAGMENT_DISAGREEMENT"
+    | "AMBIGUOUS_ASSIGNMENT"
     | "UNRESOLVED_DISPUTE"
     | "NOT_CORROBORATED"
     | "DOCUMENT_INCOMPLETE"
@@ -189,6 +198,33 @@ export function guidanceFor(input: GuidanceInput): ReviewGuidance {
         "If two different encounters were merged, Reject this record and re-extract the document.",
       ],
       canAttest: false,
+    };
+  }
+
+  // 2b. Which record IS this? The identity rules could not settle whether
+  //     nearby fragments belong here. They were NOT merged — an unproven merge
+  //     is a deletion — and they were not silently separated either. One
+  //     question is raised for the whole cluster it spans, not one per
+  //     fragment, because "these might be one record" is a single decision.
+  if (input.ambiguousAssignment) {
+    const n = input.ambiguousWith ?? 0;
+    return {
+      kind: "AMBIGUOUS_ASSIGNMENT",
+      requirement: "Decide whether this record and the extracts beside it are one note or several.",
+      why:
+        `This document carries no stored note membership, so this record's extent was worked out from what the ` +
+        `extracts themselves state. ${n === 1 ? "One further extract" : `${n} further extracts`} could be neither ` +
+        `joined to it nor shown to be a different encounter, so ${n === 1 ? "it was" : "they were"} left separate ` +
+        `rather than merged on a guess.`,
+      steps: [
+        "Open the cited pages and read whether these extracts are one signed note or separate encounters.",
+        "If they are separate, Verify each on its own — that settles the question.",
+        "If they are one record, Reject the duplicates and keep the copy that carries the full note, or re-extract the document so its membership is stored.",
+      ],
+      // Confirming the records AS SEPARATE is a legitimate answer, so the
+      // decision must not be refused. It is still an EXCEPTION: someone has to
+      // give that answer before the record's extent is settled.
+      canAttest: true,
     };
   }
 

@@ -30,7 +30,16 @@ async function main() {
   const documents = await db.document.findMany({ where: { caseId: theCase.id }, select: { id: true, segments: true } });
   const rows = await db.extractedEncounter.findMany({
     where: { caseId: theCase.id, ...CURRENT_OUTPUT_WHERE },
-    select: { id: true, sourceDocumentId: true, status: true, auditResult: true, dateStatus: true, analysisClass: true, auditVersion: true, corroboration: true },
+    select: {
+      id: true, sourceDocumentId: true, status: true, auditResult: true, dateStatus: true, analysisClass: true,
+      auditVersion: true, corroboration: true,
+      // The identity-bearing fields, so this report groups rows into
+      // encounters exactly as the Records page does. Without them the two
+      // would be counting different groupings of the same case and neither
+      // could be checked against the other. Nothing below prints them.
+      encounterDate: true, provider: true, facility: true, segmentKey: true, page: true, pageEnd: true,
+      substanceClass: true, claims: true,
+    },
   });
   const findings = await db.recordFinding
     .findMany({
@@ -53,6 +62,14 @@ async function main() {
       analysisClass: r.analysisClass,
       auditVersion: r.auditVersion,
       corroborationResult: (r.corroboration as { result?: string } | null)?.result ?? null,
+      encounterDate: r.encounterDate,
+      provider: r.provider,
+      facility: r.facility,
+      segmentKey: r.segmentKey,
+      page: r.page,
+      pageEnd: r.pageEnd,
+      substanceClass: r.substanceClass,
+      claims: Array.isArray(r.claims) ? (r.claims as { field: string; value: string; excerpt?: string | null; page?: number | null }[]) : [],
     })) as BurdenRow[],
     findings: findings as BurdenFinding[],
     pages,
@@ -63,14 +80,19 @@ async function main() {
 
   console.log(`case ${theCase.caseNumber} — review burden (PHI-free)\n`);
   console.log(`  active extraction rows            ${burden.activeRows}`);
-  console.log(`  canonical notes                   ${burden.canonicalNotes}`);
+  console.log(`  canonical encounters              ${burden.canonicalNotes}`);
   console.log(`    of which multi-row              ${burden.multiRowNotes}`);
+  console.log(`    grouped by compatibility path   ${burden.fallbackNotes}`);
   console.log(`    rows with no persisted segment  ${burden.rowsWithoutSegment}`);
-  console.log(`  decisions before consolidation    ${burden.decisionsBeforeConsolidation}`);
-  console.log(`  decisions after consolidation     ${burden.decisionsAfterConsolidation}`);
+  console.log(`  review units before consolidation ${burden.decisionsBeforeConsolidation}`);
+  console.log(`  review units after consolidation  ${burden.decisionsAfterConsolidation}`);
+  console.log(`\n  REQUIRED DECISIONS (exceptions)   ${burden.requiredDecisions}`);
+  console.log(`    encounter exceptions            ${burden.requiredDecisionsByKind.encounterExceptions}`);
+  console.log(`      of which ambiguous assignment ${burden.requiredDecisionsByKind.ambiguousAssignments}`);
+  console.log(`    case / document / page blockers ${burden.requiredDecisionsByKind.caseBlockers} / ${burden.requiredDecisionsByKind.documentBlockers} / ${burden.requiredDecisionsByKind.pageBlockers}`);
   console.log(`\n  notes needing attention           ${burden.notesNeedingAttention}`);
   console.log(`  notes carrying a caution          ${burden.notesCarryingCaution}`);
-  console.log(`  clean notes awaiting attestation  ${burden.cleanNotesAwaitingAttestation}`);
+  console.log(`  clean notes (case-level confirm)  ${burden.cleanNotesAwaitingAttestation}`);
   console.log(`\n  AI_DRAFT rows                     ${burden.aiDraft}`);
   console.log(`  AI_AUDIT_PASSED rows              ${burden.aiAuditPassed}`);
   console.log(`  machine-corroborated rows         ${burden.machineCorroborated}`);

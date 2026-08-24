@@ -4,6 +4,7 @@ import { requireApiContext, requireCanonicalPermission, requireCase, audit } fro
 import { encounterContentHash } from "@/lib/records/verifiedContent";
 import { REVIEW_VISIBLE_STATES, REVIEW_VISIBLE_WHERE, isCurrentOutput } from "@/lib/records/encounterLifecycle";
 import { parseCanonicalNoteId } from "@/lib/records/reviewBurden";
+import { groupCanonicalEncounters } from "@/lib/records/canonicalEncounters";
 import { makeRecordStore, refreshCaseRecordsWithRecovery } from "@/lib/records/buildRecords";
 import { generatePlan } from "@/lib/engine/generate";
 import { ok, handleError } from "@/lib/api";
@@ -90,11 +91,60 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
       .map((seg) => (Array.isArray(seg?.rowIds) ? (seg.rowIds as unknown[]).filter((x): x is string => typeof x === "string") : []))
       .find((rowIds) => claimedRowIds.every((id) => rowIds.includes(id)));
 
+    // Rows of THIS document only, under this case and firm. Loaded before the
+    // branch below so the compatibility grouping has something to run over;
+    // when a persisted segment owns the note, none of this is consulted.
+    const fallbackOwning = owning?.length
+      ? null
+      : await (async () => {
+          const docRows = await prisma.extractedEncounter.findMany({
+            where: { caseId: params.caseId, firmId: ctx.firm.id, sourceDocumentId: documentId, ...REVIEW_VISIBLE_WHERE },
+            select: {
+              id: true, sourceDocumentId: true, encounterDate: true, dateStatus: true, analysisClass: true,
+              provider: true, facility: true, page: true, pageEnd: true, substanceClass: true, segmentKey: true, claims: true,
+            },
+          });
+          const group = groupCanonicalEncounters({
+            documents: [{ id: documentId, segments: doc.segments }],
+            rows: docRows.map((r) => ({
+              id: r.id,
+              sourceDocumentId: r.sourceDocumentId,
+              encounterDate: r.encounterDate,
+              dateStatus: r.dateStatus,
+              analysisClass: r.analysisClass,
+              provider: r.provider,
+              facility: r.facility,
+              page: r.page,
+              pageEnd: r.pageEnd,
+              substanceClass: r.substanceClass,
+              segmentKey: r.segmentKey,
+              claims: Array.isArray(r.claims) ? (r.claims as { field: string; value: string; excerpt?: string | null; page?: number | null }[]) : [],
+            })),
+          }).find((g) => claimedRowIds.every((id) => g.rowIds.includes(id)));
+          return group?.rowIds ?? null;
+        })();
+
     let ids: string[];
     if (owning?.length) {
       // A real canonical note: its live members, exactly.
       const live = await prisma.extractedEncounter.findMany({
         where: { id: { in: owning }, caseId: params.caseId, firmId: ctx.firm.id, ...REVIEW_VISIBLE_WHERE },
+        select: { id: true },
+      });
+      ids = live.map((r) => r.id);
+    } else if (fallbackOwning?.length) {
+      // ── The compatibility path, derived HERE ────────────────────────────
+      // A document whose segments still carry the ingest-time shape has no
+      // stored row membership, so the review surface resolves its encounters
+      // with the shared canonical grouping. The server must resolve them the
+      // same way or the card would offer a decision this endpoint refuses.
+      //
+      // It is derived, never accepted: the grouping runs over rows loaded
+      // under this case, this firm and THIS document, so a compatibility path
+      // can no more widen scope than the persisted one can. The client still
+      // does not get to say which rows its signature covers.
+      const live = await prisma.extractedEncounter.findMany({
+        where: { id: { in: fallbackOwning }, caseId: params.caseId, firmId: ctx.firm.id, sourceDocumentId: documentId, ...REVIEW_VISIBLE_WHERE },
         select: { id: true },
       });
       ids = live.map((r) => r.id);

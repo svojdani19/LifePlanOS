@@ -17,6 +17,7 @@
 
 import { auditFactualRecord, type AuditEncounter, type AuditOutcome } from "@/lib/llm/factualAudit";
 import { canonicalNoteId } from "@/lib/records/reviewBurden";
+import { groupCanonicalEncounters } from "@/lib/records/canonicalEncounters";
 import type { FindingDraft } from "@/lib/records/recordFindings";
 
 /** Bumped whenever deterministic grading changes; persisted on every row. */
@@ -41,6 +42,15 @@ export interface ReauditRow {
   page: number | null;
   unresolvedDisputes?: number | null;
   contradictedFields?: string[] | null;
+  // Identity-bearing, so a NOTE-scoped finding names the SAME canonical
+  // encounter the review surface shows. Optional: a caller that omits them
+  // gets the persisted grouping and, where there is none, notes of one — the
+  // behaviour this had before, never a different grouping.
+  facility?: string | null;
+  pageEnd?: number | null;
+  substanceClass?: string | null;
+  segmentKey?: string | null;
+  analysisClass?: string | null;
 }
 
 /**
@@ -200,16 +210,30 @@ export function planReaudit(
       thisDocumentIncomplete: !authoritative,
     });
 
-    // Row ids by their position in the persisted segment, so a NOTE-scoped
-    // finding can name the canonical note rather than one fragment of it.
+    // Canonical membership from the ONE shared mechanism, so a NOTE-scoped
+    // finding names the encounter the reviewer is actually looking at rather
+    // than one fragment of it — or, on a document with no stored membership,
+    // an identifier whose note no longer exists on the screen.
     const noteOfRow = new Map<string, string>();
-    const segments = Array.isArray(doc.segments) ? (doc.segments as { rowIds?: unknown }[]) : [];
-    for (const seg of segments) {
-      const ids = Array.isArray(seg?.rowIds) ? (seg.rowIds as unknown[]).filter((x): x is string => typeof x === "string") : [];
-      const live = ids.filter((id) => doc.rows.some((r) => r.id === id));
-      if (!live.length) continue;
-      const noteId = canonicalNoteId(doc.id, live);
-      for (const id of live) noteOfRow.set(id, noteId);
+    for (const group of groupCanonicalEncounters({
+      documents: [{ id: doc.id, segments: doc.segments }],
+      rows: doc.rows.map((r) => ({
+        id: r.id,
+        sourceDocumentId: r.sourceDocumentId,
+        encounterDate: r.encounterDate,
+        dateStatus: r.dateStatus,
+        analysisClass: r.analysisClass ?? null,
+        provider: r.provider,
+        facility: r.facility ?? null,
+        page: r.page,
+        pageEnd: r.pageEnd ?? null,
+        substanceClass: r.substanceClass ?? null,
+        segmentKey: r.segmentKey ?? null,
+        claims: Array.isArray(r.claims) ? (r.claims as { field: string; value: string; excerpt?: string | null; page?: number | null }[]) : [],
+      })),
+    })) {
+      const noteId = canonicalNoteId(doc.id, group.rowIds);
+      for (const id of group.rowIds) noteOfRow.set(id, noteId);
     }
 
     doc.rows.forEach((row, index) => {

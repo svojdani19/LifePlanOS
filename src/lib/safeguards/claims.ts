@@ -161,7 +161,12 @@ export const SAFEGUARD_CLAIMS: SafeguardClaim[] = [
         enforces: ["parseCanonicalNoteId", "not a member of this note", "did not display", "$transaction", "encounterContentHash"],
       },
       // The copies are members of the note, so the payload carries them.
-      reachableSymbols: [{ file: "src/lib/records/noteProjection.ts", symbols: ["projectNotes"] }],
+      reachableSymbols: [
+        { file: "src/lib/records/noteProjection.ts", symbols: ["projectNotes"] },
+        // One grouping mechanism, or the card and the server can disagree
+        // about which rows a signature covers.
+        { file: "src/lib/records/canonicalEncounters.ts", symbols: ["groupCanonicalEncounters"] },
+      ],
       forbidden: [{ file: "src/components/case/CaseWorkspace.tsx", text: ["reviewWithCopies"] }],
     },
   },
@@ -188,6 +193,11 @@ export const SAFEGUARD_CLAIMS: SafeguardClaim[] = [
           "not exactly the rows of this canonical note",
           // Orphan rows are a note of ONE.
           "claimedRowIds.length === 1",
+          // A document with no stored membership resolves through the SAME
+          // shared grouping the card used — derived on the server, over rows
+          // scoped to this case, this firm and this document.
+          "groupCanonicalEncounters",
+          "sourceDocumentId: documentId",
           // The row's own integrity state, checked here.
           "row.auditResult",
           "unresolvedDisputes",
@@ -248,7 +258,16 @@ export const SAFEGUARD_CLAIMS: SafeguardClaim[] = [
       carries: ["encounters/group/correct", "canonicalNoteId: note.id", "expectedContentHash"],
       server: {
         file: "src/app/api/cases/[caseId]/records/encounters/group/correct/route.ts",
-        enforces: ["parseCanonicalNoteId", "not exactly the rows of this canonical note", "$transaction", "records.note_correct", "ConcurrentChange"],
+        enforces: [
+          "parseCanonicalNoteId",
+          "not exactly the rows of this canonical note",
+          "$transaction",
+          "records.note_correct",
+          "ConcurrentChange",
+          // Same shared, server-derived, document-scoped membership as review.
+          "groupCanonicalEncounters",
+          "sourceDocumentId: documentId",
+        ],
       },
     },
   },
