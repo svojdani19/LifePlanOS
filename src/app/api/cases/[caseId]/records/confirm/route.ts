@@ -1,12 +1,13 @@
 import { z } from "zod";
 import { prisma } from "@/lib/db";
 import { requireApiContext, requireCanonicalPermission, requireCase, audit } from "@/lib/tenant";
-import { getStructuredRecord } from "@/lib/records/structuredRecord";
+import { getStructuredRecord, type StructuredRecordClient } from "@/lib/records/structuredRecord";
 import { CHRONOLOGY_REVIEW_WHERE, REVIEW_VISIBLE_WHERE } from "@/lib/records/encounterLifecycle";
 import { encounterContentHash } from "@/lib/records/verifiedContent";
 import { attestationBlockers } from "@/lib/records/reviewIntegrity";
+import { caseLockKey } from "@/lib/records/buildRecords";
 import { manifestHashOf, planBatchConfirmation, CONFIRMABLE_ROW_STATES, type ConfirmableEvent } from "@/lib/records/batchConfirmation";
-import { CHRONOLOGY_CONTENT_SELECT } from "@/lib/records/chronologyContent";
+import { CHRONOLOGY_CONTENT_SELECT, chronologyEventContentHash } from "@/lib/records/chronologyContent";
 import { ok, handleError } from "@/lib/api";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -47,9 +48,18 @@ import { ok, handleError } from "@/lib/api";
 //     it stands is skipped, counted, explained, and left in exactly the
 //     individual correct/review/reject path it was already in.
 //
-//   • DRIFT ABORTS THE WHOLE THING. The manifest is recomputed here, every row
-//     is re-hashed here, and each write is a compare-and-set on the version
-//     that was checked. One moved row rolls back all of it.
+//   • DRIFT ABORTS THE WHOLE THING — INSIDE THE TRANSACTION. Checking a
+//     manifest before opening a transaction leaves a window, and for chronology
+//     events the window was reachable: `ChronologyEvent` has no `updatedAt`, so
+//     the write's compare-and-set could only test review state, and the
+//     retention job rewrites `sourceQuote` without touching it. A row whose
+//     quote had just been purged would have been signed as the one displayed.
+//
+//     So the whole plan — grouping, findings, eligibility, counts, row content
+//     and event content — is re-derived INSIDE the transaction, under the
+//     case's own advisory lock and explicit row locks on everything about to
+//     be written, and compared there. Nothing is checked in one place and
+//     written in another.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const bodySchema = z.object({
@@ -73,23 +83,51 @@ class ConcurrentChange extends Error {
   }
 }
 
-/** The plan, derived from persisted state alone. Shared by GET and POST. */
-async function derivePlan(caseId: string, firmId: string) {
+/** The case moved between the dialog and the write. Rolls the transaction back. */
+class StaleConfirmation extends Error {
+  constructor(readonly what: string) {
+    super("stale confirmation");
+    this.name = "StaleConfirmation";
+  }
+}
+
+/**
+ * Postgres gave up rather than allow two transactions to interleave unsafely.
+ *
+ * Indistinguishable, from the reviewer's side, from any other "the case moved"
+ * — and answered the same way: nothing was written, reload and look again.
+ */
+const isSerializationFailure = (err: unknown): boolean =>
+  typeof (err as { code?: string })?.code === "string" && ["40001", "40P01"].includes((err as { code: string }).code);
+
+/** Every client surface this endpoint reads through — the shared one, or a tx. */
+type ConfirmClient = StructuredRecordClient & {
+  chronologyEvent: { findMany(args: unknown): Promise<unknown[]> };
+};
+
+/**
+ * The plan, derived from persisted state alone.
+ *
+ * `db` is the shared client for the preview and a TRANSACTION client for the
+ * write, so the eligibility that is written is the eligibility that held under
+ * the locks — not one read a moment earlier from outside them.
+ */
+async function derivePlan(caseId: string, firmId: string, db: ConfirmClient = prisma) {
   const [record, events] = await Promise.all([
     // The SAME canonical notes the Records page renders: one grouping
     // mechanism, one guidance derivation, one CLEAN/CAUTION/EXCEPTION verdict.
-    getStructuredRecord(caseId, firmId, { scope: "review" }),
-    prisma.chronologyEvent.findMany({
+    getStructuredRecord(caseId, firmId, { scope: "review", client: db }),
+    db.chronologyEvent.findMany({
       where: { caseId, ...CHRONOLOGY_REVIEW_WHERE },
       // Every field the manifest hashes. An event has no `updatedAt` to
       // compare-and-set against, so its CONTENT is the version being
       // confirmed — and a narrower selection here than in the re-check below
       // would differ for a reason that is not a change.
       select: CHRONOLOGY_CONTENT_SELECT,
-    }),
+    }) as Promise<ConfirmableEvent[]>,
   ]);
   const notes = record.documents.flatMap((d) => d.notes);
-  const plan = planBatchConfirmation({ notes, events: events as ConfirmableEvent[] });
+  const plan = planBatchConfirmation({ notes, events });
   return { plan, record, events };
 }
 
@@ -156,40 +194,36 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
       );
     }
 
-    // ── Re-read the rows and check them AGAIN, here ────────────────────────
-    // The plan was derived from the structured record. This loads the rows
-    // themselves, tenant- and case-scoped, and re-applies the same integrity
-    // rules the individual endpoint enforces. A screen state is a courtesy; a
-    // safeguard is something the server does for itself.
-    const rows = await prisma.extractedEncounter.findMany({
+    // ── An early, cheap "no" ───────────────────────────────────────────────
+    // Everything here is a COURTESY: it answers a plainly stale request with a
+    // useful, per-record explanation before opening a serializable transaction
+    // over a whole case. None of it is the safeguard. A check that commits in
+    // a different transaction from the write it guards is not a check, and
+    // this one deliberately does not pretend otherwise — the binding version
+    // of all of it runs inside the transaction below, under the case lock and
+    // row locks, and would refuse anything this misses.
+    const preview = await prisma.extractedEncounter.findMany({
       where: { id: { in: plan.rowIds }, caseId: params.caseId, firmId: ctx.firm.id, ...REVIEW_VISIBLE_WHERE },
     });
     const problems: { id: string; reason: string }[] = [];
-    if (rows.length !== plan.rowIds.length) {
+    if (preview.length !== plan.rowIds.length) {
       problems.push({ id: "", reason: "a record in this batch is no longer reviewable" });
     }
-    for (const row of rows) {
+    for (const row of preview) {
       if (!CONFIRMABLE_ROW_STATES.includes(row.status)) {
         problems.push({ id: row.id, reason: `already decided (${row.status})` });
         continue;
       }
       for (const problem of attestationBlockers(row as never)) problems.push({ id: row.id, reason: problem.reason });
     }
-    // The bytes, again. The manifest above proves the SET did not change; this
-    // proves each row still holds the content that set was built from.
-    const manifestRows = rows.map((r) => ({ id: r.id, contentHash: encounterContentHash(r), status: r.status }));
-    const events = await prisma.chronologyEvent.findMany({
+    const previewEvents = (await prisma.chronologyEvent.findMany({
       where: { id: { in: plan.eventIds }, caseId: params.caseId },
       select: CHRONOLOGY_CONTENT_SELECT,
-    });
-    // The SAME complete manifest, recomputed over the rows and events as they
-    // are at this instant. The plan check above proves the decision set has
-    // not moved; this proves the content behind it has not either — including
-    // chronology prose, which carries no version column of its own.
+    })) as ConfirmableEvent[];
     const recheck = manifestHashOf({
       encounters: plan.encounters,
-      rows: manifestRows,
-      events: events as ConfirmableEvent[],
+      rows: preview.map((r) => ({ id: r.id, contentHash: encounterContentHash(r), status: r.status })),
+      events: previewEvents,
       counts: plan.counts,
       cautionsByKind: plan.cautionsByKind,
       skippedByReason: plan.skippedByReason,
@@ -206,6 +240,7 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
           error: "Nothing was confirmed: one or more records in this batch could not be confirmed as displayed.",
           problems,
           applied: 0,
+          stale: true,
         },
         409,
       );
@@ -214,105 +249,203 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
     const now = new Date();
     const actor = ctx.user.id;
 
-    // ── All-or-none ────────────────────────────────────────────────────────
-    const result = await prisma.$transaction(async (tx) => {
-      let confirmedRows = 0;
-      for (const row of rows) {
-        // Compare-and-set on the exact version validated above, AND on the
-        // status still being a machine draft. Either moving aborts everything.
-        const applied = await tx.extractedEncounter.updateMany({
-          where: {
-            id: row.id,
-            updatedAt: row.updatedAt,
-            status: { in: CONFIRMABLE_ROW_STATES as string[] },
+    // ── All-or-none, and all inside the same transaction ───────────────────
+    // Everything above this line is a courtesy to the caller: it answers 409
+    // early and cheaply when the case has obviously moved. NOTHING above is
+    // relied on as a safeguard, because a check that commits in a different
+    // transaction from the write it guards is not a check.
+    //
+    // Serializable, so Postgres itself refuses an unsafe interleaving; and
+    // belt and braces beneath it, because a rollback the database chooses is
+    // a coarser instrument than knowing exactly which record moved.
+    const result = await prisma.$transaction(
+      async (tx) => {
+        // 1. The case's OWN lock — the same advisory lock the records builder
+        //    takes to publish. A rebuild cannot re-segment the documents this
+        //    plan is derived from while this transaction holds it.
+        await tx.$executeRawUnsafe("SELECT pg_advisory_xact_lock($1)", caseLockKey(params.caseId));
+
+        // 2. Explicit row locks on exactly what is about to be written.
+        //    `ChronologyEvent` has no `updatedAt`, so there is no version
+        //    column to compare against — and the retention job rewrites
+        //    `sourceQuote` without touching review state, so the write's own
+        //    predicate could not have caught it. Locking the rows here means
+        //    the content read below is the content committed.
+        if (plan.eventIds.length) {
+          await tx.$queryRawUnsafe(
+            'SELECT "id" FROM "ChronologyEvent" WHERE "id" = ANY($1::text[]) AND "caseId" = $2 FOR UPDATE',
+            plan.eventIds,
+            params.caseId,
+          );
+        }
+        if (plan.rowIds.length) {
+          await tx.$queryRawUnsafe(
+            'SELECT "id" FROM "ExtractedEncounter" WHERE "id" = ANY($1::text[]) AND "caseId" = $2 AND "firmId" = $3 FOR UPDATE',
+            plan.rowIds,
+            params.caseId,
+            ctx.firm.id,
+          );
+        }
+
+        // 3. Re-derive the WHOLE plan through the transaction client, under
+        //    those locks. Grouping, findings, eligibility, counts, cautions,
+        //    row content and event content are all bound by the one hash — so
+        //    a finding raised, a document re-segmented or a quote purged since
+        //    the dialog opened is caught here, not merely earlier.
+        const fresh = await derivePlan(params.caseId, ctx.firm.id, tx as unknown as ConfirmClient);
+        if (fresh.plan.manifestHash !== input.expectedManifestHash) {
+          throw new StaleConfirmation("the case");
+        }
+
+        // 4. And the rows themselves, re-read and re-checked here.
+        const locked = await tx.extractedEncounter.findMany({
+          where: { id: { in: fresh.plan.rowIds }, caseId: params.caseId, firmId: ctx.firm.id, ...REVIEW_VISIBLE_WHERE },
+        });
+        if (locked.length !== fresh.plan.rowIds.length) throw new StaleConfirmation("a record in this batch");
+        for (const row of locked) {
+          if (!CONFIRMABLE_ROW_STATES.includes(row.status)) throw new StaleConfirmation(`record ${row.id}`);
+          if (attestationBlockers(row as never).length) throw new StaleConfirmation(`record ${row.id}`);
+        }
+
+        let confirmedRows = 0;
+        for (const row of locked) {
+          // Compare-and-set on the exact version just validated, AND on the
+          // status still being a machine draft. Either moving aborts
+          // everything — a redundancy under the locks above, kept because a
+          // safeguard that depends on another safeguard holding is one
+          // safeguard.
+          const applied = await tx.extractedEncounter.updateMany({
+            where: {
+              id: row.id,
+              updatedAt: row.updatedAt,
+              status: { in: CONFIRMABLE_ROW_STATES as string[] },
+              caseId: params.caseId,
+              firmId: ctx.firm.id,
+            },
+            // Review state and review metadata. Nothing else — no content field
+            // appears here, and none is read-modify-written anywhere above.
+            data: {
+              status: "REVIEWED",
+              reviewedById: actor,
+              reviewedAt: now,
+              ...(input.note ? { reviewNote: input.note } : {}),
+            },
+          });
+          if (applied.count === 0) throw new ConcurrentChange(`record ${row.id}`);
+          confirmedRows += applied.count;
+        }
+
+        const manifestRows = locked.map((r) => ({ id: r.id, contentHash: encounterContentHash(r), status: r.status }));
+        const events = fresh.events.filter((e) => fresh.plan.eventIds.includes(e.id));
+
+        let confirmedEvents = 0;
+        for (const event of events) {
+          const applied = await tx.chronologyEvent.updateMany({
+            // Review state only. The CONTENT is guarded by the row lock and
+            // the in-transaction manifest above, which is what an event
+            // without a version column requires.
+            where: { id: event.id, caseId: params.caseId, reviewStatus: "AI_DRAFT", edited: false },
+            data: { reviewStatus: "REVIEWED", reviewedById: actor, reviewedAt: now },
+          });
+          if (applied.count === 0) throw new ConcurrentChange(`chronology event ${event.id}`);
+          confirmedEvents += applied.count;
+        }
+
+        // ── The record of what was confirmed ────────────────────────────────
+        // Committed WITH the writes, and built from the plan re-derived HERE:
+        // an audit entry describing a case state that had already moved is a
+        // signature over content nobody can reconstruct.
+        await audit(
+          ctx,
+          "records.batch_confirm",
+          {
+            type: "case",
+            id: params.caseId,
             caseId: params.caseId,
-            firmId: ctx.firm.id,
+            meta: {
+              firmId: ctx.firm.id,
+              decision: "REVIEWED",
+              attestation: false,
+              counts: fresh.plan.counts,
+              // Exactly what was covered, and exactly the content it held.
+              manifestHash: fresh.plan.manifestHash,
+              rows: manifestRows.map((r) => ({ id: r.id, contentHash: r.contentHash })),
+              events: fresh.plan.eventIds,
+              // The content each confirmed chronology entry held, since the
+              // event carries no version column of its own.
+              eventContentHashes: events.map((e) => ({ id: e.id, contentHash: chronologyEventContentHash(e) })),
+              encounters: fresh.plan.encounters
+                .filter((e) => e.eligible)
+                .map((e) => ({ noteId: e.noteId, level: e.level, guidanceKind: e.guidanceKind, rowIds: e.rowIds })),
+              // What the reviewer was told they were also covering.
+              cautionsByKind: fresh.plan.cautionsByKind,
+              // How each covered record's membership was established.
+              groupingBasis: fresh.plan.basisCounts,
+              // What this act did NOT cover, and why.
+              skippedEncounters: fresh.plan.counts.skippedEncounters,
+              skippedByReason: fresh.plan.skippedByReason,
+              // …and what it passed over without that being anybody's decision:
+              // records waiting on an assignment decision elsewhere, or on
+              // another appearance of one of their rows.
+              heldEncounters: fresh.plan.counts.heldEncounters,
+              heldByReason: fresh.plan.heldByReason,
+              heldChronologyEvents: fresh.plan.counts.heldEvents,
+              heldChronologyByReason: fresh.plan.heldEventsByReason,
+              note: input.note ?? null,
+            },
           },
-          // Review state and review metadata. Nothing else — no content field
-          // appears here, and none is read-modify-written anywhere above.
-          data: {
-            status: "REVIEWED",
-            reviewedById: actor,
-            reviewedAt: now,
-            ...(input.note ? { reviewNote: input.note } : {}),
-          },
-        });
-        if (applied.count === 0) throw new ConcurrentChange(`record ${row.id}`);
-        confirmedRows += applied.count;
-      }
+          tx as never,
+        );
 
-      let confirmedEvents = 0;
-      for (const event of events) {
-        const applied = await tx.chronologyEvent.updateMany({
-          // The predicate IS the compare-and-set: a draft that has since been
-          // edited, reviewed or superseded no longer matches.
-          where: { id: event.id, caseId: params.caseId, reviewStatus: "AI_DRAFT", edited: false },
-          data: { reviewStatus: "REVIEWED", reviewedById: actor, reviewedAt: now },
-        });
-        if (applied.count === 0) throw new ConcurrentChange(`chronology event ${event.id}`);
-        confirmedEvents += applied.count;
-      }
-
-      // ── The record of what was confirmed ──────────────────────────────────
-      // Committed WITH the writes. A batch decision whose manifest landed
-      // separately would be a signature over content nobody can reconstruct.
-      await audit(
-        ctx,
-        "records.batch_confirm",
-        {
-          type: "case",
-          id: params.caseId,
-          caseId: params.caseId,
-          meta: {
-            firmId: ctx.firm.id,
-            decision: "REVIEWED",
-            attestation: false,
-            counts: plan.counts,
-            // Exactly what was covered, and exactly the content it held.
-            manifestHash: plan.manifestHash,
-            rows: manifestRows.map((r) => ({ id: r.id, contentHash: r.contentHash })),
-            events: plan.eventIds,
-            encounters: plan.encounters
-              .filter((e) => e.eligible)
-              .map((e) => ({ noteId: e.noteId, level: e.level, guidanceKind: e.guidanceKind, rowIds: e.rowIds })),
-            // What the reviewer was told they were also covering.
-            cautionsByKind: plan.cautionsByKind,
-            // How each covered record's membership was established.
-            groupingBasis: plan.basisCounts,
-            // What this act did NOT cover, and why.
-            skippedEncounters: plan.counts.skippedEncounters,
-            skippedByReason: plan.skippedByReason,
-            // …and what it passed over without that being anybody's decision:
-            // records waiting on an assignment decision elsewhere, or on
-            // another appearance of one of their rows.
-            heldEncounters: plan.counts.heldEncounters,
-            heldByReason: plan.heldByReason,
-            heldChronologyEvents: plan.counts.heldEvents,
-            heldChronologyByReason: plan.heldEventsByReason,
-            note: input.note ?? null,
-          },
-        },
-        tx as never,
-      );
-
-      return { confirmedRows, confirmedEvents };
-    });
+        return { confirmedRows, confirmedEvents, plan: fresh.plan };
+      },
+      // Postgres refuses an unsafe interleaving itself, beneath the locks. The
+      // timeout matches the records builder's: this transaction re-derives a
+      // whole case's canonical grouping inside itself.
+      { isolationLevel: "Serializable", timeout: 120_000 },
+    );
 
     return ok({
       applied: result.confirmedRows + result.confirmedEvents,
       rows: result.confirmedRows,
       events: result.confirmedEvents,
-      counts: plan.counts,
-      skippedByReason: plan.skippedByReason,
-      heldByReason: plan.heldByReason,
-      cautionsByKind: plan.cautionsByKind,
+      counts: result.plan.counts,
+      skippedByReason: result.plan.skippedByReason,
+      heldByReason: result.plan.heldByReason,
+      heldEventsByReason: result.plan.heldEventsByReason,
+      cautionsByKind: result.plan.cautionsByKind,
     });
   } catch (err) {
+    // Three ways the same thing goes wrong — the case moved — and one answer:
+    // nothing was written, look again. Distinguished only in the wording, so a
+    // reviewer can tell "somebody edited a record" from "the figures changed".
+    if (err instanceof StaleConfirmation) {
+      return ok(
+        {
+          error: `Nothing was confirmed: ${err.what} changed after these counts were shown. Reload the records and review the new figures before confirming.`,
+          applied: 0,
+          stale: true,
+        },
+        409,
+      );
+    }
     if (err instanceof ConcurrentChange) {
       return ok(
         {
           error: `Nothing was confirmed: ${err.what} changed while the confirmation was being applied. Reload and review the new figures.`,
           applied: 0,
+          stale: true,
+        },
+        409,
+      );
+    }
+    if (isSerializationFailure(err)) {
+      return ok(
+        {
+          error:
+            "Nothing was confirmed: another change to this case was being applied at the same time. Reload the records and confirm again.",
+          applied: 0,
+          stale: true,
         },
         409,
       );

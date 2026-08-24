@@ -20,6 +20,14 @@ const db = vi.hoisted(() => {
     audits: [] as Record<string, unknown>[],
     /** Simulate a concurrent writer: the compare-and-set matches nothing. */
     raceOn: null as string | null,
+    /**
+     * A committed change by SOMEBODY ELSE, injected at the moment the
+     * transaction takes its row locks — i.e. after the outer recheck and
+     * before any write. The deterministic stand-in for a real interleaving.
+     */
+    raceAtLock: null as (() => void) | null,
+    /** Every raw statement the transaction issued, so the locks are testable. */
+    rawCalls: [] as string[],
     txAborted: false,
   };
   const inList = (v: unknown, x: unknown) => Array.isArray((v as { in?: unknown[] })?.in) && (v as { in: unknown[] }).in.includes(x);
@@ -70,6 +78,21 @@ const db = vi.hoisted(() => {
       },
     },
     auditLog: { create: async ({ data }: { data: Record<string, unknown> }) => { state.audits.push(data); return data; } },
+    // The advisory lock. Recorded, not executed.
+    $executeRawUnsafe: async (sql: string) => {
+      state.rawCalls.push(sql);
+      return 0;
+    },
+    // `SELECT … FOR UPDATE`. In a real database this blocks concurrent
+    // writers until commit; here it is the point at which a concurrent write
+    // is injected, because that is the last instant one could still land.
+    $queryRawUnsafe: async (sql: string) => {
+      state.rawCalls.push(sql);
+      const race = state.raceAtLock;
+      state.raceAtLock = null;
+      race?.();
+      return [];
+    },
     $transaction: async (work: (tx: unknown) => Promise<unknown>) => {
       const rowsBefore = JSON.parse(JSON.stringify(state.rows, (k, v) => (v instanceof Date ? v.toISOString() : v)));
       const eventsBefore = JSON.parse(JSON.stringify(state.events, (k, v) => (v instanceof Date ? v.toISOString() : v)));
@@ -175,6 +198,12 @@ const makeEvent = (id: string, over: Record<string, unknown> = {}) => ({
   sourceDocumentId: "doc-1",
   eventDate: new Date("2025-03-14T00:00:00Z"),
   sourceFingerprint: `fp-${id}`,
+  // Real content in the fields the retention job and a reviewer actually
+  // touch. A fixture whose hashed fields are all absent cannot tell a purge
+  // from a no-op — the hash reads an absent field and a nulled one alike.
+  summary: `Follow-up visit ${id}; conservative care continued.`,
+  sourceQuote: `verbatim excerpt behind ${id}`,
+  sourcePage: 4,
   reviewedById: null,
   reviewedAt: null,
   ...over,
@@ -193,6 +222,8 @@ beforeEach(() => {
   db.state.extractions = [];
   db.state.audits = [];
   db.state.raceOn = null;
+  db.state.raceAtLock = null;
+  db.state.rawCalls = [];
   db.state.txAborted = false;
   tenant.denied = null;
 });
@@ -315,6 +346,29 @@ describe("an exception is never swept in", () => {
     await post({ expectedManifestHash: plan.manifestHash });
     expect(db.state.events.find((e) => e.id === "contested")!.reviewStatus).toBe("AI_DRAFT");
     expect(db.state.events.find((e) => e.id === "clear")!.reviewStatus).toBe("REVIEWED");
+  });
+
+  it("releases a RECORD_IN_QUESTION entry automatically once its record is settled", async () => {
+    // The claim the panel makes about these: no separate chronology review is
+    // needed, the next confirmation covers them. That has to be true.
+    db.state.rows = [makeRow("bad", { auditResult: "FAILED" })];
+    db.state.documents[0].segments = [{ rowIds: ["bad"] }];
+    db.state.events = [makeEvent("waiting")];
+
+    const first = await preview();
+    expect(first.counts).toMatchObject({ events: 0, heldEvents: 1 });
+    expect(first.heldEventsByReason).toEqual({ RECORD_IN_QUESTION: 1 });
+
+    // The reviewer resolves the RECORD, through the individual path. They do
+    // nothing at all to the chronology entry.
+    const bad = db.state.rows[0];
+    bad.status = "HUMAN_EDITED";
+    bad.editedFields = ["factualSummary"];
+
+    const second = await preview();
+    expect(second.counts).toMatchObject({ events: 1, heldEvents: 0 });
+    expect((await post({ expectedManifestHash: second.manifestHash })).status).toBe(200);
+    expect(db.state.events[0].reviewStatus).toBe("REVIEWED");
   });
 
   it("holds a chronology draft nothing in the records supports", async () => {
@@ -775,5 +829,143 @@ describe("a shared row is vetoed by ANY exception appearance of it", () => {
     // One decision, both rows, no row named twice.
     expect((await res.json()).rows).toBe(2);
     expect(db.state.rows.every((r) => r.status === "REVIEWED")).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+describe("a race between the check and the write changes nothing", () => {
+  // The hole this closes: the manifest was recomputed BEFORE the transaction,
+  // and the write's own predicate could only test review state. A
+  // `ChronologyEvent` has no `updatedAt`, and `scripts/enforce-retention.ts`
+  // rewrites `sourceQuote` without touching `reviewStatus` or `edited` — so a
+  // quote purged in that window would have been signed as the one displayed.
+  //
+  // `raceAtLock` fires when the transaction takes its row locks: the last
+  // instant a concurrent write could still land.
+  const nothingWasWritten = () => {
+    expect(db.state.rows.every((r) => r.status === "AI_AUDIT_PASSED")).toBe(true);
+    expect(db.state.rows.every((r) => r.reviewedById == null)).toBe(true);
+    expect(db.state.events.every((e) => e.reviewStatus === "AI_DRAFT")).toBe(true);
+    expect(db.state.audits).toHaveLength(0);
+  };
+
+  it("locks the case and the exact rows it is about to write", async () => {
+    const plan = await preview();
+    expect((await post({ expectedManifestHash: plan.manifestHash })).status).toBe(200);
+    expect(db.state.rawCalls.some((q) => /pg_advisory_xact_lock/.test(q))).toBe(true);
+    expect(db.state.rawCalls.some((q) => /"ChronologyEvent".*FOR UPDATE/s.test(q))).toBe(true);
+    expect(db.state.rawCalls.some((q) => /"ExtractedEncounter".*FOR UPDATE/s.test(q))).toBe(true);
+  });
+
+  it("refuses when a chronology sourceQuote is purged after the recheck", async () => {
+    const plan = await preview();
+    // Exactly what the retention job does: content only, review state
+    // untouched — invisible to the write's own predicate.
+    db.state.raceAtLock = () => {
+      for (const e of db.state.events) e.sourceQuote = null;
+    };
+    const res = await post({ expectedManifestHash: plan.manifestHash });
+    expect(res.status).toBe(409);
+    expect((await res.json()).stale).toBe(true);
+    nothingWasWritten();
+  });
+
+  it("refuses when a chronology summary is rewritten after the recheck", async () => {
+    const plan = await preview();
+    db.state.raceAtLock = () => {
+      db.state.events[0].summary = "A materially different sentence about this visit.";
+    };
+    const res = await post({ expectedManifestHash: plan.manifestHash });
+    expect(res.status).toBe(409);
+    nothingWasWritten();
+  });
+
+  it("refuses when a blocking finding is raised after the recheck", async () => {
+    const plan = await preview();
+    db.state.raceAtLock = () => {
+      db.state.findings.push({
+        id: "f-late", scope: "ENTRY", type: "UNSUPPORTED_CLAIM", severity: "BLOCKING", blocking: true,
+        source: "DETERMINISTIC_VALIDATOR", detail: "no supporting excerpt", excerpt: null, field: null,
+        pageStart: null, pageEnd: null, claimIndex: null, status: "OPEN", encounterId: "b",
+        sourceDocumentId: "doc-1", canonicalNoteId: null, fingerprint: "fp-late", sourceFingerprint: null,
+      });
+    };
+    const res = await post({ expectedManifestHash: plan.manifestHash });
+    expect(res.status).toBe(409);
+    expect((await res.json()).stale).toBe(true);
+    // Not even the two records the late finding does not touch.
+    nothingWasWritten();
+  });
+
+  it("refuses when the GROUPING changes after the recheck", async () => {
+    const plan = await preview();
+    db.state.raceAtLock = () => {
+      db.state.documents[0].segments = [{ rowIds: ["a", "b", "c"] }];
+    };
+    const res = await post({ expectedManifestHash: plan.manifestHash });
+    expect(res.status).toBe(409);
+    nothingWasWritten();
+  });
+
+  it("refuses when a record's own content is corrected after the recheck", async () => {
+    const plan = await preview();
+    db.state.raceAtLock = () => {
+      db.state.rows[0].factualSummary = "Corrected by another reviewer.";
+    };
+    const res = await post({ expectedManifestHash: plan.manifestHash });
+    expect(res.status).toBe(409);
+    nothingWasWritten();
+  });
+
+  it("refuses when a record becomes an exception after the recheck", async () => {
+    const plan = await preview();
+    db.state.raceAtLock = () => {
+      db.state.rows[1].auditResult = "FAILED";
+    };
+    const res = await post({ expectedManifestHash: plan.manifestHash });
+    expect(res.status).toBe(409);
+    nothingWasWritten();
+  });
+
+  it("refuses when another reviewer decides one of the records first", async () => {
+    const plan = await preview();
+    db.state.raceAtLock = () => {
+      db.state.rows[2].status = "VERIFIED";
+    };
+    const res = await post({ expectedManifestHash: plan.manifestHash });
+    expect(res.status).toBe(409);
+    expect(db.state.rows.filter((r) => r.status === "REVIEWED")).toHaveLength(0);
+    expect(db.state.audits).toHaveLength(0);
+  });
+
+  it("re-derives the plan INSIDE the transaction, not only before it", async () => {
+    // Proof the in-transaction derivation is real: the outer checks all pass
+    // (the mutation lands after them), and the request is still refused.
+    const plan = await preview();
+    let recheckPassed = false;
+    db.state.raceAtLock = () => {
+      recheckPassed = true;
+      db.state.events[0].workStatus = "Off work six weeks.";
+    };
+    const res = await post({ expectedManifestHash: plan.manifestHash });
+    expect(recheckPassed).toBe(true);
+    expect(res.status).toBe(409);
+    nothingWasWritten();
+  });
+
+  it("still confirms when nothing races", async () => {
+    const plan = await preview();
+    const res = await post({ expectedManifestHash: plan.manifestHash });
+    expect(res.status).toBe(200);
+    expect(db.state.rows.every((r) => r.status === "REVIEWED")).toBe(true);
+    expect(db.state.events.every((e) => e.reviewStatus === "REVIEWED")).toBe(true);
+  });
+
+  it("records the content each confirmed chronology entry held", async () => {
+    const plan = await preview();
+    await post({ expectedManifestHash: plan.manifestHash });
+    const meta = db.state.audits[0].meta as { eventContentHashes: { id: string; contentHash: string }[] };
+    expect(meta.eventContentHashes.map((e) => e.id).sort()).toEqual(["e1", "e2"]);
+    expect(meta.eventContentHashes.every((e) => /^[0-9a-f]{32}$/.test(e.contentHash))).toBe(true);
   });
 });

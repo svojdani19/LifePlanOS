@@ -314,10 +314,20 @@ export const SAFEGUARD_CLAIMS: SafeguardClaim[] = [
           "CHRONOLOGY_CONTENT_SELECT",
           // Review, never verification.
           'status: "REVIEWED"',
-          // All-or-none, with per-row compare-and-set.
+          // All-or-none, with per-row compare-and-set — and the whole check
+          // INSIDE the transaction, under the case's own advisory lock and
+          // row locks on exactly what is about to be written. A chronology
+          // event has no version column, so a pre-transaction hash could not
+          // guard it.
           "$transaction",
           "ConcurrentChange",
+          "StaleConfirmation",
           "updatedAt: row.updatedAt",
+          "pg_advisory_xact_lock",
+          "FOR UPDATE",
+          "isolationLevel",
+          // The plan re-derived through the transaction client.
+          "derivePlan(params.caseId, ctx.firm.id, tx",
           // One detailed record of what was covered and what was not.
           "records.batch_confirm",
           "skippedByReason",

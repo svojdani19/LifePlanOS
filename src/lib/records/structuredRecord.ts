@@ -416,12 +416,33 @@ export function coverageGapBlocker(runs: readonly { sourceDocumentId: string; co
   return `${missed} dated note header(s) across the records produced no extracted encounter; the record may be under-extracted and needs human review.`;
 }
 
+/**
+ * The subset of the Prisma client this reader uses.
+ *
+ * Declared so a caller can hand it a TRANSACTION client and get a view of the
+ * case that is consistent with, and locked by, the transaction about to write.
+ * The confirm endpoint needs exactly that: deriving eligibility outside the
+ * transaction and writing inside it leaves a window in which a finding lands,
+ * a document is re-segmented, or a row is corrected — and the audit entry then
+ * describes a case state that never existed at the moment of the write.
+ */
+export type StructuredRecordClient = Pick<
+  typeof prisma,
+  "document" | "recordExtraction" | "extractedEncounter" | "recordFinding"
+>;
+
 /** Tenant-scoped: firmId comes from the authenticated context, never the client. */
-export async function getStructuredRecord(caseId: string, firmId: string, options: { scope?: "review" | "output" } = {}): Promise<StructuredRecord> {
+export async function getStructuredRecord(
+  caseId: string,
+  firmId: string,
+  options: { scope?: "review" | "output"; client?: StructuredRecordClient } = {},
+): Promise<StructuredRecord> {
+  // Defaults to the shared client, so every existing caller is unchanged.
+  const db = options.client ?? prisma;
   const [documents, runs, encounters] = await Promise.all([
-    prisma.document.findMany({ where: { caseId, firmId }, orderBy: { createdAt: "asc" } }),
-    prisma.recordExtraction.findMany({ where: { caseId, firmId }, orderBy: { createdAt: "desc" } }),
-    prisma.extractedEncounter.findMany({
+    db.document.findMany({ where: { caseId, firmId }, orderBy: { createdAt: "asc" } }),
+    db.recordExtraction.findMany({ where: { caseId, firmId }, orderBy: { createdAt: "desc" } }),
+    db.extractedEncounter.findMany({
       // Two callers, two questions. The review surface must SEE stale human
       // work and generation-loss candidates in order to resolve them; report
       // data must NOT read facts from rows describing a source that changed or
@@ -459,7 +480,7 @@ export async function getStructuredRecord(caseId: string, firmId: string, option
     // Optional-chained: a caller with a narrower Prisma surface (tests, older
     // mocks) simply gets no findings rather than a crash. `.catch` cannot
     // help here — the throw would happen before a promise exists.
-    const found = await prisma.recordFinding
+    const found = await db.recordFinding
       ?.findMany({
         where: { caseId, firmId, status: { in: ["OPEN", "CONFIRMED"] } },
         // Every field the routing below reads. `sourceDocumentId` and

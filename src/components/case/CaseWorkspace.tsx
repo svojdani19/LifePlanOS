@@ -890,6 +890,13 @@ function BatchConfirmPanel({ caseId, onConfirmed }: { caseId: string; onConfirme
   const skippedKinds = Object.entries((plan?.skippedByReason ?? {}) as Record<string, number>);
   const heldKinds = Object.entries((plan?.heldByReason ?? {}) as Record<string, number>);
   const phrase = (pairs: [string, number][]) => pairs.map(([k, n]) => `${n} ${k.replace(/_/g, " ").toLowerCase()}`).join(", ");
+  // Two very different reasons a chronology entry is passed over, and only one
+  // of them is work. An entry waiting on a record decision above becomes
+  // confirmable by itself once that decision is made; saying "held for
+  // individual review" of both overstated the queue.
+  const heldEventKinds = (plan?.heldEventsByReason ?? {}) as Record<string, number>;
+  const eventsAwaitingRecord = Number(heldEventKinds.RECORD_IN_QUESTION ?? 0);
+  const eventsNeedingReview = held - eventsAwaitingRecord;
 
   async function confirm() {
     setWorking(true);
@@ -920,7 +927,8 @@ function BatchConfirmPanel({ caseId, onConfirmed }: { caseId: string; onConfirme
         ? `Nothing is confirmable in one act right now: ${[
             skipped > 0 && `${skipped} exception${skipped === 1 ? "" : "s"} need${skipped === 1 ? "s" : ""} an individual decision`,
             heldRecords > 0 && `${heldRecords} record${heldRecords === 1 ? "" : "s"} waiting on ${heldRecords === 1 ? "that decision" : "those decisions"}`,
-            held > 0 && `${held} chronology entr${held === 1 ? "y" : "ies"} for individual review`,
+            eventsNeedingReview > 0 && `${eventsNeedingReview} chronology entr${eventsNeedingReview === 1 ? "y" : "ies"} needing individual review`,
+            eventsAwaitingRecord > 0 && `${eventsAwaitingRecord} chronology entr${eventsAwaitingRecord === 1 ? "y" : "ies"} waiting on ${eventsAwaitingRecord === 1 ? "a record decision" : "record decisions"}`,
           ]
             .filter(Boolean)
             .join(", ")}.`
@@ -962,7 +970,15 @@ function BatchConfirmPanel({ caseId, onConfirmed }: { caseId: string; onConfirme
             releases {heldRecords === 1 ? "it" : "them"}{heldKinds.length > 0 && <> ({phrase(heldKinds)})</>} — no separate action
             is needed on {heldRecords === 1 ? "it" : "them"}.</>
         )}
-        {held > 0 && <> {held} chronology entr{held === 1 ? "y is" : "ies are"} held back for individual review.</>}
+        {eventsNeedingReview > 0 && (
+          <> {eventsNeedingReview} chronology entr{eventsNeedingReview === 1 ? "y" : "ies"} cite{eventsNeedingReview === 1 ? "s" : ""} no
+            record this confirmation covers and need{eventsNeedingReview === 1 ? "s" : ""} individual chronology review.</>
+        )}
+        {eventsAwaitingRecord > 0 && (
+          <> {eventsAwaitingRecord} chronology entr{eventsAwaitingRecord === 1 ? "y is" : "ies are"} waiting on the record decision
+            {eventsAwaitingRecord === 1 ? " above" : "s above"} and will be covered by the next confirmation — no separate review
+            is needed.</>
+        )}
       </p>
       {armed ? (
         <div className="mt-2 rounded border border-teal-300 bg-white p-2">

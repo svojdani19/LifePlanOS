@@ -725,8 +725,10 @@ describe("refuting: 'nothing blocks an export invisibly'", () => {
     // so the map was empty on every request and note findings never appeared.
     // Anchored on the query itself: `routeScopedFindings` is DEFINED earlier
     // in the file than it is called, so slicing to the first mention would
-    // read backwards and pass on an empty string.
-    const at = src.indexOf("prisma.recordFinding\n      ?.findMany");
+    // read backwards and pass on an empty string. Matched on the CALL rather
+    // than on which client makes it — the reader now accepts a transaction
+    // client, and the columns it selects are the point, not the binding.
+    const at = src.search(/\brecordFinding\s*\n?\s*\?\.findMany/);
     expect(at, "the findings query is where it is expected").toBeGreaterThan(-1);
     const select = src.slice(at, at + 1200);
     for (const column of ["sourceDocumentId: true", "canonicalNoteId: true", "fingerprint: true", "sourceFingerprint: true"]) {
