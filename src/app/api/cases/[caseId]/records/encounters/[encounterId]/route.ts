@@ -10,6 +10,7 @@ import { encounterContentHash } from "@/lib/records/verifiedContent";
 import { REVIEWER_ASSIGNABLE_CLASSES, requiresDate } from "@/lib/documents/analysisClass";
 import { classifyEncounterSubstance } from "@/lib/records/encounterSubstance";
 import { generatePlan } from "@/lib/engine/generate";
+import { PipelineBusyError } from "@/lib/engine/pipelineLock";
 import { ok, handleError } from "@/lib/api";
 
 // Human verification and correction of one extracted encounter.
@@ -112,38 +113,24 @@ const scheduleDerivedRefresh = (caseId: string, afterPublish?: () => void) => {
 type Params = { params: Promise<{ caseId: string; encounterId: string }> };
 
 /**
- * Cases with a rebuild already in flight. A reviewer correcting five rows in a
- * row should cause ONE rebuild after the last of them, not five overlapping
- * ones racing to write the same plan.
- */
-const regenerating = new Map<string, { running: boolean; again: boolean }>();
-
-/**
  * Rebuild the case downstream of a corrected record. Fire-and-forget: the
  * reviewer's edit must not wait on a full regeneration, and a rebuild that
  * fails leaves the prior plan in place rather than a half-written one.
+ *
+ * A reviewer correcting five rows in a row must cause ONE rebuild after the
+ * last of them, not five overlapping ones racing to write the same plan. This
+ * used to be enforced by a module-level `Map` — which guarded only this route,
+ * inside only this process, while two other routes fired the same regeneration
+ * with no guard at all. The fold-in-and-make-one-more-pass behaviour now lives
+ * in `generatePlan`'s own lock, where every caller and every worker sees it.
  */
 function scheduleRegeneration(caseId: string, actorUserId: string): void {
-  const state = regenerating.get(caseId);
-  if (state?.running) {
-    // Fold this request into the run already going; one more pass follows.
-    state.again = true;
-    return;
-  }
-  const entry = { running: true, again: false };
-  regenerating.set(caseId, entry);
-  void (async () => {
-    try {
-      do {
-        entry.again = false;
-        await generatePlan(caseId, { userId: actorUserId });
-      } while (entry.again);
-    } catch (e) {
-      console.error(`[records] regeneration after reclassification failed for ${caseId}:`, e instanceof Error ? e.message : e);
-    } finally {
-      regenerating.delete(caseId);
-    }
-  })();
+  void generatePlan(caseId, { userId: actorUserId }).catch((e) => {
+    // Contention is the expected, correct outcome of a fast edit sequence: the
+    // run in flight owes one more pass, so this edit is not lost.
+    if (e instanceof PipelineBusyError) return;
+    console.error(`[records] regeneration after reclassification failed for ${caseId}:`, e instanceof Error ? e.message : e);
+  });
 }
 
 async function load(caseId: string, encounterId: string, firmId: string) {

@@ -9,6 +9,7 @@ import { REVIEWER_ASSIGNABLE_CLASSES, requiresDate } from "@/lib/documents/analy
 import { classifyEncounterSubstance } from "@/lib/records/encounterSubstance";
 import { makeRecordStore, refreshCaseRecordsWithRecovery } from "@/lib/records/buildRecords";
 import { generatePlan } from "@/lib/engine/generate";
+import { PipelineBusyError } from "@/lib/engine/pipelineLock";
 import { ok, handleError } from "@/lib/api";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -304,7 +305,14 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
     // note-wide field is a plan input, so the plan follows the records.
     void refreshCaseRecordsWithRecovery(makeRecordStore(prisma as never), params.caseId)
       .then((outcome) => {
-        if (outcome.published) void generatePlan(params.caseId, { userId: actor }).catch(() => {});
+        // One at a time per case — see the note on the group review route. A
+        // losing caller is folded into the run in flight, not dropped.
+        if (outcome.published) {
+          void generatePlan(params.caseId, { userId: actor }).catch((e) => {
+            if (e instanceof PipelineBusyError) return;
+            console.error(`[review] plan regeneration failed for case ${params.caseId}: ${String(e).slice(0, 200)}`);
+          });
+        }
       })
       .catch((error) => console.error(`[review] note correction refresh failed for case ${params.caseId}: ${String(error).slice(0, 200)}`));
 

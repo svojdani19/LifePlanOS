@@ -242,3 +242,51 @@ export function stateObjectiveEvidence(found: readonly ConditionEvidence[], cond
     supported: false,
   };
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// One citation per document, page and quote.
+//
+// Two locators feed a causation card and they overlap by design:
+// `locateConditionEvidenceInClaims` reads the validated extracted claims, while
+// `locateConditionEvidence` greps the raw document text. A quote that is both a
+// validated claim and a literal string in the document is therefore found
+// twice, and both copies were persisted — so a card cited
+// "River Oaks BR&MR w Aff.pdf — p. 1 'Chronic Pain Syndrome'" twice over,
+// reading as two independent corroborating records when there is one.
+//
+// The display string built beside it was already deduped; the JSON the causation
+// panel actually renders was not.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** The persisted citation shape. `field` is present only on claim-backed rows. */
+export interface EvidenceSourceRow {
+  documentId?: string | null;
+  encounterId?: string | null;
+  filename?: string | null;
+  page?: number | null;
+  quote?: string | null;
+  field?: string | null;
+  verbatim?: boolean;
+}
+
+const citationIdentity = (s: EvidenceSourceRow): string =>
+  `${String(s.documentId ?? "")}|${s.page ?? ""}|${String(s.quote ?? "").trim().toLowerCase()}`;
+
+/**
+ * Collapse citations that point at the same words in the same place.
+ *
+ * Order is significant and load-bearing: pass the claim-backed rows FIRST, so
+ * that when the same quote arrives from both locators the surviving copy is the
+ * one carrying `field` — the extraction field the quote came from, which is what
+ * lets everything downstream grade it DIAGNOSIS / OBJECTIVE / HISTORY instead of
+ * assuming objective.
+ */
+export function dedupeEvidenceSources<T extends EvidenceSourceRow>(sources: readonly T[]): T[] {
+  const seen = new Set<string>();
+  return sources.filter((s) => {
+    const key = citationIdentity(s);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}

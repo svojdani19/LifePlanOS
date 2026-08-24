@@ -351,6 +351,25 @@ model Case {
   createdAt DateTime   @default(now())
   updatedAt DateTime   @updatedAt
 
+  // ── Plan-generation mutual exclusion (engine/pipelineLock.ts) ──────────────
+  // `generatePlan` is a long read-reset-write: it snapshots the prior plan,
+  // clears it, then spends seconds locating evidence before writing the new
+  // one. Nothing serialized it, and three call sites fire it in the background
+  // whenever a records reviewer publishes a corrected note — so a reviewer
+  // working a queue launched overlapping runs whose resets all landed before
+  // any of their writes. Every one of them then wrote a full plan. That is how
+  // one case came to hold each diagnosis and each care item three times over.
+  //
+  // The claim is a single conditional UPDATE, which Postgres serializes on the
+  // row: exactly one caller can see `pipelineRunId` free and take it. An
+  // in-process Map cannot do this — it does not survive a second worker.
+  /// Holder of the pipeline lock; null when no run is in flight.
+  pipelineRunId          String?
+  /// When the current holder claimed it — also the staleness clock.
+  pipelineRunAt          DateTime?
+  /// An edit arrived mid-run: the holder owes exactly one more pass.
+  pipelineRerunRequested Boolean   @default(false)
+
   auditLogs                 AuditLog[]
   documents                 Document[]
   chronologyEvents          ChronologyEvent[]
@@ -783,6 +802,13 @@ model Condition {
 
   futureCareItems FutureCareItem[]
 
+  // A case states a diagnosis once. `generatePlan` already refused to add the
+  // same name twice, but that guard was an in-memory Set scoped to one run, so
+  // it said nothing about a second run writing the same nine names again.
+  // Conditions are written only by the engine and the demo seed — there is no
+  // hand-authored path — so the invariant belongs in the database, where a
+  // concurrent writer cannot step around it.
+  @@unique([caseId, name])
   @@index([caseId])
 }
 

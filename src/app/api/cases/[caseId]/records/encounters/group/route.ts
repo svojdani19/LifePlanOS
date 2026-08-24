@@ -8,6 +8,7 @@ import { groupCanonicalEncounters } from "@/lib/records/canonicalEncounters";
 import { attestationBlockers } from "@/lib/records/reviewIntegrity";
 import { makeRecordStore, refreshCaseRecordsWithRecovery } from "@/lib/records/buildRecords";
 import { generatePlan } from "@/lib/engine/generate";
+import { PipelineBusyError } from "@/lib/engine/pipelineLock";
 import { ok, handleError } from "@/lib/api";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -370,7 +371,16 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
     const invalidatesPlan = input.action === "reject" ? wasPlanInput : restored;
     void refreshCaseRecordsWithRecovery(makeRecordStore(prisma as never), params.caseId)
       .then((outcome) => {
-        if (invalidatesPlan && outcome.published) void generatePlan(params.caseId, { userId: actor }).catch(() => {});
+        // One at a time per case: this fires on every published group, so a
+        // reviewer working the queue used to launch overlapping regenerations
+        // that each wrote a whole plan. Contention now means the run in flight
+        // owes one more pass, so nothing is lost by not running here.
+        if (invalidatesPlan && outcome.published) {
+          void generatePlan(params.caseId, { userId: actor }).catch((e) => {
+            if (e instanceof PipelineBusyError) return;
+            console.error(`[review] plan regeneration failed for case ${params.caseId}: ${String(e).slice(0, 200)}`);
+          });
+        }
       })
       .catch((error) => console.error(`[review] group refresh failed for case ${params.caseId}: ${String(error).slice(0, 200)}`));
 

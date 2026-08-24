@@ -5,7 +5,7 @@
   "description": "LifePlanOS \u2014 the operating system for life care planning. Standalone multi-tenant SaaS.",
   "scripts": {
     "dev": "next dev -p 3100",
-    "dev:auto": "next dev",
+    "dev:auto": "next dev -p 3100",
     "test": "vitest run",
     "test:watch": "vitest",
     "build": "next build",
@@ -27,6 +27,7 @@
     "records:reextract": "tsx scripts/reextract-case.ts",
     "records:reaudit": "tsx scripts/reaudit-case.ts",
     "records:burden": "tsx scripts/review-burden.ts",
+    "plan:dedupe": "tsx scripts/dedupe-plan-items.ts",
     "reasoning:backfill": "tsx scripts/backfill-reasoning.ts",
     "ocr:redo": "tsx scripts/ocr-redo.ts",
     "retention:enforce": "tsx scripts/enforce-retention.ts",

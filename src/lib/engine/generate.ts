@@ -25,11 +25,12 @@ import { buildBasis } from "@/lib/engine/recommendationBasis";
 import { assembleBasis } from "@/lib/engine/basisAssembly";
 import { approvedCarePatterns, suggestedInterventions } from "@/lib/learning/carePatterns";
 import { resolveRecommendationCondition } from "@/lib/engine/recommendationCondition";
-import { locateConditionEvidenceInClaims, stateObjectiveEvidence } from "@/lib/engine/conditionEvidence";
+import { locateConditionEvidenceInClaims, stateObjectiveEvidence, dedupeEvidenceSources } from "@/lib/engine/conditionEvidence";
 import { CURRENT_OUTPUT_WHERE } from "@/lib/records/encounterLifecycle";
 import { generateStandardOfCare } from "@/lib/engine/standardOfCare";
 import { mapRecommendationToCondition, type CondInput } from "@/lib/engine/integrity";
 import { planRegeneration } from "@/lib/engine/lifecycle";
+import { withCasePipelineLock } from "@/lib/engine/pipelineLock";
 import { servicesMatch } from "@/lib/engine/goldStandard";
 import { resolveUnitCost } from "@/lib/references/pricingProvider";
 import { applyPriors, priorProvenanceNote, scopeKeyOf } from "@/lib/engine/learning";
@@ -139,7 +140,24 @@ export interface PlanResult {
   superseded: number;
 }
 
+/**
+ * Generate the plan, holding the case's pipeline lock for the whole run.
+ *
+ * The lock is not an optimisation. Everything below is a read-reset-write with
+ * seconds of evidence work between the reset and the writes, and three call
+ * sites fire this in the background off records review — so overlapping runs
+ * each reset what they had snapshotted and then each wrote a full plan. That is
+ * what put every diagnosis and every care item on one case three times over.
+ *
+ * A caller that loses the race does not run: it flags the case and throws
+ * {@link PipelineBusyError}, and the holder makes one more pass so the losing
+ * caller's edit still lands. Background callers should swallow that error.
+ */
 export async function generatePlan(caseId: string, actor?: { userId?: string; role?: string }): Promise<PlanResult> {
+  return withCasePipelineLock(prisma, caseId, () => generatePlanLocked(caseId, actor));
+}
+
+async function generatePlanLocked(caseId: string, actor?: { userId?: string; role?: string }): Promise<PlanResult> {
   const c = await prisma.case.findUniqueOrThrow({ where: { id: caseId } });
   // Life expectancy: when unset and DOB + sex are documented, the SSA period
   // life table supplies the actuarial baseline — persisted with its basis so
@@ -252,11 +270,26 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
     const supportingRecords = citedRecords.length
       ? [...new Set(citedRecords)].join("; ")
       : "No record in this case was located that asserts this condition.";
+    // Both locators find a quote that is both a validated claim and a literal
+    // string in the document, and both copies used to be persisted — so a card
+    // cited the same words on the same page twice, reading as two corroborating
+    // records where there is one. Claim-backed rows go first so the survivor is
+    // the one carrying `field`.
+    const dedupedSources = dedupeEvidenceSources([
+      ...claimEvidence.map((e) => ({ documentId: e.documentId, encounterId: e.encounterId, filename: e.filename, page: e.page, quote: e.quote, field: e.field, verbatim: e.verbatim })),
+      // The raw text locator greps document text, so its quote IS the
+      // document's words.
+      ...sources.map((s) => ({ documentId: s.documentId, filename: s.filename, page: s.page, quote: s.quote, verbatim: true })),
+    ]);
     const cond = await prisma.condition.create({
       data: {
         caseId,
         supportingRecords,
         ...data,
+        // Stored in the same shape the in-run dedupe key is built from, so the
+        // `@@unique([caseId, name])` index and `seenNames` agree on what "the
+        // same diagnosis" means rather than differing by stray whitespace.
+        name: data.name.trim(),
         objectiveEvidence,
         missingInfo,
         // Claim-backed sources FIRST, and they carry `field` — the extraction
@@ -265,15 +298,7 @@ export async function generatePlan(caseId: string, actor?: { userId?: string; ro
         // objective. Persisting only the text locator's output threw that
         // grading away at the first step, so the ledger it fed contained
         // nothing but OBJECTIVE rows.
-        evidenceSources:
-          claimEvidence.length || sources.length
-            ? ([
-                ...claimEvidence.map((e) => ({ documentId: e.documentId, encounterId: e.encounterId, filename: e.filename, page: e.page, quote: e.quote, field: e.field, verbatim: e.verbatim })),
-                // The raw text locator greps document text, so its quote IS
-                // the document's words.
-                ...sources.map((s) => ({ documentId: s.documentId, filename: s.filename, page: s.page, quote: s.quote, verbatim: true })),
-              ] as unknown as Prisma.InputJsonValue)
-            : Prisma.DbNull,
+        evidenceSources: dedupedSources.length ? (dedupedSources as unknown as Prisma.InputJsonValue) : Prisma.DbNull,
       },
     });
     conditions.push(cond);
