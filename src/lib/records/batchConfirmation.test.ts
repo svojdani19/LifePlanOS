@@ -17,7 +17,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import { describe, expect, it } from "vitest";
-import { manifestHashOf, planBatchConfirmation, type ConfirmableEvent } from "@/lib/records/batchConfirmation";
+import { manifestHashOf, planBatchConfirmation, eventLineage, type ConfirmableEvent } from "@/lib/records/batchConfirmation";
 import { projectNotes, type NoteFinding } from "@/lib/records/noteProjection";
 import { measureReviewBurden, type BurdenRow } from "@/lib/records/reviewBurden";
 import type { StructuredEncounter } from "@/lib/records/structuredRecord";
@@ -123,6 +123,14 @@ const unsureCluster = (n: number, over: Partial<StructuredEncounter> = {}) =>
     }),
   );
 
+/**
+ * A chronology draft as the CURRENT builder writes one: carrying the exact
+ * ExtractedEncounter ids it was built from.
+ *
+ * Eligibility is decided from that lineage, not from source document plus
+ * service date — the old key could not tell two same-day encounters in one
+ * document apart, so confirming either swept in the events of both.
+ */
 const event = (id: string, over: Partial<ConfirmableEvent> = {}): ConfirmableEvent => ({
   id,
   reviewStatus: "AI_DRAFT",
@@ -130,6 +138,7 @@ const event = (id: string, over: Partial<ConfirmableEvent> = {}): ConfirmableEve
   sourceDocumentId: "doc-1",
   eventDate: new Date("2025-03-14T00:00:00Z"),
   sourceFingerprint: `fp-${id}`,
+  sourceRowIds: ["a"],
   ...over,
 });
 
@@ -180,8 +189,14 @@ describe("a hundred clean records are one decision, not a hundred", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-describe("cautions are covered — and disclosed", () => {
-  it("includes a sound entry inside an incomplete document, and names the caution", () => {
+describe("a caution never rides in a clean confirmation", () => {
+  // The previous contract: "N encounters are clean and can be confirmed in one
+  // review. M of those carry a caution to read first" — and all N went in the
+  // same click. The caution was disclosed as a COUNT and confirmed as though it
+  // had been READ, with nothing distinguishing the reviewer who read it from
+  // the one who did not. `humanAuthoritative()` then treats those rows as
+  // something a person saw.
+  it("excludes a caution from the clean batch, and still names it", () => {
     const notes = notesFor([
       enc("clean"),
       enc("caution", { auditResult: "EXTRACTION_INCOMPLETE" }),
@@ -189,18 +204,54 @@ describe("cautions are covered — and disclosed", () => {
     expect(notes.map((n) => n.attention).sort()).toEqual(["CAUTION", "CLEAN"]);
 
     const plan = planBatchConfirmation({ notes, events: [] });
-    expect(plan.counts.eligibleEncounters).toBe(2);
+    // Only the genuinely clean record is covered.
+    expect(plan.counts.eligibleEncounters).toBe(1);
     expect(plan.counts.cleanEncounters).toBe(1);
+    expect(plan.rowIds).toEqual(["clean"]);
+    // The caution is still counted and named — it is work, on its own path.
     expect(plan.counts.cautionEncounters).toBe(1);
-    // Named, not merely counted: the reviewer is told what they are covering.
     expect(plan.cautionsByKind).toEqual({ DOCUMENT_INCOMPLETE: 1 });
+    // …and it is reported on its OWN channel, not as an exception. Counting a
+    // caution among the exceptions made the panel report the same record twice
+    // — "N cautions" and "N exceptions" — and inflated the review burden by
+    // exactly the number of cautions.
+    expect(plan.skippedByReason).toEqual({});
+    expect(plan.counts.skippedEncounters).toBe(0);
+    expect(plan.cautionsByReason).toEqual({ DOCUMENT_INCOMPLETE: 1 });
+    // The requirement text travels with it, so the separate path can show the
+    // ACTUAL caution rather than a code.
+    const cautioned = plan.encounters.find((e) => e.noteId.endsWith("caution"))!;
+    expect(cautioned.cautionReasons).toHaveLength(1);
+    expect(cautioned.cautionReasons[0].reason.length).toBeGreaterThan(0);
+    expect(cautioned.reasons).toEqual([]);
   });
 
-  it("includes an old grade whose reason was never recorded", () => {
+  it("excludes an old grade whose reason was never recorded", () => {
     const notes = notesFor([enc("legacy", { auditResult: "SOURCE_CONFLICT", auditVersion: null } as never)], [{ rowIds: ["legacy"] }]);
     const plan = planBatchConfirmation({ notes, events: [] });
-    expect(plan.counts.eligibleEncounters).toBe(1);
+    expect(plan.counts.eligibleEncounters).toBe(0);
+    expect(plan.rowIds).toEqual([]);
     expect(plan.cautionsByKind).toEqual({ LEGACY_CONFLICT: 1 });
+  });
+
+  it("never puts a caution's rows in the manifest", () => {
+    const notes = notesFor([
+      enc("clean"),
+      enc("caution", { auditResult: "EXTRACTION_INCOMPLETE" }),
+    ], [{ rowIds: ["clean"] }, { rowIds: ["caution"] }]);
+    const plan = planBatchConfirmation({ notes, events: [] });
+    expect(plan.manifestRecords.map((r) => r.noteId)).not.toContain("doc-1:caution");
+    expect(plan.manifestRecords.flatMap((r) => r.rows.map((row) => row.rowId))).toEqual(["clean"]);
+  });
+
+  it("holds a chronology entry built from a cautioned record", () => {
+    const notes = notesFor([
+      enc("clean"),
+      enc("caution", { auditResult: "EXTRACTION_INCOMPLETE" }),
+    ], [{ rowIds: ["clean"] }, { rowIds: ["caution"] }]);
+    const plan = planBatchConfirmation({ notes, events: [event("e-caution", { sourceRowIds: ["caution"] })] });
+    expect(plan.eventIds).toEqual([]);
+    expect(plan.heldEventsByReason).toEqual({ RECORD_IN_QUESTION: 1 });
   });
 });
 
@@ -341,9 +392,9 @@ describe("a chronology draft is confirmed only when a record actually supports i
 
   it("HOLDS a draft that cites no source document", () => {
     const notes = notesFor([enc("a")], [{ rowIds: ["a"] }]);
-    const plan = planBatchConfirmation({ notes, events: [event("orphan", { sourceDocumentId: null })] });
+    const plan = planBatchConfirmation({ notes, events: [event("orphan", { sourceDocumentId: null, sourceRowIds: null })] });
     expect(plan.eventIds).toEqual([]);
-    expect(plan.heldEventsByReason).toEqual({ NO_SOURCE_CITATION: 1 });
+    expect(plan.heldEventsByReason).toEqual({ NO_EXACT_LINEAGE: 1 });
   });
 
   it("HOLDS a draft whose document and date carry no canonical record at all", () => {
@@ -351,14 +402,14 @@ describe("a chronology draft is confirmed only when a record actually supports i
     // exception exists on this day", and an unexplained event has no
     // exception because it has no record either.
     const notes = notesFor([enc("a", { encounterDate: "2025-03-14" })], [{ rowIds: ["a"] }]);
-    const plan = planBatchConfirmation({ notes, events: [event("floating", { eventDate: new Date("2031-01-01T00:00:00Z") })] });
+    const plan = planBatchConfirmation({ notes, events: [event("floating", { eventDate: new Date("2031-01-01T00:00:00Z"), sourceRowIds: ["row-nobody-confirmed"] })] });
     expect(plan.eventIds).toEqual([]);
     expect(plan.heldEventsByReason).toEqual({ NO_CONFIRMED_RECORD: 1 });
   });
 
   it("HOLDS a draft whose document is not in this case's records at all", () => {
     const notes = notesFor([enc("a")], [{ rowIds: ["a"] }]);
-    const plan = planBatchConfirmation({ notes, events: [event("elsewhere", { sourceDocumentId: "doc-unknown" })] });
+    const plan = planBatchConfirmation({ notes, events: [event("elsewhere", { sourceDocumentId: "doc-unknown", sourceRowIds: ["row-elsewhere"] })] });
     expect(plan.eventIds).toEqual([]);
     expect(plan.heldEventsByReason).toEqual({ NO_CONFIRMED_RECORD: 1 });
   });
@@ -382,7 +433,10 @@ describe("a chronology draft is confirmed only when a record actually supports i
     );
     const plan = planBatchConfirmation({
       notes,
-      events: [event("contested"), event("clear", { eventDate: new Date("2025-04-02T00:00:00Z") })],
+      events: [
+        event("contested", { sourceRowIds: ["broken"] }),
+        event("clear", { eventDate: new Date("2025-04-02T00:00:00Z"), sourceRowIds: ["clean"] }),
+      ],
     });
     expect(plan.eventIds).toEqual(["clear"]);
     expect(plan.heldEventsByReason).toEqual({ RECORD_IN_QUESTION: 1 });
@@ -391,7 +445,11 @@ describe("a chronology draft is confirmed only when a record actually supports i
   });
 
   it("holds an entry whose day is waiting on an ambiguity decision", () => {
-    const plan = planBatchConfirmation({ notes: notesFor(unsureCluster(3)), events: [event("e1")] });
+    const clustered = unsureCluster(3);
+    const plan = planBatchConfirmation({
+      notes: notesFor(clustered),
+      events: [event("e1", { sourceRowIds: [clustered[0].id] })],
+    });
     expect(plan.eventIds).toEqual([]);
     expect(plan.heldEventsByReason).toEqual({ RECORD_IN_QUESTION: 1 });
   });
@@ -501,12 +559,15 @@ describe("the manifest binds the whole plan the reviewer was shown", () => {
     expect(skipped.manifestHash).not.toBe(base().manifestHash);
   });
 
-  it("moves when a caution appears without changing eligibility", () => {
+  it("moves when a caution appears — and the caution leaves the batch", () => {
     const cautioned = planBatchConfirmation({
       notes: notesFor([enc("a", { segmentKey: "n1", auditResult: "EXTRACTION_INCOMPLETE" } as never), rows[1]]),
       events: [event("e1")],
     });
-    expect(cautioned.counts.eligibleEncounters).toBe(base().counts.eligibleEncounters);
+    // A caution is no longer eligible, so it changes BOTH the plan and its
+    // identity. Either alone would be a bug: a manifest that moved without the
+    // eligibility moving would mean the caution was still being confirmed.
+    expect(cautioned.counts.eligibleEncounters).toBeLessThan(base().counts.eligibleEncounters);
     expect(cautioned.cautionsByKind).toEqual({ DOCUMENT_INCOMPLETE: 1 });
     expect(cautioned.manifestHash).not.toBe(base().manifestHash);
   });
@@ -559,18 +620,20 @@ describe("the manifest binds the whole plan the reviewer was shown", () => {
     expect(reversed.manifestHash).toBe(forward.manifestHash);
   });
 
-  it("is computed from the same shape the server re-checks with", () => {
+  it("is computed over the LITERAL displayed manifest, not a parallel projection", () => {
+    // The point of the correction: the hash's input is the same array the
+    // component renders. Recomputing it from a differently-shaped projection is
+    // how the hash and the screen drifted apart — a filename correction or a
+    // re-paged document changed what the reviewer read and left the hash alone.
     const plan = base();
-    const rowsById = new Map(notesFor(rows).flatMap((n) => n.rows.map((r) => [r.id, r] as const)));
     const recomputed = manifestHashOf({
       encounters: plan.encounters,
-      rows: plan.rowIds.map((id) => {
-        const r = rowsById.get(id)!;
-        return { id: r.id, contentHash: r.contentHash, status: r.status };
-      }),
-      events: [event("e1")],
+      records: plan.manifestRecords,
+      events: plan.manifestEvents,
+      eventContent: [event("e1")],
       counts: plan.counts,
       cautionsByKind: plan.cautionsByKind,
+      cautionsByReason: plan.cautionsByReason,
       skippedByReason: plan.skippedByReason,
       heldByReason: plan.heldByReason,
       heldEventsByReason: plan.heldEventsByReason,
@@ -754,5 +817,306 @@ describe("an entry the factual audit never graded is not clean", () => {
     // …and there is nothing left for the batch to write, because a person
     // already owns the row.
     expect(planBatchConfirmation({ notes: corrected, events: [] }).rowIds).toEqual([]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EXACT LINEAGE
+//
+// The previous link between a chronology event and a record was
+//
+//     const key = `${event.sourceDocumentId} ${isoDay(event.eventDate)}`;
+//
+// which is ambiguous the moment a production carries two encounters on the same
+// day in the same document — an ER record, a therapy chart, any same-day
+// follow-up. Confirming ONE of them marked the day supported, and every event
+// on it was written REVIEWED, including events built from the encounter nobody
+// confirmed.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("batch authority requires exact chronology lineage", () => {
+  /** Two encounters, same document, same day — the ambiguous case. */
+  const sameDay = () => [
+    enc("morning", { encounterDate: "2025-03-14", segmentKey: "n-morning" } as never),
+    enc("evening", { encounterDate: "2025-03-14", segmentKey: "n-evening" } as never),
+  ];
+
+  it("covers only the event whose own rows were confirmed, not the whole day", () => {
+    // The evening encounter fails its audit, so it is skipped. Under the old
+    // document+date key the morning encounter's confirmation still marked
+    // 2025-03-14 supported and swept in BOTH events.
+    const rows = [sameDay()[0], enc("evening", { encounterDate: "2025-03-14", segmentKey: "n-evening", auditResult: "FAILED" } as never)];
+    const notes = notesFor(rows, [{ rowIds: ["morning"] }, { rowIds: ["evening"] }]);
+    const plan = planBatchConfirmation({
+      notes,
+      events: [
+        event("e-morning", { sourceRowIds: ["morning"] }),
+        event("e-evening", { sourceRowIds: ["evening"] }),
+      ],
+    });
+    expect(plan.rowIds).toEqual(["morning"]);
+    expect(plan.eventIds).toEqual(["e-morning"]);
+    expect(plan.heldEventsByReason).toEqual({ RECORD_IN_QUESTION: 1 });
+  });
+
+  it("holds a merged event when only SOME of its rows were confirmed", () => {
+    const rows = [sameDay()[0], enc("evening", { encounterDate: "2025-03-14", segmentKey: "n-evening", auditResult: "FAILED" } as never)];
+    const notes = notesFor(rows, [{ rowIds: ["morning"] }, { rowIds: ["evening"] }]);
+    const plan = planBatchConfirmation({
+      notes,
+      // A series or merged event resting on both encounters.
+      events: [event("e-merged", { sourceRowIds: ["morning", "evening"] })],
+    });
+    expect(plan.eventIds).toEqual([]);
+    expect(plan.heldEventsByReason).toEqual({ RECORD_IN_QUESTION: 1 });
+  });
+
+  it("covers a merged event when EVERY one of its rows was confirmed", () => {
+    const notes = notesFor(sameDay(), [{ rowIds: ["morning"] }, { rowIds: ["evening"] }]);
+    const plan = planBatchConfirmation({
+      notes,
+      events: [event("e-merged", { sourceRowIds: ["morning", "evening"] })],
+    });
+    expect(plan.rowIds).toEqual(["evening", "morning"]);
+    expect(plan.eventIds).toEqual(["e-merged"]);
+  });
+
+  it("holds a legacy event that carries no lineage rather than guessing", () => {
+    const notes = notesFor([enc("a")], [{ rowIds: ["a"] }]);
+    for (const absent of [null, undefined, [], "not-an-array", [""], [42]]) {
+      const plan = planBatchConfirmation({ notes, events: [event("legacy", { sourceRowIds: absent as never })] });
+      expect(plan.eventIds, JSON.stringify(absent)).toEqual([]);
+      expect(plan.heldEventsByReason).toEqual({ NO_EXACT_LINEAGE: 1 });
+    }
+  });
+
+  it("holds an event naming a row that no longer exists on the case", () => {
+    // A copied or re-extracted record leaves the old row id behind. It is not
+    // a confirmed row, so the event is not covered.
+    const notes = notesFor([enc("a")], [{ rowIds: ["a"] }]);
+    const plan = planBatchConfirmation({ notes, events: [event("orphan", { sourceRowIds: ["a", "deleted-row"] })] });
+    expect(plan.eventIds).toEqual([]);
+    expect(plan.heldEventsByReason).toEqual({ NO_CONFIRMED_RECORD: 1 });
+  });
+
+  it("holds an event built from a superseded row", () => {
+    // A superseded row is not among the note's confirmable rows, so nothing
+    // settles it and the event stays out.
+    const notes = notesFor([enc("live"), enc("old", { status: "SUPERSEDED" })], [{ rowIds: ["live"] }, { rowIds: ["old"] }]);
+    const plan = planBatchConfirmation({ notes, events: [event("e-old", { sourceRowIds: ["old"] })] });
+    expect(plan.eventIds).toEqual([]);
+  });
+
+  it("covers an event over a record a PERSON already settled, by lineage", () => {
+    const notes = notesFor([enc("a", { status: "VERIFIED" })], [{ rowIds: ["a"] }]);
+    const plan = planBatchConfirmation({ notes, events: [event("e1", { sourceRowIds: ["a"] })] });
+    expect(plan.rowIds).toEqual([]);
+    expect(plan.eventIds).toEqual(["e1"]);
+  });
+
+  it("ignores duplicate ids within one event's lineage", () => {
+    const notes = notesFor([enc("a")], [{ rowIds: ["a"] }]);
+    const plan = planBatchConfirmation({ notes, events: [event("e1", { sourceRowIds: ["a", "a", "a"] })] });
+    expect(plan.eventIds).toEqual(["e1"]);
+  });
+
+  it("binds lineage into the manifest, so a re-attributed event fails closed", () => {
+    const notes = notesFor(sameDay(), [{ rowIds: ["morning"] }, { rowIds: ["evening"] }]);
+    const before = planBatchConfirmation({ notes, events: [event("e1", { sourceRowIds: ["morning"] })] });
+    // Same id, same prose, same date — different source encounter.
+    const after = planBatchConfirmation({ notes, events: [event("e1", { sourceRowIds: ["evening"] })] });
+    expect(after.manifestHash).not.toBe(before.manifestHash);
+  });
+
+  it("exports the lineage reader defensively", () => {
+    expect(eventLineage({ sourceRowIds: ["a", "b", "a"] })).toEqual(["a", "b"]);
+    expect(eventLineage({ sourceRowIds: null })).toEqual([]);
+    expect(eventLineage({})).toEqual([]);
+    expect(eventLineage({ sourceRowIds: [1, null, "ok", ""] as never })).toEqual(["ok"]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+describe("the itemized manifest is what gets confirmed", () => {
+  it("names every record the confirmation will mark reviewed", () => {
+    const notes = notesFor([enc("a"), enc("b")], [{ rowIds: ["a"] }, { rowIds: ["b"] }]);
+    const plan = planBatchConfirmation({ notes, events: [] });
+    // One line per covered record — not a count standing in for them.
+    expect(plan.manifestRecords).toHaveLength(plan.counts.eligibleEncounters);
+    expect(plan.manifestRecords.flatMap((r) => r.rows.map((row) => row.rowId)).sort()).toEqual(plan.rowIds);
+  });
+
+  it("carries the summary and the citation needed to check each line", () => {
+    const notes = notesFor([enc("a")], [{ rowIds: ["a"] }]);
+    const [line] = planBatchConfirmation({ notes, events: [] }).manifestRecords;
+    expect(line.documentId).toBe("doc-1");
+    expect(line.basis.length).toBeGreaterThan(0);
+    // The ASSERTION lives on the row line, because that is what gets written.
+    expect(line.rows).toHaveLength(1);
+    expect(line.rows[0].summary.length).toBeGreaterThan(0);
+    expect(line.rows[0].documentId).toBe("doc-1");
+    expect(line.rows[0].contentHash.length).toBeGreaterThan(0);
+  });
+
+  it("names every chronology entry it will mark reviewed, with its lineage", () => {
+    const notes = notesFor([enc("a")], [{ rowIds: ["a"] }]);
+    const plan = planBatchConfirmation({ notes, events: [event("e1", { sourceRowIds: ["a"] })] });
+    expect(plan.manifestEvents).toHaveLength(1);
+    expect(plan.manifestEvents[0]).toMatchObject({ eventId: "e1", sourceRowIds: ["a"], linkage: "EXACT_LINEAGE" });
+  });
+
+  it("lists nothing when nothing is confirmable", () => {
+    const notes = notesFor([enc("a", { auditResult: "FAILED" })], [{ rowIds: ["a"] }]);
+    const plan = planBatchConfirmation({ notes, events: [] });
+    expect(plan.manifestRecords).toEqual([]);
+    expect(plan.manifestEvents).toEqual([]);
+    expect(plan.rowIds).toEqual([]);
+  });
+
+  it("is ordered deterministically, so the same plan renders the same list", () => {
+    const rows = [enc("c"), enc("a"), enc("b")];
+    const segs = [{ rowIds: ["c"] }, { rowIds: ["a"] }, { rowIds: ["b"] }];
+    const first = planBatchConfirmation({ notes: notesFor(rows, segs), events: [] });
+    const second = planBatchConfirmation({ notes: notesFor([...rows].reverse(), segs), events: [] });
+    expect(first.manifestRecords.map((r) => r.noteId)).toEqual(second.manifestRecords.map((r) => r.noteId));
+    expect(first.manifestHash).toBe(second.manifestHash);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EVERY ROW BEING WRITTEN IS DISPLAYED, WITH ITS OWN ASSERTION
+//
+// The first version rendered one line per canonical note, taking the summary
+// from `primaryRow` — the first row of the note's document. `confirmRowIds`
+// routinely holds several rows, and a note can mix an already-human-reviewed
+// row with an AI draft, so the sentence shown could belong to a row the click
+// was not writing. `humanAuthoritative()` then treats every written row as
+// something a person read.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("no row is confirmed on another row's sentence", () => {
+  /** Two rows in ONE canonical note, with genuinely different assertions. */
+  const twoRowNote = () => [
+    enc("first", { segmentKey: "n1", factualSummary: "Initial evaluation; conservative care begun." } as never),
+    enc("second", { segmentKey: "n1", factualSummary: "Injection performed at L4-L5 under fluoroscopy." } as never),
+  ];
+
+  it("displays every distinct summary in a multi-row note", () => {
+    const notes = notesFor(twoRowNote(), [{ rowIds: ["first", "second"] }]);
+    const plan = planBatchConfirmation({ notes, events: [] });
+    // Still ONE decision — the canonical model is unchanged.
+    expect(plan.manifestRecords).toHaveLength(1);
+    expect(plan.counts.eligibleEncounters).toBe(1);
+    // …but both assertions are on screen.
+    const summaries = plan.manifestRecords[0].rows.map((r) => r.summary);
+    expect(summaries).toContain("Initial evaluation; conservative care begun.");
+    expect(summaries).toContain("Injection performed at L4-L5 under fluoroscopy.");
+  });
+
+  it("displays a line for EVERY confirmRowId, with no omission or substitution", () => {
+    const notes = notesFor(twoRowNote(), [{ rowIds: ["first", "second"] }]);
+    const plan = planBatchConfirmation({ notes, events: [] });
+    const displayed = plan.manifestRecords.flatMap((r) => r.rows.map((row) => row.rowId)).sort();
+    expect(displayed).toEqual(plan.rowIds);
+    // Every displayed line names the row whose summary it carries.
+    for (const line of plan.manifestRecords[0].rows) {
+      const row = notes[0].rows.find((r) => r.id === line.rowId)!;
+      expect(line.summary).toBe(row.factualSummary);
+    }
+  });
+
+  it("never shows an already-reviewed row's sentence for an AI draft being written", () => {
+    // The exact substitution: a note mixing a human-reviewed row with a draft.
+    // `confirmRowIds` holds only the draft, and the header must not describe
+    // the batch using the reviewed row's content.
+    const rows = [
+      enc("done", { segmentKey: "n1", status: "REVIEWED", reviewedAt: "2025-05-01T00:00:00.000Z", factualSummary: "ALREADY REVIEWED SENTENCE" } as never),
+      enc("draft", { segmentKey: "n1", factualSummary: "The draft nobody has read yet." } as never),
+    ];
+    const plan = planBatchConfirmation({ notes: notesFor(rows, [{ rowIds: ["done", "draft"] }]), events: [] });
+    expect(plan.rowIds).toEqual(["draft"]);
+    const [line] = plan.manifestRecords;
+    // Exactly one row line, for the row actually being written.
+    expect(line.rows.map((r) => r.rowId)).toEqual(["draft"]);
+    expect(line.rows[0].summary).toBe("The draft nobody has read yet.");
+    // And the already-reviewed sentence appears nowhere in the manifest.
+    expect(JSON.stringify(plan.manifestRecords)).not.toContain("ALREADY REVIEWED SENTENCE");
+  });
+
+  it("gives a cross-document copy its own citation, not the note's", () => {
+    const rows = [
+      enc("primary", { segmentKey: "n1", sourceDocumentId: "doc-1", page: 3 } as never),
+      enc("copy", { segmentKey: "n1", sourceDocumentId: "doc-2", page: 88, factualSummary: "The same record, produced twice." } as never),
+    ];
+    const plan = planBatchConfirmation({
+      notes: notesFor(rows, [{ rowIds: ["primary", "copy"] }]),
+      events: [],
+      filenames: new Map([["doc-1", "primary.pdf"], ["doc-2", "second-production.pdf"]]),
+    });
+    const copyLine = plan.manifestRecords[0].rows.find((r) => r.rowId === "copy")!;
+    expect(copyLine.documentId).toBe("doc-2");
+    expect(copyLine.filename).toBe("second-production.pdf");
+    expect(copyLine.page).toBe(88);
+  });
+
+  it("shows an empty summary as a visible gap rather than dropping the row", () => {
+    const rows = [enc("blank", { factualSummary: "" } as never)];
+    const plan = planBatchConfirmation({ notes: notesFor(rows, [{ rowIds: ["blank"] }]), events: [] });
+    if (plan.rowIds.includes("blank")) {
+      expect(plan.manifestRecords[0].rows.map((r) => r.rowId)).toContain("blank");
+    }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+describe("every displayed field is bound into the manifest hash", () => {
+  const noteRows = () => [enc("a", { segmentKey: "n1" } as never)];
+  const planWith = (over: { filenames?: Map<string, string>; rows?: ReturnType<typeof noteRows> } = {}) =>
+    planBatchConfirmation({
+      notes: notesFor(over.rows ?? noteRows(), [{ rowIds: ["a"] }]),
+      events: [event("e1", { sourceRowIds: ["a"] })],
+      filenames: over.filenames ?? new Map([["doc-1", "records.pdf"]]),
+    });
+
+  it("moves when a displayed FILENAME changes and nothing else does", () => {
+    const before = planWith().manifestHash;
+    const after = planWith({ filenames: new Map([["doc-1", "records-corrected.pdf"]]) }).manifestHash;
+    expect(after).not.toBe(before);
+  });
+
+  it("moves when a displayed SUMMARY changes", () => {
+    const before = planWith().manifestHash;
+    const after = planWith({ rows: [enc("a", { segmentKey: "n1", factualSummary: "Rewritten after the list was drawn." } as never)] }).manifestHash;
+    expect(after).not.toBe(before);
+  });
+
+  it("moves when a displayed PAGE changes", () => {
+    const before = planWith().manifestHash;
+    const after = planWith({ rows: [enc("a", { segmentKey: "n1", page: 47 } as never)] }).manifestHash;
+    expect(after).not.toBe(before);
+  });
+
+  it("moves when a displayed PROVIDER or FACILITY changes", () => {
+    const before = planWith().manifestHash;
+    expect(planWith({ rows: [enc("a", { segmentKey: "n1", provider: "Dr Someone Else" } as never)] }).manifestHash).not.toBe(before);
+    expect(planWith({ rows: [enc("a", { segmentKey: "n1", facility: "A different clinic" } as never)] }).manifestHash).not.toBe(before);
+  });
+
+  it("moves when a chronology line's displayed filename changes", () => {
+    const withName = planBatchConfirmation({
+      notes: notesFor(noteRows(), [{ rowIds: ["a"] }]),
+      events: [event("e1", { sourceRowIds: ["a"] })],
+      filenames: new Map([["doc-1", "records.pdf"]]),
+    });
+    const renamed = planBatchConfirmation({
+      notes: notesFor(noteRows(), [{ rowIds: ["a"] }]),
+      events: [event("e1", { sourceRowIds: ["a"] })],
+      filenames: new Map([["doc-1", "records-v2.pdf"]]),
+    });
+    expect(renamed.manifestHash).not.toBe(withName.manifestHash);
+    // …and the filename is actually on the line, not only in the hash.
+    expect(withName.manifestEvents[0].filename).toBe("records.pdf");
+  });
+
+  it("is stable when nothing displayed changes", () => {
+    expect(planWith().manifestHash).toBe(planWith().manifestHash);
   });
 });

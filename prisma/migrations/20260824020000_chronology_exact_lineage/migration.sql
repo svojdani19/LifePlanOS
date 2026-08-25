@@ -1,0 +1,30 @@
+-- Exact source lineage on a chronology event.
+--
+-- Batch confirmation tied an event to a record by SOURCE DOCUMENT plus SERVICE
+-- DATE:
+--
+--     const key = `${event.sourceDocumentId} ${day}`;
+--
+-- A production with two encounters on the same day in the same document — an ER
+-- record, a therapy chart, any same-day follow-up — makes that key ambiguous.
+-- Confirming one of those encounters marked the whole day "supported", and
+-- every event on it was written REVIEWED, including events built from the
+-- encounter nobody confirmed. `humanAuthoritative()` then treats those rows as
+-- something a person read.
+--
+-- This column records the exact ExtractedEncounter ids the builder used, so a
+-- batch can require that an event's lineage is a SUBSET of the rows actually
+-- displayed and confirmed.
+--
+-- ADDITIVE and nullable on purpose. NULL means one of two honest things:
+--   • the event predates this column, or
+--   • it came from the regex path, where no encounter row exists to name.
+-- Neither is guessed at. Both are held out of batch confirmation and go to
+-- individual chronology review, which is where an event nothing can vouch for
+-- belonged all along.
+--
+-- No backfill: there is no source of truth to backfill FROM. Inferring lineage
+-- from document and date would persist the exact ambiguity this column exists
+-- to remove, and would do it as though it were recorded fact.
+
+ALTER TABLE "ChronologyEvent" ADD COLUMN "sourceRowIds" JSONB;

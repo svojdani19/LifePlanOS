@@ -102,30 +102,12 @@ export const SUPPORTING_INCLUDE = new Set([
   "EMG_NCS_REPORT",
 ]);
 
-export const EXCLUDED_TYPES = new Set([
-  "BILLING_RECORD",
-  "INSURANCE_RECORDS",
-  "TAX_RECORDS",
-  "EMPLOYMENT_RECORDS",
-  "WAGE_LOSS_DOCUMENTATION",
-  "CORRESPONDENCE",
-  "COST_PROJECTION",
-  "DEPOSITION",
-  "LEGAL_PLEADING",
-  "DEMAND_LETTER",
-  "SETTLEMENT_AGREEMENT",
-  "COURT_ORDER",
-  "PHOTOGRAPHS",
-  "SURVEILLANCE_VIDEO",
-  "EXPERT_REPORT",
-  "PEER_REVIEW",
-  // A finalized life care plan is the answer key. Chronicling it would put the
-  // planner's own recommendations into the patient's timeline as though they
-  // were care delivered. It was absent from this list while EXPERT_REPORT was
-  // present — the same document class, one of them guarded.
-  "LIFE_CARE_PLAN",
-  "COST_PROJECTION",
-]);
+// The list itself lives in a dependency-free module: a client component that
+// only wants to say "excluded by record type" must not drag this file's
+// `node:crypto` and Prisma imports into the browser bundle. Re-exported so
+// every existing import site is unchanged.
+export { EXCLUDED_TYPES } from "@/lib/documents/chronologyExclusions";
+import { EXCLUDED_TYPES } from "@/lib/documents/chronologyExclusions";
 
 // Core clinical treatment/diagnostic records — kept whenever a finding exists.
 const CORE_CLINICAL = new Set([
@@ -862,6 +844,15 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
     sourceDocumentId: string;
     sourcePage: number | null;
     dateInferred: boolean;
+    /**
+     * The exact ExtractedEncounter ids this event was built from.
+     *
+     * Empty on the regex path, where no encounter row exists — an honest
+     * absence, not a zero. Batch confirmation refuses to cover an event whose
+     * lineage is empty rather than falling back to document-plus-date, which
+     * is ambiguous for same-day encounters.
+     */
+    sourceRowIds: string[];
     mentionsPostOp?: boolean;
   };
   const drafts: Draft[] = [];
@@ -976,6 +967,8 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
           sourceDocumentId: doc.id,
           sourcePage: enc.page, // unknown page STAYS null — never coerced to 1
           dateInferred: enc.dateStatus === "INFERRED",
+          // Exact lineage: this event IS this extracted encounter.
+          sourceRowIds: [enc.id],
           mentionsPostOp: POST_OP_MENTION_RE.test(enc.factualSummary),
         });
       }
@@ -1020,6 +1013,11 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
           return null;
         }
         return {
+          // The regex path derives events from document TEXT, not from
+          // extracted encounter rows, so there is nothing to name here. An
+          // empty lineage keeps this event out of batch confirmation, which is
+          // correct: nothing links it to a record a reviewer confirmed.
+          sourceRowIds: [],
           eventDate, eventDateEnd, eventType: ev.eventType, specialty: ev.specialty,
           provider: docProvider ?? null, facility: doc.facility ?? null,
           recordType: typeLabel(doc.type),
@@ -1111,6 +1109,8 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
         summary = `${ev.recordType ?? typeLabel(doc.type)} addressing ${topCond.replace(/,\s*initial encounter$/i, "").toLowerCase()}`;
       }
       return {
+        // Regex path: no extracted encounter row to name. See above.
+        sourceRowIds: [],
         eventDate,
         eventDateEnd,
         eventType: ev.eventType,
@@ -1319,6 +1319,10 @@ export async function buildChronologyFromRecords(caseId: string, ctx: Chronology
     sourceDocumentId: d.sourceDocumentId,
     // An unknown source page STAYS unknown — never coerced to page 1.
     sourcePage: d.sourcePage,
+    // Null rather than [] when there is no lineage: "this event names no
+    // extracted row" and "this event names zero rows" are the same fact, and
+    // null is the one the column documents.
+    sourceRowIds: d.sourceRowIds.length ? d.sourceRowIds : undefined,
     dateInferred: d.dateInferred,
     // Causal relatedness is a professional judgment, not an extraction output:
     // events enter the timeline UNCLEAR until a qualified human (or a gated

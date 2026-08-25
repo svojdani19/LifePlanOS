@@ -767,6 +767,28 @@ model ChronologyEvent {
   // underlying visit, so citations point at each member's own document and a
   // membership change is visible even when the range's end date is unchanged.
   seriesMembers Json?
+
+  // ── Exact lineage: which extracted rows this event was actually built from ──
+  //
+  // Batch confirmation used to tie an event to a record by SOURCE DOCUMENT plus
+  // SERVICE DATE:
+  //
+  //     const key = `${event.sourceDocumentId} ${day}`;
+  //
+  // A production with two encounters on the same day in the same document —
+  // routine in an ER record, a therapy chart, or any same-day follow-up — makes
+  // that key ambiguous. Confirming one of those encounters marked the day
+  // "supported", and every event on it was swept in as human-reviewed,
+  // including events built from the encounter nobody confirmed.
+  //
+  // `sourceRowIds` is the exact set of ExtractedEncounter ids the builder used.
+  // A batch may cover an event only when that set is a subset of the rows the
+  // reviewer was actually shown. Null means the event predates this column or
+  // came from the regex path, where no encounter row exists: those are held out
+  // of batch confirmation rather than guessed at from document and date.
+  //
+  // Case-scoped by construction — every id names a row on this same case.
+  sourceRowIds Json?
   createdAt     DateTime @default(now())
 
   @@index([caseId, eventDate])
@@ -808,7 +830,20 @@ model Condition {
   // Conditions are written only by the engine and the demo seed — there is no
   // hand-authored path — so the invariant belongs in the database, where a
   // concurrent writer cannot step around it.
-  @@unique([caseId, name])
+  //
+  // The constraint is NOT declared here, because it cannot be: the semantic key
+  // is `lower(btrim(name))` — the same key the generator's own in-run guard
+  // uses — and Prisma's schema language cannot express a unique index over an
+  // expression. A plain `@@unique([caseId, name])` compares case-sensitively
+  // and counts stray whitespace, so it admits "Low back pain" beside "low back
+  // pain": exactly the duplicates it is supposed to forbid.
+  //
+  //   UNIQUE INDEX "Condition_caseId_name_normalized_key"
+  //     ON "Condition" ("caseId", lower(btrim("name")))
+  //
+  // lives in migrations/20260824010000_condition_normalized_uniqueness. Do not
+  // run `prisma db push` against a database that has it: push reconciles from
+  // this file and would drop an index it cannot see.
   @@index([caseId])
 }
 

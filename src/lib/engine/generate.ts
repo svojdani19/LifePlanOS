@@ -141,7 +141,7 @@ export interface PlanResult {
 }
 
 /**
- * Generate the plan, holding the case's pipeline lock for the whole run.
+ * Generate the plan, holding the case's pipeline lock for the run.
  *
  * The lock is not an optimisation. Everything below is a read-reset-write with
  * seconds of evidence work between the reset and the writes, and three call
@@ -149,15 +149,29 @@ export interface PlanResult {
  * each reset what they had snapshotted and then each wrote a full plan. That is
  * what put every diagnosis and every care item on one case three times over.
  *
+ * PREFER `runCasePipeline` (engine/runPipeline.ts). This entry point locks
+ * generation ALONE, so the validation, reasoning and attestation finalizers a
+ * caller runs afterwards fall outside the lease and outside the coalescing
+ * loop. It remains for callers that genuinely want generation only, and for
+ * the demo seed and scripts.
+ *
  * A caller that loses the race does not run: it flags the case and throws
  * {@link PipelineBusyError}, and the holder makes one more pass so the losing
  * caller's edit still lands. Background callers should swallow that error.
  */
 export async function generatePlan(caseId: string, actor?: { userId?: string; role?: string }): Promise<PlanResult> {
-  return withCasePipelineLock(prisma, caseId, () => generatePlanLocked(caseId, actor));
+  return withCasePipelineLock(prisma, caseId, () => generatePlanUnlocked(caseId, actor));
 }
 
-async function generatePlanLocked(caseId: string, actor?: { userId?: string; role?: string }): Promise<PlanResult> {
+/**
+ * The generation body, WITHOUT the lock.
+ *
+ * Exported for `runCasePipeline`, which holds one lease across generation and
+ * every finalizer. Never call this directly from a route: unlocked generation
+ * is the defect, not the feature. Re-entering `generatePlan` from inside a
+ * held lease would deadlock against the holder's own claim.
+ */
+export async function generatePlanUnlocked(caseId: string, actor?: { userId?: string; role?: string }): Promise<PlanResult> {
   const c = await prisma.case.findUniqueOrThrow({ where: { id: caseId } });
   // Life expectancy: when unset and DOB + sex are documented, the SSA period
   // life table supplies the actuarial baseline — persisted with its basis so

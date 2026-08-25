@@ -13,6 +13,19 @@ import {
   LogOut,
   BriefcaseBusiness,
   Eye,
+  Scale,
+  ClipboardList,
+  FileSearch,
+  HeartPulse,
+  Briefcase,
+  Calculator,
+  ShieldCheck,
+  Receipt,
+  Building2,
+  ServerCog,
+  UserSearch,
+  Landmark,
+  Glasses,
 } from "lucide-react";
 import { cn, initials } from "@/lib/utils";
 import { NotificationBell } from "@/components/NotificationBell";
@@ -24,6 +37,36 @@ interface NavItem {
   icon: typeof LayoutDashboard;
   perm?: Permission;
 }
+
+/**
+ * A distinct icon per workspace.
+ *
+ * Every workspace link rendered `BriefcaseBusiness`. Below `lg` the labels are
+ * hidden, so the rail became a column of identical briefcases: nothing
+ * distinguished the Records workspace from the Physician one except position,
+ * and a `title` a keyboard user has to hover to read. Keyed by href, which is
+ * what the Sidebar is given — the WORKSPACES registry stays a server-side data
+ * contract with no presentational fields in it.
+ */
+const WORKSPACE_ICON: Record<string, typeof LayoutDashboard> = {
+  "/attorney": Scale,
+  "/case-manager": ClipboardList,
+  "/records": FileSearch,
+  "/planner": HeartPulse,
+  "/physician": Stethoscope,
+  "/vocational": Briefcase,
+  "/economist": Calculator,
+  "/qa": ShieldCheck,
+  "/operations": Receipt,
+  "/firm-admin": Building2,
+  "/platform-admin": ServerCog,
+  "/external-expert": UserSearch,
+  "/insurance": Landmark,
+  "/observer": Glasses,
+};
+
+/** An unknown workspace keeps the old icon rather than rendering nothing. */
+const workspaceIcon = (href: string) => WORKSPACE_ICON[href] ?? BriefcaseBusiness;
 
 const NAV: NavItem[] = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -81,8 +124,11 @@ export function Sidebar({
           const active = pathname === workspace.href;
           return (
             <Link key={workspace.href} href={workspace.href} title={`${workspace.label} workspace`} aria-current={active ? "page" : undefined} className={cn("focusable relative flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition-colors", active ? "bg-brand-50 font-semibold text-brand-800" : "font-medium text-ink-500 hover:bg-ink-50 hover:text-ink-900")}>
-              <BriefcaseBusiness className="h-[18px] w-[18px] shrink-0" aria-hidden />
-              <span className="hidden truncate lg:inline">{workspace.label}</span>
+              {(() => { const Icon = workspaceIcon(workspace.href); return <Icon className="h-[18px] w-[18px] shrink-0" aria-hidden />; })()}
+              {/* The label is hidden below lg, so the accessible name would be
+                  the icon alone. `sr-only` keeps it available to a screen
+                  reader at every width without changing the rail's layout. */}
+              <span className="truncate max-lg:sr-only">{workspace.label}</span>
             </Link>
           );
         })}
@@ -99,7 +145,7 @@ export function Sidebar({
             )}
           >
             <Eye className="h-[18px] w-[18px] shrink-0" aria-hidden />
-            <span className="hidden truncate lg:inline">{viewAs.label}</span>
+            <span className="truncate max-lg:sr-only">{viewAs.label}</span>
             <span className="hidden rounded bg-violet-100 px-1 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-700 lg:inline">
               viewing
             </span>
@@ -122,14 +168,14 @@ export function Sidebar({
               )}
             >
               <item.icon className="h-[18px] w-[18px] shrink-0" aria-hidden />
-              <span className="hidden lg:inline">{item.label}</span>
+              <span className="max-lg:sr-only">{item.label}</span>
             </Link>
           );
         })}
       </nav>
 
       <div className="border-t border-ink-200 p-2 lg:p-3">
-        <div className="flex items-center gap-2 rounded-lg px-1 py-1.5 lg:gap-3 lg:px-2">
+        <div className="flex flex-wrap items-center gap-2 rounded-lg px-1 py-1.5 lg:flex-nowrap lg:gap-3 lg:px-2">
           <Link href="/account" title="Account & security" className="focusable flex min-w-0 flex-1 items-center gap-3 rounded-lg hover:opacity-80">
             <div className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-brand-100 text-sm font-semibold text-brand-800">
               {initials(user.name)}
@@ -139,10 +185,12 @@ export function Sidebar({
               <p className="truncate text-xs text-ink-500">{user.roleLabel}</p>
             </div>
           </Link>
-          <span className="hidden lg:block">
-            <NotificationBell />
-          </span>
-          <button onClick={logout} title="Log out" aria-label="Log out" className="focusable hidden rounded-md p-1.5 text-ink-400 hover:bg-ink-100 hover:text-ink-700 lg:block">
+          {/* Both were `hidden lg:block`, so below lg there was no way to log
+              out and no notifications at all — not a layout choice but a
+              missing control. They are icon-only, which the 16-wide rail fits;
+              the row wraps rather than the buttons disappearing. */}
+          <NotificationBell />
+          <button type="button" onClick={logout} title="Log out" aria-label="Log out" className="focusable rounded-md p-1.5 text-ink-400 hover:bg-ink-100 hover:text-ink-700">
             <LogOut className="h-4 w-4" aria-hidden />
           </button>
         </div>

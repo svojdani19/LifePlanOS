@@ -153,6 +153,15 @@ export interface ChronologyDraft {
    * contains.
    */
   sourceFingerprint?: string | null;
+  /**
+   * The exact ExtractedEncounter ids this event was built from.
+   *
+   * Batch confirmation may cover an event only when this set is a subset of
+   * the rows a reviewer was actually shown. Tying an event to a record by
+   * document plus date instead is ambiguous the moment a production carries
+   * two encounters on the same day in the same document.
+   */
+  sourceRowIds?: string[];
   [column: string]: unknown;
 }
 
@@ -490,6 +499,8 @@ export async function buildRecords(options: BuildOptions): Promise<BuiltRecords>
             : summary,
         sourceDocumentId: note.sourceDocumentId,
         sourcePage: cite ? note.pageStart : null,
+        // Exact lineage: this event is built from precisely this note's rows.
+        sourceRowIds: [...note.rowIds].sort(),
         reviewStatus: "AI_DRAFT",
         dateInferred: resolved.inferred,
         relevanceScore: billingCare ? 40 : 50,
@@ -1284,6 +1295,14 @@ export function collapseTreatmentSeries(events: readonly ChronologyDraft[]): Chr
             documentId: e.sourceDocumentId,
             page: e.sourcePage ?? null,
           })),
+          // A series rests on every visit it merged, so a batch may cover it
+          // only when EVERY member's rows were confirmed. A member whose
+          // lineage is unknown makes the whole series unknown — the union
+          // below is empty in that case, which holds it out rather than
+          // covering it on the strength of the members that are known.
+          sourceRowIds: run.every((e) => Array.isArray(e.sourceRowIds) && e.sourceRowIds.length)
+            ? [...new Set(run.flatMap((e) => e.sourceRowIds as string[]))].sort()
+            : [],
           sourceDocumentId: first.sourceDocumentId,
           sourcePage: null,
           reviewStatus: "AI_DRAFT",

@@ -1,9 +1,12 @@
 import { describe, it, expect } from "vitest";
 import {
   withCasePipelineLock,
+  renewPipelineLease,
   PipelineBusyError,
+  PipelineLeaseLostError,
   PIPELINE_LOCK_STALE_MS,
-  MAX_COALESCED_RERUNS,
+  MAX_PIPELINE_PASSES,
+  PipelineRerunOverflowError,
   type CaseLockStore,
 } from "@/lib/engine/pipelineLock";
 
@@ -170,16 +173,69 @@ describe("withCasePipelineLock", () => {
     expect(passes).toBe(3);
   });
 
-  it("bounds coalesced passes so continuous editing cannot pin a worker", async () => {
+  // THE stranding regression.
+  //
+  // The previous contract capped coalesced passes and left the flag set "for
+  // the next caller". There is no next caller: every loser has already returned
+  // PipelineBusyError, and both background callers swallow it. An edit arriving
+  // during the last allowed pass was simply never regenerated.
+  it("keeps going until the case is stable, past any former cap, with no new caller", async () => {
+    const store = makeStore();
+    let passes = 0;
+    // Set the flag on every pass well beyond the old cap of 3, then stop.
+    const OBLIGATIONS = 9;
+    await withCasePipelineLock(store, "case-1", async () => {
+      passes += 1;
+      if (passes <= OBLIGATIONS) store.row.pipelineRerunRequested = true;
+    });
+    // Every obligation was honoured by THIS holder…
+    expect(passes).toBe(OBLIGATIONS + 1);
+    // …and it did not return owing anything.
+    expect(store.row.pipelineRerunRequested).toBe(false);
+    expect(store.row.pipelineRunId).toBeNull();
+  });
+
+  it("never returns while it still holds the lease and still owes a pass", async () => {
     const store = makeStore();
     let passes = 0;
     await withCasePipelineLock(store, "case-1", async () => {
       passes += 1;
-      store.row.pipelineRerunRequested = true; // never satisfied
+      // Edits land through pass 4 — the last one arriving during what would
+      // have been the final pass under the old cap of 3.
+      if (passes <= 4) store.row.pipelineRerunRequested = true;
     });
-    expect(passes).toBe(1 + MAX_COALESCED_RERUNS);
-    // The obligation is not lost — it is left set for the next caller.
+    expect(passes).toBe(5);
+    expect(store.row.pipelineRerunRequested).toBe(false);
+  });
+
+  it("raises a fault rather than looping forever, and does NOT discard the obligation", async () => {
+    const store = makeStore();
+    let passes = 0;
+    await expect(
+      withCasePipelineLock(store, "case-1", async () => {
+        passes += 1;
+        store.row.pipelineRerunRequested = true; // never satisfied — a bug, not editing
+      }),
+    ).rejects.toBeInstanceOf(PipelineRerunOverflowError);
+    expect(passes).toBe(MAX_PIPELINE_PASSES);
+    // Left set on purpose: the work is still owed, and the condition is loud.
     expect(store.row.pipelineRerunRequested).toBe(true);
+    // The lock is still released, so the case is not wedged.
+    expect(store.row.pipelineRunId).toBeNull();
+  });
+
+  it("hands the obligation to a stale takeover rather than dropping it", async () => {
+    const store = makeStore();
+    let passes = 0;
+    await withCasePipelineLock(store, "case-1", async () => {
+      passes += 1;
+      store.row.pipelineRerunRequested = true;
+      // Ownership moves away mid-run: the new holder inherits the flag.
+      store.row.pipelineRunId = "new-owner";
+    });
+    expect(passes).toBe(1);
+    expect(store.row.pipelineRerunRequested).toBe(true);
+    expect(store.row.pipelineRunId).toBe("new-owner");
   });
 
   it("releases the lock when the work throws, and propagates the error", async () => {
@@ -250,5 +306,192 @@ describe("withCasePipelineLock", () => {
     });
     // The rerun obligation belongs to whoever holds the lock now.
     expect(passes).toBe(1);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Lease renewal.
+//
+// A fixed 15-minute staleness window has to recover from a dead process AND
+// not interrupt a slow one. A large case can exceed it legitimately, and when
+// it did, a second caller took the lock from a run that was still writing —
+// reintroducing the very concurrency the lock exists to prevent, on exactly
+// the cases where it does the most damage.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A scheduler the test drives by hand, so no wall-clock time is involved. */
+function manualScheduler() {
+  const ticks: (() => void)[] = [];
+  let cleared = 0;
+  return {
+    scheduler: {
+      setInterval: (fn: () => void) => {
+        ticks.push(fn);
+        return ticks.length - 1;
+      },
+      clearInterval: () => {
+        cleared += 1;
+      },
+    },
+    tick: async () => {
+      for (const fn of ticks) fn();
+      // Let the renewal promise inside the tick settle.
+      for (let i = 0; i < 5; i += 1) await Promise.resolve();
+    },
+    clearedCount: () => cleared,
+    timerCount: () => ticks.length,
+  };
+}
+
+describe("renewPipelineLease", () => {
+  it("renews a claim that is still ours and moves the staleness clock", async () => {
+    const store = makeStore({ pipelineRunId: "mine", pipelineRunAt: new Date(1000) });
+    const ok = await renewPipelineLease(store, "case-1", "mine", () => new Date(9999));
+    expect(ok).toBe(true);
+    expect(store.row.pipelineRunAt).toEqual(new Date(9999));
+  });
+
+  it("refuses to renew a claim somebody else now holds", async () => {
+    const store = makeStore({ pipelineRunId: "theirs", pipelineRunAt: new Date(1000) });
+    expect(await renewPipelineLease(store, "case-1", "mine")).toBe(false);
+    // And it must not have taken the lock back — that would defeat the
+    // takeover the staleness window exists to allow.
+    expect(store.row.pipelineRunId).toBe("theirs");
+  });
+
+  it("refuses to renew a released claim", async () => {
+    const store = makeStore({ pipelineRunId: null });
+    expect(await renewPipelineLease(store, "case-1", "mine")).toBe(false);
+    expect(store.row.pipelineRunId).toBeNull();
+  });
+});
+
+describe("lease renewal during long-running work", () => {
+  it("keeps a long run's claim fresh so it cannot be stolen while it works", async () => {
+    const store = makeStore();
+    const m = manualScheduler();
+    const start = new Date(0);
+    let clock = start;
+
+    let contended = false;
+    await withCasePipelineLock(
+      store,
+      "case-1",
+      async (lease) => {
+        // Time passes well beyond the staleness window…
+        clock = new Date(PIPELINE_LOCK_STALE_MS * 3);
+        await m.tick();
+        // …but the claim was renewed, so it is still current and still ours.
+        expect(lease.owned()).toBe(true);
+        expect(store.row.pipelineRunAt).toEqual(clock);
+        // A fresh claimant arriving now must be refused. Contend ONCE: a
+        // refusal sets the rerun flag, and the holder honours every obligation
+        // before returning, so contending on every pass would never converge.
+        if (contended) return;
+        contended = true;
+        await expect(
+          withCasePipelineLock(store, "case-1", async () => "stolen", { now: () => clock, heartbeatMs: 0 }),
+        ).rejects.toBeInstanceOf(PipelineBusyError);
+      },
+      { now: () => clock, scheduler: m.scheduler },
+    );
+    expect(store.row.pipelineRunId).toBeNull();
+  });
+
+  it("always clears its timer, including when the work throws", async () => {
+    const m = manualScheduler();
+    const store = makeStore();
+    await expect(
+      withCasePipelineLock(store, "case-1", async () => { throw new Error("boom"); }, { scheduler: m.scheduler }),
+    ).rejects.toThrow("boom");
+    expect(m.timerCount()).toBe(1);
+    expect(m.clearedCount()).toBe(1);
+  });
+
+  it("clears its timer on the success path too", async () => {
+    const m = manualScheduler();
+    const store = makeStore();
+    await withCasePipelineLock(store, "case-1", async () => "fine", { scheduler: m.scheduler });
+    expect(m.clearedCount()).toBe(1);
+  });
+
+  it("fails closed when the lease is lost mid-run rather than writing", async () => {
+    const store = makeStore();
+    const m = manualScheduler();
+    let sawLoss = false;
+    await expect(
+      withCasePipelineLock(
+        store,
+        "case-1",
+        async (lease) => {
+          // Another run takes the case while this one is still working.
+          store.row.pipelineRunId = "someone-else";
+          await m.tick();
+          sawLoss = !lease.owned();
+          // Anything further this run would persist must not be persisted.
+          lease.assertOwned();
+          return "wrote something";
+        },
+        { scheduler: m.scheduler },
+      ),
+    ).rejects.toBeInstanceOf(PipelineLeaseLostError);
+    expect(sawLoss).toBe(true);
+    // The run that took it keeps it.
+    expect(store.row.pipelineRunId).toBe("someone-else");
+  });
+
+  it("does not treat a transient renewal error as ownership loss", async () => {
+    // A renewal that cannot reach the database says nothing about ownership;
+    // the claim stands until the staleness window expires. Abandoning healthy
+    // runs on one failed round-trip would be worse than not renewing at all.
+    const m = manualScheduler();
+    const store = makeStore();
+    let calls = 0;
+    const flaky: CaseLockStore = {
+      case: {
+        async updateMany(args) {
+          calls += 1;
+          if (calls === 2) throw new Error("connection reset");
+          return store.case.updateMany(args);
+        },
+        findUnique: (args) => store.case.findUnique(args),
+      },
+    };
+    const result = await withCasePipelineLock(
+      flaky,
+      "case-1",
+      async (lease) => {
+        await m.tick();
+        expect(lease.owned()).toBe(true);
+        return "survived";
+      },
+      { scheduler: m.scheduler },
+    );
+    expect(result).toBe("survived");
+  });
+
+  it("checks ownership after every coalesced pass, not only the first", async () => {
+    const store = makeStore();
+    const m = manualScheduler();
+    let passes = 0;
+    await expect(
+      withCasePipelineLock(
+        store,
+        "case-1",
+        async () => {
+          passes += 1;
+          if (passes === 1) {
+            store.row.pipelineRerunRequested = true;
+            return "first";
+          }
+          // The lease is taken during the SECOND pass.
+          store.row.pipelineRunId = "someone-else";
+          await m.tick();
+          return "second";
+        },
+        { scheduler: m.scheduler },
+      ),
+    ).rejects.toBeInstanceOf(PipelineLeaseLostError);
+    expect(passes).toBe(2);
   });
 });

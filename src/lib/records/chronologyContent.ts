@@ -68,6 +68,11 @@ export const CHRONOLOGY_CONTENT_FIELDS = [
   "relevanceScore",
   "relatedness",
   "seriesMembers",
+  // The exact source rows this event was built from. Part of the CONTENT: a
+  // rebuild that re-attributes an event to a different encounter — same id,
+  // same prose, same date — must move the hash, or a reviewer's confirmation
+  // carries over to a record they never saw it attached to.
+  "sourceRowIds",
   // The review state a confirmation is conditioned on. Present so that a
   // decision taken elsewhere between the dialog and the click moves the hash.
   "reviewStatus",

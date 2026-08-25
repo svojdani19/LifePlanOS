@@ -8,8 +8,8 @@ import { groupCanonicalEncounters } from "@/lib/records/canonicalEncounters";
 import { REVIEWER_ASSIGNABLE_CLASSES, requiresDate } from "@/lib/documents/analysisClass";
 import { classifyEncounterSubstance } from "@/lib/records/encounterSubstance";
 import { makeRecordStore, refreshCaseRecordsWithRecovery } from "@/lib/records/buildRecords";
-import { generatePlan } from "@/lib/engine/generate";
-import { PipelineBusyError } from "@/lib/engine/pipelineLock";
+import { PipelineBusyError, PipelineLeaseLostError } from "@/lib/engine/pipelineLock";
+import { runCasePipeline } from "@/lib/engine/runPipeline";
 import { ok, handleError } from "@/lib/api";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -308,8 +308,8 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
         // One at a time per case — see the note on the group review route. A
         // losing caller is folded into the run in flight, not dropped.
         if (outcome.published) {
-          void generatePlan(params.caseId, { userId: actor }).catch((e) => {
-            if (e instanceof PipelineBusyError) return;
+          void runCasePipeline(params.caseId, ctx.firm.id, { userId: actor }).catch((e) => {
+            if (e instanceof PipelineBusyError || e instanceof PipelineLeaseLostError) return;
             console.error(`[review] plan regeneration failed for case ${params.caseId}: ${String(e).slice(0, 200)}`);
           });
         }

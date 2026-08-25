@@ -58,10 +58,14 @@ vi.mock("@/lib/records/buildRecords", () => ({
     return flow.refreshOutcome;
   }),
 }));
-vi.mock("@/lib/engine/generate", () => ({
-  generatePlan: vi.fn(async (caseId: string) => {
+// The route regenerates through the ORCHESTRATOR now, not through
+// `generatePlan` alone: the lease has to cover validation, reasoning and
+// attestation refresh as well, or a coalesced final pass leaves them
+// describing the plan before it. See engine/runPipeline.ts.
+vi.mock("@/lib/engine/runPipeline", () => ({
+  runCasePipeline: vi.fn(async (caseId: string) => {
     flow.regenerated.push(caseId);
-    return {};
+    return { passes: 1, finalizerErrors: [] };
   }),
 }));
 

@@ -9,8 +9,8 @@ import { FAILURE_CODES } from "@/lib/learning/failureTaxonomy";
 import { encounterContentHash } from "@/lib/records/verifiedContent";
 import { REVIEWER_ASSIGNABLE_CLASSES, requiresDate } from "@/lib/documents/analysisClass";
 import { classifyEncounterSubstance } from "@/lib/records/encounterSubstance";
-import { generatePlan } from "@/lib/engine/generate";
-import { PipelineBusyError } from "@/lib/engine/pipelineLock";
+import { PipelineBusyError, PipelineLeaseLostError } from "@/lib/engine/pipelineLock";
+import { runCasePipeline } from "@/lib/engine/runPipeline";
 import { ok, handleError } from "@/lib/api";
 
 // Human verification and correction of one extracted encounter.
@@ -122,13 +122,15 @@ type Params = { params: Promise<{ caseId: string; encounterId: string }> };
  * used to be enforced by a module-level `Map` — which guarded only this route,
  * inside only this process, while two other routes fired the same regeneration
  * with no guard at all. The fold-in-and-make-one-more-pass behaviour now lives
- * in `generatePlan`'s own lock, where every caller and every worker sees it.
+ * in the pipeline lease, where every caller and every worker sees it — and it
+ * now covers validation, reasoning and attestation refresh too, so a coalesced
+ * final pass cannot leave them describing the plan before it.
  */
-function scheduleRegeneration(caseId: string, actorUserId: string): void {
-  void generatePlan(caseId, { userId: actorUserId }).catch((e) => {
+function scheduleRegeneration(caseId: string, firmId: string, actorUserId: string): void {
+  void runCasePipeline(caseId, firmId, { userId: actorUserId }).catch((e) => {
     // Contention is the expected, correct outcome of a fast edit sequence: the
-    // run in flight owes one more pass, so this edit is not lost.
-    if (e instanceof PipelineBusyError) return;
+    // run in flight owes one more complete pass, so this edit is not lost.
+    if (e instanceof PipelineBusyError || e instanceof PipelineLeaseLostError) return;
     console.error(`[records] regeneration after reclassification failed for ${caseId}:`, e instanceof Error ? e.message : e);
   });
 }
@@ -247,7 +249,7 @@ export async function PATCH(req: Request, { params: paramsPromise }: Params) {
     const outlookChanged = planInputTouched || restoredToOutput;
     // Material fields changed: one coalesced rebuild from the newest state,
     // and plan regeneration only after it publishes.
-    scheduleDerivedRefresh(params.caseId, outlookChanged ? () => scheduleRegeneration(params.caseId, ctx.user.id) : undefined);
+    scheduleDerivedRefresh(params.caseId, outlookChanged ? () => scheduleRegeneration(params.caseId, ctx.firm.id, ctx.user.id) : undefined);
 
     return ok({
       encounter: updated,
@@ -292,7 +294,7 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
       // WAS part of the plan's input set, the plan is invalid until rebuilt.
       // Rejecting a row the plan never used (STALE, GENERATION_LOSS) refreshes
       // the review surface without regenerating.
-      scheduleDerivedRefresh(params.caseId, wasPlanInput ? () => scheduleRegeneration(params.caseId, ctx.user.id) : undefined);
+      scheduleDerivedRefresh(params.caseId, wasPlanInput ? () => scheduleRegeneration(params.caseId, ctx.firm.id, ctx.user.id) : undefined);
       return ok({ encounter: updated });
     }
 
@@ -383,7 +385,7 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
     // Reviewing anything refreshes the derived output; confirming a STALE or
     // GENERATION_LOSS candidate additionally restores a row the plan was NOT
     // built from into its input set, which invalidates the plan itself.
-    scheduleDerivedRefresh(params.caseId, !wasPlanInput ? () => scheduleRegeneration(params.caseId, ctx.user.id) : undefined);
+    scheduleDerivedRefresh(params.caseId, !wasPlanInput ? () => scheduleRegeneration(params.caseId, ctx.firm.id, ctx.user.id) : undefined);
     return ok({ encounter: updated });
   } catch (err) {
     return handleError(err);

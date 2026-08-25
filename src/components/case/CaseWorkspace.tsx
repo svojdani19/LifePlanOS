@@ -1,6 +1,8 @@
 "use client";
 
-import ReportLibrary, { type ReportSelection } from "@/components/case/ReportLibrary";
+import dynamic from "next/dynamic";
+
+import type { ReportSelection } from "@/components/case/ReportLibrary";
 import { useState, useMemo, useRef, useEffect, useCallback, Fragment } from "react";
 import { useRouter } from "next/navigation";
 import {
@@ -112,7 +114,6 @@ import { deriveWitnessAssessment, assessmentFromBasis, detectSetConflicts, PROBA
 import type { BasisRecord } from "@/lib/engine/recommendationBasis";
 import { filterSortCare, type CareSortKey } from "@/lib/uiFilters";
 import { Icd10Search } from "@/components/Icd10Search";
-import { PreExistingConditionsModal } from "@/components/PreExistingConditionsModal";
 import { parseConditions, serializeConditions, findConditionsInRecords } from "@/lib/intake/preExisting";
 import { suggestDiagnoses } from "@/lib/intake/diagnosisSuggest";
 import { BookOpenCheck } from "lucide-react";
@@ -120,8 +121,47 @@ import { MEDICAL_SPECIALTIES } from "@/lib/intake/specialties";
 import { attorneyItemsNeeded } from "@/lib/attorneyItems";
 import { US_STATES } from "@/lib/intake/jurisdictions";
 import { dateFromFilename } from "@/lib/documents/filenameDate";
-import { CaseAssistant } from "@/components/case/CaseAssistant";
 import { KIND_LABEL } from "@/lib/records/encounterSubstance";
+// One reading of "is this in the supported total?", shared with the server's
+// own `computePlanTotals`. See lib/engine/careSupportView.ts for what each
+// surface used to answer instead.
+import {
+  supportBadgeFor,
+  totalsMembership,
+  membershipExplanation,
+  isDeEmphasised,
+  categorySubtotal,
+  membershipCaption,
+} from "@/lib/engine/careSupportView";
+import { chronologyCoverage, coverageSentence } from "@/lib/records/chronologyCoverage";
+import { runRequest, type ActionStatus } from "@/lib/ui/requestAction";
+import { ActionStatusBar } from "@/components/case/ActionStatusBar";
+import { BatchManifest } from "@/components/case/BatchManifest";
+import { ProofCardView } from "@/components/case/ProofCardView";
+
+// ── Loaded when the tab that needs them is opened ───────────────────────────
+// Every panel's code shipped with the first byte of the workspace, whichever
+// tab the reader was on. These three are the largest pieces that are (a)
+// already separate modules and (b) rendered behind a condition, so deferring
+// them changes nothing about layout, navigation or URLs — the same markup
+// appears in the same place, a moment later, the first time it is asked for.
+//
+// `ssr: false` on all three: the report library and the assistant are
+// interactive-only surfaces, and the pre-existing-conditions modal does not
+// exist until a button is pressed. Nothing here is content a crawler or a
+// first paint needs.
+const ReportLibrary = dynamic(() => import("@/components/case/ReportLibrary"), {
+  ssr: false,
+  loading: () => <div className="card p-5 text-sm text-ink-400">Loading the report library…</div>,
+});
+const CaseAssistant = dynamic(() => import("@/components/case/CaseAssistant").then((m) => m.CaseAssistant), {
+  ssr: false,
+});
+const PreExistingConditionsModal = dynamic(
+  () => import("@/components/PreExistingConditionsModal").then((m) => m.PreExistingConditionsModal),
+  { ssr: false },
+);
+import { buildProofCard } from "@/lib/engine/proofCard";
 
 // Loosely-typed serialized case (dates are ISO strings after JSON round-trip).
 type AnyRec = Record<string, any>;
@@ -201,6 +241,10 @@ export function CaseWorkspace({
   const router = useRouter();
   const [tab, setTab] = useState("overview");
   const [busy, setBusy] = useState<string | null>(null);
+  // Replaces `alert()`: a modal the screen reader announces out of context, the
+  // keyboard user must dismiss before doing anything else, and embedded
+  // browsers — which is where this app is reviewed — block outright.
+  const [status, setStatus] = useState<ActionStatus | null>(null);
   const [focusId, setFocusId] = useState<string | null>(null);
   const [focusCat, setFocusCat] = useState<string | null>(null);
   const can = (p: Permission) => permissions.includes(p);
@@ -255,17 +299,23 @@ export function CaseWorkspace({
     setTimeout(() => { setFocusId((f) => (f === entityId ? null : f)); setFocusCat(null); }, 6000);
   };
 
+  /**
+   * One request, one busy flag, one announced outcome — on every path.
+   *
+   * `setBusy(null)` used to sit on the line after the await, so a rejected
+   * fetch threw past it and left the control disabled with a spinner running
+   * and no error anywhere. The recovery logic now lives in
+   * lib/ui/requestAction.ts, which always clears the flag and always returns a
+   * status instead of raising an OS modal.
+   */
   async function call(url: string, method: string, body?: unknown, tag = "op") {
-    setBusy(tag);
-    const res = await fetch(url, { method, headers: body ? { "Content-Type": "application/json" } : undefined, body: body ? JSON.stringify(body) : undefined });
-    setBusy(null);
-    if (!res.ok) {
-      const e = await res.json().catch(() => ({}));
-      alert(e.error ?? "Request failed");
-      return null;
-    }
-    router.refresh();
-    return res.json().catch(() => ({}));
+    const outcome = await runRequest(url, method, body, {
+      tag,
+      setBusy,
+      onSuccess: () => router.refresh(),
+    });
+    setStatus(outcome.status);
+    return outcome.data;
   }
 
   const hasPlan = data.futureCareItems.length > 0;
@@ -335,6 +385,12 @@ export function CaseWorkspace({
           <p className="mt-1 font-mono text-[11px] text-red-600">{String(data.basisUnreadable)}</p>
         </div>
       ) : null}
+      {/* The outcome of the last action, announced rather than alerted. */}
+      {status && (
+        <div className="mb-3">
+          <ActionStatusBar status={status} onDismiss={() => setStatus(null)} />
+        </div>
+      )}
       {/* ── Clinical workspace header (sticky) ─────────────────────────────── */}
       <div className="sticky top-0 z-30 -mx-6 border-b border-ink-200 bg-white/95 px-6 pt-3 backdrop-blur supports-[backdrop-filter]:bg-white/85">
         {/* Identity + actions */}
@@ -621,7 +677,7 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
                 <div className="flex shrink-0 items-center gap-1.5">
                   {!form.diagnosis.trim() && <button className="btn-primary px-2.5 py-1 text-xs" onClick={() => approveSuggestion(s, true)}>Set as Primary</button>}
                   <button className="btn-outline px-2.5 py-1 text-xs" onClick={() => approveSuggestion(s, false)}>Add as Additional</button>
-                  <button className="rounded-md p-1 text-ink-300 hover:bg-ink-100 hover:text-ink-600" title="Dismiss" onClick={() => setDismissed((d) => new Set(d).add(s.icd10Code))}><X className="h-3.5 w-3.5" /></button>
+                  <button type="button" className="focusable rounded-md p-1 text-ink-300 hover:bg-ink-100 hover:text-ink-600" title={`Dismiss ${s.icd10Code}`} aria-label={`Dismiss the suggested diagnosis ${s.icd10Code}`} onClick={() => setDismissed((d) => new Set(d).add(s.icd10Code))}><X aria-hidden="true" className="h-3.5 w-3.5" /></button>
                 </div>
               </div>
             ))}
@@ -655,8 +711,8 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
                 />
               </div>
               {canEdit && (
-                <button type="button" title="Remove" className="mt-6 rounded-md p-1 text-ink-400 hover:bg-ink-100 hover:text-red-600" onClick={() => { setAdditional((a) => a.filter((_, i) => i !== idx)); setSaved(false); }}>
-                  <X className="h-4 w-4" />
+                <button type="button" title="Remove this diagnosis" aria-label={`Remove additional diagnosis ${idx + 1}`} className="focusable mt-6 rounded-md p-1 text-ink-400 hover:bg-ink-100 hover:text-red-600" onClick={() => { setAdditional((a) => a.filter((_, i) => i !== idx)); setSaved(false); }}>
+                  <X aria-hidden="true" className="h-4 w-4" />
                 </button>
               )}
             </div>
@@ -687,8 +743,8 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
                 {MEDICAL_SPECIALTIES.map((m) => <option key={m} value={m}>{m}</option>)}
               </select>
               {canEdit && (
-                <button type="button" title="Remove" className="rounded-md p-1 text-ink-400 hover:bg-ink-100 hover:text-red-600" onClick={() => { setAddlSpecialties((prev) => prev.filter((_, i) => i !== idx)); setSaved(false); }}>
-                  <X className="h-4 w-4" />
+                <button type="button" title="Remove this specialty" aria-label={`Remove additional specialty ${idx + 1}`} className="focusable rounded-md p-1 text-ink-400 hover:bg-ink-100 hover:text-red-600" onClick={() => { setAddlSpecialties((prev) => prev.filter((_, i) => i !== idx)); setSaved(false); }}>
+                  <X aria-hidden="true" className="h-4 w-4" />
                 </button>
               )}
             </div>
@@ -753,10 +809,17 @@ function IntakePanel({ data, canEdit, call }: { data: AnyRec; canEdit: boolean; 
       {canEdit && (
         <div className="mt-4 flex items-center gap-3">
           <button className="btn-primary" onClick={async () => {
-            if (unlinkedDx.length) { alert(`Link an ICD-10 code to each diagnosis before saving. Missing: ${unlinkedDx.join(", ")}. Pick a code from the search results.`); return; }
+            // The blocking reason is already rendered beside this button, in a
+            // role="alert" region — a modal on top of it told the user the same
+            // thing twice and made them dismiss it to act on it.
+            if (unlinkedDx.length) return;
             const r = await call(`/api/cases/${data.id}`, "PATCH", { ...form, dateOfBirth: form.dateOfBirth || null, dateOfInjury: form.dateOfInjury || null, additionalDiagnoses: additional.filter((d) => d.diagnosis.trim()), additionalSpecialties: addlSpecialties.map((s) => s.trim()).filter(Boolean) }, "intake"); if (r) setSaved(true);
           }}>Save Intake</button>
-          {unlinkedDx.length > 0 && <span className="text-sm text-amber-600">Link an ICD-10 code to {unlinkedDx.length === 1 ? "the flagged diagnosis" : `${unlinkedDx.length} diagnoses`} before saving.</span>}
+          {unlinkedDx.length > 0 && (
+            <span role="alert" className="text-sm text-amber-600">
+              Link an ICD-10 code to {unlinkedDx.length === 1 ? "the flagged diagnosis" : `${unlinkedDx.length} diagnoses`} before saving: {unlinkedDx.join(", ")}.
+            </span>
+          )}
           {saved && unlinkedDx.length === 0 && <span className="text-sm text-emerald-600">Saved.</span>}
         </div>
       )}
@@ -868,11 +931,25 @@ function BatchConfirmPanel({ caseId, onConfirmed }: { caseId: string; onConfirme
   const [plan, setPlan] = useState<AnyRec | null>(null);
   const [armed, setArmed] = useState(false);
   const [working, setWorking] = useState(false);
-  const [outcome, setOutcome] = useState<string | null>(null);
+  // Announced, not a silent paragraph: a failed confirmation is exactly the
+  // case where a reviewer is about to act on the belief that it succeeded.
+  const [outcome, setOutcome] = useState<ActionStatus | null>(null);
 
+  const [loadError, setLoadError] = useState<ActionStatus | null>(null);
+  // try/catch/finally throughout: `await res.json()` on a truncated or HTML
+  // body throws, and a rejected fetch threw past everything — leaving the panel
+  // blank with no indication that anything had failed.
   const load = useCallback(async () => {
-    const res = await fetch(`/api/cases/${caseId}/records/confirm`);
-    setPlan(res.ok ? await res.json() : null);
+    const outcome = await runRequest<AnyRec>(`/api/cases/${caseId}/records/confirm`, "GET");
+    if (outcome.status?.kind === "error") {
+      // The plan is cleared: a stale plan on screen is a manifest a reviewer
+      // could confirm against state the server has since refused to describe.
+      setPlan(null);
+      setLoadError(outcome.status);
+      return;
+    }
+    setLoadError(null);
+    setPlan(outcome.data);
   }, [caseId]);
   useEffect(() => { void load(); }, [load]);
 
@@ -899,33 +976,54 @@ function BatchConfirmPanel({ caseId, onConfirmed }: { caseId: string; onConfirme
   const eventsNeedingReview = held - eventsAwaitingRecord;
 
   async function confirm() {
-    setWorking(true);
-    const res = await fetch(`/api/cases/${caseId}/records/confirm`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      // The ONLY thing the browser contributes: the manifest it was shown.
-      body: JSON.stringify({ expectedManifestHash: plan?.manifestHash }),
-    });
-    const out = (await res.json().catch(() => ({}))) as AnyRec;
-    setWorking(false);
-    setArmed(false);
-    setOutcome(
-      res.ok && !out.error
-        ? `Confirmed ${out.rows ?? 0} record${out.rows === 1 ? "" : "s"} and ${out.events ?? 0} chronology entr${out.events === 1 ? "y" : "ies"} as reviewed.`
-        : String(out.error ?? "The confirmation could not be applied."),
+    // The ONLY thing the browser contributes: the hash of the manifest it
+    // displayed. It cannot name a row, add a row, or assert that anything is
+    // clean — it can only fail to match, in which case nothing happens.
+    const outcome = await runRequest<AnyRec>(
+      `/api/cases/${caseId}/records/confirm`,
+      "POST",
+      { expectedManifestHash: plan?.manifestHash },
+      { setBusy: (tag) => setWorking(tag !== null) },
     );
+    setArmed(false);
+    const out = outcome.data;
+    const settled: ActionStatus =
+      outcome.status?.kind === "error" || !out
+        ? { kind: "error", message: outcome.status?.message ?? "The confirmation could not be applied." }
+        : out.error
+          ? { kind: "error", message: String(out.error) }
+          : { kind: "ok", message: `Confirmed ${out.rows ?? 0} record${out.rows === 1 ? "" : "s"} and ${out.events ?? 0} chronology entr${out.events === 1 ? "y" : "ies"} as reviewed.` };
+    setOutcome(settled);
+    // Reload whatever happened: after a success the plan is empty, and after a
+    // stale-manifest refusal the reviewer needs the NEW manifest before they
+    // can confirm anything.
+    //
+    // The reload must NOT erase the reason. `load()` clears `loadError` and
+    // replaces the plan, and an earlier version let a successful reload wipe
+    // the refusal off the screen before it had been read — leaving a reviewer
+    // looking at a fresh list with no indication that their click had failed.
     await load();
+    setOutcome(settled);
     onConfirmed();
   }
 
+  if (loadError) {
+    return (
+      <div className="card p-3">
+        <ActionStatusBar status={loadError} onDismiss={() => setLoadError(null)} />
+        <button className="btn-outline mt-2 px-2 py-0.5 text-[11px]" onClick={() => void load()}>Try again</button>
+      </div>
+    );
+  }
   if (!plan) return null;
   if (!eligible && !events) {
     // No button, because it would refuse — but say WHY, rather than vanishing.
     // A case whose remaining work is genuinely individual should look like one.
     const why =
-      skipped > 0 || heldRecords > 0 || held > 0
+      skipped > 0 || cautions > 0 || heldRecords > 0 || held > 0
         ? `Nothing is confirmable in one act right now: ${[
             skipped > 0 && `${skipped} exception${skipped === 1 ? "" : "s"} need${skipped === 1 ? "s" : ""} an individual decision`,
+            cautions > 0 && `${cautions} record${cautions === 1 ? "" : "s"} carr${cautions === 1 ? "ies" : "y"} a caution to read before signing`,
             heldRecords > 0 && `${heldRecords} record${heldRecords === 1 ? "" : "s"} waiting on ${heldRecords === 1 ? "that decision" : "those decisions"}`,
             eventsNeedingReview > 0 && `${eventsNeedingReview} chronology entr${eventsNeedingReview === 1 ? "y" : "ies"} needing individual review`,
             eventsAwaitingRecord > 0 && `${eventsAwaitingRecord} chronology entr${eventsAwaitingRecord === 1 ? "y" : "ies"} waiting on ${eventsAwaitingRecord === 1 ? "a record decision" : "record decisions"}`,
@@ -935,9 +1033,9 @@ function BatchConfirmPanel({ caseId, onConfirmed }: { caseId: string; onConfirme
         : null;
     if (!outcome && !why) return null;
     return (
-      <div className="card p-3 text-[11px] text-ink-700">
-        {outcome && <p>{outcome}</p>}
-        {why && <p className={outcome ? "mt-1" : ""}>{why}</p>}
+      <div className="card space-y-2 p-3 text-[11px] text-ink-700">
+        <ActionStatusBar status={outcome} onDismiss={() => setOutcome(null)} />
+        {why && <p>{why}</p>}
       </div>
     );
   }
@@ -947,12 +1045,32 @@ function BatchConfirmPanel({ caseId, onConfirmed }: { caseId: string; onConfirme
       <p className="text-xs font-semibold text-teal-900">Factual records review</p>
       <p className="mt-1 text-[11px] text-ink-700">
         <strong>{eligible}</strong> canonical encounter{eligible === 1 ? "" : "s"} and <strong>{events}</strong> chronology
-        entr{events === 1 ? "y" : "ies"} are clean and can be confirmed in one review.
-        {cautions > 0 && (
-          <> {cautions} of those encounter{cautions === 1 ? "" : "s"} carr{cautions === 1 ? "ies" : "y"} a caution to read first
-            {cautionKinds.length > 0 && <> ({phrase(cautionKinds)})</>}.</>
-        )}
+        entr{events === 1 ? "y" : "ies"} are clean and can be confirmed in one review. Each one is listed below; this
+        confirmation records that you read them.
       </p>
+      {/* A caution is NOT in this batch. It used to be — disclosed as a count
+          and confirmed as though it had been read, in the same click, with
+          nothing distinguishing the reviewer who read it from the one who did
+          not. It has its own path, at document grain, where the caution and
+          the affected records are visible. */}
+      {cautions > 0 && (
+        <p className="mt-1 rounded border border-amber-300 bg-amber-50 px-2 py-1 text-[11px] text-amber-900">
+          <strong>{cautions}</strong> record{cautions === 1 ? "" : "s"} carr{cautions === 1 ? "ies" : "y"} a caution
+          {cautionKinds.length > 0 && <> ({phrase(cautionKinds)})</>} and {cautions === 1 ? "is" : "are"} <strong>not</strong> covered
+          by this confirmation. {cautions === 1 ? "It is" : "They are"} not {cautions === 1 ? "an exception" : "exceptions"} and
+          {cautions === 1 ? " does" : " do"} not appear in the exception count below —{" "}
+          {cautions === 1 ? "it waits" : "they wait"} under{" "}
+          <strong>&ldquo;Ready to confirm — read the note on each before signing&rdquo;</strong> in the record list,
+          where each one shows its own requirement, its source page and its own review action.
+        </p>
+      )}
+      {/* Exactly what will be marked reviewed — itemized, citable, printable. */}
+      <BatchManifest
+        caseId={caseId}
+        records={(plan.manifestRecords ?? []) as never}
+        events={(plan.manifestEvents ?? []) as never}
+        defaultOpen={armed}
+      />
       <p className="mt-1 text-[11px] text-ink-600">
         {skipped > 0 ? (
           <><strong>{skipped}</strong> exception{skipped === 1 ? "" : "s"} will NOT be covered and stay below for individual
@@ -983,10 +1101,11 @@ function BatchConfirmPanel({ caseId, onConfirmed }: { caseId: string; onConfirme
       {armed ? (
         <div className="mt-2 rounded border border-teal-300 bg-white p-2">
           <p className="text-[11px] text-ink-800">
-            You are recording a <strong>factual records review</strong> of {eligible} encounter{eligible === 1 ? "" : "s"} and{" "}
-            {events} chronology entr{events === 1 ? "y" : "ies"} as you see them now. This is not a verification and not a
+            You are recording a <strong>factual records review</strong> of the {eligible} encounter{eligible === 1 ? "" : "s"} and{" "}
+            {events} chronology entr{events === 1 ? "y" : "ies"} listed above, as they read now. This is not a verification and not a
             professional attestation. It changes no extracted fact, citation, date, provider or summary. Document, page and
-            case-level findings continue to block a final export until they are resolved.
+            case-level findings continue to block a final export until they are resolved. If any of these records has moved
+            since the list was drawn, the whole confirmation is refused and you will be shown the new list.
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-2">
             <button className="btn-primary px-2 py-0.5 text-[11px]" disabled={working} onClick={() => void confirm()}>
@@ -1000,7 +1119,11 @@ function BatchConfirmPanel({ caseId, onConfirmed }: { caseId: string; onConfirme
           Confirm all clean records and chronology
         </button>
       )}
-      {outcome && <p className="mt-1.5 text-[11px] text-ink-700">{outcome}</p>}
+      {outcome && (
+        <div className="mt-1.5">
+          <ActionStatusBar status={outcome} onDismiss={() => setOutcome(null)} />
+        </div>
+      )}
     </div>
   );
 }
@@ -1020,13 +1143,18 @@ function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, cal
   }, [data.id]);
   useEffect(() => { void loadExtractions(); }, [loadExtractions]);
 
+  // Same recovery contract as every other action: a rejected upload used to
+  // fall through `alert("Upload failed")` — or, when the fetch itself rejected,
+  // through nothing at all.
+  const [uploadStatus, setUploadStatus] = useState<ActionStatus | null>(null);
   async function upload(files: FileList | null) {
     if (!files?.length) return;
     const fd = new FormData();
     Array.from(files).forEach((f) => fd.append("files", f));
-    const res = await fetch(`/api/cases/${data.id}/documents`, { method: "POST", body: fd });
-    if (res.ok) location.reload();
-    else alert("Upload failed");
+    const outcome = await runRequest(`/api/cases/${data.id}/documents`, "POST", fd, { tag: "upload" });
+    if (outcome.status?.kind === "error") { setUploadStatus(outcome.status); return; }
+    setUploadStatus(null);
+    location.reload();
   }
 
   const docs: AnyRec[] = data.documents;
@@ -1042,10 +1170,11 @@ function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, cal
 
   return (
     <div className="space-y-4">
+      <ActionStatusBar status={uploadStatus} onDismiss={() => setUploadStatus(null)} />
       {mayUpload && (
         <div className="card flex flex-wrap items-center gap-3 p-4">
           <label className="btn-outline cursor-pointer">
-            <Upload className="h-4 w-4" /> Upload Records
+            <Upload aria-hidden="true" className="h-4 w-4" /> Upload Records
             <input type="file" multiple className="hidden" onChange={(e) => upload(e.target.files)} />
           </label>
           {canEdit && (
@@ -1138,15 +1267,31 @@ function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, cal
                           ))}
                         </select>
                       ) : (
-                        <button
-                          type="button"
-                          title={`${TYPE_LABEL[d.type] ?? d.type.replace(/_/g, " ")}${canEdit ? " — click to reassign" : ""}`}
-                          onClick={() => canEdit && setEditingId(d.id)}
-                          className={cn("group relative mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-brand-50 text-brand-700", canEdit && "cursor-pointer hover:bg-brand-100")}
-                        >
-                          <TypeIcon className="h-5 w-5" />
-                          {canEdit && <Pencil className="absolute -bottom-1 -right-1 h-3.5 w-3.5 rounded-full bg-white p-0.5 text-ink-400 opacity-0 shadow-sm transition-opacity group-hover:opacity-100" />}
-                        </button>
+                        // A reader without edit rights got a <button> whose
+                        // onClick did nothing: announced as actionable,
+                        // reachable by keyboard, and inert on arrival. It is
+                        // the type LABEL for them, and a control only for
+                        // somebody who can actually change it.
+                        canEdit ? (
+                          <button
+                            type="button"
+                            aria-label={`Record type: ${TYPE_LABEL[d.type] ?? d.type.replace(/_/g, " ")}. Reassign.`}
+                            title={`${TYPE_LABEL[d.type] ?? d.type.replace(/_/g, " ")} — click to reassign`}
+                            onClick={() => setEditingId(d.id)}
+                            className="focusable group relative mt-0.5 grid h-9 w-9 shrink-0 cursor-pointer place-items-center rounded-lg bg-brand-50 text-brand-700 hover:bg-brand-100"
+                          >
+                            <TypeIcon aria-hidden="true" className="h-5 w-5" />
+                            <Pencil aria-hidden="true" className="absolute -bottom-1 -right-1 h-3.5 w-3.5 rounded-full bg-white p-0.5 text-ink-400 opacity-0 shadow-sm transition-opacity group-hover:opacity-100" />
+                          </button>
+                        ) : (
+                          <span
+                            title={TYPE_LABEL[d.type] ?? d.type.replace(/_/g, " ")}
+                            className="relative mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-brand-50 text-brand-700"
+                          >
+                            <TypeIcon aria-hidden="true" className="h-5 w-5" />
+                            <span className="sr-only">Record type: {TYPE_LABEL[d.type] ?? d.type.replace(/_/g, " ")}</span>
+                          </span>
+                        )
                       )}
 
                       {/* Middle: filename toggles the expandable detail + summary. */}
@@ -1310,10 +1455,11 @@ function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, cal
                           href={`/api/cases/${data.id}/documents/${d.id}/view`}
                           target="_blank"
                           rel="noopener noreferrer"
-                          title="Open document"
-                          className="rounded-md p-1.5 text-ink-400 hover:bg-ink-100 hover:text-brand-700"
+                          title={`Open ${d.filename}`}
+                          aria-label={`Open ${d.filename} in a new tab`}
+                          className="focusable rounded-md p-1.5 text-ink-400 hover:bg-ink-100 hover:text-brand-700"
                         >
-                          <ExternalLink className="h-4 w-4" />
+                          <ExternalLink aria-hidden="true" className="h-4 w-4" />
                         </a>
                         {canEdit && (confirmDelDoc === d.id ? (
                           <span className="flex items-center gap-1.5">
@@ -1321,8 +1467,8 @@ function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, cal
                             <button className="text-xs font-medium text-ink-500 hover:underline" onClick={() => setConfirmDelDoc(null)}>Cancel</button>
                           </span>
                         ) : (
-                          <button className="rounded-md p-1.5 text-ink-300 hover:bg-ink-100 hover:text-red-600" title={`Remove ${d.filename}`} aria-label={`Remove ${d.filename}`} onClick={() => setConfirmDelDoc(d.id)}>
-                            <X className="h-4 w-4" />
+                          <button type="button" className="focusable rounded-md p-1.5 text-ink-300 hover:bg-ink-100 hover:text-red-600" title={`Remove ${d.filename}`} aria-label={`Remove ${d.filename}`} onClick={() => setConfirmDelDoc(d.id)}>
+                            <X aria-hidden="true" className="h-4 w-4" />
                           </button>
                         ))}
                       </div>
@@ -1339,18 +1485,27 @@ function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, cal
   );
 }
 
+/**
+ * A filter chip is a TOGGLE, and it was announced as an ordinary button — so a
+ * screen-reader user could not tell which filter was applied, only that several
+ * buttons existed. `aria-pressed` states it, and the accessible name carries the
+ * count, which is otherwise a bare number floating beside the label.
+ */
 function FilterChip({ label, count, active, onClick, icon: Icon }: { label: string; count: number; active: boolean; onClick: () => void; icon?: LucideIcon }) {
   return (
     <button
+      type="button"
+      aria-pressed={active}
+      aria-label={`${label}, ${count} item${count === 1 ? "" : "s"}`}
       onClick={onClick}
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-colors",
+        "focusable inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-medium transition-colors",
         active ? "bg-brand-600 text-white" : "bg-ink-100 text-ink-600 hover:bg-ink-200",
       )}
     >
-      {Icon && <Icon className="h-3.5 w-3.5" />}
+      {Icon && <Icon aria-hidden="true" className="h-3.5 w-3.5" />}
       {label}
-      <span className={cn("rounded-full px-1.5 text-[10px] font-semibold", active ? "bg-white/20" : "bg-white text-ink-500")}>{count}</span>
+      <span aria-hidden="true" className={cn("rounded-full px-1.5 text-[10px] font-semibold", active ? "bg-white/20" : "bg-white text-ink-500")}>{count}</span>
     </button>
   );
 }
@@ -1407,7 +1562,10 @@ function ChronologyPanel({ data, canEdit, canVerify = false, call }: { data: Any
   const years = [...new Set(events.map((e) => String(e.eventDate).slice(0, 4)))].sort();
   const selected = filtered.find((e) => e.id === selectedId) ?? filtered[0] ?? null;
 
-  const excluded = Math.max(0, data.documents.length - events.length);
+  // Distinct source documents actually represented — see
+  // lib/records/chronologyCoverage.ts for why `documents.length - events.length`
+  // was not a quantity.
+  const coverage = chronologyCoverage(data.documents as never, events as never);
   const jumpToYear = (y: string) => {
     const target = filtered.find((e) => String(e.eventDate).startsWith(y));
     if (target) {
@@ -1434,8 +1592,8 @@ function ChronologyPanel({ data, canEdit, canVerify = false, call }: { data: Any
                   {e.dateInferred && <Badge tone="amber">date inferred</Badge>}
                   {e.edited && <Badge tone="amber">edited</Badge>}
                   {canEdit && (
-                    <button className="ml-auto text-ink-300 hover:text-ink-700" onClick={() => { setEditing(e.id); setDraft(e.summary); }}>
-                      <Pencil className="h-3.5 w-3.5" />
+                    <button type="button" title="Edit this summary" aria-label={`Edit the summary of the ${lcpDate(e.eventDate)} entry`} className="focusable ml-auto rounded text-ink-300 hover:text-ink-700" onClick={() => { setEditing(e.id); setDraft(e.summary); }}>
+                      <Pencil aria-hidden="true" className="h-3.5 w-3.5" />
                     </button>
                   )}
                 </div>
@@ -1443,8 +1601,8 @@ function ChronologyPanel({ data, canEdit, canVerify = false, call }: { data: Any
                 {editing === e.id ? (
                   <div className="mt-2 flex gap-2">
                     <input className="input py-1" value={draft} onChange={(ev) => setDraft(ev.target.value)} />
-                    <button className="text-emerald-600" onClick={async () => { await call(`/api/cases/${data.id}/chronology/${e.id}`, "PATCH", { summary: draft }); setEditing(null); }}><Check className="h-4 w-4" /></button>
-                    <button className="text-ink-400" onClick={() => setEditing(null)}><X className="h-4 w-4" /></button>
+                    <button type="button" title="Save this summary" aria-label="Save the edited summary" className="focusable rounded text-emerald-600" onClick={async () => { await call(`/api/cases/${data.id}/chronology/${e.id}`, "PATCH", { summary: draft }); setEditing(null); }}><Check aria-hidden="true" className="h-4 w-4" /></button>
+                    <button type="button" title="Cancel" aria-label="Cancel editing this summary" className="focusable rounded text-ink-400" onClick={() => setEditing(null)}><X aria-hidden="true" className="h-4 w-4" /></button>
                   </div>
                 ) : (
                   /* Factual encounter summary FIRST, then the labeled clinical
@@ -1536,11 +1694,7 @@ function ChronologyPanel({ data, canEdit, canVerify = false, call }: { data: Any
 
   return (
     <div className="space-y-3">
-      <p className="text-sm text-ink-500">
-        {events.length} pivotal {events.length === 1 ? "event" : "events"} — those bearing on the diagnoses and future care — screened from {data.documents.length}{" "}
-        {data.documents.length === 1 ? "record" : "records"}
-        {excluded > 0 ? ` (${excluded} without a bearing on the complaint were excluded)` : ""}.
-      </p>
+      <p className="text-sm text-ink-500">{coverageSentence(coverage, events.length)}</p>
 
       {/* One-time provenance upgrade: reviews that predate content
           fingerprinting were staled beside fresh drafts. Shown only while any
@@ -1745,19 +1899,28 @@ function SocInputControls({ caseId, conditionName, call }: { caseId: string; con
     if (r) { setText(""); setTitle(""); setUrl(""); setMode(null); }
   }
 
+  const [uploadStatus, setUploadStatus] = useState<ActionStatus | null>(null);
   async function upload(file: File) {
-    setUploading(true);
     const fd = new FormData();
     fd.append("conditionName", conditionName);
     fd.append("file", file);
-    const res = await fetch(`/api/cases/${caseId}/soc`, { method: "POST", body: fd });
-    setUploading(false);
-    if (!res.ok) { const e = await res.json().catch(() => ({})); alert(e.error ?? "Upload failed"); return; }
-    router.refresh();
+    const outcome = await runRequest(`/api/cases/${caseId}/soc`, "POST", fd, {
+      tag: "soc-upload",
+      // `uploading` drives the control's disabled state, so it must clear on
+      // every path — including a rejected fetch, which used to skip it.
+      setBusy: (tag) => setUploading(tag !== null),
+      onSuccess: () => router.refresh(),
+    });
+    setUploadStatus(outcome.status);
   }
 
   return (
     <div className="mt-3 border-t border-ink-100 pt-3">
+      {uploadStatus && (
+        <div className="mb-2">
+          <ActionStatusBar status={uploadStatus} onDismiss={() => setUploadStatus(null)} />
+        </div>
+      )}
       {mode === null ? (
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-xs text-ink-500">Add to this analysis:</span>
@@ -1886,7 +2049,7 @@ function StandardOfCarePanel({ data, canEdit, call }: { data: AnyRec; canEdit: b
                           {g.userProvided && (
                             <span className="flex shrink-0 items-center gap-1">
                               <Badge tone="brand">added by reviewer</Badge>
-                              {canEdit && g.userInputId && <button className="text-ink-300 hover:text-red-600" title="Remove source" onClick={() => call(`/api/cases/${data.id}/soc/${g.userInputId}`, "DELETE", undefined, "soc")}><X className="h-3.5 w-3.5" /></button>}
+                              {canEdit && g.userInputId && <button type="button" className="focusable rounded text-ink-300 hover:text-red-600" title="Remove this source" aria-label="Remove this source" onClick={() => call(`/api/cases/${data.id}/soc/${g.userInputId}`, "DELETE", undefined, "soc")}><X aria-hidden="true" className="h-3.5 w-3.5" /></button>}
                             </span>
                           )}
                         </div>
@@ -1926,7 +2089,7 @@ function StandardOfCarePanel({ data, canEdit, call }: { data: AnyRec; canEdit: b
                     <li key={nn.id} className="flex items-start gap-2 text-xs text-ink-700">
                       <span className="mt-0.5 text-ink-300">•</span>
                       <span className="flex-1">{nn.text}</span>
-                      {canEdit && <button className="text-ink-300 hover:text-red-600" title="Remove" onClick={() => call(`/api/cases/${data.id}/soc/${nn.id}`, "DELETE", undefined, "soc")}><X className="h-3.5 w-3.5" /></button>}
+                      {canEdit && <button type="button" className="focusable rounded text-ink-300 hover:text-red-600" title="Remove this note" aria-label="Remove this note" onClick={() => call(`/api/cases/${data.id}/soc/${nn.id}`, "DELETE", undefined, "soc")}><X aria-hidden="true" className="h-3.5 w-3.5" /></button>}
                     </li>
                   ))}
                 </ul>
@@ -2637,7 +2800,23 @@ function FutureCarePanel({ data, canEdit, canAddEvidence = false, attorneyView =
             <div className="grid h-8 w-8 place-items-center rounded-lg bg-brand-50 text-brand-700"><g.icon className="h-4.5 w-4.5" /></div>
             <h3 className="text-sm font-semibold text-ink-900">{g.title}</h3>
             <span className="text-xs text-ink-400">{g.items.length} item{g.items.length === 1 ? "" : "s"}</span>
-            {!attorneyView && <span className="ml-auto text-xs font-medium text-brand-800">{formatMoney(g.items.reduce((s: number, it: AnyRec) => s + it.presentValue, 0))} PV</span>}
+            {/* The subtotal is SPLIT, because the case total is. Summing every
+                item in the group produced a heading the headline total
+                contradicted, with no way to see where the difference came
+                from. */}
+            {!attorneyView && (() => {
+              const sub = categorySubtotal(g.items as never);
+              const caption = membershipCaption(sub);
+              return (
+                <span className="ml-auto text-right text-xs">
+                  <span className="font-medium text-brand-800">{formatMoney(sub.supported.presentValue)} PV supported</span>
+                  {sub.candidate.items > 0 && (
+                    <span className="ml-2 text-ink-500">+{formatMoney(sub.candidate.presentValue)} disclosed only</span>
+                  )}
+                  {caption && <span className="block text-[11px] text-ink-400">{caption}</span>}
+                </span>
+              );
+            })()}
           </div>
           <div className="space-y-2">
       {g.items.map((it: AnyRec) => (
@@ -2654,7 +2833,19 @@ function FutureCarePanel({ data, canEdit, canAddEvidence = false, attorneyView =
               {/* The badges wrap as one group, so they break together or not
                   at all. */}
               <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                <Badge tone={PROB_TONE[it.probability]}>{it.probability.toLowerCase()}</Badge>
+                {/* The canonical support class leads, in BOTH densities: it is
+                    the only badge here that determines whether this item's
+                    money reaches the headline total. `probability` reads like
+                    that claim and is not it. */}
+                {(() => {
+                  const badge = supportBadgeFor(it);
+                  return (
+                    <Badge tone={badge.tone} title={badge.title}>
+                      {compact ? badge.short : badge.label}
+                    </Badge>
+                  );
+                })()}
+                <Badge tone={PROB_TONE[it.probability]} title="The engine's likelihood rating. It does not decide whether this item enters the supported total.">{it.probability.toLowerCase()}</Badge>
                 {!compact && <Badge tone={VULN_TONE[it.defenseVulnerability]} title="How exposed this item is to defense challenge, from the engine's weakening-evidence analysis">defense vulnerability: {it.defenseVulnerability.toLowerCase()}</Badge>}
                 {(it.origin === "PLANNER_ADDED" || it.origin === "PHYSICIAN_ADDED") && <Badge tone="brand" title="This item was added manually, not generated from the care templates">{it.origin === "PHYSICIAN_ADDED" ? "physician-added" : "manually added"}</Badge>}
                 <Badge tone={PHYS_TONE[it.physicianStatus]}>MD: {it.physicianStatus.toLowerCase()}</Badge>
@@ -2686,6 +2877,37 @@ function FutureCarePanel({ data, canEdit, canAddEvidence = false, attorneyView =
           </div>
           {openIds.has(it.id) && (
             <div className="mt-3 border-t border-ink-100 pt-3">
+              {/* Says, in the expanded state, the same thing the badge says in
+                  the collapsed one — from the same function, so they cannot
+                  drift apart. */}
+              <p className={cn("mb-3 rounded-md px-2.5 py-1.5 text-xs", totalsMembership(it) === "SUPPORTED" ? "bg-emerald-50 text-emerald-900" : "bg-ink-50 text-ink-700")}>
+                <span className="font-medium">Support: </span>{membershipExplanation(it)}
+              </p>
+              {/* The attorney view leads with a concise proof card — can I
+                  prove this item, and what will the other side say — built
+                  from the item's OWN accepted evidence. The full clinical
+                  dossier follows for anyone who needs it; the role boundary
+                  and pricing redaction are unchanged, and nothing here
+                  renders money. */}
+              {attorneyView && (() => {
+                // One derivation, read twice: the dossier is not cheap, and
+                // building it per field would have the card and the panel
+                // below disagree if anything in it were nondeterministic.
+                const dossier = dossierForItem(it, data);
+                return (
+                  <div className="mb-3">
+                    <ProofCardView
+                      card={buildProofCard({
+                        item: it as never,
+                        ledger: (dossier.ledger ?? []) as never,
+                        unknowns: dossier.unknowns ?? [],
+                        basisState: basisStateFor(it, data),
+                      })}
+                      caseId={data.id}
+                    />
+                  </div>
+                );
+              })()}
               <RecommendationDossierView
                 dossier={dossierForItem(it, data)}
                 assessment={assessmentForItem(it, data)}
@@ -2908,10 +3130,16 @@ function CostsPanel({ data, assumptions, totals, canEdit, canApprove, call, focu
   }, [focusId, data.futureCareItems]);
   if (data.futureCareItems.length === 0) return <Empty>Run the AI pipeline to project costs.</Empty>;
   const costCategories = [...new Set(data.futureCareItems.map((it: AnyRec) => it.category as string))].sort() as string[];
-  const notTotaled = (it: AnyRec) => it.contingencyOnly || it.physicianStatus === "REJECTED";
   const costRows = (data.futureCareItems as AnyRec[])
     .filter((it) => !costCat || it.category === costCat)
     .sort((x, y) => (y[costSort] ?? 0) - (x[costSort] ?? 0));
+  // Membership in the total is `supportClass`, and only `supportClass` — the
+  // same rule `computePlanTotals` applies on the server to produce the figure
+  // in the Total row below. The previous rule here was
+  // `contingencyOnly || physicianStatus === "REJECTED"`, which rendered a
+  // CANDIDATE_REVIEW item at full opacity under a caption promising it was in
+  // the total. It was not.
+  const visibleSubtotal = categorySubtotal(costRows as never);
   return (
     <div className="space-y-4">
       <div className="card p-5">
@@ -2974,7 +3202,8 @@ function CostsPanel({ data, assumptions, totals, canEdit, canApprove, call, focu
           <option value="annualCost">Sort: annual</option>
         </select>
         <span className="ml-auto text-meta">
-          {costRows.length} of {data.futureCareItems.length} rows · <span className="text-emerald-700">included</span> rows enter totals; <span className="text-ink-500">contingent/excluded</span> rows are disclosed only
+          {costRows.length} of {data.futureCareItems.length} rows · a row enters the total when the record or a
+          professional supports it; <span className="text-ink-500">candidate and contingent</span> rows are disclosed only
         </span>
       </div>
       <div className="card overflow-hidden">
@@ -2985,12 +3214,16 @@ function CostsPanel({ data, assumptions, totals, canEdit, canApprove, call, focu
           <tbody className="divide-y divide-ink-100">
             {costRows.map((it: AnyRec) => (
               <Fragment key={it.id}>
-                <tr id={`fc-${it.id}`} className={cn("scroll-mt-24", notTotaled(it) && "opacity-60", focusId === it.id && "bg-amber-50 ring-2 ring-inset ring-amber-400")}>
+                <tr id={`fc-${it.id}`} className={cn("scroll-mt-24", isDeEmphasised(it) && "opacity-60", focusId === it.id && "bg-amber-50 ring-2 ring-inset ring-amber-400")}>
                   <td className="px-4 py-2 text-ink-800">
                     {it.service}
-                    {it.contingencyOnly ? <Badge tone="neutral" className="ml-2" title="Disclosed as a contingency — not entered into totals">contingency</Badge>
-                      : it.physicianStatus === "REJECTED" ? <Badge tone="danger" className="ml-2" title="Physician rejected — excluded from totals">excluded</Badge>
-                      : it.startTrigger ? <Badge tone="info" className="ml-2" title={`Conditional: ${it.startTrigger}`}>conditional</Badge> : null}
+                    {/* The canonical class decides the row's state. Contingency
+                        and physician disposition are still shown — they are
+                        real facts about the item — but as secondary notes, not
+                        as the totaling rule they were standing in for. */}
+                    {(() => { const b = supportBadgeFor(it); return <Badge tone={b.tone} className="ml-2" title={b.title}>{b.short}</Badge>; })()}
+                    {it.contingencyOnly && <Badge tone="neutral" className="ml-1" title="Disclosed as a contingency pathway">contingency</Badge>}
+                    {it.physicianStatus === "REJECTED" && <Badge tone="danger" className="ml-1" title="Physician rejected this recommendation">MD rejected</Badge>}
                   </td>
                   <td className="px-4 py-2 text-xs text-ink-500">{it.isLifetime ? "lifetime" : it.durationYears ? `${it.durationYears}y recurring` : "one-time"}</td>
                   <td className="px-4 py-2 tabular-nums text-ink-600">{formatMoney(it.annualCost)}</td>
@@ -3009,8 +3242,11 @@ function CostsPanel({ data, assumptions, totals, canEdit, canApprove, call, focu
                         <p><span className="font-medium text-ink-500">Cost range (low–high):</span> {formatMoney(it.lowCost)} – {formatMoney(it.highCost)}</p>
                         <p className="sm:col-span-2"><span className="font-medium text-ink-500">Evidence basis:</span> {it.evidenceStrength || "—"}{it.literatureSupport ? ` — ${it.literatureSupport}` : ""}</p>
                         <p><span className="font-medium text-ink-500">Start / trigger:</span> {it.startTrigger || "From date of report"}</p>
-                        <p><span className="font-medium text-ink-500">Physician review:</span> {it.physicianStatus === "APPROVED" ? "Physician approved" : it.physicianStatus === "MODIFIED" ? "Physician approved with modification" : it.physicianStatus === "REJECTED" ? "Physician rejected — excluded from totals" : "Awaiting physician review"}</p>
-                        <p><span className="font-medium text-ink-500">Probability:</span> {String(it.probability).toLowerCase()}{it.probability === "SPECULATIVE" || it.probability === "NOT_SUPPORTED" ? " — disclosed, not totaled" : ""}</p>
+                        {/* The rule, stated once, from the same function the
+                            server totals with. */}
+                        <p className="sm:col-span-2"><span className="font-medium text-ink-500">Support &amp; totals:</span> {membershipExplanation(it)}</p>
+                        <p><span className="font-medium text-ink-500">Physician review:</span> {it.physicianStatus === "APPROVED" ? "Physician approved" : it.physicianStatus === "MODIFIED" ? "Physician approved with modification" : it.physicianStatus === "REJECTED" ? "Physician rejected" : "Awaiting physician review"}</p>
+                        <p><span className="font-medium text-ink-500">Probability:</span> {String(it.probability).toLowerCase()} <span className="text-ink-400">— a likelihood rating; it does not decide totals</span></p>
                         <p><span className="font-medium text-ink-500">Category:</span> {String(it.category).replace(/_/g, " ").toLowerCase()}</p>
                         <p className="sm:col-span-2"><span className="font-medium text-ink-500">Economic assumptions:</span> discount {(a.discountRate * 100).toFixed(1)}%, medical inflation {(a.medicalInflation * 100).toFixed(1)}%, geographic factor {a.geographicFactor.toFixed(2)} → present value {formatMoney(it.presentValue)}.</p>
                       </div>
@@ -3019,7 +3255,21 @@ function CostsPanel({ data, assumptions, totals, canEdit, canApprove, call, focu
                 )}
               </Fragment>
             ))}
-            <tr className="bg-ink-50 font-bold"><td className="px-4 py-2">Total — included items (all categories)</td><td /><td /><td /><td className="px-4 py-2 tabular-nums">{formatMoney(totals.totalLifetime)}</td><td className="px-4 py-2 tabular-nums text-brand-800">{formatMoney(totals.totalPresentValue)}</td><td /></tr>
+            {/* Two rows, because there are two figures and conflating them is
+                what made a candidate look like damages. The supported row is
+                the SERVER's total for the whole case and never changes with
+                the filter above; the disclosed-only row is the visible
+                selection, and says so. */}
+            <tr className="bg-ink-50 font-bold"><td className="px-4 py-2">Supported total — all categories</td><td /><td /><td /><td className="px-4 py-2 tabular-nums">{formatMoney(totals.totalLifetime)}</td><td className="px-4 py-2 tabular-nums text-brand-800">{formatMoney(totals.totalPresentValue)}</td><td /></tr>
+            {visibleSubtotal.candidate.items > 0 && (
+              <tr className="bg-ink-50/60 text-ink-600">
+                <td className="px-4 py-2 text-xs font-medium">Disclosed only — {visibleSubtotal.candidate.items} candidate/contingent row{visibleSubtotal.candidate.items === 1 ? "" : "s"} shown, not in the total above</td>
+                <td /><td /><td />
+                <td className="px-4 py-2 text-xs tabular-nums">{formatMoney(visibleSubtotal.candidate.lifetimeCost)}</td>
+                <td className="px-4 py-2 text-xs tabular-nums">{formatMoney(visibleSubtotal.candidate.presentValue)}</td>
+                <td />
+              </tr>
+            )}
           </tbody>
         </table>
       </div>
@@ -3596,7 +3846,7 @@ function FindingList({ findings, onDelete, canEdit }: { findings: AnyRec[]; onDe
             {f.quote && <span className="mt-0.5 block italic text-ink-500">“{f.quote}”</span>}
             {f.interviewDate && <span className="text-[11px] text-ink-400"> — {formatDate(f.interviewDate)}</span>}
           </span>
-          {canEdit && <button className="text-ink-300 hover:text-red-600" title="Remove" onClick={() => onDelete(f.id)}><X className="h-3.5 w-3.5" /></button>}
+          {canEdit && <button type="button" className="focusable rounded text-ink-300 hover:text-red-600" title="Remove this finding" aria-label="Remove this finding" onClick={() => onDelete(f.id)}><X aria-hidden="true" className="h-3.5 w-3.5" /></button>}
         </li>
       ))}
     </ul>

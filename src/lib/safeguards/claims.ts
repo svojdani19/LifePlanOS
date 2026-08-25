@@ -307,7 +307,14 @@ export const SAFEGUARD_CLAIMS: SafeguardClaim[] = [
           // Exactly the content that was displayed, or nothing at all — the
           // WHOLE plan, not just the row set: a regrouping that redistributes
           // the same rows changes the dialog and must change the hash.
-          "manifestHashOf",
+          //
+          // The route no longer recomputes the hash from its own projection of
+          // the plan; that projection was a second shape which could, and did,
+          // drift from the manifest the panel renders. It compares the plan's
+          // own `manifestHash`, computed over the literal manifest lines —
+          // once cheaply before the write, and again from a plan re-derived
+          // inside the transaction, which is the enforcing comparison.
+          "fresh.plan.manifestHash !== input.expectedManifestHash",
           "the case changed after these counts were shown",
           // Chronology events carry no version column, so their CONTENT is
           // the version being confirmed.

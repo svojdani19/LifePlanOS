@@ -204,6 +204,11 @@ const makeEvent = (id: string, over: Record<string, unknown> = {}) => ({
   summary: `Follow-up visit ${id}; conservative care continued.`,
   sourceQuote: `verbatim excerpt behind ${id}`,
   sourcePage: 4,
+  // Exact lineage, as the current builder writes it. Eligibility is decided
+  // from THIS, not from source document plus service date — that key could not
+  // tell two same-day encounters in one document apart, so confirming either
+  // swept in the events of both.
+  sourceRowIds: ["a"],
   reviewedById: null,
   reviewedAt: null,
   ...over,
@@ -339,7 +344,10 @@ describe("an exception is never swept in", () => {
       makeRow("good", { encounterDate: new Date("2025-06-02T00:00:00Z") }),
     ];
     db.state.documents[0].segments = [{ rowIds: ["bad"] }, { rowIds: ["good"] }];
-    db.state.events = [makeEvent("contested"), makeEvent("clear", { eventDate: new Date("2025-06-02T00:00:00Z") })];
+    db.state.events = [
+      makeEvent("contested", { sourceRowIds: ["bad"] }),
+      makeEvent("clear", { eventDate: new Date("2025-06-02T00:00:00Z"), sourceRowIds: ["good"] }),
+    ];
     const plan = await preview();
     expect(plan.counts).toMatchObject({ events: 1, heldEvents: 1 });
     expect(plan.heldEventsByReason).toEqual({ RECORD_IN_QUESTION: 1 });
@@ -353,7 +361,7 @@ describe("an exception is never swept in", () => {
     // needed, the next confirmation covers them. That has to be true.
     db.state.rows = [makeRow("bad", { auditResult: "FAILED" })];
     db.state.documents[0].segments = [{ rowIds: ["bad"] }];
-    db.state.events = [makeEvent("waiting")];
+    db.state.events = [makeEvent("waiting", { sourceRowIds: ["bad"] })];
 
     const first = await preview();
     expect(first.counts).toMatchObject({ events: 0, heldEvents: 1 });
@@ -374,12 +382,14 @@ describe("an exception is never swept in", () => {
   it("holds a chronology draft nothing in the records supports", async () => {
     db.state.events = [
       makeEvent("supported"),
-      makeEvent("orphan", { sourceDocumentId: null }),
-      makeEvent("floating", { eventDate: new Date("2031-01-01T00:00:00Z") }),
+      // A legacy event, or one the regex path produced: nothing names a row.
+      makeEvent("orphan", { sourceDocumentId: null, sourceRowIds: null }),
+      // Names a row this case does not confirm.
+      makeEvent("floating", { eventDate: new Date("2031-01-01T00:00:00Z"), sourceRowIds: ["row-nobody-confirmed"] }),
     ];
     const plan = await preview();
     expect(plan.counts).toMatchObject({ events: 1, heldEvents: 2 });
-    expect(plan.heldEventsByReason).toEqual({ NO_SOURCE_CITATION: 1, NO_CONFIRMED_RECORD: 1 });
+    expect(plan.heldEventsByReason).toEqual({ NO_EXACT_LINEAGE: 1, NO_CONFIRMED_RECORD: 1 });
     await post({ expectedManifestHash: plan.manifestHash });
     expect(db.state.events.find((e) => e.id === "supported")!.reviewStatus).toBe("REVIEWED");
     expect(db.state.events.find((e) => e.id === "orphan")!.reviewStatus).toBe("AI_DRAFT");
@@ -756,14 +766,23 @@ describe("the final export gate, before and after", () => {
   it("still blocks while ONE unresolved exception sits beside the confirmed set", async () => {
     db.state.rows = [makeRow("a"), makeRow("bad", { auditResult: "FAILED" })];
     db.state.documents[0].segments = [{ rowIds: ["a"] }, { rowIds: ["bad"] }];
+    // One entry per record, each naming the record it was built from. Under
+    // the old document-plus-date key these were indistinguishable, and the
+    // failed record held BOTH; exact lineage separates them, which is the
+    // point — a broken record holds its own entry, not its neighbour's.
+    db.state.events = [makeEvent("e-good", { sourceRowIds: ["a"] }), makeEvent("e-bad", { sourceRowIds: ["bad"] })];
     const plan = await preview();
+    expect(plan.counts).toMatchObject({ events: 1, heldEvents: 1 });
     await post({ expectedManifestHash: plan.manifestHash });
     const { complete, blockers } = await gate();
+    // The exception still blocks the final export, which is the invariant this
+    // test exists for.
     expect(complete).toBe(false);
     expect(blockers.some((b) => /ended the factual audit as failed/.test(b))).toBe(true);
-    // The chronology entries on that date were held back too — an exception
-    // holds its own day — so they are still drafts.
-    expect(db.state.events.every((e) => e.reviewStatus === "AI_DRAFT")).toBe(true);
+    // The entry built from the failed record was NOT confirmed…
+    expect(db.state.events.find((e) => e.id === "e-bad")!.reviewStatus).toBe("AI_DRAFT");
+    // …and the one built from the clean record was.
+    expect(db.state.events.find((e) => e.id === "e-good")!.reviewStatus).toBe("REVIEWED");
 
     // The reviewer resolves the exception through the individual path…
     const bad = db.state.rows.find((r) => r.id === "bad")!;
@@ -771,10 +790,11 @@ describe("the final export gate, before and after", () => {
     bad.editedFields = ["factualSummary"];
     // …the machine grade is history, so the record no longer blocks…
     expect((await gate()).blockers.some((b) => /ended the factual audit/.test(b))).toBe(false);
-    // …and the freed chronology entries are covered by confirming again.
+    // …and the freed chronology entry is covered by confirming again.
     const second = await preview();
-    expect(second.counts).toMatchObject({ events: 2, heldEvents: 0 });
+    expect(second.counts).toMatchObject({ events: 1, heldEvents: 0 });
     expect((await post({ expectedManifestHash: second.manifestHash })).status).toBe(200);
+    expect(db.state.events.find((e) => e.id === "e-bad")!.reviewStatus).toBe("REVIEWED");
     expect((await gate()).complete).toBe(true);
   });
 
@@ -967,5 +987,226 @@ describe("a race between the check and the write changes nothing", () => {
     const meta = db.state.audits[0].meta as { eventContentHashes: { id: string; contentHash: string }[] };
     expect(meta.eventContentHashes.map((e) => e.id).sort()).toEqual(["e1", "e2"]);
     expect(meta.eventContentHashes.every((e) => /^[0-9a-f]{32}$/.test(e.contentHash))).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE ITEMIZED MANIFEST
+//
+// The panel used to show counts and a button — "23 canonical encounters and 41
+// chronology entries are clean" — and `humanAuthoritative()` then treats every
+// row written by that click as something a person read. An aggregate cannot
+// establish human authority over items nobody displayed.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("the reviewer is shown exactly what they are confirming", () => {
+  it("returns one manifest line per record, not just a count", async () => {
+    const plan = await preview();
+    expect(plan.manifestRecords).toHaveLength((plan.counts as Record<string, number>).eligibleEncounters);
+    expect(plan.manifestEvents).toHaveLength((plan.counts as Record<string, number>).events);
+  });
+
+  it("each line carries the summary and the citation needed to check it", async () => {
+    const plan = await preview();
+    for (const line of plan.manifestRecords as { documentId: string; filename: string; rows: { summary: string; filename: string; contentHash: string }[] }[]) {
+      expect(line.documentId).toBe("doc-1");
+      expect(line.filename).toBe("records.pdf");
+      // The ASSERTION is per row, because a row is what gets written.
+      expect(line.rows.length).toBeGreaterThan(0);
+      for (const row of line.rows) {
+        expect(typeof row.summary).toBe("string");
+        expect(row.summary.length).toBeGreaterThan(0);
+        expect(row.filename).toBe("records.pdf");
+        expect(row.contentHash.length).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("the itemized rows are EXACTLY the rows the write touches", async () => {
+    const plan = await preview();
+    const listed = (plan.manifestRecords as { rows: { rowId: string }[] }[]).flatMap((r) => r.rows.map((row) => row.rowId)).sort();
+    await post({ expectedManifestHash: plan.manifestHash });
+    const written = db.state.rows.filter((r) => r.status === "REVIEWED").map((r) => r.id).sort();
+    expect(written).toEqual(listed);
+  });
+
+  it("the itemized events are EXACTLY the events the write touches", async () => {
+    const plan = await preview();
+    const listed = (plan.manifestEvents as { eventId: string }[]).map((e) => e.eventId).sort();
+    await post({ expectedManifestHash: plan.manifestHash });
+    const written = db.state.events.filter((e) => e.reviewStatus === "REVIEWED").map((e) => e.id).sort();
+    expect(written).toEqual(listed);
+  });
+
+  it("lists nothing, and confirms nothing, when nothing is eligible", async () => {
+    db.state.rows = [makeRow("bad", { auditResult: "FAILED" })];
+    db.state.documents[0].segments = [{ rowIds: ["bad"] }];
+    db.state.events = [];
+    const plan = await preview();
+    expect(plan.manifestRecords).toEqual([]);
+    expect(plan.manifestEvents).toEqual([]);
+    const res = await post({ expectedManifestHash: plan.manifestHash });
+    expect(res.status).not.toBe(200);
+    expect(db.state.rows[0].status).toBe("AI_AUDIT_PASSED");
+    expect(db.state.audits).toHaveLength(0);
+  });
+
+  it("a stale manifest is refused, and the refusal returns the NEW list", async () => {
+    const plan = await preview();
+    // A record is corrected between the list being drawn and the click.
+    db.state.rows.find((r) => r.id === "b")!.factualSummary = "Corrected after the list was drawn.";
+    const res = await post({ expectedManifestHash: plan.manifestHash });
+    expect(res.status).toBe(409);
+    expect(db.state.rows.every((r) => r.status === "AI_AUDIT_PASSED")).toBe(true);
+    expect(db.state.audits).toHaveLength(0);
+    // The reviewer can see the corrected line before deciding again.
+    const fresh = await preview();
+    expect(fresh.manifestHash).not.toBe(plan.manifestHash);
+    const correctedRow = (fresh.manifestRecords as { rows: { rowId: string; summary: string }[] }[])
+      .flatMap((r) => r.rows)
+      .find((row) => row.rowId === "b");
+    expect(correctedRow!.summary).toBe("Corrected after the list was drawn.");
+  });
+
+  it("requires records.verify to read the manifest at all", async () => {
+    tenant.denied = "records.verify";
+    const res = await GET(new Request("http://localhost/api"), params);
+    expect(res.status).toBe(403);
+  });
+
+  it("never lists a record from another case or firm", async () => {
+    db.state.rows.push(makeRow("other-case", { caseId: "case-2" }), makeRow("other-firm", { firmId: "firm-2" }));
+    const plan = await preview();
+    const listedRows = (plan.manifestRecords as { rows: { rowId: string }[] }[]).flatMap((r) => r.rows.map((row) => row.rowId));
+    expect(listedRows).not.toContain("other-case");
+    expect(listedRows).not.toContain("other-firm");
+  });
+
+  it("writes an audit event whose counts match the list that was displayed", async () => {
+    const plan = await preview();
+    await post({ expectedManifestHash: plan.manifestHash });
+    expect(db.state.audits).toHaveLength(1);
+    // The audit records the rows and events themselves, so the ledger names
+    // exactly what the reviewer was shown rather than a count of it.
+    const meta = db.state.audits[0].meta as { rows: { id: string }[]; events: string[] };
+    expect(meta.rows.map((r) => r.id).sort()).toEqual(
+      (plan.manifestRecords as { rows: { rowId: string }[] }[]).flatMap((r) => r.rows.map((row) => row.rowId)).sort(),
+    );
+    expect([...meta.events].sort()).toEqual((plan.manifestEvents as { eventId: string }[]).map((e) => e.eventId).sort());
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+describe("a caution is never confirmed by the clean batch", () => {
+  it("excludes a cautioned record and confirms only the genuinely clean ones", async () => {
+    db.state.rows = [makeRow("clean"), makeRow("caution", { auditResult: "EXTRACTION_INCOMPLETE" })];
+    db.state.documents[0].segments = [{ rowIds: ["clean"] }, { rowIds: ["caution"] }];
+    db.state.events = [];
+    const plan = await preview();
+    expect((plan.counts as Record<string, number>).cautionEncounters).toBe(1);
+    expect((plan.manifestRecords as { rows: { rowId: string }[] }[]).flatMap((r) => r.rows.map((row) => row.rowId))).toEqual(["clean"]);
+    await post({ expectedManifestHash: plan.manifestHash });
+    expect(db.state.rows.find((r) => r.id === "clean")!.status).toBe("REVIEWED");
+    // The cautioned record keeps its machine state: nobody has read it.
+    expect(db.state.rows.find((r) => r.id === "caution")!.status).toBe("AI_AUDIT_PASSED");
+  });
+
+  it("holds a chronology entry built from a cautioned record", async () => {
+    db.state.rows = [makeRow("clean"), makeRow("caution", { auditResult: "EXTRACTION_INCOMPLETE" })];
+    db.state.documents[0].segments = [{ rowIds: ["clean"] }, { rowIds: ["caution"] }];
+    db.state.events = [makeEvent("e-caution", { sourceRowIds: ["caution"] })];
+    const plan = await preview();
+    expect((plan.counts as Record<string, number>).events).toBe(0);
+    await post({ expectedManifestHash: plan.manifestHash });
+    expect(db.state.events[0].reviewStatus).toBe("AI_DRAFT");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// A CAUTION IS WORK, BUT IT IS NOT AN EXCEPTION
+//
+// Cautions were pushed into `reasons`, so they landed in `skippedEncounters`
+// and `skippedByReason`. The panel then reported the same records twice — "N
+// cautions" and "N exceptions" — and the zero-eligible state called them
+// exceptions outright, inflating the apparent review burden by exactly the
+// number of cautions.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("cautions are reported apart from exceptions", () => {
+  const withCaution = () => {
+    db.state.rows = [makeRow("clean"), makeRow("caution", { auditResult: "EXTRACTION_INCOMPLETE" })];
+    db.state.documents[0].segments = [{ rowIds: ["clean"] }, { rowIds: ["caution"] }];
+    db.state.events = [];
+  };
+
+  it("does not count a caution among the exceptions", async () => {
+    withCaution();
+    const plan = await preview();
+    const counts = plan.counts as Record<string, number>;
+    expect(counts.cautionEncounters).toBe(1);
+    // The number that was double-counted.
+    expect(counts.skippedEncounters).toBe(0);
+    expect(plan.skippedByReason).toEqual({});
+  });
+
+  it("reports the caution on its own channel, with its own requirement", async () => {
+    withCaution();
+    const plan = await preview();
+    expect(plan.cautionsByReason).toEqual({ DOCUMENT_INCOMPLETE: 1 });
+    expect(plan.cautionsByKind).toEqual({ DOCUMENT_INCOMPLETE: 1 });
+  });
+
+  it("still excludes the caution from the clean batch", async () => {
+    withCaution();
+    const plan = await preview();
+    await post({ expectedManifestHash: plan.manifestHash });
+    expect(db.state.rows.find((r) => r.id === "clean")!.status).toBe("REVIEWED");
+    expect(db.state.rows.find((r) => r.id === "caution")!.status).toBe("AI_AUDIT_PASSED");
+  });
+
+  it("records the split in the audit, so a ledger reader is not misled either", async () => {
+    withCaution();
+    const plan = await preview();
+    await post({ expectedManifestHash: plan.manifestHash });
+    const meta = db.state.audits[0].meta as Record<string, unknown>;
+    expect(meta.cautionEncounters).toBe(1);
+    expect(meta.cautionsByReason).toEqual({ DOCUMENT_INCOMPLETE: 1 });
+    expect(meta.skippedEncounters).toBe(0);
+    expect(meta.skippedByReason).toEqual({});
+  });
+
+  it("keeps a true exception counted as an exception", async () => {
+    db.state.rows = [makeRow("clean"), makeRow("bad", { auditResult: "FAILED" })];
+    db.state.documents[0].segments = [{ rowIds: ["clean"] }, { rowIds: ["bad"] }];
+    db.state.events = [];
+    const plan = await preview();
+    const counts = plan.counts as Record<string, number>;
+    expect(counts.skippedEncounters).toBe(1);
+    expect(counts.cautionEncounters).toBe(0);
+  });
+
+  it("counts a record carrying BOTH as an exception, once, not twice", async () => {
+    // An exception outranks a caution: it is the stronger statement, and
+    // reporting the record under both headings is the inflation being removed.
+    db.state.rows = [makeRow("both", { auditResult: "FAILED" }), makeRow("clean")];
+    db.state.documents[0].segments = [{ rowIds: ["both"] }, { rowIds: ["clean"] }];
+    db.state.events = [];
+    const plan = await preview();
+    const counts = plan.counts as Record<string, number>;
+    expect(counts.skippedEncounters + counts.cautionEncounters).toBe(1);
+  });
+
+  it("no click on this endpoint can mark a cautioned record reviewed", async () => {
+    withCaution();
+    const plan = await preview();
+    // The cautioned record appears nowhere in the manifest, so the aggregate
+    // action cannot reach it at all. The only path to it is the per-document
+    // surface, which shows its own requirement, its source page and its own
+    // review action — see the caution-bucket assertions in
+    // src/components/accessibility.test.ts.
+    const listed = (plan.manifestRecords as { rows: { rowId: string }[] }[]).flatMap((r) => r.rows.map((x) => x.rowId));
+    expect(listed).not.toContain("caution");
+    expect(plan.rowIds ?? []).not.toContain("caution");
+    await post({ expectedManifestHash: plan.manifestHash });
+    expect(db.state.rows.find((r) => r.id === "caution")!.status).toBe("AI_AUDIT_PASSED");
+    expect(db.state.rows.find((r) => r.id === "caution")!.reviewedById ?? null).toBeNull();
   });
 });

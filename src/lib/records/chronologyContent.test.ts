@@ -57,6 +57,7 @@ const event = (over: Partial<ChronologyContentRow> = {}): ChronologyContentRow =
   relevanceScore: 50,
   relatedness: "UNCLEAR",
   seriesMembers: null,
+  sourceRowIds: null,
   reviewStatus: "AI_DRAFT",
   edited: false,
   ...over,
@@ -95,6 +96,8 @@ const CHANGES: Partial<Record<(typeof CHRONOLOGY_CONTENT_FIELDS)[number], unknow
   relevanceScore: 90,
   relatedness: "RELATED",
   seriesMembers: [{ date: "2025-03-14", documentId: "doc-1", page: 4 }],
+  // Re-attribution to a different encounter must move the hash.
+  sourceRowIds: ["enc-other"],
   reviewStatus: "REVIEWED",
   edited: true,
 };
@@ -119,7 +122,7 @@ describe("every field that can reach the report moves the hash", () => {
       "functionalStatus", "impairmentRating", "clinicalSignificance", "pastMedicalHistory",
       "eventDate", "eventDateEnd", "eventType", "recordType", "specialty", "provider", "facility",
       "sourceDocumentId", "sourcePage", "sourceQuote", "sourceFingerprint", "extractionId",
-      "dateInferred", "relevanceScore", "relatedness", "seriesMembers",
+      "dateInferred", "relevanceScore", "relatedness", "seriesMembers", "sourceRowIds",
     ]) {
       expect(CHRONOLOGY_CONTENT_FIELDS as readonly string[], field).toContain(field);
     }

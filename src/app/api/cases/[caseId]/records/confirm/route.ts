@@ -6,7 +6,7 @@ import { CHRONOLOGY_REVIEW_WHERE, REVIEW_VISIBLE_WHERE } from "@/lib/records/enc
 import { encounterContentHash } from "@/lib/records/verifiedContent";
 import { attestationBlockers } from "@/lib/records/reviewIntegrity";
 import { caseLockKey } from "@/lib/records/buildRecords";
-import { manifestHashOf, planBatchConfirmation, CONFIRMABLE_ROW_STATES, type ConfirmableEvent } from "@/lib/records/batchConfirmation";
+import { planBatchConfirmation, CONFIRMABLE_ROW_STATES, type ConfirmableEvent } from "@/lib/records/batchConfirmation";
 import { CHRONOLOGY_CONTENT_SELECT, chronologyEventContentHash } from "@/lib/records/chronologyContent";
 import { ok, handleError } from "@/lib/api";
 
@@ -127,7 +127,10 @@ async function derivePlan(caseId: string, firmId: string, db: ConfirmClient = pr
     }) as Promise<ConfirmableEvent[]>,
   ]);
   const notes = record.documents.flatMap((d) => d.notes);
-  const plan = planBatchConfirmation({ notes, events });
+  // Filenames for the itemized manifest's citations, from the same structured
+  // record the notes came from — never a second read that could disagree.
+  const filenames = new Map(record.documents.map((d) => [d.documentId, d.filename]));
+  const plan = planBatchConfirmation({ notes, events, filenames });
   return { plan, record, events };
 }
 
@@ -144,8 +147,18 @@ export async function GET(_req: Request, { params: paramsPromise }: Params) {
     const { plan } = await derivePlan(params.caseId, ctx.firm.id);
     return ok({
       manifestHash: plan.manifestHash,
+      // ── The itemized manifest ────────────────────────────────────────────
+      // Exactly the records and chronology entries this confirmation will mark
+      // human-reviewed, each with the sentence being confirmed and the citation
+      // to find it. The counts below summarise this list; they used to stand in
+      // for it, and an aggregate cannot establish that a person saw anything.
+      manifestRecords: plan.manifestRecords,
+      manifestEvents: plan.manifestEvents,
       counts: plan.counts,
       skippedByReason: plan.skippedByReason,
+      // Separate from the exceptions above: a caution is work, but it is not a
+      // record that cannot be attested as it stands.
+      cautionsByReason: plan.cautionsByReason,
       heldByReason: plan.heldByReason,
       heldEventsByReason: plan.heldEventsByReason,
       cautionsByKind: plan.cautionsByKind,
@@ -216,22 +229,12 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
       }
       for (const problem of attestationBlockers(row as never)) problems.push({ id: row.id, reason: problem.reason });
     }
-    const previewEvents = (await prisma.chronologyEvent.findMany({
-      where: { id: { in: plan.eventIds }, caseId: params.caseId },
-      select: CHRONOLOGY_CONTENT_SELECT,
-    })) as ConfirmableEvent[];
-    const recheck = manifestHashOf({
-      encounters: plan.encounters,
-      rows: preview.map((r) => ({ id: r.id, contentHash: encounterContentHash(r), status: r.status })),
-      events: previewEvents,
-      counts: plan.counts,
-      cautionsByKind: plan.cautionsByKind,
-      skippedByReason: plan.skippedByReason,
-      heldByReason: plan.heldByReason,
-      heldEventsByReason: plan.heldEventsByReason,
-      basisCounts: plan.basisCounts,
-    });
-    if (recheck !== input.expectedManifestHash) {
+    // The plan was just re-derived from persisted state by `derivePlan` above,
+    // and its `manifestHash` is computed over the literal manifest lines it
+    // will render. Recomputing it here from a differently-shaped projection is
+    // what let the hash and the screen drift apart; the plan's own hash IS the
+    // identity of what would be displayed.
+    if (plan.manifestHash !== input.expectedManifestHash) {
       problems.push({ id: "", reason: "the displayed content changed before the confirmation was applied" });
     }
     if (problems.length) {
@@ -377,8 +380,11 @@ export async function POST(req: Request, { params: paramsPromise }: Params) {
               encounters: fresh.plan.encounters
                 .filter((e) => e.eligible)
                 .map((e) => ({ noteId: e.noteId, level: e.level, guidanceKind: e.guidanceKind, rowIds: e.rowIds })),
-              // What the reviewer was told they were also covering.
+              // Cautioned records, which this act did NOT cover and which are
+              // NOT counted among the exceptions below.
+              cautionEncounters: fresh.plan.counts.cautionEncounters,
               cautionsByKind: fresh.plan.cautionsByKind,
+              cautionsByReason: fresh.plan.cautionsByReason,
               // How each covered record's membership was established.
               groupingBasis: fresh.plan.basisCounts,
               // What this act did NOT cover, and why.
