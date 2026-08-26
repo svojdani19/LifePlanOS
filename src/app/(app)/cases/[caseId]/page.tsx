@@ -106,7 +106,29 @@ export default async function CaseDetailPage({ params: paramsPromise }: { params
   // whose bases may be perfectly intact — and the reader had no way to tell.
   const basisLoad = await loadRecordedBases(prisma as unknown as BasisStore, c.id);
   const recommendationBases = basisLoad.readable ? [...basisLoad.byItem.values()] : [];
-  const basisUnreadable = basisLoad.readable ? null : basisLoad.reason;
+  // ── The failure is disclosed; the DATABASE ERROR is not ──────────────────
+  //
+  // A failed read is not an empty result, so the fail-closed behaviour below is
+  // unchanged: `basisUnreadable` is still truthy, the panel still says the
+  // recorded basis could not be read, and final export is still blocked.
+  //
+  // What changed is what an ordinary user is shown. `reason` is a raw driver
+  // message — it was rendering
+  // "PrismaClientKnownRequestError: … The column `RecommendationBasis.
+  // specification` does not exist in the current database" across the top of a
+  // clinical workspace. That is an operator's diagnostic, not a reviewer's, and
+  // it tells an attacker about the schema. It goes to the server log, and to
+  // the page only for a platform administrator.
+  if (!basisLoad.readable) {
+    console.error(`[case ${c.id}] recommendation basis unreadable: ${basisLoad.reason}`);
+  }
+  //
+  // The detail is NOT sent to the client at all. `UserRole` has no platform
+  // operator — ADMIN is a firm owner, and a schema fault is a platform concern,
+  // not a firm one — so there is no role here that could honestly gate it. It
+  // stays in the server log until there is an authorised diagnostic surface to
+  // put it behind.
+  const basisUnreadable = basisLoad.readable ? null : true;
 
   const evidenceRows = (await prisma.recommendationEvidence
     ?.findMany({

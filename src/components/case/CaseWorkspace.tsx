@@ -138,6 +138,19 @@ import { runRequest, type ActionStatus } from "@/lib/ui/requestAction";
 import { ActionStatusBar } from "@/components/case/ActionStatusBar";
 import { BatchManifest } from "@/components/case/BatchManifest";
 import { ProofCardView } from "@/components/case/ProofCardView";
+// The Records tab's view model and presentation pieces. The decisions — which
+// mode to open, what state a document is in, how filters compose — are pure and
+// tested in lib/records/recordsView.ts; nothing here re-derives review state.
+import {
+  type RecordsDoc, type RecordsNote, type RecordsMode, type RecordsFilter,
+  RECORDS_MODES, MODE_LABEL, MODE_DESCRIPTION, EMPTY_FILTER,
+  defaultMode, applyFilter, taskCounts, taskStatusesOf, attentionCount, isFilterActive,
+} from "@/lib/records/recordsView";
+import {
+  ActionSummary, type ActionSummaryCard, TaskFilterBar, DocumentRow, DocumentActions,
+  DetailPane, type DetailTab, PageCoverage, type CoverageLine, ExcerptList, type Excerpt,
+  Paginated, GrainLine, StateNote,
+} from "@/components/case/records/RecordsWorkspace";
 
 // ── Loaded when the tab that needs them is opened ───────────────────────────
 // Every panel's code shipped with the first byte of the workspace, whichever
@@ -245,6 +258,12 @@ export function CaseWorkspace({
   // keyboard user must dismiss before doing anything else, and embedded
   // browsers — which is where this app is reviewed — block outright.
   const [status, setStatus] = useState<ActionStatus | null>(null);
+  // Reported up by the Records panel so the compact header can name the work
+  // without the header having to load the extraction payload itself.
+  const [recordsSummary, setRecordsSummary] = useState<{ documents: number; needsReview: number } | null>(null);
+  const [chromeOpen, setChromeOpen] = useState(false);
+  /** Records collapses the heavy header bands unless the reviewer opens them. */
+  const recordsChromeCollapsed = tab === "records" && !chromeOpen;
   const [focusId, setFocusId] = useState<string | null>(null);
   const [focusCat, setFocusCat] = useState<string | null>(null);
   const can = (p: Permission) => permissions.includes(p);
@@ -374,15 +393,22 @@ export function CaseWorkspace({
           case having none. Swallowed, it rendered every recommendation as
           though nothing had ever been recorded, on a case whose bases may be
           intact, with nothing on screen to say otherwise. */}
+      {/* One compact line, not a wall of red across a clinical workspace. The
+          fail-closed behaviour is unchanged — export is still blocked — but the
+          driver's message is an operator's diagnostic and now goes to the
+          server log, with the detail on screen only for a platform admin. */}
       {data.basisUnreadable ? (
-        <div className="mb-3 rounded-lg border border-red-300 bg-red-50 px-4 py-3">
-          <p className="text-sm font-semibold text-red-800">The recorded basis for this plan could not be read.</p>
-          <p className="mt-1 text-xs text-red-700">
-            Everything below is re-derived from the record as it stands now, and none of it has been checked against what was
-            recorded and approved. This is not a finding that these recommendations lack a recorded basis — that question was
-            never reached. Final export is blocked until the fault is resolved.
-          </p>
-          <p className="mt-1 font-mono text-[11px] text-red-600">{String(data.basisUnreadable)}</p>
+        <div role="alert" className="mb-3 flex flex-wrap items-baseline gap-x-2 gap-y-1 rounded-lg border border-red-300 bg-red-50 px-3 py-2">
+          <span className="text-xs font-semibold text-red-800">Case setup is incomplete — final report export is blocked.</span>
+          <details className="text-[11px] text-red-700">
+            <summary className="focusable inline cursor-pointer rounded underline">What this means</summary>
+            <p className="mt-1 max-w-3xl">
+              The recorded basis for this plan could not be read, so everything below is re-derived from the record as it
+              stands now and none of it has been checked against what was recorded and approved. This is not a finding that
+              these recommendations lack a recorded basis — that question was never reached.
+            </p>
+            <p className="mt-1 text-[10px] text-red-600">The technical detail is recorded in the server log.</p>
+          </details>
         </div>
       ) : null}
       {/* The outcome of the last action, announced rather than alerted. */}
@@ -435,9 +461,40 @@ export function CaseWorkspace({
           </div>
         </div>
 
-        {/* Full-width case metrics band */}
-        {hasPlan && (
-          <dl className={cn("mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-ink-200 bg-ink-200", attorneyView ? "sm:grid-cols-[1fr_2fr_1fr]" : "sm:grid-cols-5")} aria-label="Case metrics">
+        {/* ── Records works in a compact header ────────────────────────────
+            The metrics band, the pipeline and the workspace bar together took
+            most of the viewport, so a reviewer scrolling a record list saw
+            financial totals rather than records. On Records they collapse to
+            one line, with an explicit control to bring them back; every other
+            tab is unchanged. */}
+        {recordsChromeCollapsed && (
+          <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-ink-200 bg-ink-50/70 px-3 py-1.5">
+            <span className="text-xs font-medium text-ink-800">
+              {data.clientName} · Records
+              {recordsSummary ? ` · ${recordsSummary.documents} document${recordsSummary.documents === 1 ? "" : "s"}` : ""}
+              {recordsSummary && recordsSummary.needsReview > 0 ? ` · ${recordsSummary.needsReview} need review` : ""}
+            </span>
+            <button
+              type="button"
+              aria-expanded={chromeOpen}
+              onClick={() => setChromeOpen(true)}
+              className="focusable ml-auto rounded text-[11px] font-medium text-brand-700 hover:underline"
+            >
+              Show case metrics and pipeline
+            </button>
+          </div>
+        )}
+
+        {/* Full-width case metrics band.
+            The column count is derived from the number of tiles. It was fixed
+            at five while the non-attorney set is SIX whenever the supported and
+            candidate totals differ — so the sixth tile wrapped alone onto a
+            second row and left four empty cells stretching across the band. */}
+        {hasPlan && !recordsChromeCollapsed && (
+          <dl className={cn(
+            "mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-ink-200 bg-ink-200",
+            attorneyView ? "sm:grid-cols-[1fr_2fr_1fr]" : splitTotals ? "sm:grid-cols-3 lg:grid-cols-6" : "sm:grid-cols-3 lg:grid-cols-5",
+          )} aria-label="Case metrics">
             {(attorneyView
               ? [
                   // Side tiles stay compact; the lifetime estimate is the
@@ -480,7 +537,10 @@ export function CaseWorkspace({
 
         {/* Full-width workflow pipeline — each stage a demarcated segment with
             its own progress rail, so the sequence reads as distinct steps. */}
+        {!recordsChromeCollapsed && (
         <div className="mt-3 text-[10px] font-semibold uppercase tracking-wide text-ink-400">Pipeline</div>
+        )}
+        {!recordsChromeCollapsed && (
         <ol className="mt-1 flex w-full items-stretch overflow-x-auto" aria-label="Case workflow">
           {VISIBLE_FLOW.map((s, i) => {
             const sIdx = STAGES.indexOf(s.stage);
@@ -527,8 +587,10 @@ export function CaseWorkspace({
             );
           })}
         </ol>
+        )}
 
         {/* Secondary workspaces — a visually separate band of their own */}
+        {!recordsChromeCollapsed && (
         <div className="-mx-6 flex items-center gap-1.5 border-t border-ink-200 bg-ink-50/70 px-6 py-1.5" role="navigation" aria-label="Case workspaces">
           <span className="text-label mr-2.5 shrink-0">Workspaces</span>
           {SECONDARY.map((t) => (
@@ -549,11 +611,22 @@ export function CaseWorkspace({
             </button>
           ))}
         </div>
+        )}
+        {/* Collapsing it must not strand the reviewer: the way back is here. */}
+        {chromeOpen && tab === "records" && (
+          <button
+            type="button"
+            onClick={() => setChromeOpen(false)}
+            className="focusable my-1 rounded text-[11px] font-medium text-brand-700 hover:underline"
+          >
+            Hide case metrics and pipeline while reviewing records
+          </button>
+        )}
       </div>
 
       <div className="mt-5">
         {tab === "overview" && <IntakePanel data={data} canEdit={can("case.edit") || attorneyView} call={call} />}
-        {tab === "records" && <RecordsPanel data={data} canEdit={can("records.upload")} canUpload={attorneyView} canVerify={canVerifyRecords} call={call} busy={busy} />}
+        {tab === "records" && <RecordsPanel data={data} canEdit={can("records.upload")} canUpload={attorneyView} canVerify={canVerifyRecords} call={call} busy={busy} onSummary={setRecordsSummary} />}
         {tab === "chronology" && <ChronologyPanel data={data} canEdit={can("chronology.edit")} canVerify={canVerifyRecords} call={call} />}
         {tab === "causation" && <CausationPanel data={data} />}
         {/* Roster management stays behind case.edit (matching the server);
@@ -1128,24 +1201,39 @@ function BatchConfirmPanel({ caseId, onConfirmed }: { caseId: string; onConfirme
   );
 }
 
-function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, call, busy }: { data: AnyRec; canEdit: boolean; canUpload?: boolean; canVerify?: boolean; call: any; busy: string | null }) {
+function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, call, busy, onSummary }: { data: AnyRec; canEdit: boolean; canUpload?: boolean; canVerify?: boolean; call: any; busy: string | null; onSummary?: (s: { documents: number; needsReview: number }) => void }) {
   const mayUpload = canEdit || canUpload;
-  const [filter, setFilter] = useState<string>("All");
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [confirmDelDoc, setConfirmDelDoc] = useState<string | null>(null);
+  const [openDocId, setOpenDocId] = useState<string | null>(null);
+  const [detailTab, setDetailTab] = useState<DetailTab>("overview");
+  const [filter, setFilter] = useState<RecordsFilter>(EMPTY_FILTER);
+  const [modeState, setModeState] = useState<RecordsMode | null>(null);
   // Structured AI-extraction view (source-grounded pipeline): per-document
   // status + cited encounters + the undated review group.
   const [extractions, setExtractions] = useState<AnyRec | null>(null);
+  const [loadError, setLoadError] = useState<ActionStatus | null>(null);
+  const [planCounts, setPlanCounts] = useState<AnyRec | null>(null);
+
   const loadExtractions = useCallback(async () => {
-    const res = await fetch(`/api/cases/${data.id}/records/extractions`);
-    if (res.ok) setExtractions(await res.json());
+    const outcome = await runRequest<AnyRec>(`/api/cases/${data.id}/records/extractions`, "GET");
+    if (outcome.status?.kind === "error") { setLoadError(outcome.status); return; }
+    setLoadError(null);
+    setExtractions(outcome.data);
   }, [data.id]);
   useEffect(() => { void loadExtractions(); }, [loadExtractions]);
 
-  // Same recovery contract as every other action: a rejected upload used to
-  // fall through `alert("Upload failed")` — or, when the fetch itself rejected,
-  // through nothing at all.
+  // The action summary reads the SAME plan the batch confirmation derives, so
+  // the four cards and the confirmation cannot disagree about what is clean.
+  // Fetched separately from BatchConfirmPanel on purpose: the manifest a
+  // confirmation submits must be derived by the component that submits it.
+  const loadPlanCounts = useCallback(async () => {
+    const outcome = await runRequest<AnyRec>(`/api/cases/${data.id}/records/confirm`, "GET");
+    if (outcome.status?.kind !== "error") setPlanCounts(outcome.data);
+  }, [data.id]);
+  useEffect(() => { if (canVerify) void loadPlanCounts(); }, [loadPlanCounts, canVerify]);
+
+  const onReviewChanged = useCallback(() => { void loadExtractions(); void loadPlanCounts(); }, [loadExtractions, loadPlanCounts]);
+
   const [uploadStatus, setUploadStatus] = useState<ActionStatus | null>(null);
   async function upload(files: FileList | null) {
     if (!files?.length) return;
@@ -1158,35 +1246,181 @@ function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, cal
   }
 
   const docs: AnyRec[] = data.documents;
+  const structuredById = useMemo(
+    () => new Map(((extractions?.documents as AnyRec[] | undefined) ?? []).map((s) => [s.documentId, s])),
+    [extractions],
+  );
 
-  // Count per group; only surface filter chips for groups that have documents.
-  const groupCounts: Record<string, number> = {};
-  docs.forEach((d) => {
-    const g = TYPE_GROUP[d.type] ?? "Other";
-    groupCounts[g] = (groupCounts[g] ?? 0) + 1;
-  });
-  const activeGroups = DOC_TYPE_GROUPS.filter((g) => groupCounts[g.label] > 0);
-  const filtered = filter === "All" ? docs : docs.filter((d) => (TYPE_GROUP[d.type] ?? "Other") === filter);
+  /**
+   * One view row per uploaded document, carrying both halves: the `Document`
+   * row the page already had, and the structured record the extraction API
+   * adds. Merged here so every list, filter and count reads one shape.
+   */
+  const viewDocs: RecordsDoc[] = useMemo(
+    () => docs.map((d) => {
+      const s = structuredById.get(d.id);
+      return {
+        documentId: d.id,
+        filename: d.filename,
+        type: d.type,
+        pageCount: d.pageCount ?? null,
+        serviceDate: d.serviceDate ?? null,
+        serviceDateEnd: d.serviceDateEnd ?? null,
+        ocrConfidence: d.ocrConfidence ?? null,
+        flags: d.flags ?? null,
+        extraction: s?.extraction ?? { status: "NOT_RUN" },
+        notes: (s?.notes as RecordsNote[] | undefined) ?? [],
+        encounters: (s?.encounters as RecordsDoc["encounters"]) ?? [],
+        findings: (s?.findings as RecordsDoc["findings"]) ?? [],
+        pageFindings: (s?.pageFindings as RecordsDoc["pageFindings"]) ?? [],
+      } satisfies RecordsDoc;
+    }),
+    [docs, structuredById],
+  );
+
+  const rawById = useMemo(() => new Map(docs.map((d) => [d.id, d])), [docs]);
+
+  // Mode: an explicit choice in the URL wins; otherwise the queue when there is
+  // work and Documents when there is not. Resolved once the extraction payload
+  // has arrived, so the default is not decided from an empty set.
+  useEffect(() => {
+    if (modeState !== null || !extractions) return;
+    const requested = new URLSearchParams(window.location.search).get("rmode");
+    setModeState(defaultMode(viewDocs, requested));
+  }, [extractions, viewDocs, modeState]);
+  const mode: RecordsMode = modeState ?? "documents";
+  const setMode = (m: RecordsMode) => {
+    setModeState(m);
+    // Same shape as the existing `?tab=` deep link, so back/forward/refresh all
+    // behave the way the rest of the workspace already does.
+    const url = new URL(window.location.href);
+    url.searchParams.set("tab", "records");
+    url.searchParams.set("rmode", m);
+    window.history.replaceState(null, "", url.toString());
+  };
+
+  const categoryOf = (d: RecordsDoc) => TYPE_GROUP[d.type] ?? "Other";
+  const searchTextOf = (d: RecordsDoc) => {
+    const raw = rawById.get(d.documentId);
+    return [d.filename, raw?.provider, raw?.facility].filter(Boolean).join(" ");
+  };
+
+  const categoryCounts = useMemo(() => {
+    const out: Record<string, number> = {};
+    for (const d of viewDocs) out[categoryOf(d)] = (out[categoryOf(d)] ?? 0) + 1;
+    return out;
+  }, [viewDocs]);
+
+  // The Review Queue is the same list, pre-narrowed to work. The filter is
+  // still fully visible and resettable — this is a starting point, not a
+  // separate hidden query.
+  const queueBase = useMemo(
+    () => viewDocs.filter((d) => {
+      const s = taskStatusesOf(d);
+      return s.has("NEEDS_ACTION") || s.has("READY_TO_CONFIRM") || s.has("CAUTION") || s.has("PROCESSING_FAILED") || s.has("UNDATED");
+    }),
+    [viewDocs],
+  );
+  const base = mode === "queue" ? queueBase : viewDocs;
+  // `searchTextOf` closes over `rawById`, so that is the real dependency; the
+  // helper itself is re-created every render and would defeat the memo.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const listed = useMemo(() => applyFilter(base, filter, categoryOf, searchTextOf), [base, filter, rawById]);
+  const counts = useMemo(() => taskCounts(base), [base]);
+
+  // The compact header names the work; it must not have to load the extraction
+  // payload itself to do so.
+  useEffect(() => {
+    onSummary?.({ documents: viewDocs.length, needsReview: queueBase.length });
+  }, [viewDocs.length, queueBase.length, onSummary]);
+
+  const openDoc = openDocId ? viewDocs.find((d) => d.documentId === openDocId) ?? null : null;
+  const openRaw = openDocId ? rawById.get(openDocId) ?? null : null;
+  const openStructured = openDocId ? structuredById.get(openDocId) ?? null : null;
+
+  /** Opening a document lands on its work when it has any, Overview otherwise. */
+  const openDocument = (id: string) => {
+    const d = viewDocs.find((x) => x.documentId === id);
+    setOpenDocId(id);
+    setDetailTab(d && attentionCount(d) > 0 ? "review" : "overview");
+  };
+
+  const dateRangeOf = (d: RecordsDoc): string | null => {
+    if (!d.serviceDate) return null;
+    const start = formatDate(new Date(d.serviceDate));
+    if (!d.serviceDateEnd || d.serviceDateEnd === d.serviceDate) return start;
+    return `${start} – ${formatDate(new Date(d.serviceDateEnd))}`;
+  };
+
+  const pc = (planCounts?.counts ?? {}) as AnyRec;
+  const summaryCards: ActionSummaryCard[] = [
+    {
+      key: "ready",
+      label: "Ready to confirm",
+      count: Number(pc.eligibleEncounters ?? 0),
+      definition: "Clean records waiting for one human confirmation.",
+      detail: "These carry no exception, no caution and no unresolved finding. Confirming them records a factual records review — never a verification or a professional attestation.",
+      tone: "success",
+      onOpen: () => { setMode("queue"); setFilter({ ...EMPTY_FILTER, tasks: ["READY_TO_CONFIRM"] }); },
+    },
+    {
+      key: "exceptions",
+      label: "Exceptions",
+      count: Number(pc.skippedEncounters ?? 0),
+      definition: "Records that cannot be attested as they stand and need an individual decision.",
+      detail: "Each carries its own requirement — a contradicted date, an integrity failure, an unresolved dispute — and stays in the individual correction path until somebody resolves it.",
+      tone: "danger",
+      onOpen: () => { setMode("queue"); setFilter({ ...EMPTY_FILTER, tasks: ["NEEDS_ACTION"] }); },
+    },
+    {
+      key: "cautions",
+      label: "Cautions",
+      count: Number(pc.cautionEncounters ?? 0),
+      definition: "Sound records that carry something to read before signing.",
+      detail: "A caution is not an exception and is not counted among them. It is excluded from the clean batch and confirmed individually, where its own requirement and source page are shown.",
+      tone: "warning",
+      onOpen: () => { setMode("queue"); setFilter({ ...EMPTY_FILTER, tasks: ["CAUTION"] }); },
+    },
+    {
+      key: "chronology",
+      label: "Chronology not covered",
+      count: Number(pc.heldEvents ?? 0),
+      definition: "Timeline entries this confirmation will not cover.",
+      detail: "An entry is covered only when every extracted row it was built from is a row being confirmed. Entries with no exact lineage, or whose source record is still in question, are held for individual chronology review.",
+      tone: "neutral",
+    },
+  ];
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       <ActionStatusBar status={uploadStatus} onDismiss={() => setUploadStatus(null)} />
-      {mayUpload && (
-        <div className="card flex flex-wrap items-center gap-3 p-4">
-          <label className="btn-outline cursor-pointer">
-            <Upload aria-hidden="true" className="h-4 w-4" /> Upload Records
-            <input type="file" multiple className="hidden" onChange={(e) => upload(e.target.files)} />
-          </label>
-          {canEdit && (
-            <button className="btn-ghost" disabled={busy === "sample"} onClick={() => call(`/api/cases/${data.id}/documents`, "POST", { sample: true }, "sample")}>
-              {busy === "sample" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />} Add Sample Record Set
-            </button>
-          )}
-          <span className="text-xs text-ink-500">
-            {canEdit ? "Each record is auto-labeled by type. Click a record's type icon to reassign it." : "Each record is auto-labeled by type and processed into the case pipeline."}
-          </span>
-        </div>
-      )}
+      {loadError && <ActionStatusBar status={loadError} onDismiss={() => setLoadError(null)} />}
+
+      {/* ── Mode ────────────────────────────────────────────────────────────
+          Three jobs that were competing for one list: work the queue, manage
+          the files, read the extracted events. */}
+      <div role="tablist" aria-label="Records view" className="flex flex-wrap gap-1 border-b border-ink-200">
+        {RECORDS_MODES.map((m) => (
+          <button
+            key={m}
+            role="tab"
+            type="button"
+            aria-selected={mode === m}
+            title={MODE_DESCRIPTION[m]}
+            onClick={() => setMode(m)}
+            className={cn(
+              "focusable -mb-px rounded-t-md border-b-2 px-3 py-1.5 text-sm font-medium transition-colors",
+              mode === m ? "border-brand-600 text-brand-800" : "border-transparent text-ink-500 hover:text-ink-800",
+            )}
+          >
+            {MODE_LABEL[m]}
+            {m === "queue" && queueBase.length > 0 && (
+              <span className="ml-1.5 rounded-full bg-amber-100 px-1.5 text-[10px] font-semibold text-amber-800">{queueBase.length}</span>
+            )}
+            {m === "documents" && <span className="ml-1.5 text-[11px] text-ink-400">{viewDocs.length}</span>}
+          </button>
+        ))}
+      </div>
 
       {/* Case-level findings: nobody's document owns them, so without this row
           they were persisted, allowed to block a final export, and shown to
@@ -1198,288 +1432,420 @@ function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, cal
             caseId={data.id}
             findings={extractions.caseFindings as AnyRec[] as never}
             canDisposition={!!extractions?.canVerify && canVerify !== false}
-            onChanged={loadExtractions}
+            onChanged={onReviewChanged}
           />
         </div>
       )}
 
+      {mode === "queue" && (
+        <>
+          <ActionSummary cards={summaryCards} />
+          {canVerify && !!extractions && <BatchConfirmPanel caseId={data.id} onConfirmed={onReviewChanged} />}
+        </>
+      )}
+
+      {mode === "documents" && mayUpload && (
+        <div className="card flex flex-wrap items-center gap-3 p-3">
+          <label className="btn-outline cursor-pointer">
+            <Upload aria-hidden="true" className="h-4 w-4" /> Upload Records
+            <input type="file" multiple className="hidden" onChange={(e) => upload(e.target.files)} />
+          </label>
+          {canEdit && (
+            <button className="btn-ghost" disabled={busy === "sample"} onClick={() => call(`/api/cases/${data.id}/documents`, "POST", { sample: true }, "sample")}>
+              {busy === "sample" ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileText className="h-4 w-4" />} Add Sample Record Set
+            </button>
+          )}
+          <span className="text-xs text-ink-500">Each record is auto-labeled by type; change it from a record&apos;s actions menu.</span>
+        </div>
+      )}
+
       {/* Processing limitations the reviewer must see before trusting the set. */}
-      {!!extractions?.limitations?.length && (
-        <div className="card border-amber-200 bg-amber-50/50 p-3">
-          <p className="text-xs font-semibold text-amber-900">Processing and extraction limitations</p>
+      {mode !== "encounters" && !!extractions?.limitations?.length && (
+        <details className="card border-amber-200 bg-amber-50/50 p-2.5">
+          <summary className="focusable cursor-pointer rounded text-xs font-semibold text-amber-900">
+            Processing and extraction limitations ({extractions.limitations.length})
+          </summary>
           <ul className="mt-1 space-y-0.5">
             {extractions.limitations.map((l: string, i: number) => (
               <li key={i} className="text-[11px] text-amber-800">• {l}</li>
             ))}
           </ul>
+        </details>
+      )}
+
+      {mode === "encounters" ? (
+        <EncountersMode docs={viewDocs} structuredById={structuredById} caseId={data.id} onOpenDoc={openDocument} />
+      ) : docs.length === 0 ? (
+        <Empty>No records yet. Upload files or add the sample record set to begin.</Empty>
+      ) : !extractions && !loadError ? (
+        <StateNote kind="loading">Loading the record set…</StateNote>
+      ) : (
+        <>
+          <TaskFilterBar filter={filter} onChange={setFilter} taskCounts={counts} categoryCounts={categoryCounts} />
+          <GrainLine docs={base} />
+
+          {/* Two panes on desktop so the list stays in context; the detail pane
+              becomes a full-screen panel below lg. */}
+          <div className={cn("gap-3", openDoc ? "lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.25fr)]" : "block")}>
+            <div className="card divide-y divide-ink-100 overflow-hidden">
+              {listed.length === 0 ? (
+                <StateNote kind="empty">
+                  {isFilterActive(filter) ? "No records match these filters." : mode === "queue" ? "Nothing is waiting for a review decision." : "No records in this view."}
+                </StateNote>
+              ) : (
+                <Paginated items={listed} pageSize={25} itemLabel="records">
+                  {(d) => {
+                    const raw = rawById.get(d.documentId) as AnyRec;
+                    return (
+                      <div key={d.documentId}>
+                        {editingId === d.documentId ? (
+                          <div className="px-3 py-2">
+                            <label className="text-[11px] font-medium text-ink-600" htmlFor={`type-${d.documentId}`}>Record type</label>
+                            <select
+                              id={`type-${d.documentId}`}
+                              autoFocus
+                              defaultValue={d.type}
+                              className="mt-0.5 block w-full rounded-md border border-ink-300 bg-white px-2 py-1 text-xs"
+                              onBlur={() => setEditingId(null)}
+                              onChange={async (e) => {
+                                setEditingId(null);
+                                await call(`/api/cases/${data.id}/documents/${d.documentId}`, "PATCH", { type: e.target.value });
+                              }}
+                            >
+                              {DOC_TYPE_GROUPS.map((g) => (
+                                <optgroup key={g.label} label={g.label}>
+                                  {g.types.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                                </optgroup>
+                              ))}
+                            </select>
+                          </div>
+                        ) : (
+                          <DocumentRow
+                            doc={d}
+                            raw={raw}
+                            selected={openDocId === d.documentId}
+                            onOpen={() => openDocument(d.documentId)}
+                            dateRange={dateRangeOf(d)}
+                            actions={
+                              <DocumentActions
+                                filename={d.filename}
+                                viewHref={`/api/cases/${data.id}/documents/${d.documentId}/view`}
+                                canEdit={canEdit}
+                                onReclassify={() => setEditingId(d.documentId)}
+                                onRemove={async () => { await call(`/api/cases/${data.id}/documents/${d.documentId}`, "DELETE"); }}
+                              />
+                            }
+                          />
+                        )}
+                      </div>
+                    );
+                  }}
+                </Paginated>
+              )}
+            </div>
+
+            {openDoc && (
+              <DocumentDetail
+                caseId={data.id}
+                doc={openDoc}
+                raw={openRaw as AnyRec}
+                structured={openStructured}
+                tab={detailTab}
+                onTab={setDetailTab}
+                canVerify={!!extractions?.canVerify && canVerify !== false}
+                onChanged={onReviewChanged}
+                onClose={() => setOpenDocId(null)}
+                dateRange={dateRangeOf(openDoc)}
+              />
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+/**
+ * One document, in a pane beside the list.
+ *
+ * Everything the inline expansion used to render is still here — the same
+ * `ExtractionBlock`, the same review actions, the same audit path — but split
+ * across tabs and paginated, so opening the 625-page production no longer
+ * renders its whole note set into the middle of the list you were working.
+ */
+function DocumentDetail({
+  caseId, doc, raw, structured, tab, onTab, canVerify, onChanged, onClose, dateRange,
+}: {
+  caseId: string; doc: RecordsDoc; raw: AnyRec; structured: AnyRec | null;
+  tab: DetailTab; onTab: (t: DetailTab) => void; canVerify: boolean;
+  onChanged: () => void; onClose: () => void; dateRange: string | null;
+}) {
+  const [notePage, setNotePage] = useState(0);
+  useEffect(() => { setNotePage(0); }, [doc.documentId, tab]);
+
+  const notes = (structured?.notes as AnyRec[] | undefined) ?? [];
+  const rows = (structured?.encounters as AnyRec[] | undefined) ?? [];
+  const attention = attentionCount(doc);
+  const statuses = taskStatusesOf(doc);
+  const segs: AnyRec[] = Array.isArray(raw?.segments) ? (raw.segments as AnyRec[]) : [];
+
+  // Notes needing a decision come first when the reviewer opened this to work.
+  const orderedNotes = tab === "review"
+    ? [...notes].sort((a, b) => Number(!!b.needsAttention || b.attention === "EXCEPTION") - Number(!!a.needsAttention || a.attention === "EXCEPTION"))
+    : notes;
+  const NOTES_PER_PAGE = 10;
+  const notePages = Math.max(1, Math.ceil(orderedNotes.length / NOTES_PER_PAGE));
+  const noteSlice = orderedNotes.slice(notePage * NOTES_PER_PAGE, notePage * NOTES_PER_PAGE + NOTES_PER_PAGE);
+
+  // Page coverage, from what the payload can honestly support. Anything the
+  // client cannot compute is reported as "Not measured" rather than as zero.
+  const clinicalPages = new Set<number>();
+  const adminPages = new Set<number>();
+  for (const s of segs) {
+    const from = Number(s.pageStart ?? 0), to = Number(s.pageEnd ?? s.pageStart ?? 0);
+    if (!from) continue;
+    for (let i = from; i <= Math.max(from, to); i++) (s.kind === "clinical" ? clinicalPages : adminPages).add(i);
+  }
+  const coverage: CoverageLine[] = [
+    { label: "Pages in the file", value: doc.pageCount ?? null, note: doc.pageCount ? undefined : "The page count was not recorded." },
+    { label: "Pages with clinical entries", value: segs.length ? clinicalPages.size : null, note: segs.length ? undefined : "This record has no page-level segmentation." },
+    { label: "Administrative pages", value: segs.length ? adminPages.size : null, note: segs.length ? undefined : "Not segmented." },
+    { label: "Document-level OCR confidence", value: doc.ocrConfidence != null ? Math.round(doc.ocrConfidence * 100) : null, note: doc.ocrConfidence != null ? "Per cent, for the document as a whole — per-page quality is not measured here." : "Not recorded." },
+    { label: "Extracted entries", value: rows.length },
+    { label: "Encounters assembled", value: notes.length },
+  ];
+
+  const excerpts: Excerpt[] = rows.flatMap((r) =>
+    ((r.claims as AnyRec[] | undefined) ?? []).map((c, i) => ({
+      id: `${r.id}:${i}`,
+      text: String(c.excerpt ?? c.value ?? "").slice(0, 400),
+      field: (c.field as string | null) ?? null,
+      page: (c.page as number | null) ?? null,
+    })).filter((e) => e.text.trim().length > 0),
+  );
+
+  return (
+    <DetailPane
+      title={doc.filename}
+      subtitle={[dateRange, TYPE_LABEL[doc.type] ?? doc.type.replace(/_/g, " "), doc.pageCount ? `${doc.pageCount} pp.` : null].filter(Boolean).join(" · ") || null}
+      tab={tab}
+      onTab={onTab}
+      reviewCount={attention}
+      onClose={onClose}
+    >
+      {tab === "overview" && (
+        <div className="space-y-2.5 text-xs">
+          <RecordMeta d={raw} compact />
+          {statuses.has("SOURCE_CONFLICT") && (
+            <p role="status" className="rounded border border-amber-200 bg-amber-50 px-2 py-1.5 text-[11px] text-amber-900">
+              The provider or facility on this record is contradicted or unconfirmed. It is shown in the details below as extracted, not as established.
+            </p>
+          )}
+          <p className="leading-relaxed text-ink-700">{narrativeFor(raw)}</p>
+          <dl className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
+            <dt className="text-ink-500">Extracted provider</dt>
+            <dd className="text-ink-800">{raw.provider || <span className="text-ink-400">Not extracted</span>}</dd>
+            <dt className="text-ink-500">Extracted facility</dt>
+            <dd className="text-ink-800">{raw.facility || <span className="text-ink-400">Not extracted</span>}</dd>
+          </dl>
+          {raw.flags && <p className="text-[11px] text-amber-700">{raw.flags}</p>}
         </div>
       )}
 
-      {/* ── One human confirmation over the clean part of the case ────────────
-          Grouping cut the number of review UNITS; it did not cut the number of
-          clicks, because the final gate still wanted every machine draft
-          signed one card at a time. This is where a reviewer gives that
-          confirmation once, having been shown exactly what it covers and
-          exactly what it does not. Every exception stays below, individually,
-          in the path it was already in. */}
-      {canVerify && !!extractions && (
-        <BatchConfirmPanel caseId={data.id} onConfirmed={loadExtractions} />
+      {tab === "encounters" && (
+        <Paginated items={notes} pageSize={15} itemLabel="encounters" emptyLabel="No encounters were assembled from this record.">
+          {(n: AnyRec) => (
+            <div key={n.id} className="border-l-2 border-ink-200 pl-2.5 text-xs">
+              <p className="font-semibold text-ink-900">
+                {n.encounterDate ?? "Undated"}
+                {n.provider ? <span className="font-normal text-ink-700"> — {n.provider}</span> : null}
+                {n.facility ? <span className="font-normal text-ink-400"> · {n.facility}</span> : null}
+              </p>
+              <p className="leading-relaxed text-ink-600">{(n.rows as AnyRec[] | undefined)?.[0]?.factualSummary ?? "No summary recorded."}</p>
+              <p className="text-[10px] text-ink-400">
+                {n.claimCount ?? 0} source fragment{(n.claimCount ?? 0) === 1 ? "" : "s"}
+                {n.pageStart ? ` · p. ${n.pageStart}${n.pageEnd && n.pageEnd !== n.pageStart ? `–${n.pageEnd}` : ""}` : ""}
+              </p>
+            </div>
+          )}
+        </Paginated>
       )}
 
-      {docs.length === 0 ? (
-        <Empty>No records yet. Upload files or add the sample record set to begin.</Empty>
+      {tab === "review" && (
+        structured ? (
+          <div className="space-y-2">
+            {notePages > 1 && (
+              <div className="flex items-center justify-between rounded-md bg-ink-50 px-2 py-1 text-[11px] text-ink-600">
+                <span aria-live="polite">
+                  Reviewing {notePage * NOTES_PER_PAGE + 1}–{Math.min(orderedNotes.length, notePage * NOTES_PER_PAGE + NOTES_PER_PAGE)} of {orderedNotes.length} encounters
+                </span>
+                <span className="flex gap-2">
+                  <button type="button" disabled={notePage === 0} onClick={() => setNotePage((p) => p - 1)} className="focusable rounded px-1 font-medium text-brand-700 disabled:text-ink-300">Previous</button>
+                  <button type="button" disabled={notePage >= notePages - 1} onClick={() => setNotePage((p) => p + 1)} className="focusable rounded px-1 font-medium text-brand-700 disabled:text-ink-300">Next</button>
+                </span>
+              </div>
+            )}
+            {/* The SAME review component, with the same handlers and the same
+                audit path — given a page of notes rather than all of them. */}
+            <ExtractionBlock
+              caseId={caseId}
+              doc={{ ...structured, notes: noteSlice }}
+              canVerify={canVerify}
+              onChanged={onChanged}
+            />
+          </div>
+        ) : (
+          <StateNote kind="empty">This record has not been extracted yet, so there is nothing to review.</StateNote>
+        )
+      )}
+
+      {tab === "coverage" && (
+        <PageCoverage
+          lines={coverage}
+          findings={
+            (structured?.pageFindings as AnyRec[] | undefined)?.length ? (
+              <RecordFindingList
+                caseId={caseId}
+                findings={structured!.pageFindings as AnyRec[] as never}
+                canDisposition={canVerify}
+                onChanged={onChanged}
+              />
+            ) : (
+              <p className="text-[11px] text-ink-500">
+                No page-level findings were raised for this record. That is not proof the production is complete — page completeness is only established where the source states a page count.
+              </p>
+            )
+          }
+        />
+      )}
+
+      {tab === "excerpts" && <ExcerptList excerpts={excerpts} />}
+    </DetailPane>
+  );
+}
+
+/**
+ * Every extracted clinical event on the case, searchable, without opening a
+ * document first.
+ *
+ * Ordering and grouping are PRESENTATION only: entries are grouped by the
+ * canonical note the server already assembled, never merged. No relevance is
+ * invented — where the payload carries no ranking, the order is the server's,
+ * and material that does not sort into a clinical bucket is grouped as "Other
+ * medical history" rather than hidden.
+ */
+function EncountersMode({
+  docs, structuredById, caseId, onOpenDoc,
+}: { docs: readonly RecordsDoc[]; structuredById: Map<string, AnyRec>; caseId: string; onOpenDoc: (id: string) => void }) {
+  const [q, setQ] = useState("");
+  const [sort, setSort] = useState<"date" | "provider" | "document">("date");
+  const [state, setState] = useState<"all" | "pending" | "reviewed">("all");
+
+  const all = useMemo(() => {
+    const out: AnyRec[] = [];
+    for (const d of docs) {
+      const s = structuredById.get(d.documentId);
+      for (const n of ((s?.notes as AnyRec[] | undefined) ?? [])) {
+        out.push({
+          ...n,
+          _docId: d.documentId,
+          _filename: d.filename,
+          _summary: (n.rows as AnyRec[] | undefined)?.[0]?.factualSummary ?? "",
+        });
+      }
+    }
+    return out;
+  }, [docs, structuredById]);
+
+  const filtered = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    let out = all;
+    if (needle) {
+      out = out.filter((n) =>
+        [n._summary, n.provider, n.facility, n._filename, n.encounterDate].filter(Boolean).join(" ").toLowerCase().includes(needle),
+      );
+    }
+    if (state === "pending") out = out.filter((n) => n.awaitingAttestation || n.needsAttention);
+    if (state === "reviewed") out = out.filter((n) => ["REVIEWED", "VERIFIED", "HUMAN_EDITED"].includes(String(n.status)));
+    const by = (a: AnyRec, b: AnyRec) => {
+      if (sort === "provider") return String(a.provider ?? "~").localeCompare(String(b.provider ?? "~"));
+      if (sort === "document") return String(a._filename).localeCompare(String(b._filename));
+      // Undated last, so the dated sequence reads as a sequence.
+      const ad = a.encounterDate ?? "9999", bd = b.encounterDate ?? "9999";
+      return String(ad).localeCompare(String(bd));
+    };
+    return [...out].sort(by);
+  }, [all, q, sort, state]);
+
+  const dated = filtered.filter((n) => n.encounterDate);
+  const undated = filtered.filter((n) => !n.encounterDate);
+
+  const row = (n: AnyRec) => (
+    <div key={`${n._docId}:${n.id}`} className="border-l-2 border-ink-200 pl-2.5 text-xs">
+      <p className="font-semibold text-ink-900">
+        {n.encounterDate ?? "Undated"}
+        {n.provider ? <span className="font-normal text-ink-700"> — {n.provider}</span> : null}
+        {n.facility ? <span className="font-normal text-ink-400"> · {n.facility}</span> : null}
+      </p>
+      <p className="leading-relaxed text-ink-600">{n._summary || "No summary recorded."}</p>
+      <p className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[10px] text-ink-400">
+        <button type="button" onClick={() => onOpenDoc(n._docId)} className="focusable rounded font-medium text-brand-700 hover:underline">
+          {n._filename}
+        </button>
+        {n.pageStart ? <span>· p. {n.pageStart}{n.pageEnd && n.pageEnd !== n.pageStart ? `–${n.pageEnd}` : ""}</span> : null}
+        <a
+          href={`/api/cases/${caseId}/documents/${n._docId}/view`}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label={`Open the source of the ${n.encounterDate ?? "undated"} entry in ${n._filename}`}
+          className="focusable rounded font-medium text-brand-700 hover:underline"
+        >
+          open source
+        </a>
+        {n.attention === "EXCEPTION" || n.needsAttention ? <Badge tone="warning">needs review</Badge> : null}
+      </p>
+    </div>
+  );
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <label className="relative">
+          <input
+            className="input w-64 py-1.5 text-sm"
+            placeholder="Search encounters…"
+            aria-label="Search encounters by summary, provider, facility, date or file"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
+        </label>
+        <select className="input w-auto py-1.5 text-sm" aria-label="Sort encounters" value={sort} onChange={(e) => setSort(e.target.value as never)}>
+          <option value="date">Sort: date</option>
+          <option value="provider">Sort: provider</option>
+          <option value="document">Sort: source file</option>
+        </select>
+        <select className="input w-auto py-1.5 text-sm" aria-label="Filter by review state" value={state} onChange={(e) => setState(e.target.value as never)}>
+          <option value="all">All review states</option>
+          <option value="pending">Awaiting review</option>
+          <option value="reviewed">Reviewed</option>
+        </select>
+        <span aria-live="polite" className="text-[11px] text-ink-500">{filtered.length} of {all.length} encounters</span>
+      </div>
+
+      {filtered.length === 0 ? (
+        <StateNote kind="empty">{all.length ? "No encounter matches that search." : "No encounters have been extracted yet."}</StateNote>
       ) : (
-        <>
-          {/* Filter chips — one per document group present, plus All. */}
-          <div className="flex flex-wrap gap-2">
-            <FilterChip label="All" count={docs.length} active={filter === "All"} onClick={() => setFilter("All")} />
-            {activeGroups.map((g) => (
-              <FilterChip key={g.label} label={g.label} count={groupCounts[g.label]} icon={GROUP_ICON[g.label]} active={filter === g.label} onClick={() => setFilter(g.label)} />
-            ))}
-          </div>
-
-          <div className="card overflow-hidden">
-            <div className="divide-y divide-ink-100">
-              {filtered.map((d) => {
-                const TypeIcon = iconForType(d.type);
-                const open = expandedId === d.id;
-                return (
-                  <div key={d.id} className="px-4 py-3 hover:bg-ink-50/60">
-                    <div className="flex items-start gap-3">
-                      {/* Left: the type icon is the (editable) type label. */}
-                      {editingId === d.id ? (
-                        <select
-                          autoFocus
-                          defaultValue={d.type}
-                          className="mt-0.5 rounded-md border border-ink-300 bg-white px-2 py-1 text-xs"
-                          onBlur={() => setEditingId(null)}
-                          onChange={async (e) => {
-                            setEditingId(null);
-                            await call(`/api/cases/${data.id}/documents/${d.id}`, "PATCH", { type: e.target.value });
-                          }}
-                        >
-                          {DOC_TYPE_GROUPS.map((g) => (
-                            <optgroup key={g.label} label={g.label}>
-                              {g.types.map(([v, l]) => (
-                                <option key={v} value={v}>{l}</option>
-                              ))}
-                            </optgroup>
-                          ))}
-                        </select>
-                      ) : (
-                        // A reader without edit rights got a <button> whose
-                        // onClick did nothing: announced as actionable,
-                        // reachable by keyboard, and inert on arrival. It is
-                        // the type LABEL for them, and a control only for
-                        // somebody who can actually change it.
-                        canEdit ? (
-                          <button
-                            type="button"
-                            aria-label={`Record type: ${TYPE_LABEL[d.type] ?? d.type.replace(/_/g, " ")}. Reassign.`}
-                            title={`${TYPE_LABEL[d.type] ?? d.type.replace(/_/g, " ")} — click to reassign`}
-                            onClick={() => setEditingId(d.id)}
-                            className="focusable group relative mt-0.5 grid h-9 w-9 shrink-0 cursor-pointer place-items-center rounded-lg bg-brand-50 text-brand-700 hover:bg-brand-100"
-                          >
-                            <TypeIcon aria-hidden="true" className="h-5 w-5" />
-                            <Pencil aria-hidden="true" className="absolute -bottom-1 -right-1 h-3.5 w-3.5 rounded-full bg-white p-0.5 text-ink-400 opacity-0 shadow-sm transition-opacity group-hover:opacity-100" />
-                          </button>
-                        ) : (
-                          <span
-                            title={TYPE_LABEL[d.type] ?? d.type.replace(/_/g, " ")}
-                            className="relative mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-brand-50 text-brand-700"
-                          >
-                            <TypeIcon aria-hidden="true" className="h-5 w-5" />
-                            <span className="sr-only">Record type: {TYPE_LABEL[d.type] ?? d.type.replace(/_/g, " ")}</span>
-                          </span>
-                        )
-                      )}
-
-                      {/* Middle: filename toggles the expandable detail + summary. */}
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <button type="button" onClick={() => setExpandedId(open ? null : d.id)} className="group flex min-w-0 items-center gap-1.5 text-left" aria-expanded={open}>
-                            <span className="truncate text-sm font-medium text-ink-900">{d.filename}</span>
-                            <span className="flex shrink-0 items-center gap-0.5 text-xs font-medium text-brand-700 group-hover:underline">
-                              Details
-                              <ChevronDown className={cn("h-4 w-4 shrink-0 transition-transform", open && "rotate-180")} />
-                            </span>
-                          </button>
-                          {d.flags && <span title={d.flags} className="shrink-0 text-sm text-amber-500">⚠</span>}
-                        </div>
-                        {/* At-a-glance metadata: what this record is without opening it. */}
-                        <div className="mt-0.5 truncate text-xs text-ink-500">
-                          {[
-                            d.serviceDate ? `${formatDate(new Date(d.serviceDate))}${d.serviceDateEnd && d.serviceDateEnd !== d.serviceDate ? ` – ${formatDate(new Date(d.serviceDateEnd))}` : ""}` : null,
-                            d.provider || null,
-                            d.facility || null,
-                            d.pageCount ? `${d.pageCount} pp.` : null,
-                          ].filter(Boolean).join(" · ") || "No metadata extracted yet"}
-                        </div>
-                        {d.flags && <div className="mt-0.5 text-xs text-amber-600">{d.flags}</div>}
-
-                        {open && (() => {
-                          // Prefer persisted sub-documents (segmented at ingest);
-                          // fall back to on-the-fly encounter splitting for legacy
-                          // rows not yet segmented.
-                          const segs: AnyRec[] | null = Array.isArray(d.segments) ? (d.segments as AnyRec[]) : null;
-                          const fallbackEnc = segs ? null : recordEncounters(d);
-                          const allClinical: AnyRec[] = segs ? segs.filter((s) => s.kind === "clinical") : (fallbackEnc ?? []);
-                          // Dated care reads as a sequence; unresolved items
-                          // interleaved among it read as part of that sequence
-                          // and quietly undermine it. They are separated, kept,
-                          // and each says why it is still undated.
-                          const clinical = allClinical.filter((e) => e.date);
-                          const unresolved = allClinical.filter((e) => !e.date);
-                          const adminBearing: AnyRec[] = segs ? segs.filter((s) => s.kind === "administrative" && s.bearsOnCare) : [];
-                          const adminOther: AnyRec[] = segs ? segs.filter((s) => s.kind === "administrative" && !s.bearsOnCare) : [];
-                          const consolidated = segs ? clinical.length + adminBearing.length + adminOther.length > 0 : !!fallbackEnc && fallbackEnc.length >= 2;
-                          const segPages = (s: AnyRec) => (s.pageStart && s.pageEnd ? (s.pageStart === s.pageEnd ? `p. ${s.pageStart}` : `pp. ${s.pageStart}–${s.pageEnd}`) : "");
-                          return (
-                          <div className="mt-2 space-y-2 rounded-lg bg-ink-50/70 p-3">
-                            {/* Consolidated records show a compact header (date range +
-                                pages) and detail each encounter below — no duplicate
-                                provider/location lists. */}
-                            <RecordMeta d={d} compact={consolidated} />
-                            {(d.pageCount || d.ocrConfidence != null) && (
-                              <p className="text-[11px] text-ink-400">
-                                {d.pageCount ? `${d.pageCount} page${d.pageCount === 1 ? "" : "s"}` : ""}
-                                {d.pageCount && d.ocrConfidence != null ? " · " : ""}
-                                {d.ocrConfidence != null ? `OCR ${Math.round(d.ocrConfidence * 100)}%` : ""}
-                                {d.flags ? ` · ${d.flags}` : ""}
-                              </p>
-                            )}
-                            {consolidated ? (
-                              <div className="space-y-2.5">
-                                {clinical.length > 0 && (
-                                  <div className="space-y-1.5">
-                                    <p className="text-[11px] font-medium text-ink-500">{clinical.length} clinical encounter{clinical.length === 1 ? "" : "s"} in this record:</p>
-                                    <ul className="space-y-2">
-                                      {clinical.map((e, i) => (
-                                        <li key={i} className="border-l-2 border-ink-200 pl-2.5 text-xs">
-                                          <p className="font-semibold text-ink-900">
-                                            {e.label}
-                                            {e.noteTitle ? <span className="font-normal text-ink-500"> · {e.noteTitle}</span> : null}
-                                            {e.provider ? <span className="font-normal text-ink-700"> — {e.provider}</span> : null}
-                                            {e.facility ? <span className="font-normal text-ink-400"> · {e.facility}</span> : null}
-                                            {segPages(e) ? <span className="font-normal text-ink-300"> · {segPages(e)}</span> : null}
-                                          </p>
-                                          <p className="leading-relaxed text-ink-600">{e.summary}</p>
-                                          <DateProvenance seg={e} />
-                                        </li>
-                                      ))}
-                                    </ul>
-                                  </div>
-                                )}
-                                {unresolved.length > 0 && (
-                                  <div className="space-y-1.5 rounded-md border border-amber-200 bg-amber-50/60 p-2">
-                                    <p className="text-[11px] font-medium text-amber-800">
-                                      Undated — requires review ({unresolved.length})
-                                    </p>
-                                    <ul className="space-y-2">
-                                      {unresolved.map((e, i) => (
-                                        <li key={i} className="border-l-2 border-amber-300 pl-2.5 text-xs">
-                                          <p className="font-semibold text-ink-900">
-                                            {e.noteTitle ? <span className="font-normal text-ink-600">{e.noteTitle}</span> : "Undated record"}
-                                            {e.provider ? <span className="font-normal text-ink-700"> — {e.provider}</span> : null}
-                                            {e.facility ? <span className="font-normal text-ink-400"> · {e.facility}</span> : null}
-                                            {segPages(e) ? <span className="font-normal text-ink-300"> · {segPages(e)}</span> : null}
-                                          </p>
-                                          <p className="leading-relaxed text-ink-600">{e.summary}</p>
-                                          <p className="mt-0.5 text-[11px] text-amber-700">{undatedReason(e.unresolvedReason)}</p>
-                                        </li>
-                                      ))}
-                                    </ul>
-                                  </div>
-                                )}
-                                {adminBearing.length > 0 && (
-                                  <div className="space-y-1.5">
-                                    <p className="text-[11px] font-medium text-ink-500">Administrative &amp; consent bearing on care:</p>
-                                    <ul className="space-y-2">
-                                      {Object.entries(
-                                        adminBearing.reduce((acc: Record<string, AnyRec[]>, s) => {
-                                          (acc[s.category as string] ??= []).push(s);
-                                          return acc;
-                                        }, {}),
-                                      ).map(([cat, items], i) => {
-                                        const pages = items.map((x) => x.pageStart).filter((n): n is number => !!n);
-                                        const detail = items.map((x) => x.summary as string).find((s) => s && s.includes(":"));
-                                        const dates = [...new Set(items.map((x) => x.label))];
-                                        return (
-                                          <li key={i} className="border-l-2 border-amber-300 pl-2.5 text-xs">
-                                            <p className="font-semibold text-ink-900">
-                                              {cat}
-                                              <span className="font-normal text-ink-400">
-                                                {" "}
-                                                · {items.length} page{items.length === 1 ? "" : "s"}
-                                                {pages.length ? ` (pp. ${pageRange(pages)})` : ""}
-                                              </span>
-                                            </p>
-                                            <p className="leading-relaxed text-ink-600">{detail ?? dates.slice(0, 4).join(", ") + (dates.length > 4 ? "…" : "")}</p>
-                                          </li>
-                                        );
-                                      })}
-                                    </ul>
-                                  </div>
-                                )}
-                                {adminOther.length > 0 && (
-                                  <p className="text-[11px] text-ink-400">
-                                    + {adminOther.length} standard administrative page{adminOther.length === 1 ? "" : "s"}
-                                    {(() => {
-                                      const cats = [...new Set(adminOther.map((s) => s.category))].filter(Boolean) as string[];
-                                      return cats.length ? ` (${cats.join(", ").toLowerCase()})` : "";
-                                    })()}
-                                    .
-                                  </p>
-                                )}
-                                {clinical.length === 0 && adminBearing.length === 0 && (
-                                  <p className="text-xs leading-relaxed text-ink-600">{narrativeFor(d)}</p>
-                                )}
-                              </div>
-                            ) : (
-                              <p className="text-xs leading-relaxed text-ink-600">{narrativeFor(d)}</p>
-                            )}
-                            <ExtractionBlock
-                              caseId={data.id}
-                              doc={extractions?.documents?.find((x: AnyRec) => x.documentId === d.id) ?? null}
-                              canVerify={!!extractions?.canVerify && canVerify !== false}
-                              onChanged={loadExtractions}
-                            />
-                          </div>
-                          );
-                        })()}
-                      </div>
-
-                      {/* Right: open the document, and remove. */}
-                      <div className="flex shrink-0 items-center gap-1">
-                        <a
-                          href={`/api/cases/${data.id}/documents/${d.id}/view`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          title={`Open ${d.filename}`}
-                          aria-label={`Open ${d.filename} in a new tab`}
-                          className="focusable rounded-md p-1.5 text-ink-400 hover:bg-ink-100 hover:text-brand-700"
-                        >
-                          <ExternalLink aria-hidden="true" className="h-4 w-4" />
-                        </a>
-                        {canEdit && (confirmDelDoc === d.id ? (
-                          <span className="flex items-center gap-1.5">
-                            <button className="rounded bg-red-600 px-2 py-0.5 text-xs font-medium text-white hover:bg-red-700" onClick={async () => { setConfirmDelDoc(null); await call(`/api/cases/${data.id}/documents/${d.id}`, "DELETE"); }}>Confirm remove</button>
-                            <button className="text-xs font-medium text-ink-500 hover:underline" onClick={() => setConfirmDelDoc(null)}>Cancel</button>
-                          </span>
-                        ) : (
-                          <button type="button" className="focusable rounded-md p-1.5 text-ink-300 hover:bg-ink-100 hover:text-red-600" title={`Remove ${d.filename}`} aria-label={`Remove ${d.filename}`} onClick={() => setConfirmDelDoc(d.id)}>
-                            <X aria-hidden="true" className="h-4 w-4" />
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-              {filtered.length === 0 && <p className="px-4 py-8 text-center text-sm text-ink-400">No documents in this category.</p>}
+        <div className="card space-y-3 p-3">
+          {dated.length > 0 && <Paginated items={dated} pageSize={30} itemLabel="encounters">{row}</Paginated>}
+          {undated.length > 0 && (
+            <div className="space-y-2 border-t border-ink-100 pt-2">
+              {/* Neutral grouping, not a hiding place: these are undated, which
+                  is a fact about the record, not a judgement about relevance. */}
+              <p className="text-[11px] font-medium text-ink-500">Other medical history — no service date established ({undated.length})</p>
+              <Paginated items={undated} pageSize={20} itemLabel="undated encounters">{row}</Paginated>
             </div>
-          </div>
-        </>
+          )}
+        </div>
       )}
     </div>
   );
