@@ -365,3 +365,57 @@ describe("no control is nested inside another control", () => {
     expect(summary).toMatch(/aria-label=\{`Show the \$\{c\.count\}/);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The four acceptance gaps found on the live Records UI after 765baac.
+// ─────────────────────────────────────────────────────────────────────────────
+describe("the Records acceptance gaps stay fixed", () => {
+  const ui = () => stripComments(read("components/case/records/RecordsWorkspace.tsx"));
+
+  it("category controls are rendered, not hidden inside a collapsed disclosure", () => {
+    const src = ui();
+    // They were six buttons inside a <details> whose summary was styled as a
+    // bare uppercase heading — present in the DOM, invisible on screen.
+    expect(src).not.toMatch(/<details>[\s\S]{0,200}?Record category/);
+    expect(src).toMatch(/role="group" aria-labelledby="record-category-label"/);
+    expect(src).toMatch(/aria-label=\{`\$\{g\.label\}, \$\{n\} record/);
+    // Category is still a toggle that composes with the task filters.
+    expect(src).toMatch(/onChange\(\{ \.\.\.filter, category: on \? null : g\.label \}\)/);
+  });
+
+  it("the category taxonomy comes from the repository, not a parallel mapping", () => {
+    expect(ui()).toContain('DOC_TYPE_GROUPS.filter((g) => (categoryCounts[g.label] ?? 0) > 0)');
+    expect(ui()).toContain('from "@/lib/documents/taxonomy"');
+  });
+
+  it("a filtered row says why it matched without replacing its overall status", () => {
+    const src = ui();
+    expect(src).toMatch(/const why = activeTasks\.length \? matchExplanation\(doc, matched\) : null;/);
+    // The status badges are still rendered from the document's own state.
+    expect(src).toMatch(/\{attention > 0 && \(/);
+    expect(src).toMatch(/\{why && <span/);
+  });
+
+  it("provider and facility are de-duplicated for display only", () => {
+    const src = ui();
+    expect(src).toMatch(/dedupeMeta\(raw\.provider as string \| null, raw\.facility as string \| null\)/);
+    // …and the contested warning is untouched by the de-duplication.
+    expect(src).toContain("provider/facility needs review");
+  });
+
+  it("the manifest disclosure names its grain instead of saying 'items'", () => {
+    const src = stripComments(read("components/case/BatchManifest.tsx"));
+    expect(src).toMatch(/Review \{grain\} this will mark as reviewed/);
+    expect(src).toContain("manifestGrainLabel(rowCount, records.length, events.length)");
+    expect(src).not.toMatch(/\{total\} item\{total === 1 \? "" : "s"\}/);
+  });
+
+  it("opening a filtered document targets the entries that matched", () => {
+    const panel = workspace();
+    expect(panel).toMatch(/const matched = d \? matchedTasks\(d, filter\.tasks\) : \[\];/);
+    expect(panel).toMatch(/focusTasks=\{detailFocus\}/);
+    // The matched entries lead; the rest of the document still follows.
+    expect(panel).toMatch(/\[\.\.\.focused, \.\.\.notes\.filter\(\(n\) => !focused\.includes\(n\)\)\]/);
+    expect(panel).toContain("other entr");
+  });
+});

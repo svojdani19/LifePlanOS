@@ -1,6 +1,7 @@
 "use client";
 
 import { FileText, CalendarDays } from "lucide-react";
+import { manifestGrainLabel } from "@/lib/records/recordsView";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // What a reviewer is about to sign, itemized.
@@ -117,10 +118,17 @@ export function BatchManifest({
   const total = rowCount + events.length;
   if (!total) return null;
 
+  // ── Say which grain each number counts ──────────────────────────────────
+  // The summary card reads "18 ready to confirm" (ENCOUNTERS) while this list
+  // holds 19 lines (EXTRACTED ENTRIES), because one canonical note was
+  // assembled from two entries. Both counts are right, and "19 items" said
+  // neither what an item was nor why the two numbers differ.
+  const grain = manifestGrainLabel(rowCount, records.length, events.length);
+
   return (
     <details open={defaultOpen} className="mt-2 rounded border border-teal-300 bg-white">
       <summary className="focusable cursor-pointer rounded px-2 py-1.5 text-[11px] font-semibold text-teal-900">
-        Review the {total} item{total === 1 ? "" : "s"} this will mark as reviewed
+        Review {grain} this will mark as reviewed
       </summary>
       <div className="max-h-96 overflow-y-auto border-t border-teal-200 px-2 py-1.5">
         {records.length > 0 && (

@@ -313,3 +313,158 @@ export function grainSentence(c: GrainCounts): string {
   const n = (v: number, one: string, many: string) => `${v} ${v === 1 ? one : many}`;
   return `${n(c.encounters, "encounter", "encounters")} assembled from ${n(c.entries, "extracted entry", "extracted entries")} and ${n(c.fragments, "source fragment", "source fragments")}.`;
 }
+
+// ── Why a document matched, at the right grain ───────────────────────────────
+//
+// A document is a bag of notes in different states. Filtering to "ready to
+// confirm" and then showing only "1 needs attention" on the matched row makes
+// the filter look broken — both facts are true, of different entries inside the
+// same file, and the row was reporting one of them.
+//
+// So a filtered row states the composition. The overall status is NOT replaced
+// by the filter's status, and a competing obligation is never hidden: the point
+// is that the reviewer can see both.
+
+export interface NoteStateCounts {
+  ready: number;
+  needsAction: number;
+  caution: number;
+  reviewed: number;
+  undated: number;
+  conflict: number;
+  /**
+   * Open blocking findings about the DOCUMENT or its pages.
+   *
+   * Counted apart from the note tallies because they are a different grain.
+   * `attentionCount` sums notes AND findings, so a row that reported only the
+   * note count beside that badge showed two numbers for what reads as the same
+   * thing — 3 against 23 on the 625-page record, where 20 page findings make up
+   * the difference.
+   */
+  documentFindings: number;
+  total: number;
+}
+
+/** Per-note tallies for one document, read from the server's classification. */
+export function noteStateCounts(doc: RecordsDoc): NoteStateCounts {
+  const out: NoteStateCounts = {
+    ready: 0, needsAction: 0, caution: 0, reviewed: 0, undated: 0, conflict: 0,
+    documentFindings: openBlocking(doc.findings) + openBlocking(doc.pageFindings),
+    total: 0,
+  };
+  for (const n of doc.notes ?? []) {
+    out.total += 1;
+    const attention = String(n.attention ?? "");
+    const kind = String(n.guidance?.kind ?? "");
+    if (attention === "EXCEPTION" || n.needsAttention) out.needsAction += 1;
+    else if (attention === "CAUTION") out.caution += 1;
+    else if (attention === "CLEAN" && n.awaitingAttestation) out.ready += 1;
+    if (["REVIEWED", "VERIFIED", "HUMAN_EDITED"].includes(String(n.status ?? ""))) out.reviewed += 1;
+    if (n.dateStatus === "UNKNOWN") out.undated += 1;
+    if (CONFLICT_KINDS.has(kind)) out.conflict += 1;
+  }
+  return out;
+}
+
+/** The count each task status contributes for one document, at note grain. */
+const COUNT_FOR: Record<TaskStatus, (c: NoteStateCounts) => number> = {
+  READY_TO_CONFIRM: (c) => c.ready,
+  NEEDS_ACTION: (c) => c.needsAction,
+  CAUTION: (c) => c.caution,
+  REVIEWED: (c) => c.reviewed,
+  UNDATED: (c) => c.undated,
+  SOURCE_CONFLICT: (c) => c.conflict,
+  // Document-grain states: a count of notes would misrepresent them.
+  MISSING_PAGES: () => 0,
+  PROCESSING_FAILED: () => 0,
+};
+
+/** How each term reads with its count in front of it. */
+const STATE_PHRASE: Record<TaskStatus, (n: number) => string> = {
+  READY_TO_CONFIRM: (n) => `${n} ${n === 1 ? "entry" : "entries"} ready to confirm`,
+  NEEDS_ACTION: (n) => `${n} ${n === 1 ? "entry needs" : "entries need"} attention`,
+  CAUTION: (n) => `${n} ${n === 1 ? "entry carries" : "entries carry"} a caution`,
+  REVIEWED: (n) => `${n} reviewed`,
+  UNDATED: (n) => `${n} undated`,
+  SOURCE_CONFLICT: (n) => `${n} in source conflict`,
+  MISSING_PAGES: (n) => `${n} possible missing pages`,
+  PROCESSING_FAILED: (n) => `${n} processing failures`,
+};
+
+/**
+ * "3 entries need attention · 20 document findings · 34 entries carry a caution"
+ *
+ * The matched statuses lead, so the row answers "why is this here?" first;
+ * every other state the document carries follows, so nothing is hidden. The
+ * document-grain findings are named separately, because the row's attention
+ * badge counts entries AND findings together — without that term the parts do
+ * not add up to the badge and the row contradicts itself again.
+ *
+ * Null when there is nothing to disambiguate.
+ */
+export function matchExplanation(doc: RecordsDoc, tasks: readonly TaskStatus[]): string | null {
+  const c = noteStateCounts(doc);
+  if (!c.total && !c.documentFindings) return null;
+  const parts: string[] = [];
+  const seen = new Set<TaskStatus>();
+  const push = (t: TaskStatus) => {
+    if (seen.has(t)) return;
+    const n = COUNT_FOR[t](c);
+    if (!n) return;
+    seen.add(t);
+    parts.push(STATE_PHRASE[t](n));
+  };
+  for (const t of tasks) push(t);
+  for (const t of ["NEEDS_ACTION", "CAUTION", "READY_TO_CONFIRM", "UNDATED", "SOURCE_CONFLICT"] as TaskStatus[]) push(t);
+  if (c.documentFindings) {
+    parts.push(`${c.documentFindings} document finding${c.documentFindings === 1 ? "" : "s"}`);
+  }
+  return parts.length > 1 ? parts.join(" · ") : null;
+}
+
+/** The statuses a document carries that a given filter selected it for. */
+export function matchedTasks(doc: RecordsDoc, tasks: readonly TaskStatus[]): TaskStatus[] {
+  const s = taskStatusesOf(doc);
+  return tasks.filter((t) => s.has(t));
+}
+
+// ── Presentation-time metadata de-duplication ────────────────────────────────
+
+/**
+ * Provider and facility, shown once each.
+ *
+ * Several affidavit productions carry the SAME string in both fields —
+ * "AFFIDAVIT CONCERNING COST AND NECESSITY OF MEDICAL SERVICES" was printing
+ * twice on one metadata line. This collapses them for DISPLAY only: nothing is
+ * written back, and only an exact match after trimming and case folding is
+ * treated as the same value, so two genuinely different names are never merged.
+ */
+export function dedupeMeta(...values: (string | null | undefined)[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const v of values) {
+    if (typeof v !== "string") continue;
+    const text = v.trim();
+    if (!text) continue;
+    const key = text.toLowerCase().replace(/\s+/g, " ");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(text);
+  }
+  return out;
+}
+
+// ── Manifest grain ───────────────────────────────────────────────────────────
+
+/**
+ * The batch manifest counts EXTRACTION ENTRIES; the summary card counts
+ * ENCOUNTERS. On this case that is 19 against 18, because one note in
+ * `OSD BR&MR w Aff.pdf` was assembled from two entries — both numbers are
+ * right, and the disclosure said "19 items" without saying items of what.
+ */
+export function manifestGrainLabel(entries: number, encounters: number, events: number): string {
+  const n = (v: number, one: string, many: string) => `${v} ${v === 1 ? one : many}`;
+  const parts = [`${n(entries, "extracted entry", "extracted entries")} in ${n(encounters, "encounter", "encounters")}`];
+  if (events > 0) parts.push(n(events, "chronology entry", "chronology entries"));
+  return parts.join(" · ");
+}

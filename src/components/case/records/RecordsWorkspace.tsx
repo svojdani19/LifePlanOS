@@ -13,6 +13,7 @@ import {
   type RecordsDoc, type TaskStatus, type RecordsFilter,
   TASK_STATUSES, TASK_LABEL, TASK_DEFINITION,
   taskStatusesOf, attentionCount, toggleTask, isFilterActive, EMPTY_FILTER,
+  matchExplanation, matchedTasks, dedupeMeta,
   GRAIN_HELP, grainCountsOf, grainSentence,
 } from "@/lib/records/recordsView";
 
@@ -220,21 +221,29 @@ export function TaskFilterBar({
         </div>
       </div>
 
+      {/* ── Secondary, but PRESENT ────────────────────────────────────────
+          These were inside a <details> whose summary was styled as a bare
+          uppercase heading. It read as a section title with nothing beneath
+          it — the six controls were in the DOM the whole time, collapsed and
+          with no visible affordance to open them. Six chips do not need a
+          disclosure; they need to be smaller than the primary row, which they
+          now are. */}
       {categories.length > 0 && (
-        <details>
-          <summary className="focusable inline-block cursor-pointer rounded text-[10px] font-semibold uppercase tracking-wide text-ink-500">
-            Record category{filter.category ? ` · ${filter.category}` : ""}
-          </summary>
-          <div className="mt-1 flex flex-wrap gap-1.5">
+        <div>
+          <p id="record-category-label" className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-ink-500">
+            Record category
+          </p>
+          <div className="flex flex-wrap gap-1.5" role="group" aria-labelledby="record-category-label">
             {categories.map((g) => {
               const on = filter.category === g.label;
               const Icon = GROUP_ICON[g.label];
+              const n = categoryCounts[g.label] ?? 0;
               return (
                 <button
                   key={g.label}
                   type="button"
                   aria-pressed={on}
-                  aria-label={`${g.label}, ${categoryCounts[g.label]} record${categoryCounts[g.label] === 1 ? "" : "s"}`}
+                  aria-label={`${g.label}, ${n} record${n === 1 ? "" : "s"}`}
                   onClick={() => onChange({ ...filter, category: on ? null : g.label })}
                   className={cn(
                     "focusable inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium transition-colors",
@@ -243,12 +252,12 @@ export function TaskFilterBar({
                 >
                   {Icon && <Icon aria-hidden="true" className="h-3 w-3" />}
                   {g.label}
-                  <span aria-hidden="true" className="opacity-70">{categoryCounts[g.label]}</span>
+                  <span aria-hidden="true" className={cn("rounded-full px-1 text-[10px] font-semibold", on ? "bg-white/20" : "bg-white text-ink-500")}>{n}</span>
                 </button>
               );
             })}
           </div>
-        </details>
+        </div>
       )}
     </div>
   );
@@ -264,6 +273,7 @@ export function DocumentRow({
   onOpen,
   actions,
   dateRange,
+  activeTasks = [],
 }: {
   doc: RecordsDoc;
   raw: AnyRec;
@@ -271,6 +281,8 @@ export function DocumentRow({
   onOpen: () => void;
   actions: React.ReactNode;
   dateRange: string | null;
+  /** Task filters currently applied, so the row can say why it matched. */
+  activeTasks?: readonly TaskStatus[];
 }) {
   const Icon = iconForType(doc.type);
   const attention = attentionCount(doc);
@@ -282,8 +294,13 @@ export function DocumentRow({
   // contradicted or low-confidence value is reported as needing review rather
   // than printed as though it were established.
   const contested = statuses.has("SOURCE_CONFLICT");
-  const provider = !contested ? (raw.provider as string | null) : null;
-  const facility = !contested ? (raw.facility as string | null) : null;
+  // Shown once each. Several affidavit productions carry the IDENTICAL string
+  // in both fields, and joining them printed it twice on one line. Collapsed
+  // for display only — nothing is written back, and only an exact match after
+  // trimming and case folding counts as the same value.
+  const meta = contested ? [] : dedupeMeta(raw.provider as string | null, raw.facility as string | null);
+  const matched = matchedTasks(doc, activeTasks);
+  const why = activeTasks.length ? matchExplanation(doc, matched) : null;
 
   return (
     <div
@@ -305,10 +322,14 @@ export function DocumentRow({
       >
         <span className="block truncate text-sm font-medium text-ink-900">{doc.filename}</span>
         <span className="mt-0.5 block truncate text-xs text-ink-500">
-          {[dateRange, provider, facility, doc.pageCount ? `${doc.pageCount} pp.` : null]
+          {[dateRange, ...meta, doc.pageCount ? `${doc.pageCount} pp.` : null]
             .filter(Boolean)
             .join(" · ") || "No metadata extracted yet"}
         </span>
+        {/* Why this row is in a filtered list, at ENTRY grain. The overall
+            status badges below are unchanged — a competing obligation is
+            disclosed, never replaced by the filter's own status. */}
+        {why && <span className="mt-0.5 block truncate text-[11px] text-ink-600">{why}</span>}
         <span className="mt-1 flex flex-wrap items-center gap-1">
           {/* One semantic treatment per status, and never colour alone. */}
           {failed && <Badge tone="danger">processing failed</Badge>}

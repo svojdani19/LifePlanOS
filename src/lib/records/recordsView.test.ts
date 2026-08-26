@@ -18,6 +18,11 @@ import {
   MODE_LABEL,
   type RecordsDoc,
   type RecordsFilter,
+  noteStateCounts,
+  matchExplanation,
+  matchedTasks,
+  dedupeMeta,
+  manifestGrainLabel,
 } from "@/lib/records/recordsView";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -264,5 +269,143 @@ describe("counting terminology", () => {
   it("reads correctly in the singular", () => {
     expect(grainSentence({ encounters: 1, entries: 1, fragments: 1 }))
       .toBe("1 encounter assembled from 1 extracted entry and 1 source fragment.");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The four acceptance gaps found on the live UI after the restructure.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("a filtered row explains why it matched, at the right grain", () => {
+  // The live defect: filtering to "ready to confirm" matched Spinelux, whose
+  // row then said "1 needs attention". Both are true — of different entries in
+  // the same file — and the row was reporting only one of them, so the filter
+  // looked broken.
+  const mixed = doc({
+    notes: [
+      note({ id: "r1" }), note({ id: "r2" }), note({ id: "r3" }),
+      note({ id: "x1", attention: "EXCEPTION", needsAttention: true }),
+      note({ id: "c1", attention: "CAUTION" }), note({ id: "c2", attention: "CAUTION" }), note({ id: "c3", attention: "CAUTION" }),
+    ],
+  });
+
+  it("counts each state at note grain", () => {
+    expect(noteStateCounts(mixed)).toMatchObject({ ready: 3, needsAction: 1, caution: 3, total: 7 });
+  });
+
+  it("leads with the matched state and still discloses the competing ones", () => {
+    const text = matchExplanation(mixed, ["READY_TO_CONFIRM"]);
+    expect(text).toBe("3 entries ready to confirm · 1 entry needs attention · 3 entries carry a caution");
+  });
+
+  it("does not hide an obligation when the filter matched something else", () => {
+    const text = matchExplanation(mixed, ["CAUTION"]);
+    expect(text).toContain("3 entries carry a caution");
+    expect(text).toContain("1 entry needs attention");
+    expect(text).toContain("3 entries ready to confirm");
+  });
+
+  it("handles source-conflict plus another state", () => {
+    const d = doc({
+      notes: [
+        note({ id: "a", guidance: { kind: "SOURCE_CONFLICT" } }),
+        note({ id: "b", attention: "EXCEPTION", needsAttention: true }),
+      ],
+    });
+    const text = matchExplanation(d, ["SOURCE_CONFLICT"]);
+    expect(text).toContain("1 in source conflict");
+    expect(text).toContain("1 entry needs attention");
+  });
+
+  // The row's badge counts entries AND findings; the explanation must account
+  // for both or it contradicts the badge sitting next to it. On the 625-page
+  // record this was "3 entries need attention" beside a "23 need attention"
+  // badge — 20 page findings made up the difference and were unnamed.
+  it("names document-grain findings so the parts add up to the attention badge", () => {
+    const d = doc({
+      notes: [note({ id: "x", attention: "EXCEPTION", needsAttention: true }), note({ id: "r" })],
+      pageFindings: Array.from({ length: 20 }, () => ({ blocking: true, status: "OPEN" })),
+    });
+    expect(noteStateCounts(d).documentFindings).toBe(20);
+    const text = matchExplanation(d, ["NEEDS_ACTION"])!;
+    expect(text).toContain("1 entry needs attention");
+    expect(text).toContain("20 document findings");
+    // 1 entry + 20 findings = 21, which is exactly what the badge shows.
+    expect(attentionCount(d)).toBe(21);
+  });
+
+  it("says 'document finding' in the singular", () => {
+    const d = doc({
+      notes: [note({ id: "x", attention: "EXCEPTION", needsAttention: true }), note({ id: "r" })],
+      findings: [{ blocking: true, status: "OPEN" }],
+    });
+    expect(matchExplanation(d, ["NEEDS_ACTION"])).toContain("1 document finding");
+  });
+
+  it("says nothing when there is only one state to report", () => {
+    expect(matchExplanation(doc({ notes: [note()] }), ["READY_TO_CONFIRM"])).toBeNull();
+  });
+
+  it("says nothing for a document with no notes", () => {
+    expect(matchExplanation(doc({ notes: [] }), ["READY_TO_CONFIRM"])).toBeNull();
+  });
+
+  it("reports exactly which of the active filters this document matched", () => {
+    expect(matchedTasks(mixed, ["READY_TO_CONFIRM", "PROCESSING_FAILED"])).toEqual(["READY_TO_CONFIRM"]);
+    expect(matchedTasks(mixed, ["READY_TO_CONFIRM", "CAUTION"])).toEqual(["READY_TO_CONFIRM", "CAUTION"]);
+  });
+});
+
+describe("provider and facility are shown once", () => {
+  // Several affidavit productions carry the identical string in both fields;
+  // the row was joining them and printing it twice.
+  const AFF = "AFFIDAVIT CONCERNING COST AND NECESSITY OF MEDICAL SERVICES";
+
+  it("collapses an exact duplicate", () => {
+    expect(dedupeMeta(AFF, AFF)).toEqual([AFF]);
+  });
+
+  it("collapses a duplicate differing only in case or whitespace", () => {
+    expect(dedupeMeta(AFF, `  ${AFF.toLowerCase()}  `)).toEqual([AFF]);
+    expect(dedupeMeta("St Joseph  Medical   Center", "St Joseph Medical Center")).toEqual(["St Joseph  Medical   Center"]);
+  });
+
+  it("keeps genuinely different values", () => {
+    expect(dedupeMeta("Ali, Zuhair, MD", "St Joseph Medical Center")).toEqual(["Ali, Zuhair, MD", "St Joseph Medical Center"]);
+  });
+
+  it("never merges names that merely share a prefix", () => {
+    expect(dedupeMeta("Spine & Joint", "Spine & Joint Clinic")).toHaveLength(2);
+  });
+
+  it("drops empty and non-string values without collapsing the rest", () => {
+    expect(dedupeMeta(null, "  ", undefined, "Real Provider")).toEqual(["Real Provider"]);
+  });
+
+  it("preserves the original text — it is display-only, never a rewrite", () => {
+    const [only] = dedupeMeta(`  ${AFF}  `, AFF);
+    expect(only).toBe(AFF);
+  });
+});
+
+describe("the batch manifest count states its grain", () => {
+  // On the McHenry case the summary card reads 18 and the manifest 19, because
+  // one note in OSD BR&MR w Aff.pdf was assembled from two extracted entries.
+  // Both are correct; the disclosure said "19 items" without saying of what.
+  it("names entries and encounters separately", () => {
+    expect(manifestGrainLabel(19, 18, 0)).toBe("19 extracted entries in 18 encounters");
+  });
+
+  it("adds chronology entries only when there are some", () => {
+    expect(manifestGrainLabel(19, 18, 3)).toBe("19 extracted entries in 18 encounters · 3 chronology entries");
+    expect(manifestGrainLabel(19, 18, 0)).not.toContain("chronology");
+  });
+
+  it("reads correctly when the two grains agree", () => {
+    expect(manifestGrainLabel(18, 18, 0)).toBe("18 extracted entries in 18 encounters");
+  });
+
+  it("is singular where it should be", () => {
+    expect(manifestGrainLabel(1, 1, 1)).toBe("1 extracted entry in 1 encounter · 1 chronology entry");
   });
 });

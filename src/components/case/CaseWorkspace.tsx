@@ -145,6 +145,7 @@ import {
   type RecordsDoc, type RecordsNote, type RecordsMode, type RecordsFilter,
   RECORDS_MODES, MODE_LABEL, MODE_DESCRIPTION, EMPTY_FILTER,
   defaultMode, applyFilter, taskCounts, taskStatusesOf, attentionCount, isFilterActive,
+  matchedTasks, noteStateCounts, manifestGrainLabel, type TaskStatus, TASK_LABEL,
 } from "@/lib/records/recordsView";
 import {
   ActionSummary, type ActionSummaryCard, TaskFilterBar, DocumentRow, DocumentActions,
@@ -1206,6 +1207,8 @@ function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, cal
   const [editingId, setEditingId] = useState<string | null>(null);
   const [openDocId, setOpenDocId] = useState<string | null>(null);
   const [detailTab, setDetailTab] = useState<DetailTab>("overview");
+  /** Which task statuses the review pane should surface first, if any. */
+  const [detailFocus, setDetailFocus] = useState<TaskStatus[]>([]);
   const [filter, setFilter] = useState<RecordsFilter>(EMPTY_FILTER);
   const [modeState, setModeState] = useState<RecordsMode | null>(null);
   // Structured AI-extraction view (source-grounded pipeline): per-document
@@ -1338,11 +1341,20 @@ function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, cal
   const openRaw = openDocId ? rawById.get(openDocId) ?? null : null;
   const openStructured = openDocId ? structuredById.get(openDocId) ?? null : null;
 
-  /** Opening a document lands on its work when it has any, Overview otherwise. */
+  /**
+   * Opening a document lands on what the reviewer was looking at.
+   *
+   * With a task filter applied, the matching entries are what brought this row
+   * into the list, so the review pane opens focused on THEM — not on the first
+   * arbitrary outstanding item, which on a mixed-state file is routinely a
+   * different entry from the one that matched.
+   */
   const openDocument = (id: string) => {
     const d = viewDocs.find((x) => x.documentId === id);
     setOpenDocId(id);
-    setDetailTab(d && attentionCount(d) > 0 ? "review" : "overview");
+    const matched = d ? matchedTasks(d, filter.tasks) : [];
+    setDetailFocus(matched);
+    setDetailTab(matched.length || (d && attentionCount(d) > 0) ? "review" : "overview");
   };
 
   const dateRangeOf = (d: RecordsDoc): string | null => {
@@ -1358,8 +1370,15 @@ function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, cal
       key: "ready",
       label: "Ready to confirm",
       count: Number(pc.eligibleEncounters ?? 0),
-      definition: "Clean records waiting for one human confirmation.",
-      detail: "These carry no exception, no caution and no unresolved finding. Confirming them records a factual records review — never a verification or a professional attestation.",
+      // The grain is named on the card itself, because the manifest below it
+      // counts ENTRIES and the two numbers legitimately differ whenever a note
+      // was assembled from more than one entry.
+      definition: `${Number(pc.eligibleEncounters ?? 0)} clean encounters waiting for one human confirmation${
+        Number(pc.rows ?? 0) !== Number(pc.eligibleEncounters ?? 0)
+          ? `, assembled from ${Number(pc.rows ?? 0)} extracted entries`
+          : ""
+      }.`,
+      detail: "These carry no exception, no caution and no unresolved finding. Confirming them records a factual records review — never a verification or a professional attestation. The manifest lists one line per extracted ENTRY, so its total exceeds this count whenever a single encounter was assembled from several entries.",
       tone: "success",
       onOpen: () => { setMode("queue"); setFilter({ ...EMPTY_FILTER, tasks: ["READY_TO_CONFIRM"] }); },
     },
@@ -1526,6 +1545,7 @@ function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, cal
                             selected={openDocId === d.documentId}
                             onOpen={() => openDocument(d.documentId)}
                             dateRange={dateRangeOf(d)}
+                            activeTasks={filter.tasks}
                             actions={
                               <DocumentActions
                                 filename={d.filename}
@@ -1556,6 +1576,7 @@ function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, cal
                 onChanged={onReviewChanged}
                 onClose={() => setOpenDocId(null)}
                 dateRange={dateRangeOf(openDoc)}
+                focusTasks={detailFocus}
               />
             )}
           </div>
@@ -1574,11 +1595,13 @@ function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, cal
  * renders its whole note set into the middle of the list you were working.
  */
 function DocumentDetail({
-  caseId, doc, raw, structured, tab, onTab, canVerify, onChanged, onClose, dateRange,
+  caseId, doc, raw, structured, tab, onTab, canVerify, onChanged, onClose, dateRange, focusTasks = [],
 }: {
   caseId: string; doc: RecordsDoc; raw: AnyRec; structured: AnyRec | null;
   tab: DetailTab; onTab: (t: DetailTab) => void; canVerify: boolean;
   onChanged: () => void; onClose: () => void; dateRange: string | null;
+  /** Statuses the list was filtered by, so the pane opens on what matched. */
+  focusTasks?: readonly TaskStatus[];
 }) {
   const [notePage, setNotePage] = useState(0);
   useEffect(() => { setNotePage(0); }, [doc.documentId, tab]);
@@ -1589,10 +1612,33 @@ function DocumentDetail({
   const statuses = taskStatusesOf(doc);
   const segs: AnyRec[] = Array.isArray(raw?.segments) ? (raw.segments as AnyRec[]) : [];
 
-  // Notes needing a decision come first when the reviewer opened this to work.
-  const orderedNotes = tab === "review"
-    ? [...notes].sort((a, b) => Number(!!b.needsAttention || b.attention === "EXCEPTION") - Number(!!a.needsAttention || a.attention === "EXCEPTION"))
-    : notes;
+  /**
+   * Which notes a given task status selected.
+   *
+   * Read from the same fields the filter reads, so the pane can never disagree
+   * with the list about what matched.
+   */
+  const noteMatches = (n: AnyRec, t: TaskStatus): boolean => {
+    const attention = String(n.attention ?? "");
+    if (t === "READY_TO_CONFIRM") return attention === "CLEAN" && !n.needsAttention && !!n.awaitingAttestation;
+    if (t === "NEEDS_ACTION") return attention === "EXCEPTION" || !!n.needsAttention;
+    if (t === "CAUTION") return attention === "CAUTION";
+    if (t === "UNDATED") return n.dateStatus === "UNKNOWN";
+    if (t === "REVIEWED") return ["REVIEWED", "VERIFIED", "HUMAN_EDITED"].includes(String(n.status ?? ""));
+    if (t === "SOURCE_CONFLICT") return ["SOURCE_CONFLICT", "LEGACY_CONFLICT", "CONTRADICTED", "DISPUTED", "UNCORROBORATED"].includes(String(n.guidance?.kind ?? ""));
+    return false;
+  };
+  const focused = focusTasks.length ? notes.filter((n) => focusTasks.some((t) => noteMatches(n, t))) : [];
+
+  // When the reviewer arrived from a filter, the entries that MATCHED lead —
+  // otherwise the pane opens on whatever outstanding item happens to sort
+  // first, which on a mixed-state file is routinely not the one they clicked
+  // for. Nothing is removed: the rest of the document's notes follow.
+  const orderedNotes = tab !== "review"
+    ? notes
+    : focused.length
+      ? [...focused, ...notes.filter((n) => !focused.includes(n))]
+      : [...notes].sort((a, b) => Number(!!b.needsAttention || b.attention === "EXCEPTION") - Number(!!a.needsAttention || a.attention === "EXCEPTION"));
   const NOTES_PER_PAGE = 10;
   const notePages = Math.max(1, Math.ceil(orderedNotes.length / NOTES_PER_PAGE));
   const noteSlice = orderedNotes.slice(notePage * NOTES_PER_PAGE, notePage * NOTES_PER_PAGE + NOTES_PER_PAGE);
@@ -1674,6 +1720,11 @@ function DocumentDetail({
       {tab === "review" && (
         structured ? (
           <div className="space-y-2">
+            {focused.length > 0 && (
+              <p role="status" className="rounded-md border border-brand-200 bg-brand-50 px-2 py-1 text-[11px] text-brand-900">
+                Showing the {focused.length} {focusTasks.map((t) => TASK_LABEL[t].toLowerCase()).join(" / ")} entr{focused.length === 1 ? "y" : "ies"} first — the {notes.length - focused.length} other entr{notes.length - focused.length === 1 ? "y" : "ies"} in this record follow.
+              </p>
+            )}
             {notePages > 1 && (
               <div className="flex items-center justify-between rounded-md bg-ink-50 px-2 py-1 text-[11px] text-ink-600">
                 <span aria-live="polite">
