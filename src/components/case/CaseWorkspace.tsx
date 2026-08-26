@@ -259,12 +259,6 @@ export function CaseWorkspace({
   // keyboard user must dismiss before doing anything else, and embedded
   // browsers — which is where this app is reviewed — block outright.
   const [status, setStatus] = useState<ActionStatus | null>(null);
-  // Reported up by the Records panel so the compact header can name the work
-  // without the header having to load the extraction payload itself.
-  const [recordsSummary, setRecordsSummary] = useState<{ documents: number; needsReview: number } | null>(null);
-  const [chromeOpen, setChromeOpen] = useState(false);
-  /** Records collapses the heavy header bands unless the reviewer opens them. */
-  const recordsChromeCollapsed = tab === "records" && !chromeOpen;
   const [focusId, setFocusId] = useState<string | null>(null);
   const [focusCat, setFocusCat] = useState<string | null>(null);
   const can = (p: Permission) => permissions.includes(p);
@@ -462,36 +456,12 @@ export function CaseWorkspace({
           </div>
         </div>
 
-        {/* ── Records works in a compact header ────────────────────────────
-            The metrics band, the pipeline and the workspace bar together took
-            most of the viewport, so a reviewer scrolling a record list saw
-            financial totals rather than records. On Records they collapse to
-            one line, with an explicit control to bring them back; every other
-            tab is unchanged. */}
-        {recordsChromeCollapsed && (
-          <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-lg border border-ink-200 bg-ink-50/70 px-3 py-1.5">
-            <span className="text-xs font-medium text-ink-800">
-              {data.clientName} · Records
-              {recordsSummary ? ` · ${recordsSummary.documents} document${recordsSummary.documents === 1 ? "" : "s"}` : ""}
-              {recordsSummary && recordsSummary.needsReview > 0 ? ` · ${recordsSummary.needsReview} need review` : ""}
-            </span>
-            <button
-              type="button"
-              aria-expanded={chromeOpen}
-              onClick={() => setChromeOpen(true)}
-              className="focusable ml-auto rounded text-[11px] font-medium text-brand-700 hover:underline"
-            >
-              Show case metrics and pipeline
-            </button>
-          </div>
-        )}
-
         {/* Full-width case metrics band.
             The column count is derived from the number of tiles. It was fixed
             at five while the non-attorney set is SIX whenever the supported and
             candidate totals differ — so the sixth tile wrapped alone onto a
             second row and left four empty cells stretching across the band. */}
-        {hasPlan && !recordsChromeCollapsed && (
+        {hasPlan && (
           <dl className={cn(
             "mt-3 grid grid-cols-2 gap-px overflow-hidden rounded-lg border border-ink-200 bg-ink-200",
             attorneyView ? "sm:grid-cols-[1fr_2fr_1fr]" : splitTotals ? "sm:grid-cols-3 lg:grid-cols-6" : "sm:grid-cols-3 lg:grid-cols-5",
@@ -538,10 +508,7 @@ export function CaseWorkspace({
 
         {/* Full-width workflow pipeline — each stage a demarcated segment with
             its own progress rail, so the sequence reads as distinct steps. */}
-        {!recordsChromeCollapsed && (
         <div className="mt-3 text-[10px] font-semibold uppercase tracking-wide text-ink-400">Pipeline</div>
-        )}
-        {!recordsChromeCollapsed && (
         <ol className="mt-1 flex w-full items-stretch overflow-x-auto" aria-label="Case workflow">
           {VISIBLE_FLOW.map((s, i) => {
             const sIdx = STAGES.indexOf(s.stage);
@@ -588,10 +555,8 @@ export function CaseWorkspace({
             );
           })}
         </ol>
-        )}
 
         {/* Secondary workspaces — a visually separate band of their own */}
-        {!recordsChromeCollapsed && (
         <div className="-mx-6 flex items-center gap-1.5 border-t border-ink-200 bg-ink-50/70 px-6 py-1.5" role="navigation" aria-label="Case workspaces">
           <span className="text-label mr-2.5 shrink-0">Workspaces</span>
           {SECONDARY.map((t) => (
@@ -612,22 +577,11 @@ export function CaseWorkspace({
             </button>
           ))}
         </div>
-        )}
-        {/* Collapsing it must not strand the reviewer: the way back is here. */}
-        {chromeOpen && tab === "records" && (
-          <button
-            type="button"
-            onClick={() => setChromeOpen(false)}
-            className="focusable my-1 rounded text-[11px] font-medium text-brand-700 hover:underline"
-          >
-            Hide case metrics and pipeline while reviewing records
-          </button>
-        )}
       </div>
 
       <div className="mt-5">
         {tab === "overview" && <IntakePanel data={data} canEdit={can("case.edit") || attorneyView} call={call} />}
-        {tab === "records" && <RecordsPanel data={data} canEdit={can("records.upload")} canUpload={attorneyView} canVerify={canVerifyRecords} call={call} busy={busy} onSummary={setRecordsSummary} />}
+        {tab === "records" && <RecordsPanel data={data} canEdit={can("records.upload")} canUpload={attorneyView} canVerify={canVerifyRecords} call={call} busy={busy} />}
         {tab === "chronology" && <ChronologyPanel data={data} canEdit={can("chronology.edit")} canVerify={canVerifyRecords} call={call} />}
         {tab === "causation" && <CausationPanel data={data} />}
         {/* Roster management stays behind case.edit (matching the server);
@@ -1202,7 +1156,7 @@ function BatchConfirmPanel({ caseId, onConfirmed }: { caseId: string; onConfirme
   );
 }
 
-function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, call, busy, onSummary }: { data: AnyRec; canEdit: boolean; canUpload?: boolean; canVerify?: boolean; call: any; busy: string | null; onSummary?: (s: { documents: number; needsReview: number }) => void }) {
+function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, call, busy }: { data: AnyRec; canEdit: boolean; canUpload?: boolean; canVerify?: boolean; call: any; busy: string | null }) {
   const mayUpload = canEdit || canUpload;
   const [editingId, setEditingId] = useState<string | null>(null);
   const [openDocId, setOpenDocId] = useState<string | null>(null);
@@ -1330,12 +1284,6 @@ function RecordsPanel({ data, canEdit, canUpload = false, canVerify = false, cal
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const listed = useMemo(() => applyFilter(base, filter, categoryOf, searchTextOf), [base, filter, rawById]);
   const counts = useMemo(() => taskCounts(base), [base]);
-
-  // The compact header names the work; it must not have to load the extraction
-  // payload itself to do so.
-  useEffect(() => {
-    onSummary?.({ documents: viewDocs.length, needsReview: queueBase.length });
-  }, [viewDocs.length, queueBase.length, onSummary]);
 
   const openDoc = openDocId ? viewDocs.find((d) => d.documentId === openDocId) ?? null : null;
   const openRaw = openDocId ? rawById.get(openDocId) ?? null : null;
