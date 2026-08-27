@@ -2,6 +2,7 @@
 
 import { FileText, CalendarDays } from "lucide-react";
 import { manifestGrainLabel } from "@/lib/records/recordsView";
+import { riskSentence, type RiskWeight } from "@/lib/records/riskWeight";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // What a reviewer is about to sign, itemized.
@@ -51,6 +52,9 @@ export interface ManifestRecordLine {
   facility: string | null;
   basis: string;
   rows: ManifestRowLine[];
+  /** Which clean records still warrant opening the cited page. Triage only —
+   *  it reorders attention and changes nothing about what the click writes. */
+  risk: RiskWeight;
 }
 
 export interface ManifestEventLine {
@@ -125,6 +129,16 @@ export function BatchManifest({
   // neither what an item was nor why the two numbers differ.
   const grain = manifestGrainLabel(rowCount, records.length, events.length);
 
+  // ── Risk triage ──────────────────────────────────────────────────────────
+  // Every record here already qualified for the batch. The split only decides
+  // READING ORDER and which ones carry a stated reason to open the page; it
+  // removes nothing from the manifest and changes nothing about the click.
+  // Partitioned on the tier the SERVER computed and hashed. Re-scoring here
+  // would be a second opinion about the same record, and the hash binds the
+  // server's answer — so the browser reads it rather than deriving it.
+  const needsEyes = records.filter((r) => r.risk?.tier === "NEEDS_EYES");
+  const lowRisk = records.filter((r) => r.risk?.tier !== "NEEDS_EYES");
+
   return (
     <details open={defaultOpen} className="mt-2 rounded border border-teal-300 bg-white">
       <summary className="focusable cursor-pointer rounded px-2 py-1.5 text-[11px] font-semibold text-teal-900">
@@ -136,8 +150,17 @@ export function BatchManifest({
             <p className="text-[10px] font-semibold uppercase tracking-wide text-ink-500">
               Records — {rowCount} entr{rowCount === 1 ? "y" : "ies"} in {records.length} note{records.length === 1 ? "" : "s"}
             </p>
+            {/* Triage, stated before the list so a reviewer knows where to
+                spend the attention they have. Both groups are confirmed by the
+                same click; this says which ones repay opening the page. */}
+            <p className="mt-0.5 text-[10px] text-ink-600">{riskSentence(lowRisk.length, needsEyes.length)}</p>
+            {needsEyes.length > 0 && (
+              <p className="mt-1 text-[10px] font-semibold uppercase tracking-wide text-amber-800">
+                Read before confirming — {needsEyes.length} record{needsEyes.length === 1 ? "" : "s"}
+              </p>
+            )}
             <ol className="mt-1 space-y-2">
-              {records.map((r) => (
+              {[...needsEyes, ...lowRisk].map((r) => (
                 <li key={r.noteId} className="border-b border-ink-100 pb-2 last:border-0">
                   <p className="flex flex-wrap items-center gap-x-1.5 text-[10px] text-ink-500">
                     <FileText aria-hidden="true" className="h-3 w-3 shrink-0" />
@@ -147,6 +170,15 @@ export function BatchManifest({
                     {r.facility && <span>· {r.facility}</span>}
                     <span className="text-ink-400">· membership: {r.basis.replace(/_/g, " ").toLowerCase()}</span>
                   </p>
+                  {/* WHY this one wants a reader. Visible text, not a tooltip:
+                      this list is meant to survive Cmd-P. */}
+                  {r.risk?.tier === "NEEDS_EYES" && r.risk.signals.length > 0 && (
+                    <ul className="mt-1 space-y-0.5 rounded border border-amber-200 bg-amber-50 px-1.5 py-1">
+                      {r.risk.signals.map((sig) => (
+                        <li key={sig.code} className="text-[10px] text-amber-900">{sig.reason}</li>
+                      ))}
+                    </ul>
+                  )}
                   {/* EVERY row this click writes, each with its own assertion
                       and its own citation. Nested, so one canonical note is
                       still one decision. */}

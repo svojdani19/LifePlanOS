@@ -38,6 +38,7 @@ import { requiresDate } from "@/lib/documents/analysisClass";
 import { chronologyEventContentHash, type ChronologyContentRow } from "@/lib/records/chronologyContent";
 import { isOpenFinding } from "@/lib/records/findingScope";
 import { attestationBlockers, humanAuthoritative } from "@/lib/records/reviewIntegrity";
+import { weighNote, type RiskWeight } from "@/lib/records/riskWeight";
 import type { ReviewableNote } from "@/lib/records/noteProjection";
 
 /**
@@ -164,6 +165,16 @@ export interface ManifestRecordLine {
   basis: string;
   /** EXACTLY the rows this confirmation writes, each with its own assertion. */
   rows: ManifestRowLine[];
+  /**
+   * Which of these clean records still warrant opening the cited page.
+   *
+   * Triage only: this never changes what the click writes, who it is written
+   * by, or which records the batch covers. It orders the reviewer's attention
+   * within a set that already qualified. Because it is RENDERED, it is hashed
+   * with everything else below — a batch whose risk framing changed while the
+   * reviewer read it is a different manifest.
+   */
+  risk: RiskWeight;
 }
 
 /** One chronology entry that will become human-reviewed. */
@@ -334,6 +345,10 @@ export function manifestHashOf(input: ManifestInput): string {
         r.provider ?? "",
         r.facility ?? "",
         r.basis,
+        // The risk tier and its reasons are on screen beside the record, so
+        // they are bound like every other displayed field.
+        r.risk.tier,
+        r.risk.signals.map((sig) => sig.code).sort().join("+"),
         // Every row line, in full: its own assertion and its own citation.
         [...r.rows]
           .map((row) => [row.rowId, row.contentHash, row.status, row.documentId, row.filename, row.page ?? "", row.pageEnd ?? "", row.summary].join("\u0001"))
@@ -719,6 +734,22 @@ export function planBatchConfirmation(input: {
         facility: confirmRows.find((r) => r.facility)?.facility ?? null,
         basis: decision.basis,
         rows,
+        // Weighed from the note, which carries the extraction confidence, page
+        // quality and assembly signals the row lines do not.
+        risk: weighNote({
+          id: decision.noteId,
+          rowIds: decision.confirmRowIds,
+          claims: (note?.claims ?? []) as never,
+          claimCount: note?.claimCount ?? null,
+          rows: confirmRows as never,
+          crossDocumentMembers: note?.crossDocumentMembers ?? [],
+          copies: note?.copies ?? [],
+          corroboration: note?.corroboration ?? null,
+          fragmentDisagreement: note?.fragmentDisagreement ?? [],
+          membershipBasis: note?.membershipBasis ?? null,
+          awaitingAttestation: note?.awaitingAttestation ?? null,
+          attention: note?.attention ?? null,
+        }),
       };
     })
     .sort((a, b) => a.noteId.localeCompare(b.noteId));
