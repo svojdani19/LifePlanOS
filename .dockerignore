@@ -1,0 +1,34 @@
+# Everything the image builds for itself, or must never contain.
+#
+# A build sourced from GitHub only ever sees tracked files, so this changes
+# nothing there. It matters for `railway up` from the CLI, which uploads the
+# working directory as-is: without it the macOS-native node_modules would
+# overwrite the Linux ones installed in the deps stage, and any local .env —
+# which here holds the Neon DATABASE_URL and the session secret — would be
+# baked into the image layer.
+node_modules
+.next
+.next-dev
+out
+build
+coverage
+
+.git
+.github
+.claude
+docs
+scripts
+tests
+*.log
+.DS_Store
+.env
+.env.*
+!.env.example
+tsconfig.tsbuildinfo
+
+# Local record fixtures and anything holding case content.
+uploads
+storage
+*.db
+*.db-shm
+*.db-wal
